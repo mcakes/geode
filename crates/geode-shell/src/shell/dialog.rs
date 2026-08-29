@@ -59,6 +59,7 @@ use std::rc::Rc;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, MouseButton, SharedString, Window, div, hsla, px};
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
@@ -156,6 +157,32 @@ pub fn open_shell_dialog<F>(
     cx.notify();
 }
 
+/// Cap on the modal panel's height, as a fraction of the window's viewport
+/// height — a *max*, not a fixed size (see [`render_modal`]'s `.max_h`
+/// use): a small dialog's panel still hugs its own content, this only
+/// stops a tall one from growing past 80% of the viewport, past which its
+/// content region (also set up in [`render_modal`]) scrolls internally
+/// instead. `settings_view::open` reads this same constant to size its own
+/// content wrapper — see that call site's doc comment for why a *second*,
+/// independent use of this ratio is required rather than one being enough.
+pub(crate) const MODAL_MAX_HEIGHT_RATIO: f32 = 0.8;
+
+/// Vertical space [`render_modal`]'s own chrome — the title row
+/// (`.text_lg()` title + small ghost close button) plus the panel's
+/// `pt_4()`/`pb_4()`/`gap_3()` — takes up around the content region, in
+/// px. `settings_view::open` subtracts this from its own target content
+/// height (which is independently capped at [`MODAL_MAX_HEIGHT_RATIO`] of
+/// the viewport, same as the panel) so the two caps don't collide: without
+/// this allowance, content sized to *exactly* the panel's own `max_h`
+/// leaves no room for the title row, and the content region's `flex_auto`
+/// gets shrunk by the chrome's own height every time, permanently
+/// scrolling off the last few pixels of content even when the window is
+/// plenty tall. A measured/generous estimate, not pixel-exact — being a
+/// little too generous just leaves a little headroom under the content;
+/// being too stingy is the failure mode this constant exists to avoid, so
+/// it errs high.
+pub(crate) const MODAL_CHROME_ALLOWANCE: f32 = 96.;
+
 /// Render one open modal's chrome: a full-window backdrop on
 /// `cx.theme().overlay` (the same token gpui-component's own `Dialog`
 /// overlay uses — `overlay_color`, pinned checkout `crates/ui/src/dialog/
@@ -172,6 +199,22 @@ pub fn open_shell_dialog<F>(
 /// `viewport_width`/`viewport_height` are the window's drawable size, same
 /// convention as `palette::render`/`whichkey::render` — passed in rather
 /// than read from `cx` so this stays a pure function of its arguments.
+///
+/// **Height contract** (content-collapse fix): the panel gets
+/// `.max_h(viewport_height * MODAL_MAX_HEIGHT_RATIO)` — a cap, so a small
+/// future dialog's panel still sizes to its own content instead of always
+/// ballooning to 80% of the window. The content region below the title row
+/// is `.flex_auto().overflow_y_scrollbar()`: `flex_auto` (flex-grow AND
+/// flex-shrink, but flex-*basis* `auto`, i.e. based on the region's own
+/// content — unlike `flex_1`'s zero basis, which discards that content
+/// size and collapses to nothing when the panel above it has no definite
+/// height of its own to grow into) lets the region size itself to whatever
+/// its content naturally needs, then shrink and scroll if the panel's
+/// `max_h` cap ends up smaller than that. Neither of those alone fixes
+/// `gpui_component::setting::Settings` collapsing to zero height inside
+/// this wrapper, though — see `settings_view::open`'s doc comment for why
+/// that composite specifically also needs its *own* content wrapper to
+/// carry an explicit height, not just a `flex_auto`/`max_h` ancestor.
 ///
 /// Interaction: a mouse-down on the backdrop closes the modal
 /// (`cx.listener` — needs `Entity<ShellView>` access to clear `view.modal`,
@@ -235,12 +278,19 @@ pub(crate) fn render_modal(
         .border_color(border)
         .rounded(radius)
         .shadow(shadow)
+        .max_h(px(viewport_height * MODAL_MAX_HEIGHT_RATIO))
         .debug_selector(|| "shell-modal-panel".to_string())
         .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
             cx.stop_propagation();
         })
         .child(title_row)
-        .child(div().px_4().child(content));
+        .child(
+            div()
+                .flex_auto()
+                .overflow_y_scrollbar()
+                .px_4()
+                .child(content),
+        );
 
     div()
         .id("shell-modal-backdrop")

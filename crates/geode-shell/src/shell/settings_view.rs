@@ -62,6 +62,7 @@ use gpui_component::{
 
 use crate::keymap::Modifiers;
 use crate::shell::ShellView;
+use crate::shell::dialog;
 use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
 
@@ -94,8 +95,38 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     // arbitrary content, with no width opinion of its own — needs this
     // call site to keep providing one, same as before.
     open_shell_dialog(view, window, cx, "Settings", move |shell, window, cx| {
+        // Content-collapse fix (root cause): `Settings`' own root
+        // (`ResizablePanelGroup::render`, pinned checkout `crates/base/src/
+        // resizable/panel.rs`) is `.size_full()` — a *percentage* height,
+        // which only resolves against a parent whose own height was
+        // explicitly specified, not one that is itself sized from its
+        // content (directly, or transitively through a `flex_auto`/`max_h`
+        // ancestor with no explicit height of its own — confirmed
+        // empirically: giving `dialog::render_modal`'s content wrapper a
+        // `flex_1()` (flex-basis 0%) instead of `flex_auto()` collapsed it
+        // right back to a sliver too, because `flex_1`'s zero basis, with
+        // no definite space on its own un-sized ancestor to grow into,
+        // discards this div's own explicit height from consideration
+        // entirely — the wrapper needs `flex_auto()`, which sizes from its
+        // content, i.e. from *this* div's real height). So this wrapper —
+        // the direct, immediate parent of `Settings` — needs its own
+        // explicit height, not `h_full()` (still just a percentage, still
+        // 0 against this div's un-sized parent). Reading `window.
+        // viewport_size()` here, applying the *same* `dialog::
+        // MODAL_MAX_HEIGHT_RATIO` the panel caps itself at, minus
+        // `dialog::MODAL_CHROME_ALLOWANCE` for the title row/paddings the
+        // panel also has to fit inside that same cap, keeps this content
+        // comfortably within the panel's cap in the common case; when it
+        // doesn't (a very short window), `render_modal`'s content wrapper
+        // (`flex_auto()` + `overflow_y_scrollbar()`) simply scrolls the
+        // excess instead of pushing the panel past its own `max_h`.
+        let content_height = (f32::from(window.viewport_size().height)
+            * dialog::MODAL_MAX_HEIGHT_RATIO
+            - dialog::MODAL_CHROME_ALLOWANCE)
+            .max(200.);
         div()
             .w(px(720.))
+            .h(px(content_height))
             // Test-only hook (no-op outside test/test-support builds, see
             // gpui's own `debug_selector` doc comment): lets a
             // `#[gpui::test]` recover this wrapper's painted bounds via
