@@ -65,11 +65,11 @@ use crate::shell::ShellView;
 use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
 
-/// Open the settings modal (`settings::open`: `mod+,`, the palette entry,
+/// Open the settings modal (`settings::open`: `ctrl+,`, the palette entry,
 /// and the sidebar profile icon all reach this). A no-op if a modal is
 /// already open — `open_shell_dialog` unconditionally sets `view.modal`,
 /// and re-triggering the action while one is already up (e.g. a second
-/// `mod+,`) should not clobber whatever's currently open with a fresh
+/// `ctrl+,`) should not clobber whatever's currently open with a fresh
 /// settings modal.
 ///
 /// Goes through [`open_shell_dialog`] (Task 9) rather than touching `view.

@@ -7,8 +7,11 @@ use geode_core::config::Config;
 
 /// The builtin keymap document, layered under desk/user keymaps.
 ///
-/// Directional focus is `ctrl+arrows` (user direction, replacing the
-/// Phase 1c `ctrl+w h/j/k/l` vim chords). Move-tile keeps the vim window
+/// Directional focus is `mod+h/j/k/l` (user direction — vim letters on
+/// the primary modifier, replacing the Phase 1c `ctrl+w h/j/k/l` chords).
+/// Not `ctrl+arrows`: macOS binds those to Mission Control/Spaces
+/// system-wide and swallows the events before any app sees them.
+/// Move-tile keeps the vim window
 /// prefix `ctrl+w` as a two-keystroke sequence (`ctrl+w shift+h` etc.),
 /// mirroring `<C-w>H`. Splits follow vim's own mnemonics —
 /// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
@@ -24,10 +27,10 @@ pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
 [bindings.keys]
-"ctrl+left" = "workspace::focus_left"
-"ctrl+down" = "workspace::focus_down"
-"ctrl+up" = "workspace::focus_up"
-"ctrl+right" = "workspace::focus_right"
+"mod+h" = "workspace::focus_left"
+"mod+j" = "workspace::focus_down"
+"mod+k" = "workspace::focus_up"
+"mod+l" = "workspace::focus_right"
 "ctrl+w shift+h" = "workspace::move_left"
 "ctrl+w shift+j" = "workspace::move_down"
 "ctrl+w shift+k" = "workspace::move_up"
@@ -55,7 +58,7 @@ context = "workspace"
 "ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
 "mod+shift+t" = "theme::toggle_mode"
-"mod+," = "settings::open"
+"ctrl+," = "settings::open"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -124,7 +127,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Toggle light/dark theme",
         "Theme",
     );
-    // The sidebar's bottom profile icon, mod+,, and the palette all
+    // The sidebar's bottom profile icon, ctrl+,, and the palette all
     // dispatch this (Task 5: the real settings dialog). Category
     // "Appearance" — not a standalone "Settings" category — groups it in
     // the palette alongside the theme rows, which share the same category

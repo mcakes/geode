@@ -483,7 +483,7 @@ impl ShellView {
         } else if action.0 == "settings::open" {
             // Task 5: the real settings dialog (gpui-component's `setting`
             // module, wrapped in Geode's own instant modal chrome — Task 9
-            // redesign, see `dialog`'s module doc). Reachable via `mod+,`,
+            // redesign, see `dialog`'s module doc). Reachable via `ctrl+,`,
             // the palette, and the sidebar profile icon. Goes through
             // `dialog::open_shell_dialog` (Task 9) via `settings_view::open`
             // itself, so it gets the crate's uniform open-time hygiene.
@@ -1189,17 +1189,17 @@ mod tests {
         );
     }
 
-    /// End-to-end: the direct arrow bindings `ctrl+left`/`ctrl+right`
-    /// move focus between
+    /// End-to-end: the direct focus bindings `mod+h`/`mod+l`
+    /// (Alt, the default `mod` alias) move focus between
     /// two tiles created via the new split bindings — `ctrl+h`
     /// (`workspace::split_down`, which on the empty starting workspace just
     /// opens the first tile per `Tree::split`'s documented "split verbs
     /// double as open a tile" behavior) then `ctrl+v`
     /// (`workspace::split_right`, side by side), leaving focus on the new
-    /// (right) tile. `ctrl+left` must move focus to the left tile, and
-    /// `ctrl+right` back to the right one.
+    /// (right) tile. `mod+h` must move focus to the left tile, and
+    /// `mod+l` back to the right one.
     #[gpui::test]
-    fn ctrl_h_then_ctrl_arrows_move_focus_between_tiles(cx: &mut gpui::TestAppContext) {
+    fn ctrl_h_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -1230,21 +1230,21 @@ mod tests {
         let right_tile =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
 
-        cx.simulate_keystrokes("ctrl-left");
+        cx.simulate_keystrokes("alt-h");
         let after_left =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         assert_ne!(
             after_left, right_tile,
-            "ctrl+left (workspace::focus_left) should have moved focus off the right \
+            "mod+h (workspace::focus_left) should have moved focus off the right \
              tile"
         );
 
-        cx.simulate_keystrokes("ctrl-right");
+        cx.simulate_keystrokes("alt-l");
         let after_right =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         assert_eq!(
             after_right, right_tile,
-            "ctrl+right (workspace::focus_right) should have moved focus back to the \
+            "mod+l (workspace::focus_right) should have moved focus back to the \
              right tile"
         );
     }
@@ -1309,7 +1309,7 @@ mod tests {
     /// End-to-end (ledgered from 1b-ui T3): a real mouse-down at a
     /// non-focused tile's on-screen coordinates focuses it, exercising the
     /// `on_mouse_down` handler wired up in `Render for ShellView` (not the
-    /// keyboard path). Two tiles side by side; `ctrl+left` first moves focus
+    /// keyboard path). Two tiles side by side; `mod+h` first moves focus
     /// off the freshly-split (right) tile so the click has something to
     /// change. The click point is derived from the same layout `render`
     /// itself uses — `Tree::layout` over the tile area, offset by the
@@ -1346,7 +1346,7 @@ mod tests {
         // tile (about to be clicked) starts out unfocused.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-left");
+        cx.simulate_keystrokes("alt-h");
 
         let before_focus =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
@@ -1428,7 +1428,7 @@ mod tests {
         // Move focus to the left tile first, then swap it rightward.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-left");
+        cx.simulate_keystrokes("alt-h");
 
         let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         let before = shell.read_with(&cx, |shell, _| {
@@ -2812,7 +2812,7 @@ mod tests {
         // session dirty; none of them writes anything by itself.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-left");
+        cx.simulate_keystrokes("alt-h");
         cx.simulate_keystrokes("ctrl-h");
         cx.simulate_keystrokes("alt-2");
         cx.simulate_keystrokes("ctrl-v");
@@ -3179,7 +3179,7 @@ mod tests {
         );
     }
 
-    /// `settings::open` (dispatched via `mod+,`, the palette, or the
+    /// `settings::open` (dispatched via `ctrl+,`, the palette, or the
     /// sidebar profile icon) opens the real settings modal (Task 5, Task 9
     /// instant-modal redesign): `shell.modal` flips `Some`, and the modal
     /// chrome (`dialog::render_modal` — backdrop + panel + title row +
@@ -3264,7 +3264,7 @@ mod tests {
         );
     }
 
-    /// A real `mod+,` keystroke, through the actual key-event pipeline,
+    /// A real `ctrl+,` keystroke, through the actual key-event pipeline,
     /// dispatches `settings::open` and opens the modal — end-to-end
     /// coverage of the `BUILTIN_KEYMAP` binding added in Task 5, mirroring
     /// `mod_shift_t_keystroke_toggles_the_theme_mode` above.
@@ -3294,13 +3294,11 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        // The builtin keymap's mod alias is Alt (default_mod), so `mod+,`
-        // is `alt+,`.
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
 
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "alt-, (mod+, = settings::open) should have opened the settings modal"
+            "ctrl-, (settings::open) should have opened the settings modal"
         );
     }
 
@@ -3345,13 +3343,13 @@ mod tests {
         });
 
         // Open the settings modal via the real `settings::open` dispatch
-        // path (the builtin `mod+,` binding), not by constructing it
+        // path (the builtin `ctrl+,` binding), not by constructing it
         // out-of-band, so this exercises the exact state `handle_key_down`
         // has to guard against.
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
 
         cx.simulate_keystrokes("ctrl-v");
@@ -3409,10 +3407,10 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
 
         cx.simulate_keystrokes("escape");
@@ -3479,13 +3477,13 @@ mod tests {
         });
         let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
 
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
         assert!(
             cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
@@ -3560,10 +3558,10 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -3616,13 +3614,13 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        cx.simulate_keystrokes("alt-,");
+        cx.simulate_keystrokes("ctrl-,");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
 
         let panel_bounds = cx
@@ -3915,8 +3913,8 @@ mod tests {
         assert_eq!(tiles_before.len(), 3);
 
         // After three splits, the focused tile is the last one (tiles_before[2]).
-        // Focus the middle tile (at index 1) using focus_left (ctrl+left).
-        cx.simulate_keystrokes("ctrl-left");
+        // Focus the middle tile (at index 1) using focus_left (mod+h).
+        cx.simulate_keystrokes("alt-h");
 
         let focused_tile =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());

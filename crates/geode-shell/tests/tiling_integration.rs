@@ -60,9 +60,9 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "ctrl+v");
     assert_eq!(ws.active().tiles().len(), 2);
 
-    // ctrl+left: focus left tile (direct arrow binding);
+    // mod+h: focus left tile (direct binding);
     // ctrl+h: split it stacked (workspace::split_down).
-    press(&mut matcher, &mut ws, "ctrl+left");
+    press(&mut matcher, &mut ws, "mod+h");
     press(&mut matcher, &mut ws, "ctrl+h");
     assert_eq!(ws.active().tiles().len(), 3);
     let rects = ws.active().layout(Rect::UNIT);
@@ -79,9 +79,9 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "mod+1");
     assert_eq!(ws.active().tiles().len(), 3);
 
-    // Directional focus works through the same pipeline (ctrl+right).
+    // Directional focus works through the same pipeline (mod+l).
     let before = ws.active().focused();
-    press(&mut matcher, &mut ws, "ctrl+right");
+    press(&mut matcher, &mut ws, "mod+l");
     assert_ne!(ws.active().focused(), before);
     assert!(
         ws.active()
