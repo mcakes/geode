@@ -82,14 +82,25 @@ impl ShellView {
     /// palette without ever touching (or being confused by) the matcher's
     /// own pending-sequence state, which palette-open key handling
     /// bypasses entirely.
+    ///
+    /// The keymap's layering contract is last-exact-match-wins (mirrors
+    /// `Matcher::press`, spec §3.4): among every single-keystroke binding
+    /// for this exact key whose predicate passes the current context
+    /// stack, the *last* one in `Keymap::bindings()`'s layer-then-
+    /// declaration order is the one that actually governs the key — a
+    /// user/desk layer rebinding or unbinding (`"mod+p" = "none"`) it must
+    /// shadow the builtin `palette::toggle` binding here exactly as it
+    /// would through the matcher. So this resolves that same winning
+    /// binding and only treats the keystroke as the palette toggle when
+    /// its action is `palette::toggle`.
     fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke) -> bool {
         let stack = self.context_stack();
-        self.services.keymap.bindings().iter().any(|binding| {
-            binding.action.0 == "palette::toggle"
-                && binding.keystrokes.len() == 1
+        let winner = self.services.keymap.bindings().iter().rfind(|binding| {
+            binding.keystrokes.len() == 1
                 && binding.keystrokes[0] == *keystroke
                 && binding.predicate.as_ref().is_none_or(|p| p.eval(&stack))
-        })
+        });
+        winner.is_some_and(|binding| binding.action.0 == "palette::toggle")
     }
 
     /// Open the palette (building a fresh `PaletteState` — actions in
@@ -126,10 +137,16 @@ impl ShellView {
     /// normal dispatch chain incl. theme::toggle_mode"); a `Theme` item
     /// applies that theme directly via `ThemeService::apply`. The palette
     /// is assumed already closed by the caller (Enter closes before
-    /// dispatching), so a `palette::toggle` item selected from within the
-    /// palette itself is a no-op rather than reopening it.
+    /// dispatching) — so the `palette::toggle` action id is deliberately
+    /// *not* re-dispatched here: `dispatch`'s `palette::toggle` branch
+    /// calls `toggle_palette`, which would reopen the just-closed palette,
+    /// turning "select 'Toggle command palette'" into "close then
+    /// immediately reopen". Skipping it instead makes selecting that row a
+    /// true toggle: the palette just closes and stays closed, exactly like
+    /// pressing the toggle keystroke a second time would.
     fn dispatch_palette_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
         match item {
+            PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
             PaletteItem::Action(id, ..) => self.dispatch(id, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
@@ -815,6 +832,162 @@ mod tests {
         assert_eq!(
             tile_count, 0,
             "escape must not dispatch the item that was filtered/selected"
+        );
+    }
+
+    /// Layers a user binding on top of the builtin keymap that rebinds
+    /// `mod+p` (BUILTIN_KEYMAP's `palette::toggle` key) to
+    /// `workspace::split_horizontal` instead. Per the layering contract
+    /// (last-exact-match-wins), this must fully shadow the builtin
+    /// `palette::toggle` binding for that key.
+    fn test_services_with_mod_p_rebound_to_split() -> ShellServices {
+        let config = Config::load(&ConfigSources::default());
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        let mod_alias = default_mod();
+        let builtin_doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let user_doc = LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".to_string(),
+            file: "<test:user>".into(),
+            table: "[[bindings]]\n[bindings.keys]\n\"mod+p\" = \"workspace::split_horizontal\"\n"
+                .parse()
+                .unwrap(),
+        };
+        let (keymap, diags) = build_keymap(&[builtin_doc, user_doc], mod_alias, &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = crate::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        ShellServices {
+            config,
+            registry,
+            keymap,
+            mod_alias,
+            workspaces: Workspaces::new(),
+            theme,
+        }
+    }
+
+    /// Regression for `is_palette_toggle` respecting keymap layering
+    /// (last-exact-match-wins, spec §3.4): a user layer rebinding `mod+p`
+    /// away from `palette::toggle` must mean pressing it does NOT open the
+    /// palette — the pre-matcher intercept in `handle_key_down` must not
+    /// fire just because *some* binding for that key, anywhere in the
+    /// keymap, happens to be `palette::toggle`. The rebound action
+    /// (`workspace::split_horizontal`) must dispatch instead, through the
+    /// normal matcher path, proving the key was fully handed over rather
+    /// than merely swallowed.
+    #[gpui::test]
+    fn user_layer_rebinding_mod_p_prevents_palette_open_and_dispatches_rebound_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services_with_mod_p_rebound_to_split(), window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("alt-p");
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "a user layer rebinding mod+p away from palette::toggle must shadow the \
+             builtin binding — the palette must not open"
+        );
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 1,
+            "alt-p should have dispatched the rebound workspace::split_horizontal \
+             action through the normal matcher path"
+        );
+    }
+
+    /// Regression for `dispatch_palette_item`: selecting the
+    /// `palette::toggle` row from inside the palette itself is a true
+    /// toggle — the palette closes (Enter already did that) and must stay
+    /// closed, not reopen. Filters straight down to that one row via its
+    /// exact title so the test doesn't depend on where it ranks unfiltered.
+    #[gpui::test]
+    fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("alt-p");
+        cx.simulate_input("Toggle command palette");
+
+        let selected_title = shell.read_with(&cx, |shell, _| {
+            shell
+                .palette
+                .as_ref()
+                .and_then(PaletteState::selected_item)
+                .map(|item| item.title())
+        });
+        assert_eq!(
+            selected_title,
+            Some("Toggle command palette".to_string()),
+            "the query should have filtered down to exactly that row"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("enter");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "enter on the palette::toggle row must leave the palette closed, not \
+             reopen it"
         );
     }
 }

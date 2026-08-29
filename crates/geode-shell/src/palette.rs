@@ -21,6 +21,14 @@ use crate::theme::ThemeService;
 /// `"Theme: {name}"` under category `"Appearance"`).
 const THEME_CATEGORY: &str = "Appearance";
 
+/// Cap on how many filtered results the overlay draws (brief: "the top
+/// ~12 results"). Lives in the pure core (not the `gpui` rendering section
+/// below, even though it's only a `usize`) because `PaletteState::
+/// move_selection` also needs it: the selection must never walk past the
+/// last row `render` actually draws, or arrow-key navigation could park
+/// the cursor on a row that's invisible.
+const MAX_VISIBLE: usize = 12;
+
 /// One row the palette can show. `Action` carries the id (for dispatch),
 /// its registry title/category, and its rendered binding text if the
 /// keymap has one bound. `Theme`'s `String` is a fully qualified bundled
@@ -170,10 +178,13 @@ impl PaletteState {
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
-    /// pass ±1), clamped to the current filtered list's bounds. Leaves the
-    /// selection at 0 without panicking when nothing matches.
+    /// pass ±1), clamped to the current filtered list's bounds *and* to
+    /// [`MAX_VISIBLE`] — `render` only ever draws the first `MAX_VISIBLE`
+    /// filtered rows (`.take(MAX_VISIBLE)`), so a selection allowed past
+    /// that point would point at a row nothing on screen highlights.
+    /// Leaves the selection at 0 without panicking when nothing matches.
     pub fn move_selection(&mut self, delta: i32) {
-        let len = self.filtered().len();
+        let len = self.filtered().len().min(MAX_VISIBLE);
         if len == 0 {
             self.selected = 0;
             return;
@@ -275,10 +286,6 @@ pub fn build_items(
 use gpui::prelude::*;
 use gpui::{App, IntoElement, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
-
-/// Cap on how many filtered results the overlay draws (brief: "the top
-/// ~12 results").
-const MAX_VISIBLE: usize = 12;
 
 /// Target overlay width in pixels (brief: "~560px wide").
 const WIDTH: f32 = 560.0;
@@ -544,6 +551,25 @@ mod tests {
         state.move_selection(1);
         state.move_selection(1);
         assert_eq!(state.selected(), 2, "cannot go past the last row");
+    }
+
+    #[test]
+    fn move_selection_clamps_to_max_visible_even_with_more_matches() {
+        // More filtered items than the render path's MAX_VISIBLE cap — the
+        // selection must never walk down into a row `render`'s
+        // `.take(MAX_VISIBLE)` never draws.
+        let items: Vec<PaletteItem> = (0..MAX_VISIBLE + 8)
+            .map(|i| action(&format!("a{i}"), &format!("Item {i}"), "Test", None))
+            .collect();
+        let mut state = PaletteState::new(items);
+        for _ in 0..(MAX_VISIBLE + 8) {
+            state.move_selection(1);
+        }
+        assert_eq!(
+            state.selected(),
+            MAX_VISIBLE - 1,
+            "selection must clamp at the last visible row, not the last filtered row"
+        );
     }
 
     #[test]
