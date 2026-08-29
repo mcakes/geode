@@ -15,14 +15,18 @@ pub const HEIGHT: f32 = 26.0;
 
 /// Build the status bar: left — workspace indicators 1..=9 (active is
 /// `primary`-styled, non-empty ones normal, empty ones hidden except the
-/// active one); middle — pending keystrokes as space-separated text; right
-/// — the active theme name in `muted_foreground`. All colors come from
-/// `cx.theme()`; no other input is read, so the same call always renders
-/// the same tree for the same arguments.
+/// active one); middle — pending keystrokes as space-separated text, then
+/// the reload indicator when `reload_message` is `Some` (Task 1c-1: a
+/// danger-toned `config: N error(s) — keeping last good` marker, `None`
+/// when config is healthy); right — the active theme name in
+/// `muted_foreground`. All colors come from `cx.theme()`; no other input is
+/// read, so the same call always renders the same tree for the same
+/// arguments.
 pub fn status_bar(
     active_index: u8,
     non_empty_indices: &[u8],
     pending: &[Keystroke],
+    reload_message: Option<&str>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
@@ -57,6 +61,15 @@ pub fn status_bar(
         .collect::<Vec<_>>()
         .join(" ");
 
+    let mut middle = h_flex()
+        .items_center()
+        .gap_3()
+        .child(indicators)
+        .child(div().text_color(theme.muted_foreground).child(pending_text));
+    if let Some(message) = reload_message {
+        middle = middle.child(div().text_color(theme.danger).child(message.to_string()));
+    }
+
     h_flex()
         .flex_none()
         .w_full()
@@ -67,13 +80,7 @@ pub fn status_bar(
         .gap_3()
         .bg(bar_bg)
         .text_color(theme.foreground)
-        .child(
-            h_flex()
-                .items_center()
-                .gap_3()
-                .child(indicators)
-                .child(div().text_color(theme.muted_foreground).child(pending_text)),
-        )
+        .child(middle)
         .child(
             div()
                 .text_color(theme.muted_foreground)

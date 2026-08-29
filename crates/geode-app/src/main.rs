@@ -21,14 +21,14 @@ fn main() {
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
 
-            let mut services = build_shell_services();
+            let (mut services, desk, user) = build_shell_services();
             for warning in services.theme.apply_from_config(&services.config, cx) {
                 eprintln!("[theme] warning: {warning}");
             }
 
             cx.spawn(async move |cx| {
                 cx.open_window(WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, window, cx));
+                    let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })
                 .expect("failed to open window");
@@ -41,15 +41,18 @@ fn main() {
 /// and build the starting (empty, workspace 1) workspace state. Config and
 /// keymap diagnostics print to stderr, one line each — a diagnostics UI is
 /// a later phase; invalid config must never stop the app from starting
-/// (spec §10.1).
-fn build_shell_services() -> ShellServices {
+/// (spec §10.1). Returns the desk/user config directories alongside the
+/// services so the caller can pass the same two directories into
+/// `ShellView::new` for the config hot-reload watcher (Task 1c-1) — one
+/// `config_dirs()` call, one source of truth for what's watched.
+fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
     let (desk, user) = config_dirs();
     let builtin_keymap =
         LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed");
     let config = Config::load(&ConfigSources {
         builtin: vec![builtin_keymap],
-        desk,
-        user,
+        desk: desk.clone(),
+        user: user.clone(),
     });
     for diag in &config.diagnostics {
         print_diagnostic("config", diag);
@@ -69,14 +72,15 @@ fn build_shell_services() -> ShellServices {
         eprintln!("[theme] warning: {warning}");
     }
 
-    ShellServices {
+    let services = ShellServices {
         config,
         registry,
         keymap,
         mod_alias,
         workspaces: Workspaces::new(),
         theme,
-    }
+    };
+    (services, desk, user)
 }
 
 fn print_diagnostic(source: &str, diag: &Diagnostic) {
