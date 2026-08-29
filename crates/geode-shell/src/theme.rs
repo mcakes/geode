@@ -295,6 +295,29 @@ impl ThemeService {
         (resolved, warnings)
     }
 
+    /// The mode the current `[theme]` config would resolve to right now —
+    /// what [`resolve_config`](Self::resolve_config)/`apply_from_config`
+    /// would apply, without applying it (fix wave, Fix 3: session
+    /// theme-mode precedence needs to compare the *active* mode against
+    /// this, not against `resolve_config`'s raw `theme.mode` parse, so an
+    /// exact fully-qualified `theme.name` — e.g. `"Gruvbox Dark"`, which
+    /// `resolve` matches outright regardless of `theme.mode` — is judged by
+    /// the mode that name actually carries, the same mode that would land
+    /// on screen, not by a separately-configured `theme.mode` value that
+    /// resolution would have silently overridden). Falls back to the same
+    /// light/dark default `resolve_config` uses on the (practically
+    /// unreachable, since `DEFAULT_FAMILY` always ships both modes) chance
+    /// nothing resolves at all.
+    pub fn config_resolved_mode(&self, config: &Config) -> Mode {
+        let (resolved, _warnings) = self.resolve_config(config);
+        resolved.map(|c| c.mode).unwrap_or_else(|| {
+            match config.get("app", "theme.mode").and_then(|v| v.as_str()) {
+                Some("light") => Mode::Light,
+                _ => Mode::Dark,
+            }
+        })
+    }
+
     /// Apply a theme by exact or family name (see [`resolve`](Self::resolve)
     /// for the matching rule). Returns whether anything matched — an unknown
     /// name leaves the current theme untouched, mirroring the config
@@ -526,6 +549,35 @@ mod tests {
         assert_eq!(resolved.unwrap().name.as_ref(), "Default Dark");
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("nocturnal"));
+    }
+
+    // --- config_resolved_mode (fix wave, Fix 3) --------------------------
+
+    #[test]
+    fn config_resolved_mode_defaults_to_dark_when_config_is_silent() {
+        let (service, _) = load_bundled();
+        let config = Config::load(&ConfigSources::default());
+        assert_eq!(service.config_resolved_mode(&config), Mode::Dark);
+    }
+
+    #[test]
+    fn config_resolved_mode_reads_theme_mode_from_config() {
+        let (service, _) = load_bundled();
+        let config = config_from("[theme]\nmode = \"light\"\n");
+        assert_eq!(service.config_resolved_mode(&config), Mode::Light);
+    }
+
+    #[test]
+    fn config_resolved_mode_follows_an_exact_fully_qualified_name_over_a_mismatched_mode() {
+        // `theme.name = "Gruvbox Dark"` is an exact `ThemeConfig.name`
+        // match (`resolve`'s `find_exact`, checked before family+mode
+        // lookup), so it wins outright regardless of `theme.mode` here
+        // saying light — the resolved mode must reflect what would
+        // actually apply (dark), not the separately-configured raw
+        // `theme.mode` value it silently overrides.
+        let (service, _) = load_bundled();
+        let config = config_from("[theme]\nname = \"Gruvbox Dark\"\nmode = \"light\"\n");
+        assert_eq!(service.config_resolved_mode(&config), Mode::Dark);
     }
 }
 

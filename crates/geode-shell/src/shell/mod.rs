@@ -23,7 +23,7 @@ use gpui::{
     Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, Window, div, px,
 };
 use gpui_component::input::InputState;
-use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::defaults::mod_alias_from_config;
@@ -269,7 +269,22 @@ impl ShellView {
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
-        if let reload::ReloadOutcome::Applied { .. } = &outcome {
+        if let reload::ReloadOutcome::Applied { warnings } = &outcome {
+            // Fix wave, Fix 4: `decide` folds warning-severity diagnostics
+            // (config + keymap-build) into `Applied { warnings }` rather
+            // than discarding them, but nothing previously read that field
+            // — a warning-only reload (e.g. an unknown-but-non-fatal
+            // keymap key) applied silently with no trace anywhere. Surface
+            // each on stderr, one line per warning, the same
+            // `[source] warning: message` convention `main.rs`'s startup
+            // diagnostics already use (these are plain `String`s by the
+            // time they reach here — `decide` already extracted
+            // `Diagnostic::message` — so there's no `Diagnostic` Display
+            // impl to reuse here).
+            for warning in warnings {
+                eprintln!("[reload] warning: {warning}");
+            }
+
             let theme_changed =
                 self.services.config.get("app", "theme") != new_config.get("app", "theme");
 
@@ -393,6 +408,41 @@ impl ShellView {
         }
     }
 
+    /// The `theme_mode` to write into a session's `[extra]` table (fix
+    /// wave, Fix 3 — refines the precedence documented on
+    /// `session::SessionExtra::theme_mode` and in `main.rs`): `Some(mode)`
+    /// only when the *active* mode genuinely diverges from the mode the
+    /// *current config* would resolve to on its own
+    /// (`ThemeService::config_resolved_mode`); `None` when they agree.
+    ///
+    /// Why: the previous behavior always wrote `Some(active_mode)`. Since
+    /// `main.rs` restores a saved `theme_mode` *after* `apply_from_config`
+    /// (deliberately, so a runtime `theme::toggle_mode` survives a
+    /// restart), that meant a session file, once written, permanently
+    /// fossilized whatever mode happened to be active at last save/quit —
+    /// even when the user never toggled anything and the active mode was
+    /// simply mirroring `[theme].mode` from config. An offline edit to
+    /// `app.toml`'s `[theme].mode` would then appear to do nothing: the
+    /// stale session value kept re-asserting the old mode over the new
+    /// config every subsequent launch. Writing `None` whenever the active
+    /// mode still just mirrors config leaves the config's mode free to
+    /// take effect on restart, and `Some` only records a real, deliberate
+    /// divergence (a `theme::toggle_mode` this session, or a palette theme
+    /// pick with a different mode) — that divergence is the only case that
+    /// actually needs to survive a restart.
+    fn session_theme_mode(&self) -> Option<String> {
+        let active = self.services.theme.active_mode();
+        let config_mode = self
+            .services
+            .theme
+            .config_resolved_mode(&self.services.config);
+        if active == config_mode {
+            None
+        } else {
+            Some(if active.is_dark() { "dark" } else { "light" }.to_string())
+        }
+    }
+
     /// If a workspace mutation happened since the last flush, serialize the
     /// current session state (cheap: `session::to_string_pretty` over a
     /// handful of small TOML tables — safe to run synchronously here, on
@@ -415,13 +465,8 @@ impl ShellView {
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
-        let theme_mode = if self.services.theme.active_mode().is_dark() {
-            "dark"
-        } else {
-            "light"
-        };
         let extra = session::SessionExtra {
-            theme_mode: Some(theme_mode.to_string()),
+            theme_mode: self.session_theme_mode(),
         };
         match session::to_string_pretty(&self.services.workspaces, &extra) {
             Ok(text) => Some((path, text)),
@@ -448,13 +493,8 @@ impl ShellView {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
-        let theme_mode = if self.services.theme.active_mode().is_dark() {
-            "dark"
-        } else {
-            "light"
-        };
         let extra = session::SessionExtra {
-            theme_mode: Some(theme_mode.to_string()),
+            theme_mode: self.session_theme_mode(),
         };
         if let Err(e) = session::save(path, &self.services.workspaces, &extra) {
             eprintln!("[session] warning: failed to save session: {e}");
@@ -577,6 +617,33 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Final-review fix wave, Fix 1: while the settings dialog (or any
+        // other gpui-component `Dialog`) is open, the shell's own keymap
+        // `Matcher` must not see a single keystroke — otherwise e.g.
+        // `ctrl+v` typed while choosing a theme in the dialog would *also*
+        // dispatch `workspace::split_right` behind it (dialogs paint above
+        // the tile surface, but this on_key_down listener sits on the
+        // ShellView root and still receives every raw KeyDownEvent that
+        // bubbles up the dispatch tree, dialog-focused or not — same
+        // "delivered regardless" behavior the filter-input guard below
+        // already relies on). `has_active_dialog` is legal to call from
+        // here (docs: "Whether any dialog is open; legal from `render`,
+        // unlike the rest") and is already used the same way by
+        // `settings_view::open`'s own re-entrancy guard.
+        //
+        // Escape and Enter still work to close/confirm the dialog: gpui-
+        // component's `Dialog` binds them as real gpui *actions*
+        // (`KeyBinding::new("escape", Cancel, Some("Dialog"))` /
+        // `KeyBinding::new("enter", Confirm { .. }, Some("Dialog"))`,
+        // pinned checkout `crates/base/src/dialog.rs`), scoped to a
+        // `key_context("Dialog")` on the dialog's own focused root
+        // (`.track_focus(&self.focus)`) — a wholly separate dispatch path
+        // from this view's `on_key_down` listener, so returning early here
+        // does not touch it.
+        if window.has_active_dialog(cx) {
+            return;
+        }
+
         // The filter field (Task 4) owns its own key handling while it has
         // focus — typing must reach it, not the shell's keymap `Matcher`
         // (brief: "shell chords won't fire — acceptable while typing a
@@ -808,7 +875,8 @@ mod tests {
     use crate::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use crate::keymap::build_keymap;
     use geode_core::config::{ConfigSources, LayerDoc};
-    use gpui_component::WindowExt as _;
+    // `WindowExt` is already brought in by `use super::*` (top-of-file
+    // import, needed by `handle_key_down`'s dialog guard below).
 
     fn test_services() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
@@ -2333,9 +2401,16 @@ mod tests {
             session_path.exists(),
             "the flush must have written the file"
         );
+        // The atomic-write temp file (now pid+counter-suffixed, fix wave
+        // Fix 2) must not be left behind.
+        let leftover_tmp_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
         assert!(
-            !dir.path().join(".session.toml.tmp").exists(),
-            "the atomic-write temp file must not be left behind"
+            leftover_tmp_files.is_empty(),
+            "no *.tmp files should remain in the session directory, found {leftover_tmp_files:?}"
         );
         assert!(
             !shell.read_with(&cx, |shell, _| shell.session_dirty),
@@ -2432,6 +2507,88 @@ mod tests {
                 .update(&mut cx, |shell, _cx| shell.take_dirty_session_write())
                 .is_none(),
             "the dirty flag must be consumed by the first take, not left set"
+        );
+    }
+
+    /// Fix wave, Fix 3 regression: `session_theme_mode` (the sole source of
+    /// `SessionExtra::theme_mode` now) must write `None` while the active
+    /// theme mode merely mirrors what the current `[theme]` config resolves
+    /// to on its own, and only `Some(mode)` once the active mode genuinely
+    /// diverges from that — a real in-session `theme::toggle_mode`, the
+    /// only case that actually needs to survive a restart (an offline edit
+    /// to `[theme].mode` in `app.toml`, with no toggle this session, must
+    /// be free to take effect on the next launch instead of being
+    /// permanently overridden by a stale session value).
+    #[gpui::test]
+    fn session_theme_mode_is_none_until_a_real_toggle_diverges_from_config(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // `test_services()` builds its `ThemeService` via `load_bundled()`
+        // alone (starting active mode: "Default Light", the crate's own
+        // baseline), unlike `main.rs`'s real startup path, which always
+        // calls `apply_from_config` before `ShellView` ever exists. Do that
+        // same call here so the active mode actually starts out mirroring
+        // config, the precondition this test means to exercise — `config
+        // ()` has no `[theme]` table at all (`ConfigSources::default()`),
+        // which `ThemeService::resolve_config` resolves to dark.
+        shell.update(&mut cx, |shell, cx| {
+            shell
+                .services
+                .theme
+                .apply_from_config(&shell.services.config, cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
+            crate::theme::Mode::Dark,
+            "sanity: a config with no [theme] table resolves to dark"
+        );
+
+        let before_toggle = shell.read_with(&cx, |shell, _| shell.session_theme_mode());
+        assert_eq!(
+            before_toggle, None,
+            "the active mode merely mirroring the config's own resolved mode \
+             must not fossilize a theme_mode into the session"
+        );
+
+        shell.update(&mut cx, |shell, cx| {
+            shell.services.theme.toggle_mode(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
+            crate::theme::Mode::Light,
+            "sanity: toggle_mode should have flipped the active mode to light"
+        );
+
+        let after_toggle = shell.read_with(&cx, |shell, _| shell.session_theme_mode());
+        assert_eq!(
+            after_toggle,
+            Some("light".to_string()),
+            "a genuine in-session toggle that diverges from the config's \
+             resolved mode must be recorded so it survives a restart"
         );
     }
 
@@ -2685,6 +2842,78 @@ mod tests {
         assert!(
             cx.update(|window, cx| window.has_active_dialog(cx)),
             "alt-, (mod+, = settings::open) should have opened the settings dialog"
+        );
+    }
+
+    /// Fix wave, Fix 1 regression: while the settings dialog is open,
+    /// `ctrl+v` (`workspace::split_right`) must not reach the shell's
+    /// keymap `Matcher` at all — modeled on the filter-input guard this
+    /// mirrors (`handle_key_down`'s early return while the filter field is
+    /// focused). Before this fix, `ShellView::handle_key_down`'s
+    /// `on_key_down` listener still received every raw keystroke regardless
+    /// of the dialog (dialogs paint above the tile surface but don't
+    /// interrupt this view's own key dispatch), so a chord typed while e.g.
+    /// picking a theme in the dialog would silently also mutate the
+    /// workspace behind it. Also checks the closed-palette case
+    /// (`ctrl+k` = `palette::toggle`): that must not open either, since the
+    /// palette-toggle intercept sits ahead of the matcher in
+    /// `handle_key_down` and needs the same guard.
+    #[gpui::test]
+    fn dialog_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Open the settings dialog via the real `settings::open` dispatch
+        // path (the builtin `mod+,` binding), not by constructing it
+        // out-of-band, so this exercises the exact state `handle_key_down`
+        // has to guard against.
+        cx.simulate_keystrokes("alt-,");
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "sanity: alt-, should have opened the settings dialog"
+        );
+
+        cx.simulate_keystrokes("ctrl-v");
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 0,
+            "ctrl+v (workspace::split_right) must not reach the matcher while \
+             the settings dialog is open"
+        );
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "ctrl+k (palette::toggle) must not open the command palette while \
+             the settings dialog is open"
+        );
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "the settings dialog should still be open — nothing here should \
+             have closed it"
         );
     }
 

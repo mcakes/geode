@@ -30,10 +30,17 @@ fn main() {
             // Restore the session (Task 3) before constructing ShellView:
             // the saved workspace layout replaces the fresh `Workspaces::
             // new()` set above, and — deliberately AFTER apply_from_config
-            // just ran — a saved theme mode is re-applied on top of it, so
-            // a session's toggled mode wins over the config's default
-            // mode (a runtime `theme::toggle_mode` survives a restart even
-            // if `app.toml`'s `[theme].mode` still says the old value).
+            // just ran — a saved theme mode, when present, is re-applied on
+            // top of it, so a session's genuinely toggled mode wins over
+            // the config's default mode (a runtime `theme::toggle_mode`
+            // survives a restart even if `app.toml`'s `[theme].mode` still
+            // says the old value). `extra.theme_mode` is `None` (fix wave,
+            // Fix 3 — see `session::SessionExtra`'s doc comment and
+            // `ShellView::session_theme_mode`) whenever the session's
+            // active mode at last save just mirrored config rather than
+            // diverging from it, so an offline `[theme].mode` edit with no
+            // in-session toggle takes effect here instead of being
+            // silently overridden by a stale session value.
             if let Some(path) = &services.session_path {
                 let (workspaces, extra, warnings) = session::load(path);
                 for warning in &warnings {

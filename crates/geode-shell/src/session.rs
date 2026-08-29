@@ -52,6 +52,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::tiling::{Node, Orientation, TileId, Tree, Workspaces};
 
@@ -66,11 +67,21 @@ use crate::tiling::{Node, Orientation, TileId, Tree, Workspaces};
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
 /// Non-workspace session state (brief: `SessionExtra { theme_mode: Option<String> }`).
-/// `theme_mode` is `"light"` or `"dark"`, whatever `ThemeService::active_mode`
-/// reported at save time — restored *after* `apply_from_config` runs
-/// (main.rs), so a session's saved mode wins over the config's default mode:
-/// a runtime `theme::toggle_mode` survives a restart even if `[theme].mode`
-/// in `app.toml` still says the old value.
+/// `theme_mode` is `"light"` or `"dark"`, restored *after* `apply_from_config`
+/// runs (main.rs), so a session's saved mode — when present — wins over the
+/// config's default mode: a runtime `theme::toggle_mode` survives a restart
+/// even if `[theme].mode` in `app.toml` still says the old value.
+///
+/// Refined precedence rule (fix wave, Fix 3 — see
+/// `ShellView::session_theme_mode`, the sole writer of this field): the
+/// shell writes `Some(mode)` only when the active mode at save time
+/// genuinely *diverges* from the mode the current `[theme]` config resolves
+/// to on its own (`ThemeService::config_resolved_mode`) — a real, deliberate
+/// toggle this session, not just the active mode happening to mirror
+/// config. When they agree, it writes `None`. This means an offline edit to
+/// `[theme].mode` in `app.toml` (no toggle this session) takes effect on the
+/// next restart instead of being permanently fossilized by a stale session
+/// value that only ever mirrored the old config in the first place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionExtra {
     pub theme_mode: Option<String>,
@@ -344,6 +355,14 @@ pub fn to_string_pretty(workspaces: &Workspaces, extra: &SessionExtra) -> Result
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
+/// Process-global counter (fix wave, Fix 2) giving every [`write_atomic`]
+/// call in this process a temp filename distinct from every other
+/// *concurrent* call, on top of the pid already distinguishing this process
+/// from any other one racing on the same session file. `Ordering::Relaxed`
+/// is enough — this only needs distinct values, not a synchronization point
+/// with any other memory access.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// Atomically write already-serialized session `text` to `path`: a temp
 /// file in the same directory, `fsync`, then rename over `path` (rename is
 /// atomic on the same filesystem — a crash or concurrent read never
@@ -360,6 +379,38 @@ pub fn to_string_pretty(workspaces: &Workspaces, extra: &SessionExtra) -> Result
 /// fix; [`save`] (a synchronous, do-everything wrapper) remains fine for
 /// off-the-UI-thread callers: direct test use, and the best-effort
 /// `on_app_quit` final flush, which fires at most once, at shutdown.
+///
+/// Temp filename (fix wave, Fix 2): `.session.toml.{pid}-{counter}.tmp`,
+/// unique per call rather than the fixed `.session.toml.tmp` this used
+/// before. The fixed name was a real race: `ShellView`'s ~500ms watcher
+/// tick and the `on_app_quit` best-effort flush can both call this against
+/// the *same* `path` close together (quit right after a workspace
+/// mutation), and two concurrent writers sharing one temp filename could
+/// interleave — one call's `File::create` truncating the other's
+/// in-progress write, or one call's `rename` consuming the other's temp
+/// file out from under it (an `ENOENT` on the second `rename`, surfaced as
+/// a spurious `[session] warning:` line even though the first writer's data
+/// was fine). A unique name per call removes that interleaving entirely:
+/// each writer only ever touches its own file until its own `rename`.
+///
+/// The pid+counter suffix keeps the *residual* case honest rather than
+/// pretending it away: two writers can still race the final `rename` step
+/// itself (both succeed — `rename` is atomic per-call — but whichever
+/// finishes second wins, since both target the same `path`). That ordering
+/// is acceptable, not a defect: every candidate `text` here is a valid,
+/// self-consistent serialization of *some* real session state, so the
+/// "wrong" outcome is at worst a slightly stale-but-valid file (e.g. an
+/// old periodic flush's rename lands after the quit-time save's rename,
+/// so the file on disk reflects state from ~500ms earlier than the very
+/// last action) — never a torn/corrupt file, and never a crash. Losing at
+/// most one flush interval of session freshness is exactly the tradeoff
+/// this module's whole "best-effort, never load-bearing" session design
+/// already accepts elsewhere (see this function's own doc above, and
+/// `load`'s "never panic or block startup").
+///
+/// Still a non-`.toml` name so the reload watcher's `*.toml` glob (Task
+/// 1c-1, `reload::scan`) never even sees it mid-write, on top of
+/// `session.toml` itself already being excluded by name.
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(
@@ -369,10 +420,9 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     })?;
     std::fs::create_dir_all(dir)?;
 
-    // A fixed, non-`.toml` name so the reload watcher's `*.toml` glob (Task
-    // 1c-1, `reload::scan`) never even sees it mid-write, on top of
-    // `session.toml` itself already being excluded by name.
-    let tmp_path = dir.join(".session.toml.tmp");
+    let pid = std::process::id();
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".session.toml.{pid}-{counter}.tmp"));
     {
         let mut file = std::fs::File::create(&tmp_path)?;
         file.write_all(text.as_bytes())?;
@@ -776,8 +826,17 @@ mod tests {
 
         save(&path, &ws, &extra).unwrap();
         assert!(path.exists());
-        // The atomic-write temp file must not be left behind.
-        assert!(!dir.path().join(".session.toml.tmp").exists());
+        // The atomic-write temp file must not be left behind, whatever its
+        // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
+        let leftover_tmp_files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            leftover_tmp_files.is_empty(),
+            "no *.tmp files should remain in the session directory, found {leftover_tmp_files:?}"
+        );
 
         let (restored, restored_extra, warnings) = load(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
