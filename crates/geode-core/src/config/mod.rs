@@ -3,8 +3,10 @@
 //! failures surface as [`Diagnostic`] values and the bad input is skipped.
 
 mod load;
+mod merge;
 
 pub use load::load_layer;
+pub use merge::{MergedDoc, merge_docs};
 
 use std::path::PathBuf;
 
@@ -90,5 +92,164 @@ impl LayerDoc {
             file: PathBuf::from(format!("<builtin:{name}>")),
             table,
         })
+    }
+}
+
+use std::collections::BTreeMap;
+
+/// Where config comes from. Builtin docs are compiled in; desk and user are
+/// directories of `*.toml` files (either may be absent).
+#[derive(Debug, Default)]
+pub struct ConfigSources {
+    pub builtin: Vec<LayerDoc>,
+    pub desk: Option<PathBuf>,
+    pub user: Option<PathBuf>,
+}
+
+/// The loaded, merged configuration plus everything needed to explain it.
+#[derive(Debug, Default)]
+pub struct Config {
+    docs: BTreeMap<String, MergedDoc>,
+    layered: BTreeMap<String, Vec<LayerDoc>>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl Config {
+    pub fn load(sources: &ConfigSources) -> Config {
+        let mut diagnostics = Vec::new();
+        let mut all: Vec<LayerDoc> = sources.builtin.clone();
+        for (layer, dir) in [(Layer::Desk, &sources.desk), (Layer::User, &sources.user)] {
+            if let Some(dir) = dir {
+                let (docs, diags) = load_layer(layer, dir);
+                all.extend(docs);
+                diagnostics.extend(diags);
+            }
+        }
+        let mut layered: BTreeMap<String, Vec<LayerDoc>> = BTreeMap::new();
+        for doc in all {
+            layered.entry(doc.name.clone()).or_default().push(doc);
+        }
+        let docs = layered
+            .iter()
+            .map(|(name, docs)| (name.clone(), merge_docs(name, docs)))
+            .collect();
+        Config {
+            docs,
+            layered,
+            diagnostics,
+        }
+    }
+
+    pub fn doc(&self, name: &str) -> Option<&MergedDoc> {
+        self.docs.get(name)
+    }
+
+    /// The unmerged per-layer docs for `name`, in Builtin → Desk → User order.
+    /// Consumers that layer at interpretation time (the keymap engine) use
+    /// this instead of the merged doc.
+    pub fn layered_docs(&self, name: &str) -> &[LayerDoc] {
+        self.layered.get(name).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Dotted-path lookup into a merged doc: `get("app", "keymap.mod")`.
+    pub fn get(&self, doc: &str, path: &str) -> Option<&toml::Value> {
+        let merged = self.docs.get(doc)?;
+        let mut parts = path.split('.');
+        let mut current = merged.value.get(parts.next()?)?;
+        for part in parts {
+            current = current.as_table()?.get(part)?;
+        }
+        Some(current)
+    }
+
+    /// Which layer supplied the value at `path` (exact entry or nearest
+    /// recorded ancestor).
+    pub fn explain(&self, doc: &str, path: &str) -> Option<Layer> {
+        let merged = self.docs.get(doc)?;
+        let mut probe = path.to_string();
+        loop {
+            if let Some(layer) = merged.provenance.get(&probe) {
+                return Some(*layer);
+            }
+            match probe.rfind('.') {
+                Some(i) => probe.truncate(i),
+                None => return None,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &std::path::Path, name: &str, text: &str) {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+
+    #[test]
+    fn load_merges_three_layers_in_order() {
+        let desk = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write(
+            desk.path(),
+            "app.toml",
+            "config_version = 1\n[keymap]\nmod = \"ctrl\"\n",
+        );
+        write(
+            user.path(),
+            "app.toml",
+            "config_version = 1\n[keymap]\nmod = \"cmd\"\n",
+        );
+        let sources = ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("app", "[keymap]\nmod = \"alt\"\n[theme]\nname = \"dark\"\n")
+                    .unwrap(),
+            ],
+            desk: Some(desk.path().to_path_buf()),
+            user: Some(user.path().to_path_buf()),
+        };
+        let config = Config::load(&sources);
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        assert_eq!(
+            config.get("app", "keymap.mod").unwrap().as_str(),
+            Some("cmd")
+        );
+        assert_eq!(
+            config.get("app", "theme.name").unwrap().as_str(),
+            Some("dark")
+        );
+        assert_eq!(config.explain("app", "keymap.mod"), Some(Layer::User));
+        assert_eq!(config.explain("app", "theme.name"), Some(Layer::Builtin));
+        let layers: Vec<_> = config.layered_docs("app").iter().map(|d| d.layer).collect();
+        assert_eq!(layers, vec![Layer::Builtin, Layer::Desk, Layer::User]);
+    }
+
+    #[test]
+    fn explain_falls_back_to_nearest_ancestor() {
+        let sources = ConfigSources {
+            builtin: vec![LayerDoc::builtin("views", "[risk]\ndataset = \"risk\"\n").unwrap()],
+            desk: None,
+            user: None,
+        };
+        let config = Config::load(&sources);
+        // "views" is atomic at depth 1, so provenance is recorded on "risk";
+        // asking about a leaf inside it resolves via the ancestor.
+        assert_eq!(
+            config.explain("views", "risk.dataset"),
+            Some(Layer::Builtin)
+        );
+    }
+
+    #[test]
+    fn absent_layers_and_docs_are_fine() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![],
+            desk: None,
+            user: None,
+        });
+        assert!(config.doc("nope").is_none());
+        assert!(config.layered_docs("nope").is_empty());
+        assert!(config.get("nope", "a.b").is_none());
     }
 }
