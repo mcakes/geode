@@ -9,3 +9,7 @@ bench = false
 
 [dependencies]
 geode-core.workspace = true
+toml = "1.1.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"

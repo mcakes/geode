@@ -2244,6 +2244,8 @@ name = "geode-shell"
 version = "0.1.0"
 dependencies = [
  "geode-core",
+ "tempfile",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]
