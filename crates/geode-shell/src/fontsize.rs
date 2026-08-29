@@ -28,9 +28,11 @@ use toml_edit::{DocumentMut, Item, Table, value};
 
 use geode_core::config::Config;
 
-/// The three offered UI text scales. `Medium` is the gpui default rem size
-/// (16px) — the app's look before this setting existed — so existing
-/// configs without a `[ui] font_size` key change nothing.
+/// The three offered UI text scales: 12/14/16px (user direction — shifted
+/// down from the original 14/16/18). `Medium` (14px) is the default for
+/// configs without a `[ui] font_size` key; note this is deliberately one
+/// step below gpui's own 16px rem default, so the app renders at 14px out
+/// of the box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FontSize {
     Small,
@@ -46,9 +48,9 @@ impl FontSize {
     /// The window rem size this scale means, in pixels.
     pub fn rem_px(self) -> f32 {
         match self {
-            FontSize::Small => 14.0,
-            FontSize::Medium => 16.0,
-            FontSize::Large => 18.0,
+            FontSize::Small => 12.0,
+            FontSize::Medium => 14.0,
+            FontSize::Large => 16.0,
         }
     }
 
@@ -134,9 +136,9 @@ mod tests {
 
     #[test]
     fn rem_px_mapping_and_medium_default() {
-        assert_eq!(FontSize::Small.rem_px(), 14.0);
-        assert_eq!(FontSize::Medium.rem_px(), 16.0);
-        assert_eq!(FontSize::Large.rem_px(), 18.0);
+        assert_eq!(FontSize::Small.rem_px(), 12.0);
+        assert_eq!(FontSize::Medium.rem_px(), 14.0);
+        assert_eq!(FontSize::Large.rem_px(), 16.0);
         assert_eq!(FontSize::default(), FontSize::Medium);
     }
 

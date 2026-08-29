@@ -3930,9 +3930,10 @@ mod tests {
 
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(16.0),
-            "sanity: with no [ui] font_size configured, medium (gpui's own \
-             16px default) must be in effect after the first render"
+            px(14.0),
+            "sanity: with no [ui] font_size configured, medium (14px — one \
+             step below gpui's own 16px rem default, per the fontsize \
+             module doc) must be in effect after the first render"
         );
 
         cx.update(|_window, cx| {
@@ -3948,8 +3949,8 @@ mod tests {
         });
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(18.0),
-            "the render after set_font_size(Large) should apply 18px as the \
+            px(16.0),
+            "the render after set_font_size(Large) should apply 16px as the \
              window rem size"
         );
     }
@@ -3984,8 +3985,8 @@ mod tests {
 
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(14.0),
-            "[ui] font_size = \"small\" should render at a 14px rem size \
+            px(12.0),
+            "[ui] font_size = \"small\" should render at a 12px rem size \
              from the very first frame"
         );
     }
@@ -4280,6 +4281,78 @@ mod tests {
             row_0_bounds
                 .is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
             "the first row should have painted with non-zero bounds, got {row_0_bounds:?}"
+        );
+    }
+
+    /// Vim `/` find, end to end through real keystrokes: `/focus` jumps
+    /// the selection to a matching row live, `enter` commits, `n` and
+    /// `shift+n` repeat forward/backward — the wiring around the pure
+    /// cores `vimfind::tests` and `keybindings_view::tests` already prove.
+    #[gpui::test]
+    fn slash_find_jumps_to_a_matching_row_and_n_repeats(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        let selected_text = |cx: &gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, _| {
+                let rows =
+                    keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+                let selected = shell.keybindings.as_ref().expect("dialog open").selected;
+                keybindings_view::searchable_text(&rows[selected])
+            })
+        };
+
+        cx.simulate_keystrokes("/ f o c u s");
+        let live = selected_text(&cx);
+        assert!(
+            live.to_lowercase().contains("focus"),
+            "the incremental jump should already sit on a 'focus' row before \
+             enter, got {live:?}"
+        );
+
+        cx.simulate_keystrokes("enter");
+        let committed = selected_text(&cx);
+        assert_eq!(committed, live, "enter keeps the incremental match");
+
+        cx.simulate_keystrokes("n");
+        let next = selected_text(&cx);
+        assert!(
+            next.to_lowercase().contains("focus") && next != committed,
+            "n should advance to a DIFFERENT matching row, got {next:?}"
+        );
+
+        cx.simulate_keystrokes("shift-n");
+        assert_eq!(
+            selected_text(&cx),
+            committed,
+            "shift+n should step back to the previous match"
         );
     }
 

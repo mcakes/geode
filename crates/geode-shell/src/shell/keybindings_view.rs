@@ -1,6 +1,10 @@
 //! The keybinding dialog (Part B): a list of every registered action with
 //! its currently-effective binding, navigable with the vim subset from
-//! [`crate::vimnav`] and editable in place — `space`/`enter`/a click on the
+//! [`crate::vimnav`], searchable with vim-style `/` find from
+//! [`crate::vimfind`] (`/` starts a query over title/category/action-id,
+//! selection jumps live to matches from the anchor; `enter` commits,
+//! `escape` restores the anchor, `n`/`shift+n` repeat with wrap — see
+//! [`press_while_finding`]/[`repeat_find`]), and editable in place — `space`/`enter`/a click on the
 //! already-selected row starts "listening" for a new binding; every
 //! keystroke while listening appends to a pending sequence (multi-keystroke
 //! bindings, e.g. `"g g"`, are supported); `enter` commits it, `escape`
@@ -57,6 +61,7 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
 use crate::keymap_edit::{Displacement, Rebind, apply_rebind};
 use crate::palette;
+use crate::vimfind::{FindDirection, FindResult, VimFind, find_match};
 use crate::vimnav::{self, NavResult, VimListNav};
 
 use super::ShellView;
@@ -210,6 +215,15 @@ pub struct KeybindingsState {
     /// [`press_while_listening`] on every keystroke except a bare
     /// `enter`/`escape`. `None` in ordinary list-navigation mode.
     pub listening: Option<Vec<Keystroke>>,
+    /// Vim-style `/` find over the rows ([`crate::vimfind`]): the session
+    /// state machine plus the committed query `n`/`N` repeat. Only ever
+    /// active in list-navigation mode — while `listening` is `Some`, `/`
+    /// is an ordinary capturable keystroke.
+    pub find: VimFind,
+    /// The selection when `/` was pressed — the incremental jump's origin,
+    /// and what `escape` restores (vim: cancelling a search returns the
+    /// cursor to where it started). `None` outside a find session.
+    pub find_anchor: Option<usize>,
 }
 
 impl KeybindingsState {
@@ -273,6 +287,11 @@ pub fn press_while_listening(pending: &mut Vec<Keystroke>, ks: &Keystroke) -> Ca
 /// dialog holding a `listening` state afterward is a fresh click on an
 /// already-selected, not-yet-listening row.
 pub fn click_selects_or_listens(state: &mut KeybindingsState, clicked_ix: usize) {
+    // A real click is an external interruption to any in-progress find
+    // session, same as it is to a pending nav gesture below — the clicked
+    // row wins, and the anchor is moot once selection moved by hand.
+    state.find.cancel();
+    state.find_anchor = None;
     if state.selected == clicked_ix && state.listening.is_none() {
         state.listening = Some(Vec::new());
     } else {
@@ -280,6 +299,66 @@ pub fn click_selects_or_listens(state: &mut KeybindingsState, clicked_ix: usize)
         state.listening = None;
         state.nav.cancel();
     }
+}
+
+/// The text one row exposes to `/` find: title, category, and the action
+/// id, space-joined — so `/focus`, `/workspace`, and `/focus_left` all
+/// land ([`find_match`] lowercases both sides).
+pub fn searchable_text(row: &KeybindingRow) -> String {
+    format!("{} {} {}", row.title, row.category, row.action.0)
+}
+
+/// Feed one keystroke to an ACTIVE find session and move `selected` per
+/// the outcome: an incremental jump from the anchor on every query edit
+/// (first match at-or-after the anchor, wrapping; back to the anchor when
+/// the query is empty or matches nothing — vim `incsearch`), anchor
+/// restore on cancel, anchor cleared (selection stays) on commit. The
+/// caller guarantees `state.find.is_active()` and swallows the keystroke
+/// regardless of outcome.
+pub fn press_while_finding(state: &mut KeybindingsState, texts: &[String], ks: &Keystroke) {
+    match state.find.press(ks) {
+        FindResult::Updated => {
+            let anchor = state.find_anchor.unwrap_or(state.selected);
+            state.selected = state
+                .find
+                .query()
+                .filter(|q| !q.is_empty())
+                .and_then(|q| find_match(texts, anchor, FindDirection::Forward, q))
+                .unwrap_or(anchor);
+        }
+        FindResult::Commit => {
+            state.find_anchor = None;
+        }
+        FindResult::Cancel => {
+            if let Some(anchor) = state.find_anchor.take() {
+                state.selected = anchor;
+            }
+        }
+        FindResult::Ignored => {}
+    }
+}
+
+/// Repeat the last committed find in `dir` (`n`/`N`), excluding the
+/// current row so every press advances (wrapping). Returns false — the
+/// keystroke was not a find repeat — when nothing was ever committed;
+/// with a committed query but no match anywhere, the selection just stays
+/// (still handled: `n` after a stale query must not fall through to
+/// anything else).
+pub fn repeat_find(state: &mut KeybindingsState, texts: &[String], dir: FindDirection) -> bool {
+    let Some(query) = state.find.last_query() else {
+        return false;
+    };
+    if texts.is_empty() {
+        return true;
+    }
+    let start = match dir {
+        FindDirection::Forward => (state.selected + 1) % texts.len(),
+        FindDirection::Backward => (state.selected + texts.len() - 1) % texts.len(),
+    };
+    if let Some(ix) = find_match(texts, start, dir, query) {
+        state.selected = ix;
+    }
+    true
 }
 
 /// True when a just-committed capture (`new_keystrokes`) is byte-for-byte
@@ -392,6 +471,46 @@ fn handle_key(
         }
         cx.notify();
         return true;
+    }
+
+    // Find mode (vim `/`, crate::vimfind) — priority right after capture
+    // listening: an active session owns every keystroke (even ones it
+    // ignores, so stray chords can't leak into list nav mid-search).
+    if state.find.is_active() {
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        press_while_finding(state, &texts, ks);
+        let selected = state.selected;
+        shell.keybindings_scroll.scroll_to_item(selected);
+        cx.notify();
+        return true;
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "/" {
+        state.find_anchor = Some(state.selected);
+        state.find.start();
+        state.nav.cancel();
+        cx.notify();
+        return true;
+    }
+    if ks.key == "n"
+        && (ks.mods == Modifiers::NONE
+            || ks.mods
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                })
+    {
+        let dir = if ks.mods.shift {
+            FindDirection::Backward
+        } else {
+            FindDirection::Forward
+        };
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        if repeat_find(state, &texts, dir) {
+            let selected = state.selected;
+            shell.keybindings_scroll.scroll_to_item(selected);
+            cx.notify();
+            return true;
+        }
     }
 
     if ks.mods == Modifiers::NONE && matches!(ks.key.as_str(), "space" | "enter") {
@@ -618,6 +737,13 @@ fn build(
                 sep("to cancel"),
             ])
             .into_any_element()
+    } else if let Some(find_display) = state.find.pending_display() {
+        // The live `/query` line, vim command-line style — rendered in the
+        // data face so the query reads as typed input, not prose.
+        div()
+            .font_family(crate::fonts::MONO)
+            .child(find_display)
+            .into_any_element()
     } else if let Some(pending) = state.nav.pending_display() {
         div().child(format!("{pending}…")).into_any_element()
     } else {
@@ -629,6 +755,12 @@ fn build(
                 chip("j"),
                 chip("k"),
                 sep("move (counts: 5j) ·"),
+                chip("/"),
+                sep("find,"),
+                chip("n"),
+                sep("/"),
+                chip("shift+n"),
+                sep("next ·"),
                 chip("g"),
                 chip("g"),
                 sep("/"),
@@ -999,5 +1131,139 @@ mod tests {
             current: None,
         };
         assert!(!is_same_key_recapture(&row, &[ctrl("h")]));
+    }
+
+    // -- find mode (vim `/`) ---------------------------------------------
+
+    fn shift(k: &str) -> Keystroke {
+        Keystroke {
+            mods: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            key: k.to_string(),
+        }
+    }
+
+    /// Rows shaped like the real dialog's: title + category + action id
+    /// all participate in the searchable text.
+    fn find_texts() -> Vec<String> {
+        [
+            ("a::one", "Close tile", "Workspace"),
+            ("a::two", "Focus left", "Workspace"),
+            ("a::three", "Toggle palette", "Palette"),
+            ("a::four", "Focus right", "Workspace"),
+        ]
+        .map(|(id, title, category)| KeybindingRow {
+            action: ActionId(id.to_string()),
+            title: title.to_string(),
+            category: category.to_string(),
+            current: None,
+        })
+        .iter()
+        .map(searchable_text)
+        .collect()
+    }
+
+    fn finding_state(selected: usize) -> KeybindingsState {
+        let mut state = KeybindingsState {
+            selected,
+            find_anchor: Some(selected),
+            ..Default::default()
+        };
+        state.find.start();
+        state
+    }
+
+    #[test]
+    fn incremental_find_jumps_from_the_anchor_and_restores_on_no_match() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        press_while_finding(&mut state, &texts, &key("f"));
+        assert_eq!(state.selected, 1, "first 'f...' match at/after the anchor");
+        press_while_finding(&mut state, &texts, &key("z"));
+        assert_eq!(
+            state.selected, 0,
+            "'fz' matches nothing — selection returns to the anchor, vim \
+             incsearch style"
+        );
+        press_while_finding(&mut state, &texts, &key("backspace"));
+        assert_eq!(state.selected, 1, "back to 'f', back to the match");
+    }
+
+    #[test]
+    fn find_searches_action_ids_and_categories_too() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        for k in ["t", "h", "r", "e", "e"] {
+            press_while_finding(&mut state, &texts, &key(k));
+        }
+        assert_eq!(state.selected, 2, "'three' only appears in an action id");
+    }
+
+    #[test]
+    fn committing_keeps_the_match_and_escape_restores_the_anchor() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        press_while_finding(&mut state, &texts, &key("f"));
+        press_while_finding(&mut state, &texts, &key("enter"));
+        assert_eq!(state.selected, 1);
+        assert_eq!(state.find_anchor, None);
+        assert!(!state.find.is_active());
+
+        let mut state = finding_state(0);
+        press_while_finding(&mut state, &texts, &key("f"));
+        assert_eq!(state.selected, 1);
+        press_while_finding(&mut state, &texts, &key("escape"));
+        assert_eq!(state.selected, 0, "escape restores the anchor selection");
+    }
+
+    #[test]
+    fn repeat_find_advances_with_wrap_in_both_directions() {
+        let texts = find_texts();
+        let mut state = finding_state(1);
+        // Commit "focus" (matches rows 1 and 3).
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding(&mut state, &texts, &key(k));
+        }
+        press_while_finding(&mut state, &texts, &key("enter"));
+        assert_eq!(state.selected, 1);
+
+        assert!(repeat_find(&mut state, &texts, FindDirection::Forward));
+        assert_eq!(state.selected, 3);
+        assert!(repeat_find(&mut state, &texts, FindDirection::Forward));
+        assert_eq!(state.selected, 1, "forward repeat wraps past the end");
+        assert!(repeat_find(&mut state, &texts, FindDirection::Backward));
+        assert_eq!(state.selected, 3, "backward repeat wraps past the start");
+    }
+
+    #[test]
+    fn repeat_find_without_a_committed_query_is_not_handled() {
+        let texts = find_texts();
+        let mut state = KeybindingsState::default();
+        assert!(
+            !repeat_find(&mut state, &texts, FindDirection::Forward),
+            "a bare n with nothing committed must fall through to list nav"
+        );
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn a_click_cancels_an_active_find_session() {
+        let mut state = finding_state(0);
+        assert!(state.find.is_active());
+        click_selects_or_listens(&mut state, 2);
+        assert!(!state.find.is_active());
+        assert_eq!(state.find_anchor, None);
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn shifted_letters_reach_the_query_but_match_case_insensitively() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        press_while_finding(&mut state, &texts, &shift("f"));
+        assert_eq!(state.find.query(), Some("F"));
+        assert_eq!(state.selected, 1, "'F' still matches 'Focus left'");
     }
 }
