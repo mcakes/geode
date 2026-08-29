@@ -67,9 +67,17 @@ pub struct ShellView {
     /// spawn time.
     desk_dir: Option<PathBuf>,
     user_dir: Option<PathBuf>,
-    /// The mtime snapshot as of the last poll (or window-open, before the
-    /// first poll). Compared against a fresh scan every ~500ms; a
-    /// difference is what triggers loading a new `Config`.
+    /// The mtime snapshot as of the last poll. Starts as `Snapshot::
+    /// default()` (empty) — `reload::scan` does real filesystem I/O, so it
+    /// must not run synchronously in `new` on the UI thread (spec
+    /// PHILOSOPHY.md: "nothing may stall the render thread"); the watcher's
+    /// first poll iteration performs the real seed scan on the background
+    /// executor instead, storing it here *without* treating it as a
+    /// "change" (see `new`'s doc comment on why: comparing it against the
+    /// empty default would always look changed and trigger a spurious
+    /// reload on every window open). Compared against a fresh scan every
+    /// ~500ms after that; a difference is what triggers loading a new
+    /// `Config`.
     last_snapshot: reload::Snapshot,
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
@@ -86,9 +94,15 @@ impl ShellView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
-        let last_snapshot = reload::scan(desk_dir.as_deref(), user_dir.as_deref());
 
+        // `last_snapshot` starts empty rather than being seeded with a
+        // synchronous `reload::scan` call right here: that would be real
+        // filesystem I/O on the UI thread, during `new` (spec PHILOSOPHY.md
+        // — review finding: the seed scan is exactly as much "the UI
+        // thread" as any other poll). The watcher spawned below performs
+        // the real seed scan, off-thread, as its first iteration.
         cx.spawn(async move |this, cx| {
+            let mut is_first_poll = true;
             loop {
                 cx.background_executor().timer(RELOAD_POLL_INTERVAL).await;
 
@@ -104,6 +118,24 @@ impl ShellView {
                     .background_executor()
                     .spawn(async move { reload::scan(scan_desk.as_deref(), scan_user.as_deref()) })
                     .await;
+
+                if is_first_poll {
+                    is_first_poll = false;
+                    // Seed-only: store this first background-thread scan as
+                    // the baseline and move on, without comparing it to the
+                    // `Snapshot::default()` placeholder — that comparison
+                    // would always read as "changed" (default is empty,
+                    // and a real desk/user dir practically never is) and
+                    // trigger a reload of the config `new` was just handed,
+                    // on every window open.
+                    if this
+                        .update(cx, |view, _cx| view.last_snapshot = snapshot)
+                        .is_err()
+                    {
+                        return;
+                    }
+                    continue;
+                }
 
                 let Ok(changed) = this.update(cx, |view, _cx| {
                     let changed = snapshot.changed_since(&view.last_snapshot);
@@ -140,7 +172,7 @@ impl ShellView {
             palette: None,
             desk_dir,
             user_dir,
-            last_snapshot,
+            last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
         }
     }
@@ -1282,6 +1314,154 @@ mod tests {
                 }
                 other => panic!("expected KeptLastGood, got {other:?}"),
             }
+        });
+    }
+
+    fn config_with_theme(name: &str, mode: &str) -> Config {
+        Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "app",
+                    &format!("[theme]\nname = \"{name}\"\nmode = \"{mode}\"\n"),
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// `apply_reload`'s theme-reapply guard, fired: when the new config's
+    /// `[theme]` table genuinely differs from the old one's, the reload
+    /// re-applies the theme, and the live `ThemeService` reflects the new
+    /// value.
+    #[gpui::test]
+    fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let mut services = test_services();
+                    services.config = config_with_theme("Gruvbox", "dark");
+                    let view = cx.new(|cx| {
+                        // Mirrors what main.rs does before opening the
+                        // window: apply the theme the starting config
+                        // actually names, so this test's "old" state is a
+                        // real (config, active theme) pair, not just a
+                        // Default-Light service that happens to hold a
+                        // Gruvbox config it never applied.
+                        services.theme.apply_from_config(&services.config, cx);
+                        ShellView::new(services, None, None, window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .theme
+                .active_name()
+                .to_string()),
+            "Gruvbox Dark",
+            "sanity: the starting theme must actually be the one the old config names"
+        );
+
+        let new_config = config_with_theme("Default", "dark");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+        shell.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.services.theme.active_name(),
+                "Default Dark",
+                "a genuinely different [theme] table must be re-applied on reload"
+            );
+        });
+    }
+
+    /// `apply_reload`'s theme-reapply guard, holding: when the new config's
+    /// `[theme]` table is identical to the old one's, the reload must NOT
+    /// re-apply the theme — a runtime `theme::toggle_mode` done between the
+    /// old config being applied and this reload survives untouched, rather
+    /// than being silently reverted to what `[theme]` still says.
+    #[gpui::test]
+    fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let mut services = test_services();
+                    services.config = config_with_theme("Gruvbox", "dark");
+                    let view = cx.new(|cx| {
+                        services.theme.apply_from_config(&services.config, cx);
+                        ShellView::new(services, None, None, window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // A runtime toggle (mod+shift+t / theme::toggle_mode), independent
+        // of config, before any reload happens.
+        shell.update(&mut cx, |shell, cx| shell.services.theme.toggle_mode(cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .theme
+                .active_name()
+                .to_string()),
+            "Gruvbox Light",
+            "sanity: toggling from Gruvbox Dark should flip to Gruvbox Light"
+        );
+
+        // Same [theme] table as the config already applied — a reload
+        // triggered by, say, an unrelated keymap.toml edit.
+        let new_config = config_with_theme("Gruvbox", "dark");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+        shell.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.services.theme.active_name(),
+                "Gruvbox Light",
+                "an unchanged [theme] table must not re-apply the theme, or the \
+                 runtime toggle above would be silently reverted"
+            );
+            assert_eq!(
+                shell.last_reload,
+                reload::ReloadOutcome::Applied { warnings: vec![] },
+                "the reload itself still succeeds — only the theme re-apply is guarded"
+            );
         });
     }
 }

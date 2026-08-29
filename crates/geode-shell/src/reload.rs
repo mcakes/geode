@@ -104,9 +104,14 @@ pub fn load_config(desk: Option<PathBuf>, user: Option<PathBuf>) -> Config {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReloadOutcome {
     /// The freshly loaded config had no error diagnostics and was applied.
-    /// `warnings` carries every warning-severity diagnostic message (config
-    /// load warnings, keymap build warnings, theme warnings), for the
-    /// optional non-noisy status bar marker (brief allows skipping it).
+    /// `warnings` carries every warning-severity diagnostic message folded
+    /// into `new_config.diagnostics` before `decide` ran — `Config::load`'s
+    /// own warnings, plus keymap-build warnings (see `decide`'s doc for why
+    /// those get folded in). Theme-resolution warnings are a separate,
+    /// later step (`ThemeService::apply_from_config`, only called when
+    /// `[theme]` actually changed) and are currently discarded rather than
+    /// merged in here. For the optional non-noisy status bar marker (brief
+    /// allows skipping it).
     Applied { warnings: Vec<String> },
     /// The freshly loaded config had at least one error diagnostic; the
     /// entire previous `Config` (and everything built from it) was kept
