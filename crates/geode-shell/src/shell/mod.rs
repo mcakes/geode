@@ -1,19 +1,20 @@
 //! The shell's window root view (spec §3): a single view owning the whole
-//! window contents, key dispatch, and workspace state. Rendering here is
-//! this task's placeholder — Task 3 replaces it with the real tiling
-//! surface and status bar; Task 6 wires the real command palette.
+//! window contents, key dispatch, and workspace state. Renders the tiling
+//! tree (Task 3) as themed, absolutely-positioned tiles; the status bar
+//! (Task 4) will own a header strip above this content area, and Task 6
+//! wires the real command palette.
 
 pub mod keys;
 
 pub use keys::convert_keystroke;
 
 use gpui::prelude::*;
-use gpui::{Context, FocusHandle, KeyDownEvent, Window};
+use gpui::{Context, FocusHandle, KeyDownEvent, MouseButton, Window, div, px};
 use gpui_component::{ActiveTheme as _, Root, v_flex};
 
 use crate::actions::ActionRegistry;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers};
-use crate::tiling::{Workspaces, apply_workspace_action};
+use crate::tiling::{Rect, Workspaces, apply_workspace_action};
 use geode_core::config::Config;
 
 /// Everything the shell needs to run a window, assembled once by the app
@@ -93,20 +94,78 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let workspaces = &self.services.workspaces;
-        let n = workspaces.active_index();
-        let k = workspaces.active().tiles().len();
-        let focused = workspaces.active().focused();
+        // The content area is the whole window for now: the status bar
+        // (Task 4) will own its own height and shrink this once it lands.
+        // `viewport_size` is the drawable area (excludes window chrome),
+        // which is what `Tree::layout` should partition (gpui/window.rs).
+        let viewport = window.viewport_size();
+        let width = f32::from(viewport.width);
+        let height = f32::from(viewport.height);
+
+        let (focused, rects) = {
+            let tree = self.services.workspaces.active();
+            (
+                tree.focused(),
+                tree.layout(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: width,
+                    h: height,
+                }),
+            )
+        };
+
+        let mut surface = div().relative().size_full();
+        if rects.is_empty() {
+            surface = surface.flex().items_center().justify_center().child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("mod+s / mod+v to open a tile"),
+            );
+        } else {
+            for (id, r) in rects {
+                let is_focused = focused == Some(id);
+                surface = surface.child(
+                    div()
+                        .absolute()
+                        .left(px(r.x + 1.0))
+                        .top(px(r.y + 1.0))
+                        .w(px((r.w - 2.0).max(0.0)))
+                        .h(px((r.h - 2.0).max(0.0)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(cx.theme().background)
+                        .border_color(if is_focused {
+                            cx.theme().primary
+                        } else {
+                            cx.theme().border
+                        })
+                        .when(is_focused, |el| el.border_2())
+                        .when(!is_focused, |el| el.border_1())
+                        .text_color(cx.theme().muted_foreground)
+                        // Click-to-focus is a convenience: keyboard (hjkl)
+                        // remains the primary path through the same
+                        // `Tree::focus` verb `apply_workspace_action` uses.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _event, _window, cx| {
+                                view.services.workspaces.active_mut().focus(id);
+                                cx.notify();
+                            }),
+                        )
+                        .child(format!("tile {}", id.0)),
+                );
+            }
+        }
 
         v_flex()
             .size_full()
-            .items_center()
-            .justify_center()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(format!("workspace {n} · {k} tiles · focused {focused:?}"))
+            .child(surface)
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
             // whoever it wraps must (spec: gpui-component usage.md "Overlay
@@ -186,6 +245,16 @@ mod tests {
             tile_count, 1,
             "alt-s (mod+s = workspace::split_horizontal) should have created the first tile \
              on the empty starting workspace"
+        );
+
+        // The tile render path (Task 3) paints a background/border quad per
+        // visible tile, not just text; a non-empty scene after the split is
+        // cheap evidence the tiling surface actually drew something (the
+        // geometry itself is tiling::tree's job, already unit-tested there).
+        let quads_after_split = cx.update(|window, _cx| window.painted_quads().len());
+        assert!(
+            quads_after_split > 0,
+            "expected the single tile to paint at least one quad"
         );
     }
 }
