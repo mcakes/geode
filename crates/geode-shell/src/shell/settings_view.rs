@@ -1,5 +1,9 @@
-//! The settings dialog (Task 5): a gpui-component `Dialog` wrapping the
-//! crate's own `setting` module composite.
+//! The settings modal (Task 5, migrated onto Task 9's instant-modal chrome
+//! — see `dialog`'s module doc): Geode's own `dialog::render_modal` wrapping
+//! the crate's own `setting` module composite. No gpui-component `Dialog`
+//! import lives here anymore — `open` hands its content straight to
+//! [`open_shell_dialog`], which is the only place that still knows anything
+//! about how a modal gets painted.
 //!
 //! ## Inventory findings (pinned checkout rev `0e2fb7a`,
 //! `crates/ui/src/setting/{fields,group,item,page,settings}.rs`, plus the
@@ -45,9 +49,12 @@
 //! comment-preserving). The muted caption under the theme controls reflects
 //! this now: "saved to your app.toml".
 
-use gpui::{App, Context, Entity, ParentElement as _, SharedString, Styled as _, Window, div, px};
+use gpui::{
+    App, Context, Entity, InteractiveElement as _, IntoElement as _, ParentElement as _,
+    SharedString, Styled as _, Window, div, px,
+};
 use gpui_component::{
-    ActiveTheme as _, WindowExt as _,
+    ActiveTheme as _,
     label::Label,
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
@@ -58,38 +65,77 @@ use crate::shell::ShellView;
 use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
 
-/// Open the settings dialog (`settings::open`: `mod+,`, the palette entry,
-/// and the sidebar profile icon all reach this). A no-op if a dialog is
-/// already open — `window.open_dialog` stacks a fresh overlay layer on
-/// every call, and re-triggering the action while the dialog is already up
-/// (e.g. a second `mod+,`) should not pile up duplicate dialogs.
+/// Open the settings modal (`settings::open`: `mod+,`, the palette entry,
+/// and the sidebar profile icon all reach this). A no-op if a modal is
+/// already open — `open_shell_dialog` unconditionally sets `view.modal`,
+/// and re-triggering the action while one is already up (e.g. a second
+/// `mod+,`) should not clobber whatever's currently open with a fresh
+/// settings modal.
 ///
-/// Goes through [`open_shell_dialog`] (Task 9) rather than calling
-/// `window.open_dialog` itself — the crate's one standard door, so this
-/// dialog gets the same pending-sequence/palette hygiene as every other one.
-/// `view`'s `Entity` handle is grabbed via `cx.entity()` before the call,
-/// since the content closure below needs a clone to read/update
-/// `ShellView`'s services later, when the dialog actually renders — not
-/// `&mut ShellView` itself, which `open_shell_dialog` already borrows for
-/// its own hygiene.
+/// Goes through [`open_shell_dialog`] (Task 9) rather than touching `view.
+/// modal` itself — the crate's one standard door, so this modal gets the
+/// same pending-sequence/palette hygiene as every other one (see
+/// `dialog`'s module doc: Task 9's instant-modal redesign keeps that rule
+/// even though opening no longer means `window.open_dialog`). `view`'s
+/// `Entity` handle is grabbed via `cx.entity()` before the call, since the
+/// content closure below needs a clone to read/update `ShellView`'s
+/// services later, when the modal actually renders — not `&mut ShellView`
+/// itself, which `open_shell_dialog` already borrows for its own hygiene.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if window.has_active_dialog(cx) {
+    if view.modal.is_some() {
         return;
     }
     let entity = cx.entity();
-    open_shell_dialog(view, window, cx, move |dialog, _window, _cx| {
-        let entity = entity.clone();
-        dialog
-            .title("Settings")
+    // The fixed 720px width the old `Dialog` set on itself (`.w(px(720.))`)
+    // — `Settings`' own root (`h_resizable`, pinned checkout `crates/ui/
+    // src/setting/settings.rs`) has no intrinsic width of its own (its
+    // sidebar is sized as `w(relative(1.))`, 100% of whatever ancestor
+    // hands it one), so this crate's own modal chrome — generic over
+    // arbitrary content, with no width opinion of its own — needs this
+    // call site to keep providing one, same as before.
+    open_shell_dialog(view, window, cx, "Settings", move |shell, window, cx| {
+        div()
             .w(px(720.))
-            .content(move |content, window, cx| content.child(build(entity.clone(), window, cx)))
+            // Test-only hook (no-op outside test/test-support builds, see
+            // gpui's own `debug_selector` doc comment): lets a
+            // `#[gpui::test]` recover this wrapper's painted bounds via
+            // `VisualTestContext::debug_bounds`, to click into the
+            // `Settings` composite's own search input (Task 9 review fix:
+            // there is no public way to reach that input's `FocusHandle`
+            // directly — `SettingsState`/`search_input` are `pub(super)` in
+            // the pinned gpui-component checkout, reachable only from
+            // inside that crate's own `setting` module — so a real click at
+            // its on-screen position, inside this wrapper's bounds, is the
+            // only way an external test can drive focus into it).
+            .debug_selector(|| "settings-content".to_string())
+            .child(build(shell, entity.clone(), window, cx))
+            .into_any_element()
     });
 }
 
 /// Build the `Settings` composite content described in the module doc.
-fn build(view: Entity<ShellView>, _window: &mut Window, cx: &mut App) -> Settings {
-    let theme_names = view.read(cx).services.theme.names();
-    let mod_alias = view.read(cx).services.mod_alias;
+///
+/// Takes *both* `shell: &ShellView` and `view: Entity<ShellView>` — not
+/// redundant, see `ShellModal::build`'s doc comment for the full story:
+/// `shell` is this exact call's plain-borrow read of whatever's needed
+/// *right now* (`theme_names`, `mod_alias`, both read once per build to
+/// seed the dropdown/mod-key display), safe because it's a Rust borrow, not
+/// an entity-handle access, even though this runs nested inside `ShellView
+/// ::render` itself; `view` is the `Entity` clone every get/set closure
+/// below captures for its OWN, later, read/update (fetching a field's
+/// current value at that field's own layout/paint time, or applying a
+/// user's edit at click/change time) — both safely outside `ShellView::
+/// render`'s call frame by the time they actually run, so `Entity::read`/
+/// `update` there carries none of the reentrancy risk a synchronous
+/// `view.read(cx)` right here would.
+fn build(
+    shell: &ShellView,
+    view: Entity<ShellView>,
+    _window: &mut Window,
+    _cx: &mut App,
+) -> Settings {
+    let theme_names = shell.services.theme.names();
+    let mod_alias = shell.services.mod_alias;
 
     let dropdown_options: Vec<(SharedString, SharedString)> = theme_names
         .into_iter()

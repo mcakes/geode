@@ -79,6 +79,17 @@ pub struct ShellView {
     /// built once at palette-open, not per frame) and dropped on close —
     /// nothing about it survives being closed and reopened.
     palette: Option<PaletteState>,
+    /// The open modal's state (Task 9, instant-modal redesign), or `None`
+    /// when closed. Set only through [`dialog::open_shell_dialog`] (the one
+    /// standard door — see that function's and `dialog`'s module doc), read
+    /// by `Render for ShellView` to paint the backdrop/panel/title-row/
+    /// close-button chrome (`dialog::render_modal`) and by
+    /// [`handle_key_down`](Self::handle_key_down)'s modal branch, which
+    /// makes Escape close it and swallows every other shell chord while
+    /// it's open. Unlike `palette`, nothing here is per-frame scroll state
+    /// to track alongside it — a modal's content owns whatever internal
+    /// state it needs (e.g. the settings composite's own search input).
+    modal: Option<dialog::ShellModal>,
     /// Scroll state for the open palette's results list, tracked across
     /// frames the same way `filter_input`'s `Entity<InputState>` is
     /// (`gpui::ScrollHandle` is a cheap `Clone` — `Rc<RefCell<..>>` — but a
@@ -261,6 +272,7 @@ impl ShellView {
             matcher: Matcher::default(),
             focus_handle,
             palette: None,
+            modal: None,
             palette_scroll: ScrollHandle::new(),
             desk_dir,
             user_dir,
@@ -470,8 +482,9 @@ impl ShellView {
             self.persist_theme(cx);
         } else if action.0 == "settings::open" {
             // Task 5: the real settings dialog (gpui-component's `setting`
-            // module, wrapped in a `Dialog`). Reachable via `mod+,`, the
-            // palette, and the sidebar profile icon. Goes through
+            // module, wrapped in Geode's own instant modal chrome — Task 9
+            // redesign, see `dialog`'s module doc). Reachable via `mod+,`,
+            // the palette, and the sidebar profile icon. Goes through
             // `dialog::open_shell_dialog` (Task 9) via `settings_view::open`
             // itself, so it gets the crate's uniform open-time hygiene.
             settings_view::open(self, window, cx);
@@ -714,30 +727,41 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Final-review fix wave, Fix 1: while the settings dialog (or any
-        // other gpui-component `Dialog`) is open, the shell's own keymap
-        // `Matcher` must not see a single keystroke — otherwise e.g.
-        // `ctrl+v` typed while choosing a theme in the dialog would *also*
-        // dispatch `workspace::split_right` behind it (dialogs paint above
-        // the tile surface, but this on_key_down listener sits on the
+        // Task 9 instant-modal redesign (see `dialog`'s module doc): while
+        // Geode's own modal (`self.modal`) OR a gpui-component `Dialog`
+        // layer is open, the shell's own keymap `Matcher` must not see a
+        // single keystroke — otherwise e.g. `ctrl+v` typed while choosing a
+        // theme in the settings modal would *also* dispatch
+        // `workspace::split_right` behind it (the modal paints above the
+        // tile surface, but this on_key_down listener sits on the
         // ShellView root and still receives every raw KeyDownEvent that
-        // bubbles up the dispatch tree, dialog-focused or not — same
+        // bubbles up the dispatch tree, modal-focused or not — same
         // "delivered regardless" behavior the filter-input guard below
-        // already relies on). `has_active_dialog` is legal to call from
-        // here (docs: "Whether any dialog is open; legal from `render`,
-        // unlike the rest") and is already used the same way by
-        // `settings_view::open`'s own re-entrancy guard.
+        // already relies on). `window.has_active_dialog` is kept alongside
+        // `self.modal.is_some()`, not replaced by it: gpui-component's own
+        // popovers (e.g. a `Select` dropdown's overlay, reachable from
+        // inside the settings modal's content) still open through that
+        // crate's dialog-layer machinery, so this guard still has to
+        // account for it even though nothing in this crate opens a
+        // gpui-component `Dialog` directly anymore.
         //
-        // Escape and Enter still work to close/confirm the dialog: gpui-
-        // component's `Dialog` binds them as real gpui *actions*
-        // (`KeyBinding::new("escape", Cancel, Some("Dialog"))` /
-        // `KeyBinding::new("enter", Confirm { .. }, Some("Dialog"))`,
-        // pinned checkout `crates/base/src/dialog.rs`), scoped to a
-        // `key_context("Dialog")` on the dialog's own focused root
-        // (`.track_focus(&self.focus)`) — a wholly separate dispatch path
-        // from this view's `on_key_down` listener, so returning early here
-        // does not touch it.
-        if window.has_active_dialog(cx) {
+        // Escape is the one key this branch still acts on itself — closing
+        // our own modal, same as a backdrop click (`dialog::render_modal`).
+        // There is no separate "Dialog" action-context to defer to anymore
+        // (that was gpui-component's own `Cancel`/`Confirm` action binding,
+        // scoped to its dialog's focused root): our modal is plain chrome,
+        // not an action-dispatch layer, so this is the only place Escape
+        // gets handled for it. Note the same "an Escape inside a focused
+        // gpui-component `Input` propagates and reaches our root handler"
+        // behavior the filter-input guard below documents applies here too
+        // — e.g. Esc typed into the settings modal's search field still
+        // reaches this branch and closes the modal, matching the old
+        // dialog's UX close enough (Task 9 design note).
+        if self.modal.is_some() || window.has_active_dialog(cx) {
+            if self.modal.is_some() && event.keystroke.key == "escape" {
+                self.modal = None;
+                cx.notify();
+            }
             return;
         }
 
@@ -939,6 +963,18 @@ impl Render for ShellView {
         });
         let registry = &self.services.registry;
 
+        // Task 9 instant-modal redesign: clone the two cheap pieces
+        // (`title`: `SharedString`, `build`: `Rc<dyn Fn>`) out of `self.
+        // modal` up front — the same "extract into a local ahead of the
+        // render chain" move `pending`/`registry` just above already make,
+        // one field further in. See `ShellModal`'s own doc comment for why
+        // this step is required rather than just reading `self.modal.
+        // as_ref()` inline inside the `when_some` below.
+        let modal = self
+            .modal
+            .as_ref()
+            .map(|modal| (modal.title.clone(), modal.build.clone()));
+
         v_flex()
             .size_full()
             .relative()
@@ -961,6 +997,36 @@ impl Render for ShellView {
                     cx,
                 ))
             })
+            // The modal overlay paints above the palette (later children
+            // paint above earlier siblings) but still below gpui-
+            // component's own dialog/notification layers below — Task 9
+            // instant-modal redesign, see `dialog`'s module doc. `palette`
+            // is always `None` by the time `modal` is `Some`
+            // (`open_shell_dialog` closes it on open), so this and the
+            // block above never both add a child in the same frame, but
+            // the ordering here is what would govern it if that ever
+            // changed.
+            .when_some(modal, |el, (title, build)| {
+                let content = build(self, window, cx);
+                el.child(dialog::render_modal(
+                    title,
+                    content,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
+            })
+            // Painted after (so above) the modal for the same reason as the
+            // modal-vs-palette ordering above: never both `Some` in the same
+            // frame, but the ordering here is what would govern it if that
+            // ever changed. This one, though, is a real invariant rather
+            // than an incidental one — while the modal is open, `self.
+            // matcher` can never go pending at all: `open_shell_dialog`
+            // cancels it on open, and `handle_key_down`'s modal branch
+            // returns before ever reaching `self.matcher.press` for as long
+            // as `self.modal` stays `Some`, so `which_key_continuations`
+            // (computed from `self.matcher.pending()`, just above) is always
+            // `None` whenever `modal` is `Some`.
             .when_some(which_key_continuations, |el, continuations| {
                 el.child(whichkey::render(
                     &continuations,
@@ -3114,13 +3180,18 @@ mod tests {
     }
 
     /// `settings::open` (dispatched via `mod+,`, the palette, or the
-    /// sidebar profile icon) opens the real settings dialog (Task 5):
-    /// `window.has_active_dialog` flips true, and the dialog chrome paints
-    /// additional quads over the empty-workspace baseline. Also stands in
-    /// for "the sidebar paints": its click handler calling into this exact
+    /// sidebar profile icon) opens the real settings modal (Task 5, Task 9
+    /// instant-modal redesign): `shell.modal` flips `Some`, and the modal
+    /// chrome (`dialog::render_modal` — backdrop + panel + title row +
+    /// settings content) actually paints, checked two ways: it adds quads
+    /// over the empty-workspace baseline, AND its backdrop/panel
+    /// `debug_selector`s recover real, non-zero-sized painted bounds — the
+    /// same "prove it painted, not just that a flag flipped" standard
+    /// `empty_workspace_paints_the_hint` sets. Also stands in for "the
+    /// sidebar paints": its click handler calling into this exact
     /// `dispatch` path is what `sidebar::sidebar`'s profile icon wires up.
     #[gpui::test]
-    fn settings_open_opens_the_dialog(cx: &mut gpui::TestAppContext) {
+    fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -3146,8 +3217,8 @@ mod tests {
         });
 
         assert!(
-            !cx.update(|window, cx| window.has_active_dialog(cx)),
-            "sanity: no dialog is open before dispatch"
+            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+            "sanity: no modal is open before dispatch"
         );
         let quads_before = cx.update(|window, _cx| window.painted_quads().len());
 
@@ -3158,9 +3229,8 @@ mod tests {
         });
 
         assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "settings::open should have opened a Dialog layer, tracked by \
-             gpui-component's own Root state"
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "settings::open should have set ShellView's own modal state"
         );
 
         // The workspace itself must stay untouched — settings::open is not
@@ -3176,58 +3246,30 @@ mod tests {
         let quads_after = cx.update(|window, _cx| window.painted_quads().len());
         assert!(
             quads_after > quads_before,
-            "the dialog overlay (backdrop + chrome + settings content) should \
+            "the modal overlay (backdrop + chrome + settings content) should \
              paint additional quads over the empty-workspace baseline"
+        );
+
+        let backdrop_bounds = cx.debug_bounds("shell-modal-backdrop");
+        assert!(
+            backdrop_bounds
+                .is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+            "the modal backdrop should have painted with non-zero bounds, got {backdrop_bounds:?}"
+        );
+        let panel_bounds = cx.debug_bounds("shell-modal-panel");
+        assert!(
+            panel_bounds
+                .is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+            "the modal panel should have painted with non-zero bounds, got {panel_bounds:?}"
         );
     }
 
     /// A real `mod+,` keystroke, through the actual key-event pipeline,
-    /// dispatches `settings::open` and opens the dialog — end-to-end
+    /// dispatches `settings::open` and opens the modal — end-to-end
     /// coverage of the `BUILTIN_KEYMAP` binding added in Task 5, mirroring
     /// `mod_shift_t_keystroke_toggles_the_theme_mode` above.
     #[gpui::test]
-    fn mod_comma_keystroke_opens_the_settings_dialog(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        // The builtin keymap's mod alias is Alt (default_mod), so `mod+,`
-        // is `alt+,`.
-        cx.simulate_keystrokes("alt-,");
-
-        assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "alt-, (mod+, = settings::open) should have opened the settings dialog"
-        );
-    }
-
-    /// Fix wave, Fix 1 regression: while the settings dialog is open,
-    /// `ctrl+v` (`workspace::split_right`) must not reach the shell's
-    /// keymap `Matcher` at all — modeled on the filter-input guard this
-    /// mirrors (`handle_key_down`'s early return while the filter field is
-    /// focused). Before this fix, `ShellView::handle_key_down`'s
-    /// `on_key_down` listener still received every raw keystroke regardless
-    /// of the dialog (dialogs paint above the tile surface but don't
-    /// interrupt this view's own key dispatch), so a chord typed while e.g.
-    /// picking a theme in the dialog would silently also mutate the
-    /// workspace behind it. Also checks the closed-palette case
-    /// (`ctrl+k` = `palette::toggle`): that must not open either, since the
-    /// palette-toggle intercept sits ahead of the matcher in
-    /// `handle_key_down` and needs the same guard.
-    #[gpui::test]
-    fn dialog_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
+    fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -3252,14 +3294,64 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        // Open the settings dialog via the real `settings::open` dispatch
+        // The builtin keymap's mod alias is Alt (default_mod), so `mod+,`
+        // is `alt+,`.
+        cx.simulate_keystrokes("alt-,");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "alt-, (mod+, = settings::open) should have opened the settings modal"
+        );
+    }
+
+    /// Fix wave, Fix 1 regression, carried forward by the Task 9
+    /// instant-modal redesign: while the settings modal is open, `ctrl+v`
+    /// (`workspace::split_right`) must not reach the shell's keymap
+    /// `Matcher` at all — modeled on the filter-input guard this mirrors
+    /// (`handle_key_down`'s early return while the filter field is
+    /// focused). Before the original fix, `ShellView::handle_key_down`'s
+    /// `on_key_down` listener still received every raw keystroke regardless
+    /// of the dialog (dialogs paint above the tile surface but don't
+    /// interrupt this view's own key dispatch); the same is true of the
+    /// modal that replaced it, so a chord typed while e.g. picking a theme
+    /// in the modal would silently also mutate the workspace behind it.
+    /// Also checks the closed-palette case (`ctrl+k` = `palette::toggle`):
+    /// that must not open either, since the palette-toggle intercept sits
+    /// ahead of the matcher in `handle_key_down` and needs the same guard.
+    #[gpui::test]
+    fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Open the settings modal via the real `settings::open` dispatch
         // path (the builtin `mod+,` binding), not by constructing it
         // out-of-band, so this exercises the exact state `handle_key_down`
         // has to guard against.
         cx.simulate_keystrokes("alt-,");
         assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "sanity: alt-, should have opened the settings dialog"
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
         );
 
         cx.simulate_keystrokes("ctrl-v");
@@ -3269,19 +3361,283 @@ mod tests {
         assert_eq!(
             tile_count, 0,
             "ctrl+v (workspace::split_right) must not reach the matcher while \
-             the settings dialog is open"
+             the settings modal is open"
         );
 
         cx.simulate_keystrokes("ctrl-k");
         assert!(
             shell.read_with(&cx, |shell, _| shell.palette.is_none()),
             "ctrl+k (palette::toggle) must not open the command palette while \
-             the settings dialog is open"
+             the settings modal is open"
         );
         assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "the settings dialog should still be open — nothing here should \
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "the settings modal should still be open — nothing here should \
              have closed it"
+        );
+    }
+
+    /// Escape closes the modal: a real keystroke, through the actual
+    /// key-event pipeline, reaching `handle_key_down`'s modal branch (not
+    /// gpui-component's own `Cancel` action — there is no such layer for
+    /// this modal, see `dialog`'s module doc). Mirrors `modal_open_
+    /// swallows_shell_chords`'s open path, but exercises the one keystroke
+    /// that must NOT be swallowed.
+    #[gpui::test]
+    fn escape_keystroke_closes_the_modal(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("alt-,");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+            "escape should have closed the modal"
+        );
+    }
+
+    /// Review fix round: the module doc's "an Escape inside a focused
+    /// gpui-component `Input` propagates and reaches our root handler"
+    /// claim (`handle_key_down`'s modal branch doc comment) was previously
+    /// only argued by analogy with the filter input — this drives the
+    /// actual path it's about: the settings modal's own search field
+    /// (`Settings`' sidebar header, `crates/ui/src/setting/settings.rs`
+    /// pinned checkout).
+    ///
+    /// Focused via a real mouse click, not a direct `FocusHandle` set (the
+    /// way `escape_in_the_filter_input_returns_focus_to_the_shell_root`
+    /// focuses `ShellView`'s own `filter_input`) — there is no public way
+    /// to reach that route here: the search field's `Entity<InputState>`
+    /// lives on `SettingsState`, `pub(super)` in the pinned gpui-component
+    /// checkout and reachable only from inside that crate's own `setting`
+    /// module, not from this crate at all. The click point is derived from
+    /// `debug_bounds("settings-content")` (a test-only hook added to
+    /// `settings_view::open`'s own content wrapper) plus a small fixed
+    /// offset into that wrapper's top-left corner — where the sidebar's
+    /// `Input::new(&search_input)` header sits, ahead of the page list —
+    /// rather than a hand-guessed absolute screen position, so the test
+    /// tracks the modal's real on-screen placement instead of duplicating
+    /// its layout math. The offset itself (24px right, 24px down) is an
+    /// estimate from the pinned checkout's own spacing (`Sidebar::header`'s
+    /// `.p_2()` plus the input control's own internal padding) landing
+    /// inside the input's visible box, not a value derived from any
+    /// `Input`-internal layout this crate can read — its correctness is
+    /// exactly what this test's own first assertion (focus actually left
+    /// the shell root) checks.
+    #[gpui::test]
+    fn escape_from_the_focused_settings_search_input_closes_the_modal(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+
+        cx.simulate_keystrokes("alt-,");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
+        );
+        assert!(
+            cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "sanity: the shell root should still hold focus right after the \
+             modal opens — nothing auto-focuses the search input"
+        );
+
+        let content_bounds = cx
+            .debug_bounds("settings-content")
+            .expect("the settings content wrapper should have painted bounds to click inside");
+        let search_input_point = gpui::point(
+            content_bounds.origin.x + px(24.0),
+            content_bounds.origin.y + px(24.0),
+        );
+
+        cx.simulate_mouse_down(
+            search_input_point,
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            !cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "clicking the settings search input should have moved focus off \
+             the shell root and onto the input — if this fails, the click \
+             point's offset likely missed the input's actual painted bounds"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+            "escape typed into the focused settings search input should \
+             still have reached ShellView::handle_key_down's modal branch \
+             and closed the modal — the same propagation \
+             escape_in_the_filter_input_returns_focus_to_the_shell_root \
+             documents for the toolbar filter field"
+        );
+    }
+
+    /// Backdrop click closes the modal: a real mouse-down at a corner of
+    /// the window, well outside the centered panel (`dialog::render_modal`
+    /// centers the panel with `.items_center().justify_center()` over the
+    /// full-viewport backdrop, so a point near the origin always falls on
+    /// the backdrop, never the panel, for any viewport the test window
+    /// opens at). Mirrors `mouse_down_on_a_tile_focuses_it`'s real-
+    /// mouse-event structure above.
+    #[gpui::test]
+    fn backdrop_click_closes_the_modal(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("alt-,");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_mouse_down(
+            gpui::point(gpui::px(4.0), gpui::px(4.0)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+            "a mouse-down on the backdrop, well outside the centered panel, \
+             should have closed the modal"
+        );
+    }
+
+    /// A mouse-down INSIDE the panel must not close the modal — the panel's
+    /// own `on_mouse_down` (`dialog::render_modal`) stops propagation before
+    /// the same bubbling event ever reaches the backdrop's close handler
+    /// underneath it. The click lands on the panel's title row (top-left
+    /// corner of the panel, which `dialog::render_modal` centers over the
+    /// backdrop): recovered via `debug_bounds("shell-modal-panel")`, the
+    /// real painted bounds, rather than recomputing the centering math by
+    /// hand.
+    #[gpui::test]
+    fn panel_click_does_not_close_the_modal(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("alt-,");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
+        );
+
+        let panel_bounds = cx
+            .debug_bounds("shell-modal-panel")
+            .expect("the modal panel should have painted bounds to click inside");
+        let inside_panel = gpui::point(
+            panel_bounds.origin.x + gpui::px(10.0),
+            panel_bounds.origin.y + gpui::px(10.0),
+        );
+
+        cx.simulate_mouse_down(inside_panel, MouseButton::Left, gpui::Modifiers::none());
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "a mouse-down inside the panel must not close the modal"
         );
     }
 
@@ -3370,17 +3726,17 @@ mod tests {
         );
     }
 
-    /// Task 9: opening a dialog through `dialog::open_shell_dialog` (here,
+    /// Task 9: opening a modal through `dialog::open_shell_dialog` (here,
     /// `settings::open` — the only current call site, migrated onto the
     /// utility) must cancel a pending keymap sequence, the same hygiene
     /// `toggle_palette` already gives palette-open. Real `ctrl+w` keystroke
     /// starts the vim window-prefix sequence (`ctrl+w h/j/k/l`, a real
     /// builtin binding — see `ctrl_h_then_ctrl_w_hl_moves_focus_between_
     /// tiles` above), which leaves one pending keystroke and paints the
-    /// which-key overlay (Task 8); opening the settings dialog must clear
+    /// which-key overlay (Task 8); opening the settings modal must clear
     /// both.
     #[gpui::test]
-    fn dialog_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestAppContext) {
+    fn modal_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -3420,7 +3776,7 @@ mod tests {
             "sanity: the which-key overlay should paint while ctrl+w is pending"
         );
 
-        // Open the settings dialog through the real dispatch path — since
+        // Open the settings modal through the real dispatch path — since
         // Task 9, `settings_view::open` routes through `open_shell_dialog`.
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
@@ -3429,12 +3785,12 @@ mod tests {
         });
 
         assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "settings::open should have opened the dialog"
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "settings::open should have opened the modal"
         );
         assert!(
             shell.read_with(&cx, |shell, _| shell.matcher.pending().is_empty()),
-            "opening a dialog through open_shell_dialog should cancel the \
+            "opening a modal through open_shell_dialog should cancel the \
              pending ctrl+w sequence, same as palette-open does"
         );
 
@@ -3490,9 +3846,13 @@ mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                dialog::open_shell_dialog(shell, window, cx, |dialog, _window, _cx| {
-                    dialog.title("Test dialog")
-                });
+                dialog::open_shell_dialog(
+                    shell,
+                    window,
+                    cx,
+                    "Test modal",
+                    |_shell, _window, _cx| div().into_any_element(),
+                );
             });
         });
 
@@ -3501,8 +3861,8 @@ mod tests {
             "open_shell_dialog should have closed the open palette"
         );
         assert!(
-            cx.update(|window, cx| window.has_active_dialog(cx)),
-            "open_shell_dialog should have opened the dialog layer"
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "open_shell_dialog should have set ShellView's own modal state"
         );
     }
 
