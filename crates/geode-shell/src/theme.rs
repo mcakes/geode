@@ -49,11 +49,26 @@
 //! window. `ThemeService` is its own `cx`-free bundled-theme index instead;
 //! only the two `cx`-touching methods (`apply`, `apply_from_config`,
 //! `toggle_mode`) reach into gpui at all.
+//!
+//! ## Persistence
+//!
+//! Every UI theme change (settings dialog, palette theme pick,
+//! `theme::toggle_mode`) is applied live through this service, then
+//! persisted into the user config layer by [`persist_to_user_config`] —
+//! see its own doc comment for the full contract, and `ShellView::
+//! persist_theme` (`shell/mod.rs`) for the one seam all three UI paths
+//! call through. There is no longer a session-file theme mechanism: a
+//! theme choice is ordinary config, resolved by the same builtin → desk →
+//! user merge (`geode_core::config`) as everything else.
 
+use std::io::Write;
+use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::App;
 use gpui_component::{Theme, ThemeConfig, ThemeSet};
+use toml_edit::{DocumentMut, Item, Table, value};
 
 use geode_core::config::Config;
 
@@ -295,29 +310,6 @@ impl ThemeService {
         (resolved, warnings)
     }
 
-    /// The mode the current `[theme]` config would resolve to right now —
-    /// what [`resolve_config`](Self::resolve_config)/`apply_from_config`
-    /// would apply, without applying it (fix wave, Fix 3: session
-    /// theme-mode precedence needs to compare the *active* mode against
-    /// this, not against `resolve_config`'s raw `theme.mode` parse, so an
-    /// exact fully-qualified `theme.name` — e.g. `"Gruvbox Dark"`, which
-    /// `resolve` matches outright regardless of `theme.mode` — is judged by
-    /// the mode that name actually carries, the same mode that would land
-    /// on screen, not by a separately-configured `theme.mode` value that
-    /// resolution would have silently overridden). Falls back to the same
-    /// light/dark default `resolve_config` uses on the (practically
-    /// unreachable, since `DEFAULT_FAMILY` always ships both modes) chance
-    /// nothing resolves at all.
-    pub fn config_resolved_mode(&self, config: &Config) -> Mode {
-        let (resolved, _warnings) = self.resolve_config(config);
-        resolved.map(|c| c.mode).unwrap_or_else(|| {
-            match config.get("app", "theme.mode").and_then(|v| v.as_str()) {
-                Some("light") => Mode::Light,
-                _ => Mode::Dark,
-            }
-        })
-    }
-
     /// Apply a theme by exact or family name (see [`resolve`](Self::resolve)
     /// for the matching rule). Returns whether anything matched — an unknown
     /// name leaves the current theme untouched, mirroring the config
@@ -343,9 +335,10 @@ impl ThemeService {
         warnings
     }
 
-    /// The active theme's mode — what a session file records at save time
-    /// (`session::SessionExtra::theme_mode`, Task 3) and what `main.rs`
-    /// restores via [`set_mode`](Self::set_mode) after `apply_from_config`.
+    /// The active theme's mode — what [`persist_to_user_config`] writes to
+    /// the user config layer whenever a UI theme change applies (settings
+    /// dialog, palette theme pick, `theme::toggle_mode`; see
+    /// `ShellView::persist_theme`, `shell/mod.rs`).
     pub fn active_mode(&self) -> Mode {
         self.active_mode
     }
@@ -365,13 +358,11 @@ impl ThemeService {
     }
 
     /// Set the active family's mode directly (rather than flipping it —
-    /// see [`toggle_mode`](Self::toggle_mode)). Used by session restore
-    /// (`main.rs`, Task 3) to re-apply a saved mode *after*
-    /// `apply_from_config` already applied the config's own `[theme]`
-    /// mode — so the session's mode wins, on top of whatever family/mode
-    /// the config resolved. A no-op when already at `mode`. Falls back to
-    /// [`DEFAULT_FAMILY`] at `mode` when the active family doesn't ship it,
-    /// same fallback `toggle_mode` uses.
+    /// see [`toggle_mode`](Self::toggle_mode)). Used by the settings
+    /// dialog's dark-mode switch (`settings_view::set_dark_mode`). A no-op
+    /// when already at `mode`. Falls back to [`DEFAULT_FAMILY`] at `mode`
+    /// when the active family doesn't ship it, same fallback `toggle_mode`
+    /// uses.
     pub fn set_mode(&mut self, mode: Mode, cx: &mut App) {
         if self.active_mode == mode {
             return;
@@ -399,6 +390,126 @@ impl ThemeService {
             .map(|(family, _)| family.clone())
             .unwrap_or_else(|| config.name.to_string());
     }
+}
+
+/// Persist a theme choice into the user config layer (`<user_dir>/app.toml`,
+/// `[theme] name`/`mode`), so it survives a restart via the ordinary
+/// desk/user config merge (`geode_core::config`) rather than a session file
+/// — the settings dialog, palette theme picks, and `theme::toggle_mode` all
+/// call this right after applying the change live (`ShellView::
+/// persist_theme`, `shell/mod.rs`).
+///
+/// `toml_edit` — not the plain `toml` crate already used elsewhere in this
+/// codebase (`session.rs`, `geode_core::config`) — is the whole reason this
+/// function exists in this shape: a hand-written `app.toml` can carry
+/// comments and unrelated keys/tables this write knows nothing about, and
+/// only a format-preserving editor can update just `[theme]` without
+/// clobbering any of that. Parsing with plain `toml::Table` and
+/// re-serializing would silently destroy every comment and reorder every
+/// key on the very first theme change — exactly the failure mode this
+/// dependency exists to avoid.
+///
+/// - **Missing file**: created fresh, with `config_version = 1` at the top
+///   (matching every other config document in this codebase) followed by
+///   `[theme]`.
+/// - **Existing, valid file**: `[theme]` is created if absent; `name`/
+///   `mode` are set (or overwritten) inside it. Everything else — every
+///   other table, key, and comment — is byte-preserved by `toml_edit`.
+/// - **Existing, unparseable file**: returns `Err` without touching the
+///   file at all. A user's hand-edited config, however broken, must never
+///   be destroyed by a UI-driven write; the caller turns this into a
+///   `[theme] warning:` stderr line, same convention as every other
+///   config-write failure in this codebase, never a crash.
+///
+/// The write itself is atomic — a unique temp file in `user_dir`, an
+/// `fsync`, then a rename, mirroring `session.rs::write_atomic` — and the
+/// temp filename ends in `.tmp`, not `.toml`, so the reload watcher's
+/// `*.toml` glob (`reload::scan`) never sees a partial write mid-flight.
+///
+/// Hot-reload interplay (corrected, Finding 3 of review fix round 1 — the
+/// previous wording here overclaimed a guard that doesn't exist): this
+/// write lands inside a directory the reload watcher polls, so it WILL be
+/// picked up as "config changed" on the watcher's next ~500ms tick and
+/// trigger a reload. `ShellView::apply_reload` decides whether to re-apply
+/// the theme by comparing its own *stale in-memory* `Config`'s `[theme]`
+/// table (never updated by this function — it only ever touches the file
+/// on disk) against the freshly reloaded one — and since this write really
+/// did just change the on-disk `[theme]` table relative to that stale
+/// in-memory copy, that first post-write reload's comparison DOES read as
+/// changed and DOES call `apply_from_config` again. That is redundant, not
+/// skipped: it re-applies a theme that's already active in `ThemeService`
+/// (matching the same name/mode this function just wrote), so it is still
+/// harmless — merely idempotent in effect, not guarded away in mechanism.
+/// (Finding 2 of the same review, separately: this reload must also not
+/// close an open palette on a theme-only change — see `ShellView::
+/// apply_reload`'s own `palette_snapshot_changed` check.) Accepted as-is:
+/// deliberately no self-write suppression here, so this stays one plain
+/// write path with no special-casing of its own output.
+pub fn persist_to_user_config(user_dir: &Path, name: &str, mode: Mode) -> Result<(), String> {
+    let path = user_dir.join("app.toml");
+    let existed = path.exists();
+
+    let mut doc = if existed {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?
+    } else {
+        DocumentMut::new()
+    };
+
+    if !existed {
+        doc["config_version"] = value(1_i64);
+    }
+
+    if !doc.get("theme").is_some_and(Item::is_table_like) {
+        doc["theme"] = Item::Table(Table::new());
+    }
+    let theme_table = doc["theme"]
+        .as_table_mut()
+        .expect("just ensured [theme] is a table");
+    theme_table["name"] = value(name);
+    theme_table["mode"] = value(if mode.is_dark() { "dark" } else { "light" });
+
+    write_atomic(user_dir, &path, &doc.to_string())
+}
+
+/// Process-global counter for [`persist_to_user_config`]'s temp filenames —
+/// same reasoning as `session.rs`'s `TMP_COUNTER`: a distinct name per
+/// call, on top of the pid, so concurrent writers in this process never
+/// interleave on one shared temp file.
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Atomic write for [`persist_to_user_config`]: unique temp file in `dir`,
+/// `fsync`, rename over `path`. Mirrors `session.rs::write_atomic`'s
+/// pid+counter+`.tmp` scheme (this module keeps its own small copy rather
+/// than sharing that one, since it needs a `Result<(), String>` to match
+/// this module's own error convention instead of `std::io::Result`).
+fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+
+    let pid = std::process::id();
+    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".app.toml.{pid}-{counter}.tmp"));
+    {
+        let mut file = std::fs::File::create(&tmp_path)
+            .map_err(|e| format!("failed to create {}: {e}", tmp_path.display()))?;
+        file.write_all(text.as_bytes())
+            .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("failed to sync {}: {e}", tmp_path.display()))?;
+    }
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        format!(
+            "failed to rename {} to {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
+    })
 }
 
 #[cfg(test)]
@@ -550,34 +661,136 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("nocturnal"));
     }
+}
 
-    // --- config_resolved_mode (fix wave, Fix 3) --------------------------
+/// [`persist_to_user_config`] tests: toml_edit round-trip preservation,
+/// create-if-missing, and corrupt-file handling (design doc, "Tests" —
+/// TDD the pure parts).
+#[cfg(test)]
+mod persist_tests {
+    use super::*;
 
     #[test]
-    fn config_resolved_mode_defaults_to_dark_when_config_is_silent() {
-        let (service, _) = load_bundled();
-        let config = Config::load(&ConfigSources::default());
-        assert_eq!(service.config_resolved_mode(&config), Mode::Dark);
+    fn creates_a_fresh_file_with_config_version_and_theme() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["config_version"].as_integer(), Some(1));
+        assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Dark"));
+        assert_eq!(doc["theme"]["mode"].as_str(), Some("dark"));
     }
 
     #[test]
-    fn config_resolved_mode_reads_theme_mode_from_config() {
-        let (service, _) = load_bundled();
-        let config = config_from("[theme]\nmode = \"light\"\n");
-        assert_eq!(service.config_resolved_mode(&config), Mode::Light);
+    fn round_trips_an_existing_file_byte_preserving_comments_and_unrelated_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "\
+# a hand-written config
+config_version = 1
+
+# keymap comment stays put
+[keymap]
+mod = \"ctrl\" # inline comment
+
+[theme]
+# old theme comment
+name = \"Default\"
+mode = \"light\"
+";
+        std::fs::write(dir.path().join("app.toml"), original).unwrap();
+
+        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        assert!(text.contains("# a hand-written config"));
+        assert!(text.contains("# keymap comment stays put"));
+        assert!(text.contains("mod = \"ctrl\" # inline comment"));
+        assert!(text.contains("# old theme comment"));
+
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Dark"));
+        assert_eq!(doc["theme"]["mode"].as_str(), Some("dark"));
+        assert_eq!(
+            doc["keymap"]["mod"].as_str(),
+            Some("ctrl"),
+            "unrelated [keymap] table must be untouched"
+        );
     }
 
     #[test]
-    fn config_resolved_mode_follows_an_exact_fully_qualified_name_over_a_mismatched_mode() {
-        // `theme.name = "Gruvbox Dark"` is an exact `ThemeConfig.name`
-        // match (`resolve`'s `find_exact`, checked before family+mode
-        // lookup), so it wins outright regardless of `theme.mode` here
-        // saying light — the resolved mode must reflect what would
-        // actually apply (dark), not the separately-configured raw
-        // `theme.mode` value it silently overrides.
-        let (service, _) = load_bundled();
-        let config = config_from("[theme]\nname = \"Gruvbox Dark\"\nmode = \"light\"\n");
-        assert_eq!(service.config_resolved_mode(&config), Mode::Dark);
+    fn creates_the_theme_table_when_missing_from_an_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.toml"),
+            "config_version = 1\n[keymap]\nmod = \"cmd\"\n",
+        )
+        .unwrap();
+
+        persist_to_user_config(dir.path(), "Default Light", Mode::Light).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["theme"]["name"].as_str(), Some("Default Light"));
+        assert_eq!(doc["theme"]["mode"].as_str(), Some("light"));
+        assert_eq!(
+            doc["keymap"]["mod"].as_str(),
+            Some("cmd"),
+            "existing content must survive [theme] being newly added"
+        );
+        assert!(
+            !text.contains("config_version = 1\nconfig_version"),
+            "config_version must not be duplicated when the file already had one"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_existing_file_is_left_untouched_and_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        let corrupt = "this is [not valid toml";
+        std::fs::write(&path, corrupt).unwrap();
+
+        let result = persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark);
+        assert!(result.is_err(), "a parse failure must return Err");
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, corrupt, "a corrupt file must never be written to");
+
+        let leftover_tmp: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(
+            leftover_tmp.is_empty(),
+            "no temp file should be left behind on a parse failure"
+        );
+    }
+
+    #[test]
+    fn overwriting_an_existing_theme_replaces_name_and_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+        persist_to_user_config(dir.path(), "Default Light", Mode::Light).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["theme"]["name"].as_str(), Some("Default Light"));
+        assert_eq!(doc["theme"]["mode"].as_str(), Some("light"));
+    }
+
+    #[test]
+    fn no_leftover_tmp_files_after_a_successful_write() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+
+        let leftover_tmp: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "tmp"))
+            .collect();
+        assert!(leftover_tmp.is_empty(), "{leftover_tmp:?}");
     }
 }
 

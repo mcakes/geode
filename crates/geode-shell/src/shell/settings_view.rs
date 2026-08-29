@@ -38,10 +38,12 @@
 //! this dialog's) — a reset button implying otherwise would be misleading.
 //!
 //! **Persistence**: changes apply live (through `ThemeService`, same as
-//! `theme::toggle_mode`) but are never written to `app.toml` — that is the
-//! config-editor phase's job (brief). The muted caption under the theme
-//! controls says so, honestly, rather than silently discarding the
-//! expectation that a UI change usually persists.
+//! `theme::toggle_mode`), then persist into the user config layer —
+//! [`set_theme`]/[`set_dark_mode`] both call `ShellView::persist_theme`
+//! right after applying, which writes `<user_dir>/app.toml`'s `[theme]`
+//! table via `theme::persist_to_user_config` (`toml_edit`, format- and
+//! comment-preserving). The muted caption under the theme controls reflects
+//! this now: "saved to your app.toml".
 
 use gpui::{App, Context, Entity, ParentElement as _, SharedString, Styled as _, Window, div, px};
 use gpui_component::{
@@ -130,7 +132,7 @@ fn build(view: Entity<ShellView>, _window: &mut Window, cx: &mut App) -> Setting
             div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child("set [theme] in app.toml to persist")
+                .child("saved to your app.toml")
         }),
     ]);
 
@@ -176,27 +178,31 @@ fn mod_alias_label(mods: Modifiers) -> &'static str {
 }
 
 /// Apply `name` at the theme's currently active mode via
-/// `ThemeService::apply` — the theme dropdown's setter. Kept as a
-/// standalone function (rather than inlined only in the closure above) so
-/// a `#[gpui::test]` can drive exactly this path directly: the dropdown's
-/// own popup menu is a pinned-rev `dropdown_menu_with_anchor` overlay this
-/// crate has no direct handle to simulate a click into, so the test-plan
-/// choice (recorded in the task report) is to call this same handler the
-/// control invokes rather than simulate the click.
+/// `ThemeService::apply`, then persist it (`ShellView::persist_theme`) —
+/// the theme dropdown's setter. Kept as a standalone function (rather than
+/// inlined only in the closure above) so a `#[gpui::test]` can drive
+/// exactly this path directly: the dropdown's own popup menu is a
+/// pinned-rev `dropdown_menu_with_anchor` overlay this crate has no direct
+/// handle to simulate a click into, so the test-plan choice (recorded in
+/// the task report) is to call this same handler the control invokes
+/// rather than simulate the click.
 pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
     view.update(cx, |shell, cx| {
         let mode = shell.services.theme.active_mode();
         shell.services.theme.apply(name, mode, cx);
+        shell.persist_theme(cx);
         cx.notify();
     });
 }
 
 /// Apply the mode a dark-mode switch's `checked` value implies via
-/// `ThemeService::set_mode` — same reasoning as [`set_theme`].
+/// `ThemeService::set_mode`, then persist it — same reasoning as
+/// [`set_theme`].
 pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut App) {
     let mode = if checked { Mode::Dark } else { Mode::Light };
     view.update(cx, |shell, cx| {
         shell.services.theme.set_mode(mode, cx);
+        shell.persist_theme(cx);
         cx.notify();
     });
 }

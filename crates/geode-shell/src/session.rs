@@ -1,5 +1,10 @@
 //! Session layout persistence (Task 3): saves/restores the workspace
-//! tiling layout (and the active theme mode) across app restarts.
+//! tiling layout across app restarts. Pure layout state — theme choices
+//! persist separately, into the user config layer (see `theme::
+//! persist_to_user_config`); this file no longer carries a `theme_mode`
+//! (removed: theme changes now persist via `toml_edit` into `app.toml`
+//! instead of the session file, so they survive the ordinary desk/user
+//! config merge like any other config value, not a side channel).
 //!
 //! State-as-config (brief): the session file lives alongside desk/user
 //! config, at `user_config_dir()/session.toml` (wired in `geode-app`'s
@@ -38,10 +43,12 @@
 //! [[workspaces.1.node.children]]
 //! kind = "leaf"
 //! id = 2
-//!
-//! [extra]
-//! theme_mode = "dark"
 //! ```
+//!
+//! Old session files written before this removal may still carry an
+//! `[extra]` table with a `theme_mode` key; `from_toml` never reads
+//! `extra` at all now, so it is simply ignored like any other unknown
+//! top-level key — the layout underneath it still loads.
 //!
 //! Every workspace present in [`Workspaces::spaces`] is written, empty ones
 //! included (mirrors the in-memory behavior: "workspaces materialize lazily
@@ -66,30 +73,9 @@ use crate::tiling::{Node, Orientation, TileId, Tree, Workspaces};
 /// "assume current" rather than a hard failure).
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
-/// Non-workspace session state (brief: `SessionExtra { theme_mode: Option<String> }`).
-/// `theme_mode` is `"light"` or `"dark"`, restored *after* `apply_from_config`
-/// runs (main.rs), so a session's saved mode — when present — wins over the
-/// config's default mode: a runtime `theme::toggle_mode` survives a restart
-/// even if `[theme].mode` in `app.toml` still says the old value.
-///
-/// Refined precedence rule (fix wave, Fix 3 — see
-/// `ShellView::session_theme_mode`, the sole writer of this field): the
-/// shell writes `Some(mode)` only when the active mode at save time
-/// genuinely *diverges* from the mode the current `[theme]` config resolves
-/// to on its own (`ThemeService::config_resolved_mode`) — a real, deliberate
-/// toggle this session, not just the active mode happening to mirror
-/// config. When they agree, it writes `None`. This means an offline edit to
-/// `[theme].mode` in `app.toml` (no toggle this session) takes effect on the
-/// next restart instead of being permanently fossilized by a stale session
-/// value that only ever mirrored the old config in the first place.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SessionExtra {
-    pub theme_mode: Option<String>,
-}
-
-/// Serialize `workspaces` and `extra` into a session TOML table (pure, no
-/// I/O — see [`save`] for the file-writing wrapper).
-pub fn to_toml(workspaces: &Workspaces, extra: &SessionExtra) -> toml::Table {
+/// Serialize `workspaces` into a session TOML table (pure, no I/O — see
+/// [`save`] for the file-writing wrapper).
+pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
     let mut root = toml::Table::new();
     root.insert(
         "config_version".to_string(),
@@ -122,19 +108,16 @@ pub fn to_toml(workspaces: &Workspaces, extra: &SessionExtra) -> toml::Table {
     }
     root.insert("workspaces".to_string(), toml::Value::Table(spaces_table));
 
-    if let Some(mode) = &extra.theme_mode {
-        let mut extra_table = toml::Table::new();
-        extra_table.insert("theme_mode".to_string(), toml::Value::String(mode.clone()));
-        root.insert("extra".to_string(), toml::Value::Table(extra_table));
-    }
-
     root
 }
 
-/// Deserialize a session TOML table back into `Workspaces` + `SessionExtra`
-/// plus any non-fatal warnings (pure, no I/O). Tolerant of unknown keys
-/// (only the fields documented at the top of this file are ever read). Any
-/// structural corruption — a mismatched `config_version` (see
+/// Deserialize a session TOML table back into `Workspaces` plus any
+/// non-fatal warnings (pure, no I/O). Tolerant of unknown keys
+/// (only the fields documented at the top of this file are ever read —
+/// notably including a legacy `[extra]` table, e.g. a `theme_mode` key
+/// written by a build before theme changes moved to the user config layer:
+/// it is simply never looked at, so the layout underneath it still loads).
+/// Any structural corruption — a mismatched `config_version` (see
 /// [`SESSION_CONFIG_VERSION`]), a `Split` with a bad arity/ratio-length
 /// mismatch or a non-finite/non-positive ratio (see [`Tree::from_parts`]),
 /// an unparseable node, an out-of-range `active` — collects into the `Err`
@@ -142,9 +125,7 @@ pub fn to_toml(workspaces: &Workspaces, extra: &SessionExtra) -> toml::Table {
 /// start, warn". A dangling `focused`/`fullscreen` reference is healed
 /// silently by `Tree::from_parts`, not an error; a missing `config_version`
 /// is a warning that still lets the rest of the file parse.
-pub fn from_toml(
-    table: &toml::Table,
-) -> Result<(Workspaces, SessionExtra, Vec<String>), Vec<String>> {
+pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<String>> {
     let mut warnings = Vec::new();
     match table.get("config_version") {
         Some(toml::Value::Integer(v)) if *v == SESSION_CONFIG_VERSION => {}
@@ -200,14 +181,7 @@ pub fn from_toml(
 
     let workspaces = Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
 
-    let theme_mode = table
-        .get("extra")
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("theme_mode"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    Ok((workspaces, SessionExtra { theme_mode }, warnings))
+    Ok((workspaces, warnings))
 }
 
 fn parse_workspace(key: &str, value: &toml::Value) -> Result<(u8, Tree), String> {
@@ -350,8 +324,8 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
 /// `shell::mod`'s `take_dirty_session_write`), which serializes here on the
 /// UI thread and hands the resulting `String` to a background executor for
 /// [`write_atomic`].
-pub fn to_string_pretty(workspaces: &Workspaces, extra: &SessionExtra) -> Result<String, String> {
-    let table = to_toml(workspaces, extra);
+pub fn to_string_pretty(workspaces: &Workspaces) -> Result<String, String> {
+    let table = to_toml(workspaces);
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
@@ -437,8 +411,8 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 /// UI/background boundary (direct test use; `ShellView`'s best-effort
 /// `on_app_quit` flush, which is a one-shot at shutdown, not a per-keystroke
 /// hot path).
-pub fn save(path: &Path, workspaces: &Workspaces, extra: &SessionExtra) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces, extra)
+pub fn save(path: &Path, workspaces: &Workspaces) -> std::io::Result<()> {
+    let text = to_string_pretty(workspaces)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -450,8 +424,8 @@ pub fn save(path: &Path, workspaces: &Workspaces, extra: &SessionExtra) -> std::
 /// prints one `[session] warning:` line each, same convention as config/
 /// keymap/theme diagnostics) — a bad session file must never panic or
 /// block startup.
-pub fn load(path: &Path) -> (Workspaces, SessionExtra, Vec<String>) {
-    let fresh = |warnings: Vec<String>| (Workspaces::new(), SessionExtra::default(), warnings);
+pub fn load(path: &Path) -> (Workspaces, Vec<String>) {
+    let fresh = |warnings: Vec<String>| (Workspaces::new(), warnings);
 
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -465,7 +439,7 @@ pub fn load(path: &Path) -> (Workspaces, SessionExtra, Vec<String>) {
     };
 
     match from_toml(&table) {
-        Ok((workspaces, extra, warnings)) => (workspaces, extra, warnings),
+        Ok((workspaces, warnings)) => (workspaces, warnings),
         Err(errors) => fresh(errors),
     }
 }
@@ -484,15 +458,11 @@ mod tests {
     #[test]
     fn round_trips_a_fresh_workspaces() {
         let ws = Workspaces::new();
-        let extra = SessionExtra {
-            theme_mode: Some("dark".to_string()),
-        };
-        let table = to_toml(&ws, &extra);
-        let (restored, restored_extra, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws);
+        let (restored, warnings) = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored.active_index(), ws.active_index());
         assert!(restored.active().is_empty());
-        assert_eq!(restored_extra, extra);
     }
 
     #[test]
@@ -506,15 +476,11 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
-        let extra = SessionExtra {
-            theme_mode: Some("light".to_string()),
-        };
-        let table = to_toml(&ws, &extra);
-        let (restored, restored_extra, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws);
+        let (restored, warnings) = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         assert_eq!(restored.active_index(), 1);
-        assert_eq!(restored_extra, extra);
 
         let before: BTreeMap<u8, _> = ws
             .spaces()
@@ -538,21 +504,29 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_with_no_theme_mode_omits_the_extra_table() {
-        let ws = Workspaces::new();
-        let table = to_toml(&ws, &SessionExtra::default());
-        assert!(
-            !table.contains_key("extra"),
-            "omit the extra table entirely when there is nothing to say"
+    fn from_toml_tolerates_a_legacy_extra_theme_mode_table() {
+        // Old session files (written before theme changes moved to the
+        // user config layer) may carry `[extra]\ntheme_mode = "..."`.
+        // `from_toml` no longer reads `extra` at all — the layout must
+        // still load intact, with the legacy key simply ignored like any
+        // other unknown key.
+        let mut table = to_toml(&Workspaces::new());
+        let mut extra_table = toml::Table::new();
+        extra_table.insert(
+            "theme_mode".to_string(),
+            toml::Value::String("dark".to_string()),
         );
-        let (_, extra, warnings) = from_toml(&table).unwrap();
+        table.insert("extra".to_string(), toml::Value::Table(extra_table));
+
+        let (ws, warnings) = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(extra.theme_mode, None);
+        assert_eq!(ws.active_index(), 1);
+        assert!(ws.active().is_empty());
     }
 
     #[test]
     fn from_toml_tolerates_unknown_keys() {
-        let mut table = to_toml(&Workspaces::new(), &SessionExtra::default());
+        let mut table = to_toml(&Workspaces::new());
         table.insert(
             "some_future_field".to_string(),
             toml::Value::String("ignored".to_string()),
@@ -569,10 +543,9 @@ mod tests {
 
     #[test]
     fn from_toml_on_an_empty_table_is_a_fresh_workspace_one_with_a_missing_version_warning() {
-        let (ws, extra, warnings) = from_toml(&toml::Table::new()).unwrap();
+        let (ws, warnings) = from_toml(&toml::Table::new()).unwrap();
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
-        assert_eq!(extra.theme_mode, None);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("config_version"));
     }
@@ -671,7 +644,7 @@ mod tests {
         ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
 
-        let (ws, _, warnings) =
+        let (ws, warnings) =
             from_toml(&table).expect("dangling focused must be healed, not rejected");
         assert_eq!(
             warnings,
@@ -704,7 +677,7 @@ mod tests {
             "config_version".to_string(),
             toml::Value::Integer(SESSION_CONFIG_VERSION),
         );
-        let (_, _, warnings) = from_toml(&table).unwrap();
+        let (_, warnings) = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
@@ -715,7 +688,7 @@ mod tests {
         // `from_toml_heals_a_dangling_focused_reference`); this test pins
         // the exact warning wording as its own regression.
         let table = toml::Table::new();
-        let (_, _, warnings) = from_toml(&table).unwrap();
+        let (_, warnings) = from_toml(&table).unwrap();
         assert_eq!(
             warnings,
             vec!["missing config_version (assuming 1)".to_string()]
@@ -752,11 +725,10 @@ mod tests {
     #[test]
     fn load_of_a_missing_file_is_a_fresh_start_with_no_warnings() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, extra, warnings) = load(&dir.path().join("session.toml"));
+        let (ws, warnings) = load(&dir.path().join("session.toml"));
         assert!(warnings.is_empty());
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
-        assert_eq!(extra.theme_mode, None);
     }
 
     #[test]
@@ -764,7 +736,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "this is [not valid toml").unwrap();
-        let (ws, _, warnings) = load(&path);
+        let (ws, warnings) = load(&path);
         assert!(!warnings.is_empty());
         assert!(ws.active().is_empty());
     }
@@ -774,7 +746,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "active = 99\n").unwrap();
-        let (ws, _, warnings) = load(&path);
+        let (ws, warnings) = load(&path);
         assert!(!warnings.is_empty());
         assert_eq!(ws.active_index(), 1);
     }
@@ -784,7 +756,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "config_version = 99\nactive = 3\n").unwrap();
-        let (ws, _, warnings) = load(&path);
+        let (ws, warnings) = load(&path);
         assert_eq!(
             ws.active_index(),
             1,
@@ -802,7 +774,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "active = 2\n").unwrap();
-        let (ws, _, warnings) = load(&path);
+        let (ws, warnings) = load(&path);
         assert_eq!(
             ws.active_index(),
             2,
@@ -820,11 +792,8 @@ mod tests {
         let mut ws = Workspaces::new();
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let extra = SessionExtra {
-            theme_mode: Some("dark".to_string()),
-        };
 
-        save(&path, &ws, &extra).unwrap();
+        save(&path, &ws).unwrap();
         assert!(path.exists());
         // The atomic-write temp file must not be left behind, whatever its
         // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
@@ -838,9 +807,8 @@ mod tests {
             "no *.tmp files should remain in the session directory, found {leftover_tmp_files:?}"
         );
 
-        let (restored, restored_extra, warnings) = load(&path);
+        let (restored, warnings) = load(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(restored_extra, extra);
         assert_eq!(
             restored.active().layout(crate::tiling::Rect::UNIT),
             ws.active().layout(crate::tiling::Rect::UNIT)
@@ -848,10 +816,20 @@ mod tests {
     }
 
     #[test]
+    fn save_does_not_write_a_theme_mode_or_extra_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        save(&path, &Workspaces::new()).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("theme_mode"), "{text}");
+        assert!(!text.contains("[extra]"), "{text}");
+    }
+
+    #[test]
     fn save_creates_the_parent_directory_if_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("session.toml");
-        save(&path, &Workspaces::new(), &SessionExtra::default()).unwrap();
+        save(&path, &Workspaces::new()).unwrap();
         assert!(path.exists());
     }
 
@@ -861,8 +839,8 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let table = to_toml(&ws, &SessionExtra::default());
-        let (mut restored, _, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws);
+        let (mut restored, warnings) = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let before_ids: std::collections::HashSet<_> =

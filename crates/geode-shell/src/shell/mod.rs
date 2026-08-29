@@ -33,9 +33,10 @@ use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_k
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::reload;
 use crate::session;
+use crate::theme;
 use crate::theme::ThemeService;
 use crate::tiling::{Rect, Workspaces, apply_workspace_action};
-use geode_core::config::Config;
+use geode_core::config::{Config, LayerDoc};
 
 /// How often the background reload watcher polls the watched config
 /// directories' `*.toml` mtimes (brief: "~500ms"). File scanning and
@@ -116,6 +117,22 @@ pub struct ShellView {
     /// `Entity<InputState>` across frames to keep its own cursor/selection/
     /// focus state, not something rebuildable from scratch each render.
     filter_input: Entity<InputState>,
+}
+
+/// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
+/// Builtin → Desk → User order) are identical — content, not just count.
+/// Used by [`ShellView::apply_reload`] (Review fix round 1, Finding 2) to
+/// decide whether a reload's palette-relevant inputs actually changed.
+/// A free function comparing fields directly rather than a `PartialEq`
+/// derive on `LayerDoc` itself (`geode_core::config`): every field here
+/// already implements `PartialEq` (`Layer`, `String`, `PathBuf`,
+/// `toml::Table`), so this needs no change to that shared type just for
+/// one call site.
+fn keymap_docs_equal(a: &[LayerDoc], b: &[LayerDoc]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.layer == y.layer && x.name == y.name && x.file == y.file && x.table == y.table
+        })
 }
 
 impl ShellView {
@@ -246,9 +263,12 @@ impl ShellView {
     /// keymap and mod alias from it, re-apply the theme only if `[theme]`
     /// actually changed (so a runtime `theme::toggle_mode` isn't silently
     /// clobbered by an unrelated reload — e.g. only `keymap.toml` edited),
-    /// close an open palette (its items snapshot the old registry/keymap at
-    /// open — brief: "must close on a successful reload"), and record the
-    /// outcome for the status bar.
+    /// close an open palette only if ITS snapshot inputs actually changed
+    /// (Review fix round 1, Finding 2 — refines the original brief's "must
+    /// close on a successful reload": a theme-only reload no longer closes
+    /// it, since the palette's items don't depend on `[theme]` at all; see
+    /// `keymap_docs_equal` and the `palette_snapshot_changed` check below),
+    /// and record the outcome for the status bar.
     ///
     /// Any error-severity diagnostic — from `Config::load` itself, or from
     /// building the keymap against the new config's docs — keeps the
@@ -289,6 +309,18 @@ impl ShellView {
 
             let theme_changed =
                 self.services.config.get("app", "theme") != new_config.get("app", "theme");
+            // Review fix round 1, Finding 2: only close the palette when
+            // its own snapshot inputs (Task 6: bindings, built in
+            // `toggle_palette` from the raw keymap docs + the resolved mod
+            // alias) could actually have changed — a theme-only reload
+            // (including the one our own `theme::persist_to_user_config`
+            // write triggers, see that function's doc comment) must not
+            // silently close an open palette out from under the user.
+            let palette_snapshot_changed = self.services.mod_alias != mod_alias
+                || !keymap_docs_equal(
+                    self.services.config.layered_docs("keymap"),
+                    new_config.layered_docs("keymap"),
+                );
 
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
@@ -300,7 +332,9 @@ impl ShellView {
                     .apply_from_config(&self.services.config, cx);
             }
 
-            self.palette = None;
+            if palette_snapshot_changed {
+                self.palette = None;
+            }
         }
 
         self.last_reload = outcome;
@@ -402,6 +436,7 @@ impl ShellView {
             self.toggle_palette();
         } else if action.0 == "theme::toggle_mode" {
             self.services.theme.toggle_mode(cx);
+            self.persist_theme(cx);
         } else if action.0 == "settings::open" {
             // Task 5: the real settings dialog (gpui-component's `setting`
             // module, wrapped in a `Dialog`). Reachable via `mod+,`, the
@@ -412,39 +447,65 @@ impl ShellView {
         }
     }
 
-    /// The `theme_mode` to write into a session's `[extra]` table (fix
-    /// wave, Fix 3 — refines the precedence documented on
-    /// `session::SessionExtra::theme_mode` and in `main.rs`): `Some(mode)`
-    /// only when the *active* mode genuinely diverges from the mode the
-    /// *current config* would resolve to on its own
-    /// (`ThemeService::config_resolved_mode`); `None` when they agree.
+    /// The apply-then-persist seam every UI theme-change path calls right
+    /// after applying a change live through `ThemeService` (`theme::
+    /// toggle_mode` above, `dispatch_palette_item`'s `Theme` branch below,
+    /// and `settings_view::set_theme`/`set_dark_mode`) — one place that
+    /// knows how to turn "the active theme just changed" into a write of
+    /// `<user_dir>/app.toml`'s `[theme]` table (`theme::
+    /// persist_to_user_config`), so a theme choice survives a restart via
+    /// the ordinary config layer instead of the removed session `theme_mode`
+    /// mechanism.
     ///
-    /// Why: the previous behavior always wrote `Some(active_mode)`. Since
-    /// `main.rs` restores a saved `theme_mode` *after* `apply_from_config`
-    /// (deliberately, so a runtime `theme::toggle_mode` survives a
-    /// restart), that meant a session file, once written, permanently
-    /// fossilized whatever mode happened to be active at last save/quit —
-    /// even when the user never toggled anything and the active mode was
-    /// simply mirroring `[theme].mode` from config. An offline edit to
-    /// `app.toml`'s `[theme].mode` would then appear to do nothing: the
-    /// stale session value kept re-asserting the old mode over the new
-    /// config every subsequent launch. Writing `None` whenever the active
-    /// mode still just mirrors config leaves the config's mode free to
-    /// take effect on restart, and `Some` only records a real, deliberate
-    /// divergence (a `theme::toggle_mode` this session, or a palette theme
-    /// pick with a different mode) — that divergence is the only case that
-    /// actually needs to survive a restart.
-    fn session_theme_mode(&self) -> Option<String> {
-        let active = self.services.theme.active_mode();
-        let config_mode = self
-            .services
-            .theme
-            .config_resolved_mode(&self.services.config);
-        if active == config_mode {
-            None
-        } else {
-            Some(if active.is_dark() { "dark" } else { "light" }.to_string())
-        }
+    /// Review fix round 1, Finding 1: `persist_to_user_config` does real,
+    /// potentially-blocking file I/O — a read, a `toml_edit` parse, an
+    /// `fsync`, a rename — so it must never run inline on the UI thread
+    /// (PHILOSOPHY.md: "nothing may stall the render thread"), the same
+    /// reasoning `session::write_atomic` already gets in this file's own
+    /// watcher loop (see `new`'s doc comment). Only the cheap part — reading
+    /// `user_dir`/`active_name`/`active_mode` off `self` — happens here, on
+    /// the UI thread; the actual read-modify-write runs inside a task handed
+    /// to `cx.background_executor()`, fire-and-forget (`.detach()`): theme
+    /// changes are infrequent (a user action, not a hot path like key-repeat),
+    /// so there's no need for the session-save path's coalescing
+    /// dirty-flag/watcher-tick machinery here — a plain spawn per change is
+    /// simple and cheap enough. A write failure surfaces as a `[theme]
+    /// warning:` stderr line from inside the task, never a crash — same
+    /// convention as every other config-write failure in this codebase.
+    ///
+    /// A missing `user_dir` (no writable user config dir — some test setups,
+    /// or a platform with neither `$HOME` nor `%APPDATA%`) is a silent
+    /// no-op, checked before ever spawning: theme persistence, like session
+    /// persistence, is best-effort, never load-bearing.
+    ///
+    /// Raciness (Finding 1, acknowledged rather than engineered away): two
+    /// theme changes in quick succession spawn two independent
+    /// read-modify-write tasks against the same `app.toml`, with no
+    /// ordering guarantee between them beyond however the background
+    /// executor happens to schedule them — whichever task's rename lands
+    /// second wins the `[theme]` table. This is last-writer-wins on
+    /// `[theme]`, not a torn file (`persist_to_user_config`'s unique
+    /// pid+counter temp names already rule that out — each task only ever
+    /// touches its own temp file until its own rename), and in the
+    /// vanishingly rare case it's even reachable — two theme changes inside
+    /// one background-executor scheduling window — the on-disk value still
+    /// converges to *some* real, valid theme choice, never a corrupt one.
+    /// Accepted as-is rather than serialized through a dirty-flag/watcher-
+    /// tick queue: theme changes are rare UI actions, not the key-repeat-
+    /// speed churn the session path was built to survive.
+    fn persist_theme(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let name = self.services.theme.active_name().to_string();
+        let mode = self.services.theme.active_mode();
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
+                    eprintln!("[theme] warning: {e}");
+                }
+            })
+            .detach();
     }
 
     /// If a workspace mutation happened since the last flush, serialize the
@@ -469,10 +530,7 @@ impl ShellView {
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
-        let extra = session::SessionExtra {
-            theme_mode: self.session_theme_mode(),
-        };
-        match session::to_string_pretty(&self.services.workspaces, &extra) {
+        match session::to_string_pretty(&self.services.workspaces) {
             Ok(text) => Some((path, text)),
             Err(e) => {
                 eprintln!("[session] warning: failed to serialize session: {e}");
@@ -481,26 +539,23 @@ impl ShellView {
         }
     }
 
-    /// Write the current workspace layout (and active theme mode) to the
-    /// session file, if one is configured (`ShellServices::session_path`),
-    /// synchronously and unconditionally (ignores `session_dirty` — this is
-    /// the "flush no matter what" path, not the coalesced per-dispatch
-    /// one). The only caller is `main.rs`'s best-effort `on_app_quit` hook:
-    /// a one-shot at shutdown, not a per-keystroke hot path, so a
-    /// synchronous atomic write (`session::save`) here is fine — it does
-    /// not reintroduce the render-thread stall Task 3 fix round 1 removed
-    /// from `dispatch`. A write failure (e.g. an unwritable directory) is a
-    /// warning line, never a panic — session persistence is a convenience,
-    /// not a correctness requirement (mirrors config's own "bad input is a
+    /// Write the current workspace layout to the session file, if one is
+    /// configured (`ShellServices::session_path`), synchronously and
+    /// unconditionally (ignores `session_dirty` — this is the "flush no
+    /// matter what" path, not the coalesced per-dispatch one). The only
+    /// caller is `main.rs`'s best-effort `on_app_quit` hook: a one-shot at
+    /// shutdown, not a per-keystroke hot path, so a synchronous atomic write
+    /// (`session::save`) here is fine — it does not reintroduce the
+    /// render-thread stall Task 3 fix round 1 removed from `dispatch`. A
+    /// write failure (e.g. an unwritable directory) is a warning line,
+    /// never a panic — session persistence is a convenience, not a
+    /// correctness requirement (mirrors config's own "bad input is a
     /// warning" philosophy).
     pub fn save_session(&self) {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
-        let extra = session::SessionExtra {
-            theme_mode: self.session_theme_mode(),
-        };
-        if let Err(e) = session::save(path, &self.services.workspaces, &extra) {
+        if let Err(e) = session::save(path, &self.services.workspaces) {
             eprintln!("[session] warning: failed to save session: {e}");
         }
     }
@@ -534,6 +589,7 @@ impl ShellView {
                 self.services
                     .theme
                     .apply(name, crate::theme::Mode::Dark, cx);
+                self.persist_theme(cx);
             }
         }
     }
@@ -2260,6 +2316,119 @@ mod tests {
         });
     }
 
+    /// Review fix round 1, Finding 2: an open palette must NOT close on a
+    /// reload whose `[theme]` table is the only thing that changed — the
+    /// palette's own items (Task 6: built from the registry + keymap
+    /// bindings, `toggle_palette`) don't depend on `[theme]` at all, so
+    /// closing it here would just be spurious churn. This is exactly the
+    /// situation `theme::persist_to_user_config`'s own write triggers (see
+    /// its doc comment): the app writes its own theme choice to disk, the
+    /// watcher picks that up as "config changed", and this reload must not
+    /// silently close a palette the user still has open.
+    #[gpui::test]
+    fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+        // `test_services()`'s starting config has no `[theme]` table at
+        // all (and no `[keymap]` table either — `config_with_theme` only
+        // ever writes an "app" doc's `[theme]` section, so this new
+        // config's `layered_docs("keymap")` is just as empty as the
+        // starting one's, and neither sets `[keymap] mod`).
+        let new_config = config_with_theme("Gruvbox", "dark");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+        shell.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.services.theme.active_name(),
+                "Gruvbox Dark",
+                "sanity: the theme-only change must still have been applied"
+            );
+            assert!(
+                shell.palette.is_some(),
+                "a theme-only reload must leave an open palette open"
+            );
+        });
+    }
+
+    /// The contrasting half of the Finding 2 pair above: a reload whose
+    /// keymap docs genuinely differ (here, via `[keymap] mod`, which
+    /// changes the resolved mod alias and therefore the bindings the
+    /// palette would render) DOES close an open palette — its snapshot
+    /// really is stale.
+    #[gpui::test]
+    fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+        let new_config = config_with_mod("ctrl");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+        shell.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.services.mod_alias,
+                Modifiers::CTRL,
+                "sanity: the mod alias must actually have changed"
+            );
+            assert!(
+                shell.palette.is_none(),
+                "a reload with genuinely different keymap docs must close an open palette"
+            );
+        });
+    }
+
     // --- Task 3: session save/restore wiring ----------------------------
 
     fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
@@ -2441,7 +2610,7 @@ mod tests {
                     .collect()
             });
 
-        let (mut restored, _extra, warnings) = session::load(&session_path);
+        let (mut restored, warnings) = session::load(&session_path);
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let restored_layout: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> = restored
@@ -2524,25 +2693,28 @@ mod tests {
         );
     }
 
-    /// Fix wave, Fix 3 regression: `session_theme_mode` (the sole source of
-    /// `SessionExtra::theme_mode` now) must write `None` while the active
-    /// theme mode merely mirrors what the current `[theme]` config resolves
-    /// to on its own, and only `Some(mode)` once the active mode genuinely
-    /// diverges from that — a real in-session `theme::toggle_mode`, the
-    /// only case that actually needs to survive a restart (an offline edit
-    /// to `[theme].mode` in `app.toml`, with no toggle this session, must
-    /// be free to take effect on the next launch instead of being
-    /// permanently overridden by a stale session value).
+    /// End-to-end (design doc, "Tests"): a real `mod+shift+t` keystroke,
+    /// with a real `user_dir` wired up (a tempdir, exactly like
+    /// `build_shell_services` wires the real `%APPDATA%`/`$HOME/.config`
+    /// dir in `main.rs`), must leave the new mode written into
+    /// `<user_dir>/app.toml`'s `[theme]` table on disk — the whole point of
+    /// the apply-then-persist seam (`ShellView::persist_theme`) replacing
+    /// the removed session `theme_mode` mechanism.
     #[gpui::test]
-    fn session_theme_mode_is_none_until_a_real_toggle_diverges_from_config(
+    fn mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
 
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().to_path_buf();
+
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
+                    });
                     cx.new(|cx| Root::new(view, window, cx))
                 })
             })
@@ -2553,6 +2725,26 @@ mod tests {
             let _ = window.draw(cx);
         });
 
+        assert!(
+            !user_dir.join("app.toml").exists(),
+            "sanity: nothing written before the toggle"
+        );
+
+        cx.simulate_keystrokes("alt-shift-t");
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // `persist_theme` (Finding 1, review fix round 1) hands the actual
+        // file write to `cx.background_executor()` rather than running it
+        // inline, so the file doesn't necessarily exist the instant the
+        // keystroke's synchronous dispatch returns — `run_until_parked`
+        // drives that detached background task to completion, same pattern
+        // the gpui testing reference uses for any detached background/async
+        // work.
+        cx.run_until_parked();
+
         let root = window.root(&mut cx).unwrap();
         let shell = root.read_with(&cx, |root, _cx| {
             root.view()
@@ -2560,49 +2752,20 @@ mod tests {
                 .downcast::<ShellView>()
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
+        let active_mode = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode());
+        let expected_mode = if active_mode.is_dark() {
+            "dark"
+        } else {
+            "light"
+        };
 
-        // `test_services()` builds its `ThemeService` via `load_bundled()`
-        // alone (starting active mode: "Default Light", the crate's own
-        // baseline), unlike `main.rs`'s real startup path, which always
-        // calls `apply_from_config` before `ShellView` ever exists. Do that
-        // same call here so the active mode actually starts out mirroring
-        // config, the precondition this test means to exercise — `config
-        // ()` has no `[theme]` table at all (`ConfigSources::default()`),
-        // which `ThemeService::resolve_config` resolves to dark.
-        shell.update(&mut cx, |shell, cx| {
-            shell
-                .services
-                .theme
-                .apply_from_config(&shell.services.config, cx);
-        });
+        let text = std::fs::read_to_string(user_dir.join("app.toml"))
+            .expect("the keystroke must have written app.toml");
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
         assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
-            crate::theme::Mode::Dark,
-            "sanity: a config with no [theme] table resolves to dark"
-        );
-
-        let before_toggle = shell.read_with(&cx, |shell, _| shell.session_theme_mode());
-        assert_eq!(
-            before_toggle, None,
-            "the active mode merely mirroring the config's own resolved mode \
-             must not fossilize a theme_mode into the session"
-        );
-
-        shell.update(&mut cx, |shell, cx| {
-            shell.services.theme.toggle_mode(cx);
-        });
-        assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
-            crate::theme::Mode::Light,
-            "sanity: toggle_mode should have flipped the active mode to light"
-        );
-
-        let after_toggle = shell.read_with(&cx, |shell, _| shell.session_theme_mode());
-        assert_eq!(
-            after_toggle,
-            Some("light".to_string()),
-            "a genuine in-session toggle that diverges from the config's \
-             resolved mode must be recorded so it survives a restart"
+            doc["theme"]["mode"].as_str(),
+            Some(expected_mode),
+            "the persisted [theme].mode must match the mode the keystroke applied"
         );
     }
 

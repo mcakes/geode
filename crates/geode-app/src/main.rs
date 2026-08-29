@@ -33,33 +33,18 @@ fn main() {
 
             // Restore the session (Task 3) before constructing ShellView:
             // the saved workspace layout replaces the fresh `Workspaces::
-            // new()` set above, and — deliberately AFTER apply_from_config
-            // just ran — a saved theme mode, when present, is re-applied on
-            // top of it, so a session's genuinely toggled mode wins over
-            // the config's default mode (a runtime `theme::toggle_mode`
-            // survives a restart even if `app.toml`'s `[theme].mode` still
-            // says the old value). `extra.theme_mode` is `None` (fix wave,
-            // Fix 3 — see `session::SessionExtra`'s doc comment and
-            // `ShellView::session_theme_mode`) whenever the session's
-            // active mode at last save just mirrored config rather than
-            // diverging from it, so an offline `[theme].mode` edit with no
-            // in-session toggle takes effect here instead of being
-            // silently overridden by a stale session value.
+            // new()` set above. Pure layout state now — theme choices are
+            // ordinary config (`[theme]` in `app.toml`, written by
+            // `ShellView::persist_theme` via `theme::persist_to_user_config`)
+            // resolved by `apply_from_config` above like everything else, so
+            // there is no session-side theme re-application step to run
+            // here any more.
             if let Some(path) = &services.session_path {
-                let (workspaces, extra, warnings) = session::load(path);
+                let (workspaces, warnings) = session::load(path);
                 for warning in &warnings {
                     eprintln!("[session] warning: {warning}");
                 }
                 services.workspaces = workspaces;
-                if let Some(mode) = extra.theme_mode.as_deref() {
-                    match mode {
-                        "light" => services.theme.set_mode(theme::Mode::Light, cx),
-                        "dark" => services.theme.set_mode(theme::Mode::Dark, cx),
-                        other => {
-                            eprintln!("[session] warning: unknown theme_mode '{other}'; ignoring")
-                        }
-                    }
-                }
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
@@ -67,9 +52,11 @@ fn main() {
             // wire it up as a belt-and-suspenders save — the post-dispatch
             // save in `ShellView::dispatch` already covers crash-robustness
             // for every workspace-mutating action; this only additionally
-            // catches a theme-mode-only change (`theme::toggle_mode`, which
-            // is not itself a workspace-mutating dispatch) made just before
-            // quitting with no workspace action after it.
+            // catches a workspace mutation made just before quitting, ahead
+            // of the background watcher's next ~500ms flush. (A theme
+            // change persists synchronously the moment it applies —
+            // `ShellView::persist_theme` — so it needs no quit-time flush
+            // of its own any more.)
             cx.on_app_quit(|cx| {
                 for window in cx.windows() {
                     if let Some(handle) = window.downcast::<Root>() {
