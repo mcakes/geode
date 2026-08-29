@@ -156,3 +156,32 @@ Reinstated (the earlier cut is obsolete): the `ctrl+w` prefix now creates a real
 - **Coverage of user direction:** titlebar-integrated toolbar with no extra row and no content yet (T4), sidebar with workspace indicators + profile icon → settings dialog on the `setting` module (T4+T5), vim-style `ctrl+w` focus/move prefix + `ctrl+k` palette (T2), palette placeholder removed (T6), fuzzy highlighting (T6). Multi-window: excluded per user. Hot reload (T1), direct resize + vim bindings (T2), session persistence (T3), which-key (T8 — reinstated because the `ctrl+w` prefix creates a real sequence family).
 - **Consistency:** new action ids (`workspace::resize_*`, `workspace::move_*`, `settings::open`, `workspace::resize_mode/exit`) all registered in defaults with bindings; guard test stays diagnostic-free; dispatcher arms match; watcher ignores `session.toml`; palette-open cancels pending (supersedes the 1b-ui deferred note).
 - **Order:** T1 and T2 independent; T3 before T4 only for `next_tile` API stability (not strictly required — briefs are self-contained); T4 before T5 (profile icon hosts the open path).
+
+---
+
+### Task 9: Uniform dialog utility (user direction, added mid-phase)
+
+**Files:** Create `crates/geode-shell/src/shell/dialog.rs`; modify `shell/mod.rs`, `shell/settings_view.rs`, `CLAUDE.md`.
+
+**Interfaces:**
+- `dialog::open_shell_dialog(view: &mut ShellView, window, cx, build: impl FnOnce(...))` — the single mandatory door for opening any dialog in Geode. On open it: (1) cancels any pending key sequence (`matcher.cancel()` — consistent with palette-open), (2) closes the palette if open, (3) delegates to gpui-component's dialog layer with our standard conventions. Signature adapts to what `window.open_dialog`'s builder actually needs at the pinned rev — structure is the contract.
+- Chord suppression while a dialog is open is already handled centrally by the `has_active_dialog` guard in `handle_key_down` (final-review fix) — this utility does NOT duplicate it; its module doc references the guard so the two halves of the uniform behavior are discoverable together.
+- Module doc states the rule: dialogs are opened through this function, never `window.open_dialog` directly. Migrate `settings_view::open` to it (the only current call site — the convention is established while there's exactly one). CLAUDE.md gains a one-line gotcha under the gpui section.
+- Tests: a `#[gpui::test]` proving open-through-utility cancels pending (start a `ctrl+w` sequence, open a dialog via the utility, assert pending cleared and which-key overlay gone) and closes an open palette.
+
+**Steps:** implement → migrate settings_view → tests → full verification → commit `feat: uniform shell dialog utility — pending/palette hygiene on open`.
+
+---
+
+### Task 10: Fonts — JetBrains Mono and Inter (user direction, added mid-phase)
+
+**Files:** Create `assets/fonts/` (vendored TTF/OTF + OFL license files); modify `crates/geode-app/src/main.rs` (font registration), `crates/geode-shell` render code where mono applies, possibly theme wiring.
+
+**Interfaces:**
+- Vendor both families into `assets/fonts/` (static weights actually used — regular/medium/semibold for Inter, regular/bold for JetBrains Mono — not every weight; include each family's OFL-1.1 license file alongside). Both are SIL OFL — vendoring is fine; record exact upstream versions in a small README in that directory.
+- INVENTORY-FIRST: inspect how the pinned revs want fonts wired — gpui's text system accepts embedded font bytes at startup (find the exact API in the zed checkout: `text_system().add_fonts` or equivalent), and gpui-component's `Theme` carries font-family configuration (inspect `crates/ui/src/theme/` for `font_family`/mono equivalents and how `ThemeConfig` interacts — a theme JSON must not override our families unexpectedly; record findings).
+- Mapping (user-approved): **Inter** = default UI face (chrome, palette titles, dialogs, hints — becomes the window/theme default). **JetBrains Mono** = data face: keystroke/binding displays (status pending keys, which-key key column, palette binding hints), tile placeholder labels; documented as the face the phase-3 blotter will use for cells. Mono usages reference the family explicitly via a shared constant (e.g. `shell::fonts::MONO`), not string literals scattered.
+- Fallback honesty: if a font fails to load, the app must still run on the platform default (warning to stderr) — never panic.
+- Tests: font registration smoke (`#[gpui::test]` asserting the families resolve in the text system if the API allows; else document), plus the shared-constant usage compiled everywhere (grep test in report).
+
+**Steps:** inventory inspection (record findings) → vendor fonts + licenses + README → register at startup → apply mapping via theme/window defaults + `fonts::MONO` constant at the named mono sites → tests + honest manual note → full FINAL verification (`cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check && cargo bench --workspace --no-run`) → commit `feat: bundled Inter and JetBrains Mono with UI/data font mapping`.
