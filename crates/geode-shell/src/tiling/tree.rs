@@ -55,6 +55,7 @@ impl Rect {
 }
 
 /// Edge-adjacency tolerance for unit-space geometry comparisons.
+/// MIN_RATIO bounds ratios, not absolute size, so deeply nested layouts can in principle produce tiles thinner than EPS whose adjacency checks then fail; unreachable in realistic layouts (measured clean at <= 12 tiles), revisit if tile counts grow far beyond that.
 pub(crate) const EPS: f32 = 1e-3;
 
 /// Smallest fraction any split child may occupy.
@@ -150,13 +151,15 @@ impl Tree {
     /// Split the focused tile, placing `new` adjacent to it. On an empty
     /// tree this creates the first tile (the split verbs double as "open a
     /// tile"). Sibling ratios equalize on insert (documented v1
-    /// simplification). Focus moves to the new tile.
+    /// simplification). Focus moves to the new tile. Splitting a non-empty
+    /// tree exits fullscreen.
     pub fn split(&mut self, new: TileId, orientation: Orientation) {
         match (self.root.take(), self.focused) {
             (None, _) => {
                 self.root = Some(Node::Leaf(new));
             }
             (Some(root), Some(focused)) => {
+                self.fullscreen = None;
                 self.root = Some(split_at(root, focused, new, orientation));
             }
             // Invariant: focused is Some whenever root is Some.
@@ -852,5 +855,39 @@ mod tests {
         tree.close();
         assert_eq!(tree.fullscreen(), None);
         assert_eq!(rects(&tree).len(), 3);
+    }
+
+    #[test]
+    fn split_while_fullscreen_exits_fullscreen() {
+        let mut tree = grid();
+        tree.toggle_fullscreen();
+        assert_eq!(tree.fullscreen(), Some(TileId(1)));
+        tree.split(TileId(9), Orientation::Horizontal);
+        assert_eq!(tree.fullscreen(), None, "split must exit fullscreen");
+        assert_eq!(tree.focused(), Some(TileId(9)));
+        assert_eq!(rects(&tree).len(), 5, "all tiles visible again");
+    }
+
+    #[test]
+    fn composed_resize_split_close_keeps_ratios_normalized() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        // Push toward the clamp, then split (equalizes), then close (renormalizes).
+        assert!(tree.resize(Direction::Right, 0.4)); // ratios [0.9, 0.1]
+        tree.split(TileId(3), Orientation::Horizontal); // equalize to thirds
+        tree.focus(TileId(2));
+        tree.close(); // renormalize the survivors
+        let rects = tree.layout(Rect::UNIT);
+        assert_eq!(rects.len(), 2);
+        let total: f32 = rects.iter().map(|(_, r)| r.w).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-4,
+            "layout must partition the unit square, got {total}"
+        );
+        for (_, r) in &rects {
+            assert!(r.w > 0.0, "no zero/negative-width tiles");
+        }
     }
 }

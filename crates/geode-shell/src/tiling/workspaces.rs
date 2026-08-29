@@ -42,6 +42,7 @@ impl Workspaces {
     }
 
     pub fn active_mut(&mut self) -> &mut Tree {
+        // Invariant: 'active' is always a key — established in new() and switch().
         self.spaces
             .get_mut(&self.active)
             .expect("active workspace always exists")
