@@ -7,6 +7,9 @@ publish.workspace = true
 [dependencies]
 rand = "0.9"
 
+[lib]
+bench = false
+
 [dev-dependencies]
 criterion = "0.8.2"
 
