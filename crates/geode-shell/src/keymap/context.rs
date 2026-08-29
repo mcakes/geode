@@ -1,3 +1,5 @@
+const MAX_DEPTH: u32 = 64;
+
 /// One frame of the focus-context stack, e.g. `blotter` with `mode=normal`.
 /// The stack runs outermost → innermost.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,6 +139,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 toks.push(Tok::Str(value));
             }
             c if c.is_ascii_alphanumeric() || c == '_' || c == '-' => {
+                // '-' is accepted anywhere in an identifier so kebab-case context names work.
                 let mut ident = String::new();
                 while let Some(&ch) = chars.peek() {
                     if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
@@ -157,6 +160,7 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    depth: u32,
 }
 
 impl Parser {
@@ -195,7 +199,14 @@ impl Parser {
     fn parse_unary(&mut self) -> Result<Predicate, String> {
         if self.peek() == Some(&Tok::Not) {
             self.advance();
-            Ok(Predicate::Not(Box::new(self.parse_unary()?)))
+            self.depth += 1;
+            if self.depth > MAX_DEPTH {
+                self.depth -= 1;
+                return Err("context expression too deeply nested".to_string());
+            }
+            let result = self.parse_unary();
+            self.depth -= 1;
+            Ok(Predicate::Not(Box::new(result?)))
         } else {
             self.parse_primary()
         }
@@ -204,7 +215,14 @@ impl Parser {
     fn parse_primary(&mut self) -> Result<Predicate, String> {
         match self.advance() {
             Some(Tok::LParen) => {
-                let inner = self.parse_or()?;
+                self.depth += 1;
+                if self.depth > MAX_DEPTH {
+                    self.depth -= 1;
+                    return Err("context expression too deeply nested".to_string());
+                }
+                let inner = self.parse_or();
+                self.depth -= 1;
+                let inner = inner?;
                 if self.advance() != Some(Tok::RParen) {
                     return Err("expected ')'".to_string());
                 }
@@ -236,7 +254,11 @@ pub fn parse_predicate(s: &str) -> Result<Predicate, String> {
     if toks.is_empty() {
         return Err("empty context expression".to_string());
     }
-    let mut parser = Parser { toks, pos: 0 };
+    let mut parser = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let pred = parser.parse_or()?;
     if parser.pos != parser.toks.len() {
         return Err("unexpected trailing tokens".to_string());
@@ -321,5 +343,21 @@ mod tests {
         assert!(parse_predicate("(a").is_err());
         assert!(parse_predicate("a b").is_err());
         assert!(parse_predicate("mode == \"unterminated").is_err());
+    }
+
+    #[test]
+    fn deeply_nested_expression_is_an_error_not_a_crash() {
+        let many_bangs = format!("{}x", "!".repeat(200_000));
+        assert!(parse_predicate(&many_bangs).is_err());
+        let many_parens = format!("{}x{}", "(".repeat(200_000), ")".repeat(200_000));
+        assert!(parse_predicate(&many_parens).is_err());
+    }
+
+    #[test]
+    fn reasonable_nesting_still_parses() {
+        let nested = format!("{}x{}", "(".repeat(32), ")".repeat(32));
+        assert!(parse_predicate(&nested).is_ok());
+        let bangs = format!("{}x", "!".repeat(16));
+        assert!(parse_predicate(&bangs).is_ok());
     }
 }

@@ -13,7 +13,7 @@ pub struct Binding {
     pub predicate: Option<Predicate>,
     pub action: ActionId,
     pub layer: Layer,
-    /// Global definition order across all layers; higher wins ties.
+    /// Global definition order across all layers. Informational: the matcher resolves ties by iteration order of Keymap::bindings(), which this mirrors — do not reorder bindings and rely on index alone.
     pub index: usize,
 }
 
@@ -31,6 +31,7 @@ impl Keymap {
 /// Compile keymap docs (unmerged, in Builtin → Desk → User order) into a
 /// flat binding list. Bad entries are skipped with a diagnostic — a typo in
 /// a user keymap must never take down the keymap (spec §10.1).
+/// Within one [bindings.keys] table, TOML key uniqueness is by spelling, so two spellings that normalize to the same sequence (e.g. "alt+h" and "mod+h" when mod=alt) can coexist; they are iterated alphabetically, so which wins is determined by spelling, not declaration order.
 pub fn build_keymap(
     layered: &[LayerDoc],
     mod_alias: Modifiers,
