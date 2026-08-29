@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/geode-core",
+    "crates/geode-data",
+    "crates/geode-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+geode-core = { path = "crates/geode-core" }
+
+# Release builds keep debug symbols: profiling support from day one (spec §7.4).
+[profile.release]
+debug = true
+lto = "thin"
+
+[profile.bench]
+debug = true
