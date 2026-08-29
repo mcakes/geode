@@ -55,18 +55,25 @@ fn merge_table(
         };
         let entry_depth = depth + 1;
         let replace_whole = atomic == Some(entry_depth);
-        let should_recurse_into_table = matches!(value, Value::Table(_)) && !replace_whole;
-        if should_recurse_into_table {
-            // Create or get the table in dst, then recurse to record provenance on leaves
-            if !dst.contains_key(key) {
+        match (dst.get(key), value) {
+            (Some(Value::Table(_)), Value::Table(s)) if !replace_whole => {
+                // Both are tables and not at atomic boundary: recurse
+                if let Some(Value::Table(d)) = dst.get_mut(key) {
+                    merge_table(d, s, layer, prov, &child_path, entry_depth, atomic);
+                }
+            }
+            (None, Value::Table(s)) if !replace_whole => {
+                // Key doesn't exist, create table and recurse to record provenance on leaves
                 dst.insert(key.clone(), Value::Table(Table::new()));
+                if let Some(Value::Table(d)) = dst.get_mut(key) {
+                    merge_table(d, s, layer, prov, &child_path, entry_depth, atomic);
+                }
             }
-            if let (Some(Value::Table(d)), Value::Table(s)) = (dst.get_mut(key), value) {
-                merge_table(d, s, layer, prov, &child_path, entry_depth, atomic);
+            _ => {
+                // All other cases: wholesale replace (scalars, arrays, type mismatches, atomic)
+                dst.insert(key.clone(), value.clone());
+                record_provenance(prov, &child_path, layer);
             }
-        } else {
-            dst.insert(key.clone(), value.clone());
-            record_provenance(prov, &child_path, layer);
         }
     }
 }
@@ -168,5 +175,18 @@ mod tests {
         );
         assert_eq!(merged.provenance.get("keymap.mod"), Some(&Layer::User));
         assert_eq!(merged.provenance.get("theme.name"), Some(&Layer::Builtin));
+    }
+
+    #[test]
+    fn later_table_replaces_earlier_scalar_of_same_key() {
+        let merged = merge_docs(
+            "app",
+            &[
+                doc(Layer::Builtin, "app", "keymap = \"flat\"\n"),
+                doc(Layer::User, "app", "[keymap]\nmod = \"ctrl\"\n"),
+            ],
+        );
+        assert_eq!(merged.value["keymap"]["mod"].as_str(), Some("ctrl"));
+        assert_eq!(merged.provenance.get("keymap"), Some(&Layer::User));
     }
 }
