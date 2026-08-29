@@ -21,19 +21,32 @@ use std::collections::HashMap;
 /// and whose predicate passes against `stack`, the keystroke immediately
 /// following `pending` paired with the action that binding resolves to.
 ///
-/// Bindings are deduped by that next keystroke. Two rules, mirroring how
-/// `Matcher` itself resolves the same ambiguities once that next key is
-/// actually pressed:
-/// - among bindings tied for the *shortest* total length at this next
-///   keystroke, last-wins by layer-then-declaration order — so a
-///   user-layer rebind (or unbind, via the `none` action) of the same
-///   extended sequence shadows whatever a lower layer bound there;
-/// - a binding that resolves exactly one keystroke past `pending` beats a
-///   longer one sharing the same next keystroke (`Matcher`'s own
-///   "exact match beats longer candidate", `matcher.rs`
-///   `exact_match_beats_longer_candidate`) — pressing that key would fire
-///   the shorter binding's action immediately, not extend the sequence
-///   further, so that's the action worth advertising for it.
+/// Bindings are deduped by that next keystroke, keeping the *shortest*
+/// binding when more than one shares it. That "shortest wins" outcome
+/// rests on two different justifications depending on how short the
+/// survivor is — this is not one rule mirroring `Matcher` throughout:
+/// - **Exactly one keystroke past `pending`:** this genuinely mirrors
+///   `Matcher` itself (its own "exact match beats longer candidate",
+///   `matcher.rs` `exact_match_beats_longer_candidate`) — pressing that key
+///   would fire this binding's action immediately rather than extend the
+///   sequence further, so it's the *only* action `Matcher` could ever
+///   resolve to for that key. No ambiguity, nothing conventional about it.
+/// - **Two (or more) candidates all longer than one keystroke** — e.g.
+///   `"ctrl+w h x"` (len 3) and `"ctrl+w h y z"` (len 4) both sharing next
+///   keystroke `h` from `pending = ["ctrl+w"]`: here `Matcher` has *no*
+///   analogous precedent — every one of them would leave `Matcher` merely
+///   `Pending` at that key, with no opinion between them until further
+///   keys arrive. Preferring the shortest here is a **deliberate display
+///   convention** of this hint alone (shorter sequences are likelier to be
+///   what the user is about to complete), pinned by
+///   `both_longer_collision_keeps_the_shorter_sequence_as_a_convention`
+///   below so a future change to it is a conscious one, not an accident of
+///   `HashMap` iteration order.
+///
+/// Independently of shortest-wins: among bindings tied for the very same
+/// length at this next keystroke, last-wins by layer-then-declaration
+/// order — so a user-layer rebind (or unbind, via the `none` action) of
+/// the same extended sequence shadows whatever a lower layer bound there.
 ///
 /// Only after that resolution are entries whose *final* action is `none`
 /// dropped: an unbound continuation must not be advertised as one, but an
@@ -264,6 +277,31 @@ mod tests {
         assert_eq!(
             continuations(&km, &[], &[]),
             vec![(ks("g"), action("a::g"))]
+        );
+    }
+
+    #[test]
+    fn both_longer_collision_keeps_the_shorter_sequence_as_a_convention() {
+        // Unlike `exact_binding_beats_a_longer_one_sharing_the_same_next_
+        // key`, *neither* binding here resolves at the next keystroke:
+        // "ctrl+w h x" (len 3) and "ctrl+w h y z" (len 4) both extend past
+        // it. `Matcher` has no precedent to mirror for this case — every
+        // candidate would leave it merely `Pending` at "h", with no
+        // opinion between them until further keys arrive. Preferring the
+        // shorter one is this hint's own display convention (see
+        // `continuations`'s doc comment); this test pins that choice so a
+        // future change to it is deliberate, not an accident of `HashMap`
+        // iteration order.
+        let km = keymap(
+            &[(
+                Layer::Builtin,
+                "[[bindings]]\n[bindings.keys]\n\"ctrl+w h x\" = \"a::short\"\n\"ctrl+w h y z\" = \"a::long\"\n",
+            )],
+            &["a::short", "a::long"],
+        );
+        assert_eq!(
+            continuations(&km, &[ks("ctrl+w")], &[]),
+            vec![(ks("h"), action("a::short"))]
         );
     }
 
