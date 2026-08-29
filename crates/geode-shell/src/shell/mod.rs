@@ -3,13 +3,13 @@
 //! this task's placeholder — Task 3 replaces it with the real tiling
 //! surface and status bar; Task 6 wires the real command palette.
 
-mod keys;
+pub mod keys;
 
 pub use keys::convert_keystroke;
 
 use gpui::prelude::*;
 use gpui::{Context, FocusHandle, KeyDownEvent, Window};
-use gpui_component::{ActiveTheme as _, v_flex};
+use gpui_component::{ActiveTheme as _, Root, v_flex};
 
 use crate::actions::ActionRegistry;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers};
@@ -92,7 +92,7 @@ impl ShellView {
 }
 
 impl Render for ShellView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let workspaces = &self.services.workspaces;
         let n = workspaces.active_index();
         let k = workspaces.active().tiles().len();
@@ -107,6 +107,12 @@ impl Render for ShellView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(format!("workspace {n} · {k} tiles · focused {focused:?}"))
+            // ShellView is the first-level view Root wraps; Root's own
+            // Render impl does not paint these overlay layers itself, so
+            // whoever it wraps must (spec: gpui-component usage.md "Overlay
+            // Layers"). Task 6's palette/dialogs need this in place now.
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
     }
 }
 
@@ -116,7 +122,6 @@ mod tests {
     use crate::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use crate::keymap::build_keymap;
     use geode_core::config::{ConfigSources, LayerDoc};
-    use gpui_component::Root;
 
     fn test_services() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
