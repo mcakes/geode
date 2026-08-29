@@ -119,6 +119,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Toggle light/dark theme",
         "Theme",
     );
+    // Task 4: the sidebar's bottom profile icon dispatches this. Task 5
+    // wires the real settings dialog (gpui-component's `setting` module);
+    // registering it now — with `ShellView::dispatch`'s matching arm a
+    // deliberate no-op until then — makes it palette-reachable today
+    // instead of appearing only once Task 5 lands.
+    action(reg, "settings::open", "Open settings", "Settings");
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).

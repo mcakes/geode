@@ -12,9 +12,9 @@ use geode_shell::session;
 use geode_shell::shell::{ShellServices, ShellView};
 use geode_shell::theme;
 use geode_shell::tiling::Workspaces;
+use gpui::App;
 use gpui::prelude::*;
-use gpui::{App, WindowOptions};
-use gpui_component::Root;
+use gpui_component::{Root, TitleBar};
 
 fn main() {
     gpui_platform::application()
@@ -74,7 +74,13 @@ fn main() {
             .detach();
 
             cx.spawn(async move |cx| {
-                cx.open_window(WindowOptions::default(), |window, cx| {
+                // Task 4: the toolbar IS the native title bar
+                // (`geode_shell::shell::toolbar`), so the window itself
+                // must be opened with gpui-component's title-bar-owned
+                // options (window controls, drag/double-click ownership) —
+                // see the doc comment on `TitleBar::window_options` and the
+                // `window_title` example at the pinned checkout.
+                cx.open_window(TitleBar::window_options(), |window, cx| {
                     let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
                     cx.new(|cx| Root::new(view, window, cx))
                 })

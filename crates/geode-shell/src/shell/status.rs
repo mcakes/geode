@@ -1,59 +1,50 @@
-//! The bottom status bar (Task 4, spec §3): workspace indicators, pending
-//! keystroke display, and the active theme name. `status_bar` is a pure
-//! function of its arguments — no stored state, no I/O — so `ShellView`
-//! (or its tests) can call it with whatever workspace/matcher/theme
+//! The bottom status bar (Task 4, spec §3): pending keystroke display, the
+//! config-reload indicator, and the active theme name. `status_bar` is a
+//! pure function of its arguments — no stored state, no I/O — so
+//! `ShellView` (or its tests) can call it with whatever matcher/theme
 //! snapshot they have on hand.
+//!
+//! Workspace indicators moved to the sidebar (Task 4 — `shell::sidebar`);
+//! this bar no longer knows the active workspace or which ones are
+//! non-empty. Per the phase-1c plan (`docs/superpowers/plans/
+//! 2026-08-29-phase-1c-shell-polish.md`, task 4 and its resize-binding
+//! section: "no `ShellMode`, ... no mode indicator"), there is no mode
+//! indicator either — Geode has never had a modal-editing concept for this
+//! bar to report.
+//!
+//! **Inventory decision:** migrated onto gpui-component's `StatusBar`
+//! (pinned checkout: `crates/ui/src/status_bar.rs`) rather than a hand-
+//! rolled `h_flex` — its `left`/`right`/center-`child` regions are exactly
+//! this bar's shape (pending+reload on the left, theme name on the right,
+//! nothing in the center), and it pulls in the dedicated `status_bar`/
+//! `status_bar_border` theme tokens (confirmed present in the pinned
+//! `theme_color.rs`) instead of this bar's previous `sidebar`-token
+//! workaround, which predated those tokens' use here.
 
 use gpui::prelude::*;
 use gpui::{App, IntoElement, div, px};
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui_component::ActiveTheme as _;
+use gpui_component::status_bar::StatusBar;
 
 use crate::keymap::Keystroke;
 
 /// Fixed height of the status bar, in pixels (spec target: ~26px).
 pub const HEIGHT: f32 = 26.0;
 
-/// Build the status bar: left — workspace indicators 1..=9 (active is
-/// `primary`-styled, non-empty ones normal, empty ones hidden except the
-/// active one); middle — pending keystrokes as space-separated text, then
-/// the reload indicator when `reload_message` is `Some` (Task 1c-1: a
+/// Build the status bar: left — pending keystrokes as space-separated text,
+/// then the reload indicator when `reload_message` is `Some` (Task 1c-1: a
 /// danger-toned `config: N error(s) — keeping last good` marker, `None`
 /// when config is healthy); right — the active theme name in
 /// `muted_foreground`. All colors come from `cx.theme()`; no other input is
 /// read, so the same call always renders the same tree for the same
 /// arguments.
 pub fn status_bar(
-    active_index: u8,
-    non_empty_indices: &[u8],
     pending: &[Keystroke],
     reload_message: Option<&str>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
-    // `sidebar` is present at the pinned gpui-component rev (checked against
-    // the vendored theme_color.rs); the brief's `muted` fallback is not
-    // needed here, but keep the intent noted for future rev bumps.
-    let bar_bg = theme.sidebar;
-
-    let mut indicators = h_flex().gap_2();
-    for n in 1..=9u8 {
-        let is_active = n == active_index;
-        let is_non_empty = non_empty_indices.contains(&n);
-        if !is_active && !is_non_empty {
-            // Empty, inactive workspaces stay out of the strip entirely.
-            continue;
-        }
-        indicators = indicators.child(
-            div()
-                .text_color(if is_active {
-                    theme.primary
-                } else {
-                    theme.foreground
-                })
-                .child(n.to_string()),
-        );
-    }
 
     let pending_text = pending
         .iter()
@@ -61,31 +52,20 @@ pub fn status_bar(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut middle = h_flex()
-        .items_center()
-        .gap_3()
-        .child(indicators)
-        .child(div().text_color(theme.muted_foreground).child(pending_text));
-    if let Some(message) = reload_message {
-        middle = middle.child(div().text_color(theme.danger).child(message.to_string()));
-    }
-
-    h_flex()
+    let mut bar = StatusBar::new()
         .flex_none()
         .w_full()
         .h(px(HEIGHT))
-        .items_center()
-        .justify_between()
-        .px_2()
-        .gap_3()
-        .bg(bar_bg)
-        .text_color(theme.foreground)
-        .child(middle)
-        .child(
-            div()
-                .text_color(theme.muted_foreground)
-                .child(theme_name.to_string()),
-        )
+        .left(div().text_color(theme.muted_foreground).child(pending_text));
+    if let Some(message) = reload_message {
+        bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
+    }
+
+    bar.right(
+        div()
+            .text_color(theme.muted_foreground)
+            .child(theme_name.to_string()),
+    )
 }
 
 /// Minimal, status-strip-grade rendering of one keystroke (`ctrl+shift+g`).

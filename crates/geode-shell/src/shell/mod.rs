@@ -1,11 +1,15 @@
 //! The shell's window root view (spec §3): a single view owning the whole
-//! window contents, key dispatch, and workspace state. Renders the tiling
-//! tree (Task 3) as themed, absolutely-positioned tiles, with a fixed-height
-//! status bar (Task 4, `status::status_bar`) below the tile area. Task 6
-//! wires the real command palette.
+//! window contents, key dispatch, and workspace state. Chrome (Task 4):
+//! `toolbar::toolbar` (the native title bar) on top, `sidebar::sidebar`
+//! (workspace indicators + profile icon) on the left, `status::status_bar`
+//! (pending keys, reload indicator, theme name) on the bottom. Between
+//! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
+//! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 pub mod keys;
+pub mod sidebar;
 pub mod status;
+pub mod toolbar;
 
 pub use keys::convert_keystroke;
 
@@ -13,8 +17,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::prelude::*;
-use gpui::{Context, FocusHandle, KeyDownEvent, MouseButton, Window, div, px};
-use gpui_component::{ActiveTheme as _, Root, v_flex};
+use gpui::{
+    Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, Window, div, px,
+};
+use gpui_component::input::InputState;
+use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, h_flex, v_flex};
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::defaults::mod_alias_from_config;
@@ -97,6 +104,14 @@ pub struct ShellView {
     /// onto the existing poll tick means at most one write per ~500ms
     /// regardless of how many workspace actions fired in that window.
     session_dirty: bool,
+    /// The toolbar's right-aligned filter field (Task 4). Deliberately
+    /// inert — nothing reads its value; it becomes the global text filter
+    /// (spec §4.1) in the data phase. Owned here (rather than built fresh
+    /// per render, like `status_bar`/`sidebar`'s stateless element fns) is
+    /// required: `Input` is a stateful gpui-component that needs a stable
+    /// `Entity<InputState>` across frames to keep its own cursor/selection/
+    /// focus state, not something rebuildable from scratch each render.
+    filter_input: Entity<InputState>,
 }
 
 impl ShellView {
@@ -109,6 +124,11 @@ impl ShellView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
         focus_handle.focus(window, cx);
+
+        // The toolbar's filter field (Task 4): built once here, not per
+        // render, so `Input`'s own cursor/selection/focus state survives
+        // across frames.
+        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter"));
 
         // `last_snapshot` starts empty rather than being seeded with a
         // synchronous `reload::scan` call right here: that would be real
@@ -214,6 +234,7 @@ impl ShellView {
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
+            filter_input,
         }
     }
 
@@ -353,6 +374,11 @@ impl ShellView {
             self.toggle_palette();
         } else if action.0 == "theme::toggle_mode" {
             self.services.theme.toggle_mode(cx);
+        } else if action.0 == "settings::open" {
+            // Task 4: registered and palette/sidebar-reachable now; Task 5
+            // fills this arm in with the real settings dialog (gpui-
+            // component's `setting` module). Deliberately a no-op today —
+            // not a missing case, so it prints/panics nothing.
         }
     }
 
@@ -527,9 +553,42 @@ impl ShellView {
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The filter field (Task 4) owns its own key handling while it has
+        // focus — typing must reach it, not the shell's keymap `Matcher`
+        // (brief: "shell chords won't fire — acceptable while typing a
+        // filter"). This has to be handled explicitly rather than relying
+        // on gpui's dispatch to simply not reach here: gpui-component's
+        // `Input` binds most editing keys (typing, backspace, arrows,
+        // ctrl+v paste, …) as *actions* scoped to its own key context, but
+        // its `Escape` action handler calls `cx.propagate()` whenever there
+        // is no popover/inline-completion/IME-marked-text/`clean_on_escape`
+        // to consume it (the plain-filter case, always, here) — and any key
+        // with *no* action binding at all in that context (e.g. `ctrl+h`,
+        // `ctrl+k`, bare typed letters) skips the action system entirely.
+        // Both cases still deliver the raw `KeyDownEvent` to every
+        // `on_key_down` listener up the dispatch path, this one included
+        // (verified against the pinned gpui rev's `Window::
+        // finish_dispatch_key_event`/`dispatch_key_down_up_event`), so
+        // without this guard e.g. `ctrl+h` typed into the filter would
+        // *also* dispatch `workspace::split_down`. Esc is the one key this
+        // view still acts on itself: it hands focus back to the shell root
+        // so hjkl and friends resume working immediately.
+        if self
+            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            if event.keystroke.key == "escape" {
+                self.focus_handle.focus(window, cx);
+                cx.notify();
+            }
+            return;
+        }
+
         if let Some(keystroke) = convert_keystroke(&event.keystroke)
             && self.is_palette_toggle(&keystroke)
         {
@@ -566,12 +625,16 @@ impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // `viewport_size` is the drawable area (excludes window chrome),
         // which is what `Tree::layout` should partition (gpui/window.rs).
-        // The status bar (Task 4) is a fixed-height strip below the tiles,
-        // so the tile area gets the viewport minus that height; `Tree::
-        // layout` is still called exactly once, over those shrunk bounds.
+        // Task 4 adds a top toolbar (the native title bar,
+        // `TITLE_BAR_HEIGHT`) and a left sidebar (`sidebar::WIDTH`) on top
+        // of the existing bottom status bar (`status::HEIGHT`); the tile
+        // area gets the viewport minus all three, and `Tree::layout` is
+        // still called exactly once, over those shrunk bounds.
         let viewport = window.viewport_size();
-        let width = f32::from(viewport.width);
-        let content_height = (f32::from(viewport.height) - status::HEIGHT).max(0.0);
+        let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let content_height =
+            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
 
         let (focused, rects) = {
             let tree = self.services.workspaces.active();
@@ -580,16 +643,20 @@ impl Render for ShellView {
                 tree.layout(Rect {
                     x: 0.0,
                     y: 0.0,
-                    w: width,
+                    w: tile_width,
                     h: content_height,
                 }),
             )
         };
 
-        // Fixed-height (not `size_full`) so it never competes with the
-        // status bar for space below it: the tile tree is laid out over
-        // exactly this height above, and the container must match.
-        let mut surface = div().relative().w_full().h(px(content_height)).flex_none();
+        // Fixed-size (not `size_full`) so it never competes with the
+        // sidebar/status bar for space: the tile tree is laid out over
+        // exactly this rect above, and the container must match.
+        let mut surface = div()
+            .relative()
+            .w(px(tile_width))
+            .h(px(content_height))
+            .flex_none();
         if rects.is_empty() {
             surface = surface.flex().items_center().justify_center().child(
                 div()
@@ -633,17 +700,26 @@ impl Render for ShellView {
             }
         }
 
+        let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
         let status_bar = status::status_bar(
-            self.services.workspaces.active_index(),
-            &non_empty,
             self.matcher.pending(),
             reload_message.as_deref(),
             self.services.theme.active_name(),
             cx,
         );
+        let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
+        let toolbar = toolbar::toolbar(&self.filter_input, cx);
 
+        let body = h_flex()
+            .w_full()
+            .h(px(content_height))
+            .flex_none()
+            .child(sidebar)
+            .child(surface);
+
+        let width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
 
         v_flex()
@@ -653,7 +729,8 @@ impl Render for ShellView {
             .on_key_down(cx.listener(Self::handle_key_down))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(surface)
+            .child(toolbar)
+            .child(body)
             .child(status_bar)
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
@@ -2077,5 +2154,202 @@ mod tests {
                 .is_none(),
             "the dirty flag must be consumed by the first take, not left set"
         );
+    }
+
+    // --- Task 4: chrome (toolbar, sidebar, slimmed status bar) ----------
+
+    /// Cheap evidence the new chrome actually paints something, on a
+    /// window with zero tiles open — before this task, an empty workspace
+    /// painted no quads at all (just the "ctrl+h / ctrl+v" placeholder
+    /// text). The title bar and sidebar now fill their own background
+    /// regardless of tile state, so this is a real regression check, not a
+    /// tautology.
+    #[gpui::test]
+    fn chrome_paints_quads_even_with_no_tiles_open(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let quads = cx.update(|window, _cx| window.painted_quads().len());
+        assert!(
+            quads > 0,
+            "the title bar and sidebar backgrounds should paint quads even \
+             with no tiles open"
+        );
+    }
+
+    /// Focus interplay (brief): pressing Escape while the filter input has
+    /// focus hands focus back to the shell root, through the real key-event
+    /// pipeline — Input's own `Escape` action handler `cx.propagate()`s (no
+    /// popover/inline-completion/IME text to consume it), and
+    /// `ShellView::handle_key_down`'s filter-input guard is what actually
+    /// does the refocus. Focus is set directly on the input's `FocusHandle`
+    /// (equivalent to what a real mouse click on it would produce) rather
+    /// than simulating the click itself, since the filter field's on-screen
+    /// position depends on window/text layout this test shouldn't need to
+    /// know.
+    #[gpui::test]
+    fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+        let filter_input = shell.read_with(&cx, |shell, _| shell.filter_input.clone());
+        let input_focus_handle = filter_input.read_with(&cx, |state, cx| state.focus_handle(cx));
+
+        cx.update(|window, cx| input_focus_handle.focus(window, cx));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.update(|window, _cx| input_focus_handle.is_focused(window)),
+            "sanity: focusing the input's own handle should make it focused"
+        );
+        assert!(
+            !cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "sanity: the shell root must not be focused while the input is"
+        );
+
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            !cx.update(|window, _cx| input_focus_handle.is_focused(window)),
+            "escape should have moved focus off the filter input"
+        );
+        assert!(
+            cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "escape should have returned focus to the shell root"
+        );
+    }
+
+    /// Focus interplay (brief): while the filter input has focus, a shell
+    /// chord that has no key binding at all in the input's own gpui action
+    /// context (`ctrl+h` = `workspace::split_down`) must not reach the
+    /// shell's keymap `Matcher` — it stays with the input instead of
+    /// splitting the workspace.
+    #[gpui::test]
+    fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let filter_input = shell.read_with(&cx, |shell, _| shell.filter_input.clone());
+        let input_focus_handle = filter_input.read_with(&cx, |state, cx| state.focus_handle(cx));
+        cx.update(|window, cx| input_focus_handle.focus(window, cx));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("ctrl-h");
+
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 0,
+            "ctrl+h (workspace::split_down) must not dispatch while the filter \
+             input has focus"
+        );
+    }
+
+    /// `settings::open` (Task 4: the sidebar's profile icon) is registered
+    /// and dispatches cleanly as a no-op through the normal chain — Task 5
+    /// fills in the real settings dialog. Also stands in for "the sidebar
+    /// paints": its click handler calling into this exact `dispatch` path
+    /// is what `sidebar::sidebar`'s profile icon wires up.
+    #[gpui::test]
+    fn settings_open_dispatches_as_a_clean_no_op(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        shell.update(&mut cx, |shell, cx| {
+            shell.dispatch(&ActionId("settings::open".to_string()), cx);
+        });
+
+        // Reaching this point without panicking, plus the workspace being
+        // untouched, is the whole assertion: `settings::open` is not a
+        // workspace verb and must not be mistaken for one.
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(tile_count, 0);
     }
 }
