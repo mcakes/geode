@@ -169,6 +169,10 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
             ws.active_mut().toggle_fullscreen();
             true
         }
+        "workspace::toggle_split_orientation" => {
+            ws.active_mut().toggle_split_orientation();
+            true
+        }
         "workspace::move_left" => {
             ws.active_mut().move_direction(Direction::Left);
             true
@@ -483,5 +487,27 @@ mod tests {
             &act("workspace::resize_right")
         ));
         assert_eq!(ws.active().layout(Rect::UNIT), before);
+    }
+
+    #[test]
+    fn toggle_split_orientation_action_reorients_the_focused_split() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        let before = ws.active().layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::toggle_split_orientation")
+        ));
+        let after = ws.active().layout(Rect::UNIT);
+        assert_ne!(before, after, "row should have become a stack");
+        // Claimed even when it changes nothing (lone tile), same contract
+        // as the resize arms.
+        let mut lone = Workspaces::new();
+        apply_workspace_action(&mut lone, &act("workspace::split_right"));
+        assert!(apply_workspace_action(
+            &mut lone,
+            &act("workspace::toggle_split_orientation")
+        ));
     }
 }

@@ -35,26 +35,6 @@ fn keystrokes_drive_the_tiling_tree() {
         }
     };
 
-    // Presses a whitespace-separated sequence of keystrokes (e.g. the
-    // "ctrl+w shift+h" vim window-prefix sequence); every keystroke but the last
-    // must leave the matcher Pending, and the last must resolve.
-    let press_seq = |matcher: &mut Matcher, ws: &mut Workspaces, spec: &str| {
-        let parts: Vec<&str> = spec.split_whitespace().collect();
-        for (i, part) in parts.iter().enumerate() {
-            let ks = parse_keystroke(part, mod_alias).unwrap();
-            match matcher.press(&keymap, ks, &stack) {
-                MatchResult::Matched(action) if i == parts.len() - 1 => {
-                    assert!(
-                        apply_workspace_action(ws, &action),
-                        "unhandled action {action}"
-                    );
-                }
-                MatchResult::Pending if i < parts.len() - 1 => {}
-                other => panic!("unexpected {other:?} at '{part}' in sequence '{spec}'"),
-            }
-        }
-    };
-
     // ctrl+v twice: two tiles side by side (workspace::split_right).
     press(&mut matcher, &mut ws, "ctrl+v");
     press(&mut matcher, &mut ws, "ctrl+v");
@@ -89,10 +69,18 @@ fn keystrokes_drive_the_tiling_tree() {
             .is_some()
     );
 
-    // Move-tile still rides the vim ctrl+w prefix as a two-keystroke
-    // sequence (ctrl+w shift+h = workspace::move_left) through the same
-    // matcher pipeline.
+    // Move-tile is the direct ctrl+shift+arrow binding
+    // (ctrl+shift+left = workspace::move_left), same pipeline. (The builtin
+    // keymap has no sequence bindings anymore; sequence matching itself is
+    // covered by keymap_integration's desk-layer "g g" binding.)
     let layout_before = ws.active().layout(Rect::UNIT);
-    press_seq(&mut matcher, &mut ws, "ctrl+w shift+h");
+    press(&mut matcher, &mut ws, "ctrl+shift+left");
     assert_ne!(ws.active().layout(Rect::UNIT), layout_before);
+
+    // mod+e: toggle the focused tile's parent split orientation — geometry
+    // changes, tile count doesn't.
+    let layout_before = ws.active().layout(Rect::UNIT);
+    press(&mut matcher, &mut ws, "mod+e");
+    assert_ne!(ws.active().layout(Rect::UNIT), layout_before);
+    assert_eq!(ws.active().layout(Rect::UNIT).len(), layout_before.len());
 }

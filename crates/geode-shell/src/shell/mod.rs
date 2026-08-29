@@ -127,7 +127,7 @@ pub struct ShellView {
     /// where the actual file write happens — off the UI thread (Task 3 fix
     /// round 1: the first cut of this wrote synchronously per dispatch,
     /// which stalls the render thread on a slow filesystem under OS
-    /// key-repeat, e.g. holding shift+h at ~20-30 events/sec). Coalescing
+    /// key-repeat, e.g. holding shift+left at ~20-30 events/sec). Coalescing
     /// onto the existing poll tick means at most one write per ~500ms
     /// regardless of how many workspace actions fired in that window.
     session_dirty: bool,
@@ -1249,7 +1249,7 @@ mod tests {
         );
     }
 
-    /// End-to-end: `shift+h` (`workspace::resize_left`, a direct binding —
+    /// End-to-end: `shift+left` (`workspace::resize_left`, a direct binding —
     /// no mode) moves the divider adjacent to the focused tile leftward by
     /// `tiling::RESIZE_STEP` — real key dispatch all the way to
     /// `Tree::move_divider`. Focus here is the rightmost tile (no divider
@@ -1257,7 +1257,7 @@ mod tests {
     /// it left widens the focused tile (the edge-flip case documented on
     /// `Tree::move_divider`).
     #[gpui::test]
-    fn shift_h_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
+    fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -1287,7 +1287,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
 
-        cx.simulate_keystrokes("shift-h");
+        cx.simulate_keystrokes("shift-left");
 
         let focused_width = shell.read_with(&cx, |shell, _| {
             let tree = shell.services.workspaces.active();
@@ -1301,7 +1301,7 @@ mod tests {
         });
         assert!(
             (focused_width - (0.5 + crate::tiling::RESIZE_STEP)).abs() < 1e-4,
-            "shift+h should have widened the focused (rightmost) tile by moving \
+            "shift+left should have widened the focused (rightmost) tile by moving \
              its left divider left by RESIZE_STEP, got width {focused_width}"
         );
     }
@@ -1393,11 +1393,11 @@ mod tests {
         );
     }
 
-    /// End-to-end: `ctrl+w shift+l` (`workspace::move_right`, the vim
-    /// window-prefix sequence's move analog) swaps the focused tile with
+    /// End-to-end: `ctrl+shift+right` (`workspace::move_right`, a direct
+    /// binding) swaps the focused tile with
     /// its right neighbor, focus following the moved tile.
     #[gpui::test]
-    fn ctrl_w_shift_l_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
+    fn ctrl_shift_right_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -1435,7 +1435,7 @@ mod tests {
             shell.services.workspaces.active().layout(Rect::UNIT)
         });
 
-        cx.simulate_keystrokes("ctrl-w shift-l");
+        cx.simulate_keystrokes("ctrl-shift-right");
 
         let after_focused =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
@@ -1448,7 +1448,7 @@ mod tests {
         );
         assert_ne!(
             before, after,
-            "ctrl+w shift+l should have swapped the two tiles' positions"
+            "ctrl+shift+right should have swapped the two tiles' positions"
         );
     }
 
@@ -1557,10 +1557,9 @@ mod tests {
     /// Layers a test-only `"g g"` sequence binding on top of the builtin
     /// keymap (spec §3.4: sequence bindings), so the status bar's
     /// pending-keystroke display (Task 4) has something real to show. The
-    /// builtin keymap does start real sequences now (`ctrl+w shift+h/j/k/l`,
-    /// the move-tile chords), but `"g"` shares no prefix with `"ctrl+w"`, so this
-    /// isolated binding stays the cheapest way to exercise a lone pending
-    /// keystroke without any interaction from the real vim-prefix bindings.
+    /// builtin keymap has no sequence bindings anymore (move-tile went
+    /// direct to `ctrl+shift+arrows`), so this isolated binding is the way
+    /// tests exercise a pending keystroke at all.
     fn test_services_with_gg_binding() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
         let mut registry = ActionRegistry::default();
@@ -2698,7 +2697,7 @@ mod tests {
     /// must mark the session dirty and return *without* touching the
     /// filesystem at all — no synchronous write on the UI thread, however
     /// many dispatches fire back to back (this is exactly what OS
-    /// key-repeat does to `shift+h`, ~20-30 dispatches/sec while held). The
+    /// key-repeat does to `shift+left`, ~20-30 dispatches/sec while held). The
     /// file only appears once something actually flushes
     /// `take_dirty_session_write`'s pending write — see the end-to-end test
     /// below for that half.
@@ -3814,9 +3813,10 @@ mod tests {
     /// Task 9: opening a modal through `dialog::open_shell_dialog` (here,
     /// `settings::open` — the only current call site, migrated onto the
     /// utility) must cancel a pending keymap sequence, the same hygiene
-    /// `toggle_palette` already gives palette-open. Real `ctrl+w` keystroke
-    /// starts the vim window-prefix sequence (`ctrl+w shift+h/j/k/l`, the
-    /// builtin move-tile chords), which leaves one pending keystroke and paints the
+    /// `toggle_palette` already gives palette-open. A real `g` keystroke
+    /// starts the test-only `"g g"` sequence (`test_services_with_gg_binding`
+    /// — the builtin keymap has no sequences of its own anymore), which
+    /// leaves one pending keystroke and paints the
     /// which-key overlay (Task 8); opening the settings modal must clear
     /// both.
     #[gpui::test]
@@ -3826,7 +3826,9 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
+                    });
                     cx.new(|cx| Root::new(view, window, cx))
                 })
             })
@@ -3845,19 +3847,19 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        // Start (but don't finish) the "ctrl+w shift+h/j/k/l" sequence.
-        cx.simulate_keystrokes("ctrl-w");
+        // Start (but don't finish) the "g g" sequence.
+        cx.simulate_keystrokes("g");
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell.matcher.pending().len()),
             1,
-            "sanity: ctrl+w alone should leave the vim window-prefix pending"
+            "sanity: g alone should leave the test sequence pending"
         );
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
         assert!(
             cx.debug_bounds("whichkey-overlay").is_some(),
-            "sanity: the which-key overlay should paint while ctrl+w is pending"
+            "sanity: the which-key overlay should paint while g is pending"
         );
 
         // Open the settings modal through the real dispatch path — since
@@ -3875,7 +3877,7 @@ mod tests {
         assert!(
             shell.read_with(&cx, |shell, _| shell.matcher.pending().is_empty()),
             "opening a modal through open_shell_dialog should cancel the \
-             pending ctrl+w sequence, same as palette-open does"
+             pending g sequence, same as palette-open does"
         );
 
         cx.update(|window, cx| {

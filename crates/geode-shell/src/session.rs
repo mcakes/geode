@@ -346,7 +346,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// This is real, potentially-blocking file I/O (Task 3 fix round 1: a
 /// review finding on the first cut of this module, which ran this inline
 /// on the UI thread once per workspace-mutating dispatch — holding e.g.
-/// shift+h at OS key-repeat, ~20-30 events/sec, could then stall the render
+/// shift+left at OS key-repeat, ~20-30 events/sec, could then stall the render
 /// thread on a slow filesystem). Callers driven by UI events must run this
 /// on a background executor, never inline — see `ShellView`'s ~500ms
 /// watcher-tick flush, which is the only per-dispatch path left after that

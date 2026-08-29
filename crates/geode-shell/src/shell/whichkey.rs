@@ -1,6 +1,8 @@
 //! The which-key hint (Task 8, spec §3): while a keystroke sequence is
-//! pending (`Matcher::pending()` non-empty — e.g. mid-way through `ctrl+w
-//! h`), show a small overlay listing every keystroke that would continue
+//! pending (`Matcher::pending()` non-empty — e.g. mid-way through a
+//! desk/user-layer sequence like `g g`; the builtin keymap has no
+//! sequences of its own anymore), show a small overlay listing every
+//! keystroke that would continue
 //! some binding from here, next to the title of what it would do.
 //!
 //! Split the same way `palette.rs` is: `continuations` is the pure core

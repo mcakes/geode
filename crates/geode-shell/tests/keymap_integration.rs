@@ -57,13 +57,9 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
         matcher.press(&keymap, ks("mod+j"), &stack),
         MatchResult::Matched(ActionId("workspace::focus_down".into()))
     );
-    // The vim window prefix still carries the move-tile sequences.
+    // Move-tile is the direct ctrl+shift+arrow binding.
     assert_eq!(
-        matcher.press(&keymap, ks("ctrl+w"), &stack),
-        MatchResult::Pending
-    );
-    assert_eq!(
-        matcher.press(&keymap, ks("shift+j"), &stack),
+        matcher.press(&keymap, ks("ctrl+shift+down"), &stack),
         MatchResult::Matched(ActionId("workspace::move_down".into()))
     );
     // Desk-added sequence: pending, then match.

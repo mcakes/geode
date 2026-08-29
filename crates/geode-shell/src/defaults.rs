@@ -11,16 +11,18 @@ use geode_core::config::Config;
 /// the primary modifier, replacing the Phase 1c `ctrl+w h/j/k/l` chords).
 /// Not `ctrl+arrows`: macOS binds those to Mission Control/Spaces
 /// system-wide and swallows the events before any app sees them.
-/// Move-tile keeps the vim window
-/// prefix `ctrl+w` as a two-keystroke sequence (`ctrl+w shift+h` etc.),
-/// mirroring `<C-w>H`. Splits follow vim's own mnemonics —
+/// Move-tile is `ctrl+shift+arrows` and resize is `shift+arrows` (user
+/// direction, retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window
+/// prefix and `shift+h/j/k/l`) — the builtin keymap now has no sequence
+/// bindings at all; sequences remain a first-class engine feature for
+/// desk/user layers. Splits follow vim's own mnemonics —
 /// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
 /// which is why the actions they bind to are named by resulting geometry
 /// (`split_right`/`split_down`) rather than by vim verb: naming them
 /// `split_vertical`/`split_horizontal` would read backwards against these
-/// keys. Resize is a direct binding, not a mode: `shift+h/j/k/l` move the
-/// divider adjacent to the focused tile toward that letter's direction by
-/// `RESIZE_STEP` (vim's model — the key names the divider's direction, not
+/// keys. Resize is a direct binding, not a mode: `shift+arrows` move the
+/// divider adjacent to the focused tile toward the arrow's direction by
+/// `RESIZE_STEP` (the key names the divider's direction, not
 /// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
 /// consequence when the focused tile has no divider on that side).
 pub const BUILTIN_KEYMAP: &str = r#"
@@ -31,16 +33,17 @@ context = "workspace"
 "mod+j" = "workspace::focus_down"
 "mod+k" = "workspace::focus_up"
 "mod+l" = "workspace::focus_right"
-"ctrl+w shift+h" = "workspace::move_left"
-"ctrl+w shift+j" = "workspace::move_down"
-"ctrl+w shift+k" = "workspace::move_up"
-"ctrl+w shift+l" = "workspace::move_right"
-"shift+h" = "workspace::resize_left"
-"shift+j" = "workspace::resize_down"
-"shift+k" = "workspace::resize_up"
-"shift+l" = "workspace::resize_right"
+"ctrl+shift+left" = "workspace::move_left"
+"ctrl+shift+down" = "workspace::move_down"
+"ctrl+shift+up" = "workspace::move_up"
+"ctrl+shift+right" = "workspace::move_right"
+"shift+left" = "workspace::resize_left"
+"shift+down" = "workspace::resize_down"
+"shift+up" = "workspace::resize_up"
+"shift+right" = "workspace::resize_right"
 "ctrl+v" = "workspace::split_right"
 "ctrl+h" = "workspace::split_down"
+"mod+e" = "workspace::toggle_split_orientation"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+shift+w" = "workspace::close_tile"
 "mod+1" = "workspace::switch_1"
@@ -105,6 +108,15 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // vim :split, bound ctrl+h). See BUILTIN_KEYMAP's doc comment.
     action(reg, "workspace::split_right", "Split right", "Workspace");
     action(reg, "workspace::split_down", "Split down", "Workspace");
+    // Pairwise reorient around the focused tile (see
+    // `Tree::toggle_split_orientation` — deliberately not i3's
+    // whole-container toggle), bound mod+e (i3's layout-toggle key).
+    action(
+        reg,
+        "workspace::toggle_split_orientation",
+        "Toggle split orientation",
+        "Workspace",
+    );
     action(
         reg,
         "workspace::fullscreen_tile",
@@ -166,10 +178,10 @@ mod tests {
             diags.is_empty(),
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
-        // 4 focus + 4 move + 4 resize + 2 splits + fullscreen + close + 9
-        // workspace switches + 2 palette::toggle bindings + theme toggle +
-        // settings::open (Task 5).
-        assert!(keymap.bindings().len() >= 29);
+        // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
+        // fullscreen + close + 9 workspace switches + 2 palette::toggle
+        // bindings + theme toggle + settings::open (Task 5).
+        assert!(keymap.bindings().len() >= 30);
     }
 
     #[test]

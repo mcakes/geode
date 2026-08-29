@@ -381,6 +381,67 @@ impl Tree {
         true
     }
 
+    /// Reorient the split around the focused tile (pairwise, user
+    /// direction — NOT i3's whole-container "layout toggle split", which
+    /// restacks every sibling in a flat split at once). In a 2-child split
+    /// the orientation simply flips, children and ratios reinterpreted
+    /// along the other axis — a 70/30 row becomes a 70/30 stack. In a
+    /// wider (flat) split, only the focused tile and one adjacent sibling
+    /// reorient: the pair is extracted into a new sub-split of the flipped
+    /// orientation occupying exactly their old combined footprint, and
+    /// every other sibling keeps its slot untouched. The partner is the
+    /// next sibling, falling back to the previous one when the focused
+    /// tile is the split's last child — the same right/bottom preference
+    /// [`Tree::move_divider`] uses. Returns false when there is nothing to
+    /// reorient (empty tree, or the focused tile is the lone root leaf).
+    pub fn toggle_split_orientation(&mut self) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        fn flipped(orientation: Orientation) -> Orientation {
+            match orientation {
+                Orientation::Horizontal => Orientation::Vertical,
+                Orientation::Vertical => Orientation::Horizontal,
+            }
+        }
+        fn toggle_at(node: &mut Node, focused: TileId) -> bool {
+            let Node::Split {
+                orientation,
+                children,
+                ratios,
+            } = node
+            else {
+                return false;
+            };
+            let Some(i) = children.iter().position(|c| *c == Node::Leaf(focused)) else {
+                return children.iter_mut().any(|c| toggle_at(c, focused));
+            };
+            if children.len() == 2 {
+                *orientation = flipped(*orientation);
+                return true;
+            }
+            // Pair the focused child with its next sibling (previous when
+            // focused is last); `a` is the pair's leftmost/topmost index.
+            let a = if i + 1 < children.len() { i } else { i - 1 };
+            let pair: Vec<Node> = children.drain(a..=a + 1).collect();
+            let pair_ratios: Vec<f32> = ratios.drain(a..=a + 1).collect();
+            let total = pair_ratios[0] + pair_ratios[1];
+            children.insert(
+                a,
+                Node::Split {
+                    orientation: flipped(*orientation),
+                    children: pair,
+                    ratios: pair_ratios.iter().map(|r| r / total).collect(),
+                },
+            );
+            ratios.insert(a, total);
+            true
+        }
+        self.root
+            .as_mut()
+            .is_some_and(|root| toggle_at(root, focused))
+    }
+
     /// Construct a `Tree` from raw parts (session restore, Task 3): the
     /// fields are private everywhere else, so this is the one place a
     /// hostile/corrupted session file's data gets turned back into a `Tree`,
@@ -1332,5 +1393,103 @@ mod tests {
         for (_, r) in &rects {
             assert!(r.w > 0.0, "no zero/negative-width tiles");
         }
+    }
+
+    #[test]
+    fn toggle_split_orientation_turns_a_row_into_a_stack_and_back() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert!(tree.toggle_split_orientation());
+        // Same 50/50 ratios, now along the other axis: full-width stack.
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        assert!(approx(r1.w, 1.0) && approx(r1.h, 0.5) && approx(r1.y, 0.0));
+        assert!(approx(r2.w, 1.0) && approx(r2.h, 0.5) && approx(r2.y, 0.5));
+        assert!(tree.toggle_split_orientation());
+        assert!(approx(rect_of(&tree, 1).w, 0.5) && approx(rect_of(&tree, 1).h, 1.0));
+    }
+
+    #[test]
+    fn toggle_split_orientation_keeps_uneven_ratios() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert!(tree.move_divider(Direction::Right, 0.2)); // ratios [0.7, 0.3]
+        assert!(tree.toggle_split_orientation());
+        assert!(approx(rect_of(&tree, 1).h, 0.7));
+        assert!(approx(rect_of(&tree, 2).h, 0.3));
+    }
+
+    #[test]
+    fn toggle_split_orientation_noop_on_empty_or_lone_tile() {
+        let mut tree = Tree::default();
+        assert!(!tree.toggle_split_orientation());
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(!tree.toggle_split_orientation());
+        // The lone tile still fills the unit square.
+        assert!(approx(rect_of(&tree, 1).w, 1.0) && approx(rect_of(&tree, 1).h, 1.0));
+    }
+
+    #[test]
+    fn toggle_split_orientation_in_a_flat_row_reorients_only_the_focused_pair() {
+        // ctrl+v three times: ONE flat horizontal split with three children.
+        // Toggling on tile 3 (last, so it pairs with its previous sibling 2)
+        // must not restack the whole row: tile 1 keeps its slot, and 2/3
+        // stack inside their old combined footprint (right two-thirds).
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        assert!(tree.toggle_split_orientation());
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        let r3 = rect_of(&tree, 3);
+        assert!(
+            approx(r1.x, 0.0) && approx(r1.w, 1.0 / 3.0) && approx(r1.h, 1.0),
+            "tile 1 must keep its slot, got {r1:?}"
+        );
+        assert!(approx(r2.x, 1.0 / 3.0) && approx(r2.w, 2.0 / 3.0));
+        assert!(approx(r3.x, 1.0 / 3.0) && approx(r3.w, 2.0 / 3.0));
+        assert!(approx(r2.y, 0.0) && approx(r2.h, 0.5));
+        assert!(approx(r3.y, 0.5) && approx(r3.h, 0.5));
+    }
+
+    #[test]
+    fn toggle_split_orientation_pairs_a_middle_tile_with_its_next_sibling() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree.focus(TileId(2));
+        assert!(tree.toggle_split_orientation());
+        // 2 pairs rightward with 3 (same preference as resize); 1 untouched.
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        let r3 = rect_of(&tree, 3);
+        assert!(approx(r1.x, 0.0) && approx(r1.w, 1.0 / 3.0) && approx(r1.h, 1.0));
+        assert!(approx(r2.y, 0.0) && approx(r2.h, 0.5) && approx(r2.w, 2.0 / 3.0));
+        assert!(approx(r3.y, 0.5) && approx(r3.h, 0.5) && approx(r3.w, 2.0 / 3.0));
+    }
+
+    #[test]
+    fn toggle_split_orientation_flips_only_the_focused_tiles_parent() {
+        // 1 | (2 over 3): outer horizontal split, inner vertical split.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Vertical); // wraps tile 2's slot
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        assert!(tree.toggle_split_orientation());
+        // Inner split is now horizontal: 2 and 3 sit side by side in the
+        // right half; tile 1 (the outer split) is untouched at half width.
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        let r3 = rect_of(&tree, 3);
+        assert!(approx(r1.w, 0.5) && approx(r1.h, 1.0), "outer unchanged");
+        assert!(approx(r2.h, 1.0) && approx(r2.w, 0.25));
+        assert!(approx(r3.h, 1.0) && approx(r3.w, 0.25));
+        assert!(approx(r2.x, 0.5) && approx(r3.x, 0.75));
     }
 }
