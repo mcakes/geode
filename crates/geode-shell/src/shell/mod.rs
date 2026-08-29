@@ -1189,17 +1189,17 @@ mod tests {
         );
     }
 
-    /// End-to-end: the vim window-prefix sequence `ctrl+w h`/`ctrl+w l`
-    /// (two keystrokes, `Matcher`'s sequence support) moves focus between
+    /// End-to-end: the direct arrow bindings `ctrl+left`/`ctrl+right`
+    /// move focus between
     /// two tiles created via the new split bindings — `ctrl+h`
     /// (`workspace::split_down`, which on the empty starting workspace just
     /// opens the first tile per `Tree::split`'s documented "split verbs
     /// double as open a tile" behavior) then `ctrl+v`
     /// (`workspace::split_right`, side by side), leaving focus on the new
-    /// (right) tile. `ctrl+w h` must move focus to the left tile, and
-    /// `ctrl+w l` back to the right one.
+    /// (right) tile. `ctrl+left` must move focus to the left tile, and
+    /// `ctrl+right` back to the right one.
     #[gpui::test]
-    fn ctrl_h_then_ctrl_w_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
+    fn ctrl_h_then_ctrl_arrows_move_focus_between_tiles(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -1230,21 +1230,21 @@ mod tests {
         let right_tile =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
 
-        cx.simulate_keystrokes("ctrl-w h");
+        cx.simulate_keystrokes("ctrl-left");
         let after_left =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         assert_ne!(
             after_left, right_tile,
-            "ctrl+w h (workspace::focus_left, a two-keystroke sequence through the \
-             ctrl+w vim window prefix) should have moved focus off the right tile"
+            "ctrl+left (workspace::focus_left) should have moved focus off the right \
+             tile"
         );
 
-        cx.simulate_keystrokes("ctrl-w l");
+        cx.simulate_keystrokes("ctrl-right");
         let after_right =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         assert_eq!(
             after_right, right_tile,
-            "ctrl+w l (workspace::focus_right) should have moved focus back to the \
+            "ctrl+right (workspace::focus_right) should have moved focus back to the \
              right tile"
         );
     }
@@ -1309,7 +1309,7 @@ mod tests {
     /// End-to-end (ledgered from 1b-ui T3): a real mouse-down at a
     /// non-focused tile's on-screen coordinates focuses it, exercising the
     /// `on_mouse_down` handler wired up in `Render for ShellView` (not the
-    /// keyboard path). Two tiles side by side; `ctrl+w h` first moves focus
+    /// keyboard path). Two tiles side by side; `ctrl+left` first moves focus
     /// off the freshly-split (right) tile so the click has something to
     /// change. The click point is derived from the same layout `render`
     /// itself uses — `Tree::layout` over the tile area, offset by the
@@ -1346,7 +1346,7 @@ mod tests {
         // tile (about to be clicked) starts out unfocused.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-w h");
+        cx.simulate_keystrokes("ctrl-left");
 
         let before_focus =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
@@ -1428,7 +1428,7 @@ mod tests {
         // Move focus to the left tile first, then swap it rightward.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-w h");
+        cx.simulate_keystrokes("ctrl-left");
 
         let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
         let before = shell.read_with(&cx, |shell, _| {
@@ -1557,8 +1557,8 @@ mod tests {
     /// Layers a test-only `"g g"` sequence binding on top of the builtin
     /// keymap (spec §3.4: sequence bindings), so the status bar's
     /// pending-keystroke display (Task 4) has something real to show. The
-    /// builtin keymap does start real sequences now (`ctrl+w h/j/k/l` etc.,
-    /// Phase 1c), but `"g"` shares no prefix with `"ctrl+w"`, so this
+    /// builtin keymap does start real sequences now (`ctrl+w shift+h/j/k/l`,
+    /// the move-tile chords), but `"g"` shares no prefix with `"ctrl+w"`, so this
     /// isolated binding stays the cheapest way to exercise a lone pending
     /// keystroke without any interaction from the real vim-prefix bindings.
     fn test_services_with_gg_binding() -> ShellServices {
@@ -2812,7 +2812,7 @@ mod tests {
         // session dirty; none of them writes anything by itself.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
-        cx.simulate_keystrokes("ctrl-w h");
+        cx.simulate_keystrokes("ctrl-left");
         cx.simulate_keystrokes("ctrl-h");
         cx.simulate_keystrokes("alt-2");
         cx.simulate_keystrokes("ctrl-v");
@@ -3730,9 +3730,8 @@ mod tests {
     /// `settings::open` — the only current call site, migrated onto the
     /// utility) must cancel a pending keymap sequence, the same hygiene
     /// `toggle_palette` already gives palette-open. Real `ctrl+w` keystroke
-    /// starts the vim window-prefix sequence (`ctrl+w h/j/k/l`, a real
-    /// builtin binding — see `ctrl_h_then_ctrl_w_hl_moves_focus_between_
-    /// tiles` above), which leaves one pending keystroke and paints the
+    /// starts the vim window-prefix sequence (`ctrl+w shift+h/j/k/l`, the
+    /// builtin move-tile chords), which leaves one pending keystroke and paints the
     /// which-key overlay (Task 8); opening the settings modal must clear
     /// both.
     #[gpui::test]
@@ -3761,7 +3760,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        // Start (but don't finish) the "ctrl+w h/j/k/l" sequence.
+        // Start (but don't finish) the "ctrl+w shift+h/j/k/l" sequence.
         cx.simulate_keystrokes("ctrl-w");
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell.matcher.pending().len()),
@@ -3916,8 +3915,8 @@ mod tests {
         assert_eq!(tiles_before.len(), 3);
 
         // After three splits, the focused tile is the last one (tiles_before[2]).
-        // Focus the middle tile (at index 1) using focus_left (ctrl+w h).
-        cx.simulate_keystrokes("ctrl-w h");
+        // Focus the middle tile (at index 1) using focus_left (ctrl+left).
+        cx.simulate_keystrokes("ctrl-left");
 
         let focused_tile =
             shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());

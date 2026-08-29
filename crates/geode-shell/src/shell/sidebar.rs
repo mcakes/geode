@@ -23,7 +23,24 @@
 //! `crates/ui/src/avatar/avatar.rs`) for the profile icon, at its `small`
 //! (24px) size. No `.name(...)` is set — there is no real user identity
 //! yet, and `Avatar` without a name falls back to a plain `IconName::User`
-//! glyph rather than synthesizing fake initials.
+//! glyph rather than synthesizing fake initials. Upstream paints that
+//! placeholder glyph in `theme.background` on a `secondary` disc — near
+//! zero contrast on our `sidebar`-colored rail — so we override the text
+//! color to `sidebar_foreground` (caller styles win via `refine_style`).
+//!
+//! **Workspace discs are avatar-shaped but hand-built:** `Avatar` cannot
+//! render theme-tokened text — its `.name(...)` branch hard-codes a
+//! hashed-hue disc and text color on an *inner* fallback element
+//! (`avatar.rs:107-110`) that caller styles never reach, and the
+//! composable `BaseAvatar`/`AvatarFallback` primitives live in the
+//! library-internal `gpui_base` crate, which gpui-component does not
+//! re-export. So the indicators take `Avatar::small()`'s scale (24px,
+//! 1px `theme.border` ring, `text_xs` label) as a rounded square on the
+//! theme's global `radius` token (per user direction — full circles
+//! didn't read well at this size) and color it
+//! with our own tokens: active = `sidebar_primary` label on a 20%
+//! `sidebar_primary` tint, inactive = `sidebar_foreground` on
+//! `secondary` — matching the profile avatar's family visually.
 
 use gpui::prelude::*;
 use gpui::{Context, IntoElement, MouseButton, div, px};
@@ -61,11 +78,6 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 .items_center()
                 .justify_center()
                 .cursor_pointer()
-                .text_color(if is_active {
-                    theme.sidebar_primary
-                } else {
-                    theme.sidebar_foreground
-                })
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _event, window, cx| {
@@ -73,7 +85,31 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                         cx.notify();
                     }),
                 )
-                .child(n.to_string()),
+                .child(
+                    // Rounded square at `Avatar::small()` scale (24px,
+                    // 1px `theme.border` ring, `text_xs` label) — see the
+                    // module docs for why this is not a real `Avatar`.
+                    div()
+                        .size(px(24.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme.radius)
+                        .border_1()
+                        .border_color(theme.border)
+                        .bg(if is_active {
+                            theme.sidebar_primary.opacity(0.2)
+                        } else {
+                            theme.secondary
+                        })
+                        .text_color(if is_active {
+                            theme.sidebar_primary
+                        } else {
+                            theme.sidebar_foreground
+                        })
+                        .text_xs()
+                        .child(n.to_string()),
+                ),
         );
     }
 
@@ -91,7 +127,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 cx.notify();
             }),
         )
-        .child(Avatar::new().small());
+        .child(Avatar::new().small().text_color(theme.sidebar_foreground));
 
     v_flex()
         .flex_none()

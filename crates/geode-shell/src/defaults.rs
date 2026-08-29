@@ -7,9 +7,10 @@ use geode_core::config::Config;
 
 /// The builtin keymap document, layered under desk/user keymaps.
 ///
-/// Vim-idiom bindings (user direction, Phase 1c): focus and move-tile use
-/// the vim window prefix `ctrl+w` as a two-keystroke sequence (`ctrl+w h`
-/// etc.), mirroring `<C-w>h`/`<C-w>H`. Splits follow vim's own mnemonics —
+/// Directional focus is `ctrl+arrows` (user direction, replacing the
+/// Phase 1c `ctrl+w h/j/k/l` vim chords). Move-tile keeps the vim window
+/// prefix `ctrl+w` as a two-keystroke sequence (`ctrl+w shift+h` etc.),
+/// mirroring `<C-w>H`. Splits follow vim's own mnemonics —
 /// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
 /// which is why the actions they bind to are named by resulting geometry
 /// (`split_right`/`split_down`) rather than by vim verb: naming them
@@ -23,10 +24,10 @@ pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
 [bindings.keys]
-"ctrl+w h" = "workspace::focus_left"
-"ctrl+w j" = "workspace::focus_down"
-"ctrl+w k" = "workspace::focus_up"
-"ctrl+w l" = "workspace::focus_right"
+"ctrl+left" = "workspace::focus_left"
+"ctrl+down" = "workspace::focus_down"
+"ctrl+up" = "workspace::focus_up"
+"ctrl+right" = "workspace::focus_right"
 "ctrl+w shift+h" = "workspace::move_left"
 "ctrl+w shift+j" = "workspace::move_down"
 "ctrl+w shift+k" = "workspace::move_up"

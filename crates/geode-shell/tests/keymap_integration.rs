@@ -51,15 +51,20 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
         matcher.press(&keymap, ks("mod+f"), &stack),
         MatchResult::NoMatch
     );
-    // Untouched builtin binding still works — focus_down now lives behind
-    // the vim window-prefix sequence "ctrl+w j" (Phase 1c rebinding).
+    // Untouched builtin binding still works — focus_down is the direct
+    // ctrl+down arrow binding (replacing the Phase 1c "ctrl+w j" chord).
+    assert_eq!(
+        matcher.press(&keymap, ks("ctrl+down"), &stack),
+        MatchResult::Matched(ActionId("workspace::focus_down".into()))
+    );
+    // The vim window prefix still carries the move-tile sequences.
     assert_eq!(
         matcher.press(&keymap, ks("ctrl+w"), &stack),
         MatchResult::Pending
     );
     assert_eq!(
-        matcher.press(&keymap, ks("j"), &stack),
-        MatchResult::Matched(ActionId("workspace::focus_down".into()))
+        matcher.press(&keymap, ks("shift+j"), &stack),
+        MatchResult::Matched(ActionId("workspace::move_down".into()))
     );
     // Desk-added sequence: pending, then match.
     assert_eq!(

@@ -36,7 +36,7 @@ fn keystrokes_drive_the_tiling_tree() {
     };
 
     // Presses a whitespace-separated sequence of keystrokes (e.g. the
-    // "ctrl+w h" vim window-prefix sequence); every keystroke but the last
+    // "ctrl+w shift+h" vim window-prefix sequence); every keystroke but the last
     // must leave the matcher Pending, and the last must resolve.
     let press_seq = |matcher: &mut Matcher, ws: &mut Workspaces, spec: &str| {
         let parts: Vec<&str> = spec.split_whitespace().collect();
@@ -60,9 +60,9 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "ctrl+v");
     assert_eq!(ws.active().tiles().len(), 2);
 
-    // ctrl+w h: focus left tile (vim window-prefix sequence);
+    // ctrl+left: focus left tile (direct arrow binding);
     // ctrl+h: split it stacked (workspace::split_down).
-    press_seq(&mut matcher, &mut ws, "ctrl+w h");
+    press(&mut matcher, &mut ws, "ctrl+left");
     press(&mut matcher, &mut ws, "ctrl+h");
     assert_eq!(ws.active().tiles().len(), 3);
     let rects = ws.active().layout(Rect::UNIT);
@@ -79,13 +79,20 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "mod+1");
     assert_eq!(ws.active().tiles().len(), 3);
 
-    // Directional focus works through the same pipeline (ctrl+w l sequence).
+    // Directional focus works through the same pipeline (ctrl+right).
     let before = ws.active().focused();
-    press_seq(&mut matcher, &mut ws, "ctrl+w l");
+    press(&mut matcher, &mut ws, "ctrl+right");
     assert_ne!(ws.active().focused(), before);
     assert!(
         ws.active()
             .neighbor(geode_shell::tiling::Direction::Left)
             .is_some()
     );
+
+    // Move-tile still rides the vim ctrl+w prefix as a two-keystroke
+    // sequence (ctrl+w shift+h = workspace::move_left) through the same
+    // matcher pipeline.
+    let layout_before = ws.active().layout(Rect::UNIT);
+    press_seq(&mut matcher, &mut ws, "ctrl+w shift+h");
+    assert_ne!(ws.active().layout(Rect::UNIT), layout_before);
 }
