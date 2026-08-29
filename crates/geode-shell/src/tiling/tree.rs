@@ -45,19 +45,16 @@ impl Rect {
         h: 1.0,
     };
 
-    #[allow(dead_code)]
     pub(crate) fn right(&self) -> f32 {
         self.x + self.w
     }
 
-    #[allow(dead_code)]
     pub(crate) fn bottom(&self) -> f32 {
         self.y + self.h
     }
 }
 
 /// Edge-adjacency tolerance for unit-space geometry comparisons.
-#[allow(dead_code)]
 pub(crate) const EPS: f32 = 1e-3;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +67,31 @@ pub enum Node {
         /// summing to 1.0.
         ratios: Vec<f32>,
     },
+}
+
+fn v_overlap(a: &Rect, b: &Rect) -> f32 {
+    (a.bottom().min(b.bottom()) - a.y.max(b.y)).max(0.0)
+}
+
+fn h_overlap(a: &Rect, b: &Rect) -> f32 {
+    (a.right().min(b.right()) - a.x.max(b.x)).max(0.0)
+}
+
+fn swap_leaves(node: &mut Node, a: TileId, b: TileId) {
+    match node {
+        Node::Leaf(id) => {
+            if *id == a {
+                *id = b;
+            } else if *id == b {
+                *id = a;
+            }
+        }
+        Node::Split { children, .. } => {
+            for child in children {
+                swap_leaves(child, a, b);
+            }
+        }
+    }
 }
 
 /// One workspace's layout: an i3-style split tree. Pure data — every verb
@@ -169,6 +191,71 @@ impl Tree {
         let mut out = Vec::new();
         layout_node(root, bounds, &mut out);
         out
+    }
+
+    /// The geometric neighbor of the focused tile in `dir`, per the visible
+    /// layout: nearest facing edge within EPS, positive perpendicular
+    /// overlap, ties broken by larger overlap.
+    pub fn neighbor(&self, dir: Direction) -> Option<TileId> {
+        let focused = self.focused?;
+        let rects = self.layout(Rect::UNIT);
+        let f = rects.iter().find(|(id, _)| *id == focused)?.1;
+        let mut best: Option<(TileId, f32, f32)> = None; // (id, edge_key, overlap)
+        for (id, r) in &rects {
+            if *id == focused {
+                continue;
+            }
+            // edge_key is oriented so that larger = nearer to the focused
+            // tile's facing edge.
+            let candidate = match dir {
+                Direction::Left => (r.right() <= f.x + EPS).then(|| (r.right(), v_overlap(r, &f))),
+                Direction::Right => (r.x >= f.right() - EPS).then(|| (-r.x, v_overlap(r, &f))),
+                Direction::Up => (r.bottom() <= f.y + EPS).then(|| (r.bottom(), h_overlap(r, &f))),
+                Direction::Down => (r.y >= f.bottom() - EPS).then(|| (-r.y, h_overlap(r, &f))),
+            };
+            let Some((edge_key, overlap)) = candidate else {
+                continue;
+            };
+            if overlap <= EPS {
+                continue;
+            }
+            let better = match &best {
+                None => true,
+                Some((_, best_key, best_overlap)) => {
+                    edge_key > *best_key + EPS
+                        || ((edge_key - *best_key).abs() <= EPS && overlap > *best_overlap + EPS)
+                }
+            };
+            if better {
+                best = Some((*id, edge_key, overlap));
+            }
+        }
+        best.map(|(id, _, _)| id)
+    }
+
+    pub fn focus_direction(&mut self, dir: Direction) -> bool {
+        match self.neighbor(dir) {
+            Some(id) => {
+                self.focused = Some(id);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Swap the focused tile with its geometric neighbor. Focus stays on
+    /// the same TileId, which now occupies the neighbor's position.
+    pub fn move_direction(&mut self, dir: Direction) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        let Some(neighbor) = self.neighbor(dir) else {
+            return false;
+        };
+        if let Some(root) = &mut self.root {
+            swap_leaves(root, focused, neighbor);
+        }
+        true
     }
 }
 
@@ -473,4 +560,101 @@ mod tests {
             approx(r2.x, 60.0) && approx(r2.y, 20.0) && approx(r2.w, 50.0) && approx(r2.h, 50.0)
         );
     }
+
+    /// 2x2 grid:  1 | 2      built with splits + focus, ids at positions:
+    ///            -----      1 top-left, 4 bottom-left, 2 top-right,
+    ///            4 | 3      3 bottom-right.
+    fn grid() -> Tree {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal); // [1]
+        tree.split(TileId(2), Orientation::Horizontal); // [1 | 2]
+        tree.split(TileId(3), Orientation::Vertical); // 2 wraps: [1 | (2 / 3)]
+        tree.focus(TileId(1));
+        tree.split(TileId(4), Orientation::Vertical); // 1 wraps: [(1 / 4) | (2 / 3)]
+        tree.focus(TileId(1));
+        tree
+    }
+
+    #[test]
+    fn grid_geometry_is_as_documented() {
+        let tree = grid();
+        let r1 = rect_of(&tree, 1);
+        let r3 = rect_of(&tree, 3);
+        assert!(approx(r1.x, 0.0) && approx(r1.y, 0.0) && approx(r1.w, 0.5) && approx(r1.h, 0.5));
+        assert!(approx(r3.x, 0.5) && approx(r3.y, 0.5));
+    }
+
+    #[test]
+    fn focus_moves_right_and_down_through_grid() {
+        let mut tree = grid();
+        assert!(tree.focus_direction(Direction::Right));
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert!(tree.focus_direction(Direction::Down));
+        assert_eq!(tree.focused(), Some(TileId(3)));
+        assert!(tree.focus_direction(Direction::Left));
+        assert_eq!(tree.focused(), Some(TileId(4)));
+        assert!(tree.focus_direction(Direction::Up));
+        assert_eq!(tree.focused(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn no_wrap_at_edges() {
+        let mut tree = grid();
+        assert!(!tree.focus_direction(Direction::Left));
+        assert_eq!(tree.focused(), Some(TileId(1)));
+        assert!(!tree.focus_direction(Direction::Up));
+        assert_eq!(tree.focused(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn nearest_edge_wins_over_overlap() {
+        // [a | b] where the right column is split into c over d; from a,
+        // focusing Right must land on whichever of c/d overlaps a more —
+        // here both overlap equally until we unbalance: c is the top 3/4.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Vertical); // right col: 2 over 3
+        // Resize comes in Task 3; emulate asymmetry by focusing and testing
+        // overlap tie-break on the symmetric grid instead:
+        tree.focus(TileId(1));
+        assert!(tree.focus_direction(Direction::Right));
+        // 2 and 3 are equidistant (same shared edge); overlap with the
+        // full-height tile 1 is equal (0.5 each), so the first-best stands.
+        // Pin the documented deterministic outcome:
+        assert_eq!(tree.focused(), Some(TileId(2)));
+    }
+
+    #[test]
+    fn move_swaps_with_neighbor_and_focus_follows() {
+        let mut tree = grid();
+        assert!(tree.move_direction(Direction::Right)); // swap 1 and 2
+        assert_eq!(tree.focused(), Some(TileId(1)));
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        assert!(
+            approx(r1.x, 0.5) && approx(r1.y, 0.0),
+            "1 moved to top-right"
+        );
+        assert!(
+            approx(r2.x, 0.0) && approx(r2.y, 0.0),
+            "2 moved to top-left"
+        );
+    }
+
+    #[test]
+    fn move_with_no_neighbor_is_noop() {
+        let mut tree = grid();
+        assert!(!tree.move_direction(Direction::Left));
+        assert!(approx(rect_of(&tree, 1).x, 0.0));
+    }
+
+    // Task 3: fullscreen_blocks_navigation
+    // #[test]
+    // fn fullscreen_blocks_navigation() {
+    //     let mut tree = grid();
+    //     tree.toggle_fullscreen(); // Task 3 provides this; here it gates layout
+    //     assert!(!tree.focus_direction(Direction::Right));
+    //     assert_eq!(tree.focused(), Some(TileId(1)));
+    // }
 }
