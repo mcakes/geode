@@ -1982,6 +1982,69 @@ mod tests {
         );
     }
 
+    /// End-to-end: palette selection wraps at both ends. Opening the palette
+    /// and pressing up once (from index 0) wraps to the last filtered item.
+    #[gpui::test]
+    fn palette_selection_wraps_up_from_index_zero(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Open the palette with ctrl+k
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "ctrl-k should open the palette"
+        );
+
+        // Get the filtered list length
+        let filtered_len = shell.read_with(&cx, |shell, _| {
+            shell
+                .palette
+                .as_ref()
+                .map(|p| p.filtered().len())
+                .unwrap_or(0)
+        });
+        assert!(
+            filtered_len > 0,
+            "palette should have at least one item when no filter is active"
+        );
+
+        // Press up once from index 0
+        cx.simulate_keystrokes("up");
+
+        // Verify we wrapped to the last item
+        let selected = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().map(|p| p.selected()).unwrap_or(0)
+        });
+        assert_eq!(
+            selected,
+            filtered_len - 1,
+            "pressing up at index 0 should wrap to the last filtered item"
+        );
+    }
+
     /// Layers a user binding on top of the builtin keymap that rebinds
     /// `ctrl+k` (BUILTIN_KEYMAP's `palette::toggle` key) to
     /// `workspace::split_right` instead. Per the layering contract

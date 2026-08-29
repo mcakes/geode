@@ -230,22 +230,26 @@ impl PaletteState {
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
-    /// pass ±1), clamped to the current filtered list's bounds — the FULL
-    /// list, not just what fits in one screenful. `render` now draws every
-    /// filtered row inside a scrollable viewport (rather than truncating to
-    /// a fixed window), and the caller that drives real key events
+    /// pass ±1), wrapping at both ends — pressing up at index 0 selects the
+    /// LAST filtered item; pressing down at the last item wraps to 0. An
+    /// empty result list remains a no-op. `render` now draws every filtered
+    /// row inside a scrollable viewport (rather than truncating to a fixed
+    /// window), and the caller that drives real key events
     /// (`ShellView::handle_palette_key`) is responsible for scrolling the
     /// newly selected row into view after each call here — see
     /// `gpui::ScrollHandle::scroll_to_item`, invoked from that same
-    /// selection-change path. Leaves the selection at 0 without panicking
-    /// when nothing matches.
+    /// selection-change path; scroll-follow handles any index, including
+    /// wrap-around jumps.
     pub fn move_selection(&mut self, delta: i32) {
         let len = self.filtered().len();
         if len == 0 {
             self.selected = 0;
             return;
         }
-        let next = (self.selected as i32 + delta).clamp(0, len as i32 - 1);
+        // Wrapping modular arithmetic: safely handles negative deltas and
+        // out-of-bounds movement. Formula: ((current + delta) % len + len) % len
+        // The double-modulo ensures the result is always in [0, len).
+        let next = ((self.selected as i32 + delta) % len as i32 + len as i32) % len as i32;
         self.selected = next as usize;
     }
 
@@ -759,44 +763,73 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_clamps_at_both_ends() {
+    fn move_selection_wraps_at_both_ends() {
         let mut state = PaletteState::new(vec![
             action("a", "A", "Test", None),
             action("b", "B", "Test", None),
             action("c", "C", "Test", None),
         ]);
         assert_eq!(state.selected(), 0);
+        // Up at index 0 wraps to the last item
         state.move_selection(-1);
-        assert_eq!(state.selected(), 0, "cannot go below the first row");
+        assert_eq!(state.selected(), 2, "up at 0 should wrap to last index");
 
+        // Down at the last item wraps to 0
         state.move_selection(1);
-        state.move_selection(1);
-        state.move_selection(1);
-        state.move_selection(1);
-        assert_eq!(state.selected(), 2, "cannot go past the last row");
+        assert_eq!(state.selected(), 0, "down at last should wrap to 0");
     }
 
     #[test]
-    fn move_selection_reaches_the_last_of_many_filtered_items() {
-        // Item count well past one screenful (today's real registry+theme
-        // set is 66: 15 actions + 51 themes) — the selection must walk all the
-        // way to the last FILTERED row, not clamp at some fixed visible
-        // window. `render` now draws every filtered row inside a
-        // scrollable viewport rather than truncating, so there is no
-        // shorter bound to clamp against here any more.
-        const ITEM_COUNT: usize = 78;
+    fn move_selection_wraps_up_from_start_with_large_list() {
+        // 70+ item list to test wrapping with a large dataset
+        const ITEM_COUNT: usize = 75;
         let items: Vec<PaletteItem> = (0..ITEM_COUNT)
             .map(|i| action(&format!("a{i}"), &format!("Item {i}"), "Test", None))
             .collect();
         let mut state = PaletteState::new(items);
-        for _ in 0..(ITEM_COUNT + 8) {
-            state.move_selection(1);
-        }
+        assert_eq!(state.selected(), 0);
+        // Up at index 0 wraps to last
+        state.move_selection(-1);
         assert_eq!(
             state.selected(),
             ITEM_COUNT - 1,
-            "selection must clamp at the last filtered row, however many there are"
+            "up from 0 should wrap to last with a large list"
         );
+    }
+
+    #[test]
+    fn move_selection_wraps_down_from_end_with_large_list() {
+        // 70+ item list to test wrapping with a large dataset
+        const ITEM_COUNT: usize = 75;
+        let items: Vec<PaletteItem> = (0..ITEM_COUNT)
+            .map(|i| action(&format!("a{i}"), &format!("Item {i}"), "Test", None))
+            .collect();
+        let mut state = PaletteState::new(items);
+        // Move to last item (index ITEM_COUNT - 1 = 74)
+        for _ in 0..(ITEM_COUNT - 1) {
+            state.move_selection(1);
+        }
+        assert_eq!(state.selected(), ITEM_COUNT - 1);
+        // Down at last wraps to 0
+        state.move_selection(1);
+        assert_eq!(
+            state.selected(),
+            0,
+            "down from last should wrap to 0 with a large list"
+        );
+    }
+
+    #[test]
+    fn move_selection_single_item_wraps_to_itself() {
+        let items = vec![action("a", "Only Item", "Test", None)];
+        let mut state = PaletteState::new(items);
+        assert_eq!(state.selected(), 0);
+        // Up wraps to itself
+        state.move_selection(-1);
+        assert_eq!(state.selected(), 0, "single item up should stay at 0");
+        // Down wraps to itself
+        state.move_selection(1);
+        assert_eq!(state.selected(), 0, "single item down should stay at 0");
     }
 
     #[test]
