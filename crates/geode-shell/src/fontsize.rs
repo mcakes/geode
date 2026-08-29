@@ -1,0 +1,216 @@
+//! The UI font size setting (small/medium/large): a single scale knob the
+//! settings dialog's Appearance group exposes as a toggle button group.
+//!
+//! **One lever: window rem size.** Applying a [`FontSize`] means
+//! `window.set_rem_size(size.rem_px())` — done in `ShellView::render`
+//! (guarded, only when the value differs), because that's the one place
+//! with a `Window` on every path that can change the setting (startup,
+//! the settings control, a config hot reload). Everything in this crate
+//! sizes text with rem-based `Styled` helpers (`text_sm`, `text_xs`, ...),
+//! so the whole shell follows. gpui-component's `Theme.font_size` (a px
+//! value feeding its typography *tokens*) is deliberately left alone in
+//! v1 — the pinned components overwhelmingly use rem-based helpers too,
+//! and pushing a second, px-denominated lever through `Theme::change`'s
+//! projection sync buys nothing visible today.
+//!
+//! **Persistence**: `[ui] font_size = "small" | "medium" | "large"` in the
+//! user `app.toml` — its own table, not `[theme]`, because font size is
+//! not part of a theme family (switching themes must never change it).
+//! Written by [`persist_to_user_config`] with the same toml_edit
+//! format-preserving atomic write the theme persist uses
+//! ([`crate::theme::write_atomic`]); read back through the layered
+//! [`Config`] by [`FontSize::from_config`], so desk/user layers and hot
+//! reload behave exactly like every other config key.
+
+use std::path::Path;
+
+use toml_edit::{DocumentMut, Item, Table, value};
+
+use geode_core::config::Config;
+
+/// The three offered UI text scales. `Medium` is the gpui default rem size
+/// (16px) — the app's look before this setting existed — so existing
+/// configs without a `[ui] font_size` key change nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+}
+
+impl FontSize {
+    /// Display order for the settings control.
+    pub const ALL: [FontSize; 3] = [FontSize::Small, FontSize::Medium, FontSize::Large];
+
+    /// The window rem size this scale means, in pixels.
+    pub fn rem_px(self) -> f32 {
+        match self {
+            FontSize::Small => 14.0,
+            FontSize::Medium => 16.0,
+            FontSize::Large => 18.0,
+        }
+    }
+
+    /// Label for the settings control's button.
+    pub fn label(self) -> &'static str {
+        match self {
+            FontSize::Small => "Small",
+            FontSize::Medium => "Medium",
+            FontSize::Large => "Large",
+        }
+    }
+
+    /// The value written to / read from `[ui] font_size`.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            FontSize::Small => "small",
+            FontSize::Medium => "medium",
+            FontSize::Large => "large",
+        }
+    }
+
+    /// Parse a config value. `None` for anything that isn't exactly one of
+    /// the three known values — the caller decides the fallback
+    /// ([`FontSize::from_config`] falls back to `Medium`).
+    pub fn from_value(s: &str) -> Option<FontSize> {
+        FontSize::ALL.into_iter().find(|f| f.config_value() == s)
+    }
+
+    /// Resolve the effective font size from the layered config: doc `app`,
+    /// key `ui.font_size`. A missing key, or any unknown value, is
+    /// `Medium` — same lenient shape as `defaults::mod_alias_from_config`.
+    pub fn from_config(config: &Config) -> FontSize {
+        config
+            .get("app", "ui.font_size")
+            .and_then(|v| v.as_str())
+            .and_then(FontSize::from_value)
+            .unwrap_or_default()
+    }
+}
+
+/// Write `[ui] font_size` into `<user_dir>/app.toml`, preserving every
+/// other table, key, and comment — the same toml_edit + atomic-write
+/// contract as [`crate::theme::persist_to_user_config`] (see its doc
+/// comment for the full failure-mode reasoning: missing file created with
+/// `config_version = 1`, unparseable file left untouched and reported as
+/// `Err`, reload-watcher interplay identical).
+pub fn persist_to_user_config(user_dir: &Path, size: FontSize) -> Result<(), String> {
+    let path = user_dir.join("app.toml");
+    let existed = path.exists();
+
+    let mut doc = if existed {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?
+    } else {
+        DocumentMut::new()
+    };
+
+    if !existed {
+        doc["config_version"] = value(1_i64);
+    }
+
+    if !doc.get("ui").is_some_and(Item::is_table_like) {
+        doc["ui"] = Item::Table(Table::new());
+    }
+    let ui_table = doc["ui"]
+        .as_table_mut()
+        .expect("just ensured [ui] is a table");
+    ui_table["font_size"] = value(size.config_value());
+
+    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::config::{ConfigSources, LayerDoc};
+
+    #[test]
+    fn rem_px_mapping_and_medium_default() {
+        assert_eq!(FontSize::Small.rem_px(), 14.0);
+        assert_eq!(FontSize::Medium.rem_px(), 16.0);
+        assert_eq!(FontSize::Large.rem_px(), 18.0);
+        assert_eq!(FontSize::default(), FontSize::Medium);
+    }
+
+    #[test]
+    fn from_value_roundtrips_and_rejects_unknowns() {
+        for size in FontSize::ALL {
+            assert_eq!(FontSize::from_value(size.config_value()), Some(size));
+        }
+        assert_eq!(FontSize::from_value("huge"), None);
+        assert_eq!(FontSize::from_value(""), None);
+    }
+
+    #[test]
+    fn from_config_reads_ui_font_size_with_medium_fallback() {
+        let with = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfont_size = \"large\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        assert_eq!(FontSize::from_config(&with), FontSize::Large);
+
+        let empty = Config::load(&ConfigSources::default());
+        assert_eq!(FontSize::from_config(&empty), FontSize::Medium);
+
+        let bogus = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfont_size = \"huge\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        assert_eq!(FontSize::from_config(&bogus), FontSize::Medium);
+    }
+
+    #[test]
+    fn persist_creates_a_fresh_file_with_config_version() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), FontSize::Large).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        assert!(text.contains("config_version = 1"));
+        assert!(text.contains("[ui]"));
+        assert!(text.contains("font_size = \"large\""));
+    }
+
+    #[test]
+    fn persist_preserves_comments_and_unrelated_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        std::fs::write(
+            &path,
+            "# my config\nconfig_version = 1\n\n[theme]\nname = \"Gruvbox Dark\" # keep me\n",
+        )
+        .unwrap();
+        persist_to_user_config(dir.path(), FontSize::Small).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my config"));
+        assert!(text.contains("name = \"Gruvbox Dark\" # keep me"));
+        assert!(text.contains("font_size = \"small\""));
+    }
+
+    #[test]
+    fn persist_overwrites_a_previous_value_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), FontSize::Small).unwrap();
+        persist_to_user_config(dir.path(), FontSize::Large).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        assert!(text.contains("font_size = \"large\""));
+        assert!(!text.contains("font_size = \"small\""));
+    }
+
+    #[test]
+    fn persist_refuses_to_touch_an_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(persist_to_user_config(dir.path(), FontSize::Small).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not [valid toml");
+    }
+}

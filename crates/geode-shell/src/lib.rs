@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod defaults;
 pub mod fonts;
+pub mod fontsize;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod palette;

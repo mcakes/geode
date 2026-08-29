@@ -35,8 +35,9 @@
 //!   side-channel `Theme::change` call.
 //!
 //! Content v1 (brief): one page, two groups — **Appearance** (theme family
-//! dropdown, light/dark switch, both live-applying) and **Keyboard**
-//! (read-only mod-key display). Neither group is resettable: there is no
+//! dropdown, light/dark switch, and a font-size toggle button group —
+//! small/medium/large, see the `fontsize` module — all live-applying) and
+//! **Keyboard** (read-only mod-key display). Neither group is resettable: there is no
 //! meaningful "default" to reset *to* here (the config file is the real
 //! default, and writing it back is the config-editor phase's job, not
 //! this dialog's) — a reset button implying otherwise would be misleading.
@@ -54,12 +55,14 @@ use gpui::{
     SharedString, Styled as _, Window, div, px,
 };
 use gpui_component::{
-    ActiveTheme as _,
+    ActiveTheme as _, Selectable as _, Sizable as _,
+    button::{Button, ButtonGroup},
     label::Label,
     setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
     v_flex,
 };
 
+use crate::fontsize::FontSize;
 use crate::keymap::Modifiers;
 use crate::shell::ShellView;
 use crate::shell::dialog;
@@ -260,6 +263,35 @@ fn build(
             ),
         )
         .description("Light/dark variant of the active theme family."),
+        // A toggle button group (user direction — not a dropdown; three
+        // fixed options don't earn a popup) via the custom-render field
+        // kind, since the built-in field renderers don't include one.
+        SettingItem::new(
+            "Font size",
+            SettingField::render({
+                let view = view.clone();
+                move |_options, _window, cx: &mut App| {
+                    let current = view.read(cx).font_size;
+                    let view = view.clone();
+                    ButtonGroup::new("font-size")
+                        .outline()
+                        .small()
+                        .children(FontSize::ALL.map(|size| {
+                            Button::new(size.config_value())
+                                .label(size.label())
+                                .selected(size == current)
+                        }))
+                        .on_click(move |clicks: &Vec<usize>, _window, cx| {
+                            if let Some(&size) =
+                                clicks.first().and_then(|&ix| FontSize::ALL.get(ix))
+                            {
+                                set_font_size(&view, size, cx);
+                            }
+                        })
+                }
+            }),
+        )
+        .description("UI text scale — sets the window's base (rem) size."),
         SettingItem::render(|_, _, cx| {
             div()
                 .text_sm()
@@ -335,6 +367,19 @@ pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut Ap
     view.update(cx, |shell, cx| {
         shell.services.theme.set_mode(mode, cx);
         shell.persist_theme(cx);
+        cx.notify();
+    });
+}
+
+/// Set the UI font size and persist it (`[ui] font_size`) — the font-size
+/// button group's setter, standalone for the same direct-drive testability
+/// reasoning as [`set_theme`]. The `notify` triggers a re-render, and
+/// `ShellView::render` applies the new rem size there (the setter has no
+/// `Window` of its own to apply it here — see the `fontsize` module doc).
+pub(crate) fn set_font_size(view: &Entity<ShellView>, size: FontSize, cx: &mut App) {
+    view.update(cx, |shell, cx| {
+        shell.font_size = size;
+        shell.persist_font_size(cx);
         cx.notify();
     });
 }

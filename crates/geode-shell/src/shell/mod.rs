@@ -31,6 +31,7 @@ use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h
 use crate::actions::{ActionId, ActionRegistry};
 use crate::defaults::mod_alias_from_config;
 use crate::fonts;
+use crate::fontsize::{self, FontSize};
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::reload;
@@ -73,6 +74,12 @@ pub struct ShellServices {
 pub struct ShellView {
     services: ShellServices,
     matcher: Matcher,
+    /// The effective UI font size (small/medium/large — `[ui] font_size`).
+    /// Applied as the window's rem size at the top of `render`, the one
+    /// place with a `Window` on every path that can change it (startup,
+    /// the settings control via `settings_view::set_font_size`, config hot
+    /// reload) — see the `fontsize` module doc.
+    font_size: FontSize,
     focus_handle: FocusHandle,
     /// The open command palette's state (Task 6), or `None` when closed.
     /// Built fresh from the registry/keymap/theme service each time
@@ -287,9 +294,12 @@ impl ShellView {
         })
         .detach();
 
+        let font_size = FontSize::from_config(&services.config);
+
         Self {
             services,
             matcher: Matcher::default(),
+            font_size,
             focus_handle,
             palette: None,
             modal: None,
@@ -371,6 +381,8 @@ impl ShellView {
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
             self.services.keymap = keymap;
+            // Cheap re-derive; `render` applies it only when it changed.
+            self.font_size = FontSize::from_config(&self.services.config);
 
             if theme_changed {
                 self.services
@@ -574,6 +586,25 @@ impl ShellView {
             .spawn(async move {
                 if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
                     eprintln!("[theme] warning: {e}");
+                }
+            })
+            .detach();
+    }
+
+    /// Persist the current font size to `<user_dir>/app.toml`'s `[ui]`
+    /// table, off the UI thread — the exact contract of [`Self::
+    /// persist_theme`] just above (missing `user_dir` = silently skipped;
+    /// failures are a stderr warning; last-write-wins races accepted for
+    /// the same rare-UI-action reasons).
+    fn persist_font_size(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let size = self.font_size;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
+                    eprintln!("[fontsize] warning: {e}");
                 }
             })
             .detach();
@@ -885,6 +916,14 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Apply the UI font size (see the `fontsize` module doc): the rem
+        // size scales every rem-based text size in the shell. Guarded so
+        // the setter only runs on an actual change, not every frame.
+        let rem = gpui::px(self.font_size.rem_px());
+        if window.rem_size() != rem {
+            window.set_rem_size(rem);
+        }
+
         // `viewport_size` is the drawable area (excludes window chrome),
         // which is what `Tree::layout` should partition (gpui/window.rs).
         // Task 4 adds a top toolbar (the native title bar,
@@ -3855,6 +3894,99 @@ mod tests {
             shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
             crate::theme::Mode::Light,
             "set_dark_mode(false) should flip back to light"
+        );
+    }
+
+    /// `settings_view::set_font_size` (the font-size button group's setter,
+    /// driven directly for the same reason `set_theme`'s test drives the
+    /// handler rather than the control) updates `ShellView::font_size`, and
+    /// the next render applies it as the window's rem size — the one
+    /// mechanism every path shares (see the `fontsize` module doc).
+    #[gpui::test]
+    fn set_font_size_applies_the_rem_size_on_the_next_render(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert_eq!(
+            cx.update(|window, _cx| window.rem_size()),
+            px(16.0),
+            "sanity: with no [ui] font_size configured, medium (gpui's own \
+             16px default) must be in effect after the first render"
+        );
+
+        cx.update(|_window, cx| {
+            settings_view::set_font_size(&shell, crate::fontsize::FontSize::Large, cx)
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Large,
+            "set_font_size should update the shell's state immediately"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.update(|window, _cx| window.rem_size()),
+            px(18.0),
+            "the render after set_font_size(Large) should apply 18px as the \
+             window rem size"
+        );
+    }
+
+    /// A `[ui] font_size` key already present in the layered config at
+    /// startup is applied by the first render — the same read
+    /// (`FontSize::from_config`) `apply_reload` re-runs on hot reload.
+    #[gpui::test]
+    fn a_configured_font_size_applies_from_the_first_render(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut services = test_services();
+        services.config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfont_size = \"small\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert_eq!(
+            cx.update(|window, _cx| window.rem_size()),
+            px(14.0),
+            "[ui] font_size = \"small\" should render at a 14px rem size \
+             from the very first frame"
         );
     }
 

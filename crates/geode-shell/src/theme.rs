@@ -489,7 +489,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// pid+counter+`.tmp` scheme (this module keeps its own small copy rather
 /// than sharing that one, since it needs a `Result<(), String>` to match
 /// this module's own error convention instead of `std::io::Result`).
-fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
 
     let pid = std::process::id();
