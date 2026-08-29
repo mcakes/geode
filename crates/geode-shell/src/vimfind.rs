@@ -41,7 +41,7 @@
 //! `key_char`), so a shifted symbol appends the key's base character (e.g.
 //! typing `:` on a US layout arrives as `shift+;` and appends `;`).
 //! Letters, digits, and unshifted symbols — the realistic query alphabet
-//! for matching titles, categories, and action ids — are unaffected.
+//! for matching displayed titles and categories — are unaffected.
 
 use crate::keymap::{Keystroke, Modifiers};
 

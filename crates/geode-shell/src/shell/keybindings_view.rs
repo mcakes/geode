@@ -1,7 +1,8 @@
 //! The keybinding dialog (Part B): a list of every registered action with
 //! its currently-effective binding, navigable with the vim subset from
 //! [`crate::vimnav`], searchable with vim-style `/` find from
-//! [`crate::vimfind`] (`/` starts a query over title/category/action-id,
+//! [`crate::vimfind`] (`/` starts a query over the displayed title and
+//! category — never the invisible action id, see [`searchable_text`] —
 //! selection jumps live to matches from the anchor; `enter` commits,
 //! `escape` restores the anchor, `n`/`shift+n` repeat with wrap — see
 //! [`press_while_finding`]/[`repeat_find`]), and editable in place — `space`/`enter`/a click on the
@@ -304,11 +305,15 @@ pub fn click_selects_or_listens(state: &mut KeybindingsState, clicked_ix: usize)
     }
 }
 
-/// The text one row exposes to `/` find: title, category, and the action
-/// id, space-joined — so `/focus`, `/workspace`, and `/focus_left` all
-/// land ([`find_match`] lowercases both sides).
+/// The text one row exposes to `/` find: title and category — exactly
+/// what the row displays, and nothing more. The action id deliberately
+/// does NOT participate (a user-visible bug caught in review: `/mo`
+/// jumped to "Toggle light/dark theme" via the invisible `theme::
+/// toggle_mode`, with no highlight to explain why, while "Move down" glowed
+/// further down the list) — searching text the user can't see breaks the
+/// jump/highlight agreement this feature depends on.
 pub fn searchable_text(row: &KeybindingRow) -> String {
-    format!("{} {} {}", row.title, row.category, row.action.0)
+    format!("{} {}", row.title, row.category)
 }
 
 /// Feed one keystroke to an ACTIVE find session and move `selected` per
@@ -1186,8 +1191,8 @@ mod tests {
         }
     }
 
-    /// Rows shaped like the real dialog's: title + category + action id
-    /// all participate in the searchable text.
+    /// Rows shaped like the real dialog's: title + category participate in
+    /// the searchable text; the action id (invisible in the UI) must not.
     fn find_texts() -> Vec<String> {
         [
             ("a::one", "Close tile", "Workspace"),
@@ -1233,13 +1238,24 @@ mod tests {
     }
 
     #[test]
-    fn find_searches_action_ids_and_categories_too() {
+    fn find_searches_categories_but_never_invisible_action_ids() {
         let texts = find_texts();
+        let mut state = finding_state(0);
+        for k in ["p", "a", "l"] {
+            press_while_finding(&mut state, &texts, &key(k));
+        }
+        assert_eq!(state.selected, 2, "'pal' matches the Palette category");
+
         let mut state = finding_state(0);
         for k in ["t", "h", "r", "e", "e"] {
             press_while_finding(&mut state, &texts, &key(k));
         }
-        assert_eq!(state.selected, 2, "'three' only appears in an action id");
+        assert_eq!(
+            state.selected, 0,
+            "'three' appears only in an action id, which is not displayed \
+             and must not match — the /mo bug: a jump with no visible \
+             highlight to explain it"
+        );
     }
 
     #[test]
