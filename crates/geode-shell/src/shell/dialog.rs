@@ -184,7 +184,7 @@ pub fn open_shell_dialog<F>(
 /// constructs a [`ShellModal`], `open_shell_dialog` included.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<ShellView>,
     title: impl Into<SharedString>,
     build: F,
@@ -199,10 +199,12 @@ pub fn open_shell_dialog_with_key<F>(
     // the modal.
     view.matcher.cancel();
     // Close an open palette the same way `toggle_palette`'s own close arm
-    // does — the palette has no idea a modal just opened over it, and its
-    // exclusive key handling would otherwise still think it owns every
-    // keystroke underneath the modal.
-    view.palette = None;
+    // does (`close_palette` — palette-input-polish task: also returns focus
+    // to the shell root, since the palette's own `Entity<InputState>` may
+    // currently hold it) — the palette has no idea a modal just opened over
+    // it, and its exclusive key handling would otherwise still think it
+    // owns every keystroke underneath the modal.
+    view.close_palette(window, cx);
 
     view.modal = Some(ShellModal {
         title: title.into(),

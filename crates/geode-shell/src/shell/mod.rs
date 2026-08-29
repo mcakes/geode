@@ -22,10 +22,10 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, ScrollHandle, Window,
-    div, px,
+    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, ScrollHandle,
+    Window, div, px,
 };
-use gpui_component::input::InputState;
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
 
 use crate::actions::{ActionId, ActionRegistry};
@@ -120,6 +120,59 @@ pub struct ShellView {
     /// `push_char`, `backspace` in `handle_palette_key`) via `sync_palette_
     /// scroll`, so the selected row always scrolls into view.
     palette_scroll: ScrollHandle,
+    /// The palette's query field (palette-input-polish task): a real
+    /// gpui-component `Entity<InputState>`, replacing the hand-rolled
+    /// `String` + trailing caret glyph `palette::render` used to draw
+    /// itself. Built once here (like `filter_input` below — same
+    /// "`Input` needs a stable entity across frames to keep its own
+    /// cursor/selection/focus state" reasoning), *not* rebuilt per palette
+    /// open the way `PaletteState`/`palette_scroll` are: `toggle_palette`
+    /// instead resets its *value* to `""` on every open (`InputState::
+    /// set_value` — deliberately chosen over a fresh entity so the same
+    /// `FocusHandle` survives close/reopen, and so the one `InputEvent::
+    /// Change` subscription set up in `new` below stays wired for the
+    /// life of the window instead of needing to be re-subscribed on every
+    /// open).
+    ///
+    /// **Routing** (the routing design this task settled on, verified
+    /// against the pinned gpui rev's `Window::dispatch_key_event`/
+    /// `dispatch_action_on_node` before writing any of this): `toggle_
+    /// palette` focuses this field's `FocusHandle` on open and
+    /// `close_palette` returns focus to `self.focus_handle` (the shell
+    /// root) on every close path. While it's focused, gpui-component's
+    /// `Input` consumes printable characters, caret movement, ctrl+a
+    /// (select-all), and — new versus the old free-text palette — ctrl+v
+    /// (paste) natively, via its own `KeyBinding`-bound actions
+    /// (`crates/base/src/input/base/state.rs`'s `CONTEXT = "Input"`
+    /// bindings): those actions run and stop propagation *before*
+    /// `ShellView`'s own `on_key_down` (`handle_key_down`) ever sees the
+    /// raw `KeyDownEvent` (confirmed by reading `dispatch_key_event`
+    /// itself — an action handler that doesn't call `cx.propagate()`
+    /// returns early without ever reaching `finish_dispatch_key_event`,
+    /// which is what fires raw key listeners). Up/down, ctrl+p/ctrl+n,
+    /// enter, and escape all still reach `handle_palette_key` as bubbled
+    /// `KeyDownEvent`s, for three different reasons each confirmed against
+    /// the pinned checkout rather than assumed: up/down have a global
+    /// `KeyBinding` in the "Input" context, but the *element* only
+    /// attaches an `on_action` listener for them `.when(self.is_multi_
+    /// line(), ..)` — this field is single-line, so no listener exists to
+    /// consume them and the raw event falls through untouched; ctrl+p and
+    /// ctrl+n have no `KeyBinding` in "Input" at all (grepped the whole
+    /// `crates/base/src/input` tree — absent), so they're never matched in
+    /// the first place; enter and escape *are* bound and *do* have
+    /// listeners (`InputBaseState::enter`/`escape`), but for a single-line,
+    /// non-`clean_on_escape` input those handlers explicitly call
+    /// `cx.propagate()` after emitting their `InputEvent`, letting the
+    /// event continue to raw dispatch. `ctrl+k` (the palette toggle) has no
+    /// "Input" binding either, so it always reaches `handle_key_down`'s
+    /// earlier `is_palette_toggle` intercept regardless of focus — Escape
+    /// remains the one *guaranteed* close either way. `handle_palette_key`
+    /// itself now only acts on that short nav list and is a true no-op for
+    /// everything else (deliberately, not via `cx.stop_propagation()` —
+    /// see that method's doc comment: a typed character must keep
+    /// propagating past it so the window's separate IME/text-input phase
+    /// still delivers it to this field).
+    palette_input: Entity<InputState>,
     /// Desk and user config directories the reload watcher polls (Task
     /// 1c-1). Owned here (not just captured by the background task) so the
     /// watcher's own loop re-reads them fresh from the entity each poll —
@@ -151,6 +204,19 @@ pub struct ShellView {
     /// onto the existing poll tick means at most one write per ~500ms
     /// regardless of how many workspace actions fired in that window.
     session_dirty: bool,
+    /// Set by a background path that closed the palette without a `Window`
+    /// to restore focus with (today: only `apply_reload`'s palette-
+    /// snapshot-changed branch) — see that call site's own comment for the
+    /// orphaned-`FocusId` failure mode this exists to close. Consumed at
+    /// the *top* of `render`, the next place downstream that actually has
+    /// a `&mut Window`: `apply_reload` already calls `cx.notify()`
+    /// unconditionally, which schedules exactly the render that will pick
+    /// this up, so the fix lands within one frame. `render` is the right
+    /// consumption point specifically *because* `handle_key_down` is
+    /// unreachable in the orphaned state this guards against (that's the
+    /// whole bug) — a fix that waited for the next keystroke to run would
+    /// never run at all.
+    pending_focus_restore: bool,
     /// The toolbar's right-aligned filter field (Task 4). Deliberately
     /// inert — nothing reads its value; it becomes the global text filter
     /// (spec §4.1) in the data phase. Owned here (rather than built fresh
@@ -192,6 +258,37 @@ impl ShellView {
         // render, so `Input`'s own cursor/selection/focus state survives
         // across frames.
         let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter"));
+
+        // The palette's own query field (palette-input-polish task) — see
+        // the `palette_input` field's own doc comment for the full
+        // lifecycle/routing story. No placeholder text (unchanged plan
+        // constraint carried over from the old hand-rolled input: an empty
+        // query renders bare, no hint-text fallback).
+        let palette_input = cx.new(|cx| InputState::new(window, cx));
+        // One subscription for the life of the window, not re-subscribed
+        // per palette open: `InputEvent::Change` only ever fires while this
+        // field is actually focused (which only happens while `self.
+        // palette` is open), and `toggle_palette`'s own `set_value("", ..)`
+        // reset deliberately does *not* emit `Change` (`InputState::
+        // set_value`'s own doc comment: it suppresses events around the
+        // replace) — so this handler only ever runs for a real user edit,
+        // never for the open-time reset. Feeds the new value into the
+        // *pure* `PaletteState::set_query` (selection-reset-to-0 included),
+        // exactly mirroring what `push_char`/`backspace` used to do
+        // per-keystroke, then follows the selection change into view the
+        // same way every other selection-changing path here does.
+        cx.subscribe_in(&palette_input, window, |view, input, event, _window, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let Some(palette) = view.palette.as_mut() else {
+                return;
+            };
+            palette.set_query(input.read(cx).value().to_string());
+            view.sync_palette_scroll();
+            cx.notify();
+        })
+        .detach();
 
         // `last_snapshot` starts empty rather than being seeded with a
         // synchronous `reload::scan` call right here: that would be real
@@ -296,11 +393,13 @@ impl ShellView {
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
+            palette_input,
             desk_dir,
             user_dir,
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
+            pending_focus_restore: false,
             filter_input,
         }
     }
@@ -379,7 +478,28 @@ impl ShellView {
             }
 
             if palette_snapshot_changed {
+                // Deliberately `self.palette = None` here, not `self.
+                // close_palette(..)` (palette-input-polish task's own
+                // helper, used everywhere else a close needs to hand focus
+                // back to the shell root) — `apply_reload` has no `Window`
+                // (it runs from the background reload watcher's plain
+                // `Context<Self>` update, spec PHILOSOPHY.md: reload I/O
+                // stays off the UI thread and this is the cheap synchronous
+                // tail of that), so there is nothing to call `FocusHandle::
+                // focus` with directly here. If the palette's `Entity<
+                // InputState>` happened to hold real window focus at this
+                // exact moment (a keymap/mod-alias edit landing while the
+                // user is mid-query), silently dropping `self.palette`
+                // would leave that `FocusId` orphaned — the dispatch tree
+                // resolves an orphaned focus to its root node next frame,
+                // not `ShellView`'s own `track_focus`'d div, so `handle_
+                // key_down` (which lives on that div's `on_key_down`)
+                // would simply stop firing: Escape, ctrl+k, hjkl, all of
+                // it, dead until a mouse click claims focus somewhere else
+                // first. Fix-round finding: `pending_focus_restore` below
+                // is what closes that gap without needing a `Window` here.
                 self.palette = None;
+                self.pending_focus_restore = true;
             }
         }
 
@@ -431,10 +551,19 @@ impl ShellView {
 
     /// Open the palette (building a fresh `PaletteState` — actions in
     /// registry order, then themes) if it's closed, or close it if it's
-    /// open.
-    fn toggle_palette(&mut self) {
+    /// open. Takes `window`/`cx` (added by the palette-input-polish task,
+    /// unlike the old free-text version) purely for the focus handoff:
+    /// [`close_palette`](Self::close_palette) on the close arm, and, on the
+    /// open arm, resetting `self.palette_input`'s value to `""`
+    /// (`InputState::set_value` — checked against the pinned checkout: it
+    /// does *not* emit `InputEvent::Change`, so this alone never touches
+    /// `self.palette`'s query, which is already starting fresh from
+    /// `PaletteState::new` a few lines below) and focusing it, so typing
+    /// reaches the query field the instant the palette appears rather than
+    /// requiring a click first.
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.palette.is_some() {
-            self.palette = None;
+            self.close_palette(window, cx);
             return;
         }
         // Opening the palette cancels any pending keymap sequence (spec:
@@ -454,16 +583,41 @@ impl ShellView {
         // scroll position) must not carry over now that the results list
         // scrolls a real viewport instead of always fitting on screen.
         self.palette_scroll = ScrollHandle::new();
+        self.palette_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.palette_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+    }
+
+    /// Close the palette (if open) and hand focus back to the shell root —
+    /// the "return focus to shell root on close" half of the palette-
+    /// input-polish task's focus contract (the "focus it on open" half
+    /// lives in `toggle_palette`'s open arm). The one standard door for
+    /// closing the palette from a real key/mouse event: `toggle_palette`'s
+    /// close arm, `handle_palette_key`'s escape/enter arms, the click-
+    /// catcher's dismiss handler (`render`, below), and `dialog::
+    /// open_shell_dialog_with_key` (a modal opening over an open palette)
+    /// all go through this rather than setting `self.palette = None`
+    /// directly. `apply_reload`'s own silent close is the one deliberate
+    /// exception — see that call site's own comment for why (no `Window`
+    /// available there).
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette = None;
+        self.focus_handle.focus(window, cx);
     }
 
     /// Scroll the palette's results viewport so the currently selected row
     /// is visible (`gpui::ScrollHandle::scroll_to_item`, a real per-frame
     /// layout measurement — see `palette::render`'s doc comment). Called
-    /// from every path in `handle_palette_key` that can change `self.
-    /// palette`'s selection: the two arrow/ctrl+p/ctrl+n branches, and the
-    /// query-edit branches (`push_char`/`backspace` both reset the
-    /// selection to row 0, which is itself a selection change the viewport
-    /// must follow). A no-op while the palette is closed.
+    /// from every path that can change `self.palette`'s selection: `handle_
+    /// palette_key`'s up/down/ctrl+p/ctrl+n arms, the `InputEvent::Change`
+    /// subscription set up in `new` (`PaletteState::set_query` resets the
+    /// selection to row 0 on every edit, same as `push_char`/`backspace`
+    /// used to — that's still a selection change the viewport must follow),
+    /// and a row click (`set_selected`, via the click handler built in
+    /// `render`, below). A no-op while the palette is closed.
     fn sync_palette_scroll(&self) {
         if let Some(palette) = self.palette.as_ref() {
             self.palette_scroll.scroll_to_item(palette.selected());
@@ -498,7 +652,7 @@ impl ShellView {
         if handled {
             self.session_dirty = true;
         } else if action.0 == "palette::toggle" {
-            self.toggle_palette();
+            self.toggle_palette(window, cx);
         } else if action.0 == "theme::toggle_mode" {
             self.services.theme.toggle_mode(cx);
             self.persist_theme(cx);
@@ -665,22 +819,38 @@ impl ShellView {
         }
     }
 
-    /// Handle one key event while the palette is open. Exclusive routing
-    /// (plan constraint: "keyboard-first ... open, type, navigate,
-    /// dispatch, close"; brief: "Palette-open swallows all other bindings
-    /// ... keys go to the palette handler exclusively") — the shell's own
-    /// keymap `Matcher` is never consulted here, so no other binding (a
-    /// sequence, a workspace verb, anything) can leak through while typing
-    /// a query. The palette-toggle keystroke itself is intercepted earlier
-    /// in `handle_key_down`, before this method ever runs, so it does not
-    /// need a case here.
+    /// Handle one *bubbled* key event while the palette is open — reworked
+    /// by the palette-input-polish task from the old "owns every key,
+    /// including free text entry" version. Query editing (typing,
+    /// backspace/delete, caret movement, ctrl+a, ctrl+v) is no longer this
+    /// method's job at all: `self.palette_input`, a real gpui-component
+    /// `Input`, consumes those natively and — per the routing analysis on
+    /// the `palette_input` field's own doc comment — they never reach here
+    /// in the first place; `handle_key_down`'s `if self.palette.is_some()`
+    /// guard (below) only ever routes here what the `Input` didn't already
+    /// consume.
+    ///
+    /// This method now does exactly two things: act on the short list of
+    /// navigation/close keys the palette still owns (up/down, ctrl+p/
+    /// ctrl+n, enter, escape), and otherwise do *nothing* — deliberately
+    /// not `cx.stop_propagation()`, which would be the wrong kind of
+    /// "swallow": a bare typed character reaches this method too (no
+    /// `KeyBinding` at all matches it inside `Input`'s own "Input" context,
+    /// so raw dispatch runs — see the field doc comment again), and it must
+    /// keep propagating past this listener so the window's separate IME/
+    /// text-input phase (`Window::dispatch_keystroke`'s second phase in
+    /// tests; the platform's real text-input callback in production) still
+    /// delivers it to the now-focused `palette_input`. Either way, no shell
+    /// chord ever fires while the palette is open: `handle_key_down`'s own
+    /// `if self.palette.is_some() { self.handle_palette_key(..); return; }`
+    /// guard is a plain Rust-level branch that never falls through to
+    /// `self.matcher.press` regardless of what happens in here.
     ///
     /// Reads gpui's own `Keystroke` directly (`event.keystroke`, not the
-    /// shell-native one `convert_keystroke` produces) because free text
-    /// entry needs `key_char` (the actual typed/shifted character) and
-    /// named keys (`"backspace"`, `"up"`, `"down"`, `"enter"`, `"escape"`)
-    /// that the shell-native conversion's matcher-oriented shape doesn't
-    /// carry.
+    /// shell-native one `convert_keystroke` produces) because it needs the
+    /// named keys (`"up"`, `"down"`, `"enter"`, `"escape"`) and raw
+    /// `modifiers` that the shell-native conversion's matcher-oriented
+    /// shape doesn't carry as directly.
     fn handle_palette_key(
         &mut self,
         event: &KeyDownEvent,
@@ -691,19 +861,13 @@ impl ShellView {
         let mods = ks.modifiers;
 
         match ks.key.as_str() {
-            "escape" => self.palette = None,
+            "escape" => self.close_palette(window, cx),
             "enter" => {
                 let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
-                self.palette = None;
+                self.close_palette(window, cx);
                 if let Some(item) = selected {
                     self.dispatch_palette_item(&item, window, cx);
                 }
-            }
-            "backspace" => {
-                if let Some(palette) = self.palette.as_mut() {
-                    palette.backspace();
-                }
-                self.sync_palette_scroll();
             }
             "up" => {
                 if let Some(palette) = self.palette.as_mut() {
@@ -729,22 +893,14 @@ impl ShellView {
                 }
                 self.sync_palette_scroll();
             }
-            _ => {
-                // Plain typing only: a chord that also holds ctrl/cmd/fn
-                // is a shortcut, not text entry, even if the platform
-                // still reports a `key_char` for it.
-                if !mods.control
-                    && !mods.platform
-                    && !mods.function
-                    && let (Some(chars), Some(palette)) =
-                        (ks.key_char.as_ref(), self.palette.as_mut())
-                {
-                    for c in chars.chars() {
-                        palette.push_char(c);
-                    }
-                    self.sync_palette_scroll();
-                }
-            }
+            // Every other bubbled key — most commonly a bare typed
+            // character, but also e.g. tab/home/end, none of which this
+            // palette gives any shell-level meaning to — is a genuine no-op
+            // here. See this method's own doc comment for why that's
+            // correct rather than an oversight: doing nothing is what lets
+            // the keystroke keep propagating to the input's own text
+            // insertion, while still never reaching `self.matcher`.
+            _ => {}
         }
     }
 
@@ -846,6 +1002,17 @@ impl ShellView {
             return;
         }
 
+        // Deliberately no analogous "if palette_input is focused, return
+        // unless escape" guard here — unlike the filter field above, the
+        // palette needs *more* than Escape to reach it while its own input
+        // has focus (up/down, ctrl+p/ctrl+n, enter). That routing lives in
+        // `handle_palette_key` instead, reached via the `self.palette.
+        // is_some()` branch a few lines down: see that method's and the
+        // `palette_input` field's own doc comments for the full mechanism
+        // (gpui-component's `Input` already consumes everything else —
+        // printable characters, caret movement, ctrl+a, ctrl+v — before a
+        // raw `KeyDownEvent` would ever reach here at all).
+        //
         // Converted once and reused below — the palette-toggle check and
         // the closed-palette dispatch both need it, and re-converting the
         // same raw event twice was pure waste.
@@ -854,7 +1021,7 @@ impl ShellView {
         if let Some(ks) = &keystroke
             && self.is_palette_toggle(ks)
         {
-            self.toggle_palette();
+            self.toggle_palette(window, cx);
             cx.notify();
             return;
         }
@@ -885,6 +1052,20 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Fix-round finding: consume a pending focus restore left by a
+        // background path that closed the palette with no `Window` in hand
+        // (see `pending_focus_restore`'s and `apply_reload`'s own doc
+        // comments for the orphaned-`FocusId` bug this closes). `render`
+        // is the first point downstream that actually has a `&mut Window`
+        // — and the *only* point that will reliably run at all in the
+        // failure state being fixed, since an orphaned focus is exactly
+        // what makes `handle_key_down` stop firing until a mouse click
+        // claims focus elsewhere first.
+        if self.pending_focus_restore {
+            self.pending_focus_restore = false;
+            self.focus_handle.focus(window, cx);
+        }
+
         // `viewport_size` is the drawable area (excludes window chrome),
         // which is what `Tree::layout` should partition (gpui/window.rs).
         // Task 4 adds a top toolbar (the native title bar,
@@ -1037,13 +1218,61 @@ impl Render for ShellView {
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
             .when_some(self.palette.as_ref(), |el, state| {
-                el.child(palette::render(
+                // Row click -> select (no dispatch — Enter still
+                // dispatches, via `handle_palette_key`): a small `Clone`-
+                // able closure over a `WeakEntity<Self>`, not `cx.listener`
+                // directly (its returned `impl Fn` isn't itself `Clone`,
+                // and `palette::render` clones this once per row to close
+                // over each row's own index — see that function's doc
+                // comment) — this way building it costs one stack closure,
+                // not a heap allocation per row, per frame, while the
+                // palette is open (PHILOSOPHY.md: "per-frame heap churn is
+                // a defect").
+                let weak = cx.entity().downgrade();
+                let on_row_click = move |idx: usize, _window: &mut Window, cx: &mut App| {
+                    let _ = weak.update(cx, |view, cx| {
+                        if let Some(palette) = view.palette.as_mut() {
+                            palette.set_selected(idx);
+                        }
+                        view.sync_palette_scroll();
+                        cx.notify();
+                    });
+                };
+                let panel = palette::render(
                     state,
                     &self.palette_scroll,
+                    &self.palette_input,
+                    on_row_click,
                     width,
                     viewport_height,
                     cx,
-                ))
+                );
+                // Click-outside dismiss: a transparent (no dimming — the
+                // palette is an overlay, not a modal) full-window click-
+                // catcher behind the panel. Precedent: `dialog::
+                // render_modal`'s own backdrop, minus the `.bg(overlay)`
+                // dimming a real modal wants and this doesn't. The panel
+                // itself stops propagation on its own `on_mouse_down` (see
+                // `palette::render`'s doc comment), so a click landing
+                // anywhere inside it — a row, the query input, empty space
+                // — never also reaches this catcher's handler below.
+                el.child(
+                    div()
+                        .id("palette-click-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .debug_selector(|| "palette-click-catcher".to_string())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, window, cx| {
+                                view.close_palette(window, cx);
+                            }),
+                        )
+                        .child(panel),
+                )
             })
             // The modal overlay paints above the palette (later children
             // paint above earlier siblings) but still below gpui-
@@ -2047,7 +2276,13 @@ mod tests {
 
     /// Esc closes the palette without dispatching anything — typing a
     /// query that would otherwise match and select an action must not
-    /// leave any trace once the palette is dismissed.
+    /// leave any trace once the palette is dismissed. Also covers the
+    /// palette-input-polish task's focus contract: `ctrl+k` should have
+    /// focused `palette_input`'s real `FocusHandle` (proven directly, not
+    /// just inferred from typing having worked), and escape should hand
+    /// focus back to the shell root — the same "return focus on close"
+    /// story `escape_in_the_filter_input_returns_focus_to_the_shell_root`
+    /// proves for the toolbar's filter field.
     #[gpui::test]
     fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -2074,8 +2309,20 @@ mod tests {
                 .downcast::<ShellView>()
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
+        let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+        let palette_input = shell.read_with(&cx, |shell, _| shell.palette_input.clone());
+        let palette_input_focus_handle =
+            palette_input.read_with(&cx, |state, cx| state.focus_handle(cx));
 
         cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+            "ctrl+k opening the palette should have focused its query Input"
+        );
+
         cx.simulate_input("split");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -2092,6 +2339,414 @@ mod tests {
         assert_eq!(
             tile_count, 0,
             "escape must not dispatch the item that was filtered/selected"
+        );
+        assert!(
+            !cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+            "escape should have moved focus off the palette's query input"
+        );
+        assert!(
+            cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "escape should have returned focus to the shell root"
+        );
+    }
+
+    /// Left/right arrow keys are consumed by the palette's query `Input` as
+    /// native caret movement (palette-input-polish task: "OS text input
+    /// stuff... from the component") and must not leak to the shell as
+    /// workspace chords — proven two ways: the caret actually moves inside
+    /// the input (`InputState::cursor`, not inferred from the query
+    /// staying the same), and the workspace stays untouched.
+    #[gpui::test]
+    fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        let palette_input = shell.read_with(&cx, |shell, _| shell.palette_input.clone());
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_input("abc");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            palette_input.read_with(&cx, |state, _cx| state.cursor()),
+            3,
+            "sanity: typing \"abc\" should leave the caret at the end"
+        );
+
+        cx.simulate_keystrokes("left");
+        assert_eq!(
+            palette_input.read_with(&cx, |state, _cx| state.cursor()),
+            2,
+            "left should move the caret back one position inside the input"
+        );
+
+        cx.simulate_keystrokes("right");
+        assert_eq!(
+            palette_input.read_with(&cx, |state, _cx| state.cursor()),
+            3,
+            "right should move the caret forward one position inside the input"
+        );
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "the palette should still be open — arrows are caret movement, not close"
+        );
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 0,
+            "left/right must not leak to the shell as workspace chords"
+        );
+    }
+
+    /// ctrl+a is consumed by the palette's query `Input` (native "OS text
+    /// input stuff") rather than leaking to the shell — there is no
+    /// `ctrl+a` shell binding at all (checked against `defaults.rs`'s
+    /// `BUILTIN_KEYMAP`), so the meaningful proof is that the input
+    /// actually reacts to it and the query/palette are otherwise
+    /// untouched. Platform quirk, asserted directly rather than assumed
+    /// (gpui-component's own hardcoded bindings, `crates/base/src/input/
+    /// base/state.rs`, not this crate's configurable mod-alias): on macOS
+    /// `ctrl+a` is bound to `MoveHome` (Emacs-style — `cmd+a` is
+    /// `SelectAll` there instead), everywhere else `ctrl+a` *is*
+    /// `SelectAll`. Both handlers fully consume the keystroke (neither
+    /// calls `cx.propagate()` — checked against the pinned checkout), so
+    /// "does not leak" holds on every platform CI builds this on (spec: “CI
+    /// runs on both macOS and Windows”); only the resulting caret/selection
+    /// differs.
+    #[gpui::test]
+    fn ctrl_a_is_consumed_by_the_input_and_does_not_leak_to_the_shell(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        let palette_input = shell.read_with(&cx, |shell, _| shell.palette_input.clone());
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.simulate_input("split");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("ctrl-a");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            palette_input.read_with(&cx, |state, _cx| state.cursor()),
+            0,
+            "on macOS, ctrl+a inside a gpui-component Input is MoveHome, not SelectAll"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            palette_input.read_with(&cx, |state, _cx| state.selected_range()),
+            0..5,
+            "ctrl+a should select the whole \"split\" query inside the input"
+        );
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "ctrl+a must not close the palette"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .palette
+                .as_ref()
+                .unwrap()
+                .query()
+                .to_string()),
+            "split",
+            "ctrl+a must not itself change the query text"
+        );
+    }
+
+    /// A row click SELECTS it (moves the highlight) without dispatching —
+    /// Enter is still what dispatches. Real mouse coordinates, recovered
+    /// from `palette::render`'s `"palette-row-{i}"` debug selector (same
+    /// pattern `arrow_down_past_visible_rows_advances_selection_and_
+    /// scrolls_it_into_view` and `keybindings_view`'s own row-click test
+    /// use) rather than a direct `PaletteState::set_selected` call, so this
+    /// exercises the real click -> `ShellView::render`'s `on_row_click` ->
+    /// `set_selected` path end to end.
+    #[gpui::test]
+    fn click_on_a_result_row_selects_it_without_dispatching(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "sanity: the palette opens with row 0 selected"
+        );
+
+        let row_bounds = cx
+            .debug_bounds("palette-row-3")
+            .expect("row 3 should have painted bounds to click into");
+        let inside_row_3 = gpui::point(
+            row_bounds.origin.x + gpui::px(10.0),
+            row_bounds.origin.y + gpui::px(10.0),
+        );
+        cx.simulate_mouse_down(inside_row_3, MouseButton::Left, gpui::Modifiers::none());
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            3,
+            "clicking row 3 should select it"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "a row click must not dispatch — the palette stays open"
+        );
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 0,
+            "selecting a row via click must not have dispatched anything"
+        );
+    }
+
+    /// A mouse-down well outside the palette panel — on the transparent
+    /// click-catcher `ShellView::render` wraps the panel in — dismisses the
+    /// palette (design brief: "click anywhere outside the palette panel ->
+    /// dismisses the palette"). Same real-mouse-event structure and corner
+    /// point as `backdrop_click_closes_the_modal` (the panel is centered,
+    /// starting at least a third of the way down and inset horizontally,
+    /// so a point near the window's origin always falls on the catcher).
+    #[gpui::test]
+    fn click_outside_the_palette_panel_closes_it(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "sanity: ctrl-k should have opened the palette"
+        );
+
+        cx.simulate_mouse_down(
+            gpui::point(gpui::px(4.0), gpui::px(4.0)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "a mouse-down on the click-catcher, well outside the centered \
+             panel, should have closed the palette"
+        );
+    }
+
+    /// A mouse-down INSIDE the panel must NOT close the palette — the
+    /// panel's own `on_mouse_down` (`palette::render`) stops propagation
+    /// before the same bubbling event ever reaches the click-catcher's
+    /// close handler underneath it. Mirrors `panel_click_does_not_close_
+    /// the_modal` exactly, one layer down (palette panel vs. modal panel).
+    #[gpui::test]
+    fn click_on_the_palette_panel_does_not_close_it(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "sanity: ctrl-k should have opened the palette"
+        );
+
+        let panel_bounds = cx
+            .debug_bounds("palette-panel")
+            .expect("the palette panel should have painted bounds to click inside");
+        let inside_panel = gpui::point(
+            panel_bounds.origin.x + gpui::px(10.0),
+            panel_bounds.origin.y + gpui::px(10.0),
+        );
+
+        cx.simulate_mouse_down(inside_panel, MouseButton::Left, gpui::Modifiers::none());
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "a mouse-down inside the panel must not close the palette"
+        );
+    }
+
+    /// A shell chord (`ctrl+shift+w` = `workspace::close_tile`) must not
+    /// fire while the palette is open — proven with a real tile actually
+    /// present to close (an empty workspace closing "a tile" that was
+    /// never there wouldn't distinguish "correctly swallowed" from
+    /// "there was nothing to close anyway").
+    #[gpui::test]
+    fn shell_chord_does_not_fire_while_the_palette_is_open(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Create a real tile (ctrl+v = workspace::split_right) so there is
+        // something for a leaked ctrl+shift+w to actually close.
+        cx.simulate_keystrokes("ctrl-v");
+        let tile_count_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count_before, 1,
+            "sanity: ctrl+v should have split a tile"
+        );
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "sanity: ctrl-k should have opened the palette"
+        );
+
+        cx.simulate_keystrokes("ctrl-shift-w");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "ctrl+shift+w must not close the palette either"
+        );
+        let tile_count_after = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count_after, 1,
+            "ctrl+shift+w (workspace::close_tile) must not fire while the \
+             palette is open — the tile from before must still be there"
         );
     }
 
@@ -2731,6 +3386,88 @@ mod tests {
                 "a reload with genuinely different keymap docs must close an open palette"
             );
         });
+    }
+
+    /// Fix-round regression for the orphaned-`FocusId` finding on
+    /// `apply_reload`'s palette-close path (see `pending_focus_restore`'s
+    /// and that call site's own doc comments): a background reload closing
+    /// the palette while its query `Input` genuinely holds window focus
+    /// must still end up with focus back on the shell root — `apply_reload`
+    /// itself has no `Window` to do that with directly, so this proves the
+    /// `pending_focus_restore` flag actually gets consumed by the very next
+    /// render, the same "assert the shell handle is focused after" pattern
+    /// `escape_closes_the_palette_without_dispatching` uses for the
+    /// ordinary key-driven close.
+    #[gpui::test]
+    fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+        let palette_input = shell.read_with(&cx, |shell, _| shell.palette_input.clone());
+        let palette_input_focus_handle =
+            palette_input.read_with(&cx, |state, cx| state.focus_handle(cx));
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+            "sanity: ctrl+k opening the palette should have focused its query Input"
+        );
+
+        // A keymap-differing reload (not just a theme-only one — see the
+        // contrasting pair of tests above) closes the palette out from
+        // under that still-focused input, with no Window available to
+        // `apply_reload` itself to redirect focus.
+        let new_config = config_with_mod("ctrl");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "sanity: the keymap-differing reload should have closed the palette"
+        );
+
+        // `apply_reload` already calls `cx.notify()` unconditionally, so
+        // the next draw is exactly the render that should consume
+        // `pending_focus_restore`.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            !cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+            "the closed palette's query input must not still hold window focus"
+        );
+        assert!(
+            cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+            "a background reload closing a focused palette must still return \
+             focus to the shell root — otherwise handle_key_down's on_key_down \
+             listener never fires again until a mouse click claims focus"
+        );
     }
 
     // --- Task 3: session save/restore wiring ----------------------------
