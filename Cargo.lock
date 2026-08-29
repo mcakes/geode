@@ -2219,6 +2219,10 @@ dependencies = [
 [[package]]
 name = "geode-core"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "toml 1.1.4+spec-1.1.0",
+]
 
 [[package]]
 name = "geode-data"
