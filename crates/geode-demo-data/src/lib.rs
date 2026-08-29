@@ -102,6 +102,7 @@ pub fn generate(config: &GeneratorConfig) -> RiskBatch {
     batch
 }
 
+// No quoting/escaping: every string column draws from fixed, comma-free vocabularies. Revisit if the vocabularies ever grow free-form values.
 pub fn write_csv<W: std::io::Write>(batch: &RiskBatch, out: &mut W) -> std::io::Result<()> {
     writeln!(
         out,
