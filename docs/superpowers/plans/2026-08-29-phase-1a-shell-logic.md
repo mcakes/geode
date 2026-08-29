@@ -2169,7 +2169,7 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
 - [ ] **Step 7: Run the full workspace suite**
 
 Run: `cargo test --workspace`
-Expected: all tests pass — 13 in geode-core, 25 in geode-shell unit tests, 1 integration, 5 in geode-demo-data.
+Expected: all tests pass — 13 in geode-core, 31 in geode-shell unit tests (3 actions + 6 keystroke + 6 context + 6 build + 8 matcher + 2 defaults), 1 integration, 5 in geode-demo-data. Treat counts as minimums.
 
 - [ ] **Step 8: Lint, format, commit**
 
