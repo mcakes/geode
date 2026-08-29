@@ -88,6 +88,15 @@ pub struct ShellView {
     /// The result of the last reload attempt, `Unchanged` until the first
     /// one runs. Drives the status bar's reload indicator.
     last_reload: reload::ReloadOutcome,
+    /// Set on every successful workspace-mutating `dispatch`; cleared by
+    /// the background watcher's ~500ms tick (see `new`), which is also
+    /// where the actual file write happens — off the UI thread (Task 3 fix
+    /// round 1: the first cut of this wrote synchronously per dispatch,
+    /// which stalls the render thread on a slow filesystem under OS
+    /// key-repeat, e.g. holding shift+h at ~20-30 events/sec). Coalescing
+    /// onto the existing poll tick means at most one write per ~500ms
+    /// regardless of how many workspace actions fired in that window.
+    session_dirty: bool,
 }
 
 impl ShellView {
@@ -111,6 +120,30 @@ impl ShellView {
             let mut is_first_poll = true;
             loop {
                 cx.background_executor().timer(RELOAD_POLL_INTERVAL).await;
+
+                // Flush a dirty session (Task 3 fix round 1), coalesced
+                // onto this same ~500ms tick rather than writing per
+                // dispatch. `take_dirty_session_write` does the cheap part
+                // (TOML serialization) synchronously on the UI thread via
+                // `this.update`; the actual file write — real, potentially
+                // blocking I/O — runs on the background executor, so it
+                // can never stall the render thread no matter how slow the
+                // filesystem is. Runs unconditionally on every tick, ahead
+                // of the `continue`s below, so it's never skipped by the
+                // reload watcher's own early-outs.
+                let Ok(pending_write) =
+                    this.update(cx, |view, _cx| view.take_dirty_session_write())
+                else {
+                    return; // window/entity gone; stop polling
+                };
+                if let Some((path, text)) = pending_write {
+                    cx.background_executor()
+                        .spawn(async move { session::write_atomic(&path, &text) })
+                        .await
+                        .unwrap_or_else(|e| {
+                            eprintln!("[session] warning: failed to save session: {e}")
+                        });
+                }
 
                 let Ok((desk_dir, user_dir)) = this.update(cx, |view, _cx| {
                     (view.desk_dir.clone(), view.user_dir.clone())
@@ -180,6 +213,7 @@ impl ShellView {
             user_dir,
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
+            session_dirty: false,
         }
     }
 
@@ -296,19 +330,25 @@ impl ShellView {
     /// keymap-matcher path and the palette's Enter-to-dispatch path, so
     /// both take exactly the same action to the same place.
     ///
-    /// Every successful workspace-mutating dispatch is followed by a
-    /// session save (Task 3, plan constraint: "session saves happen inside
-    /// the dispatch path after workspace-mutating actions, post-action, not
-    /// per frame"). `apply_workspace_action` returning `true` means the
-    /// action was recognized as a workspace verb (see its own doc comment:
-    /// this includes no-op edge cases like focusing past the last tile) —
-    /// saving on every one of those, not just the ones that actually
-    /// changed geometry, keeps this a single cheap post-action write
-    /// instead of a second "did anything really change" comparison.
+    /// Every successful workspace-mutating dispatch marks the session dirty
+    /// (Task 3, plan constraint: "session saves happen inside the dispatch
+    /// path after workspace-mutating actions, post-action, not per frame"
+    /// — the constraint's own documented alternative: "a save-on-mutation-
+    /// with-boolean-dirty-flag flushed by the watcher's 500ms tick").
+    /// `apply_workspace_action` returning `true` means the action was
+    /// recognized as a workspace verb (see its own doc comment: this
+    /// includes no-op edge cases like focusing past the last tile) —
+    /// marking dirty on every one of those, not just the ones that actually
+    /// changed geometry, keeps this a single cheap flag-set instead of a
+    /// second "did anything really change" comparison. The actual write
+    /// happens later, off the UI thread, on the background watcher's
+    /// ~500ms tick (see `new`'s loop and `take_dirty_session_write`) — Task
+    /// 3 fix round 1: writing synchronously here, once per dispatch, could
+    /// stall the render thread under OS key-repeat on a slow filesystem.
     fn dispatch(&mut self, action: &ActionId, cx: &mut Context<Self>) {
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
-            self.save_session();
+            self.session_dirty = true;
         } else if action.0 == "palette::toggle" {
             self.toggle_palette();
         } else if action.0 == "theme::toggle_mode" {
@@ -316,16 +356,57 @@ impl ShellView {
         }
     }
 
+    /// If a workspace mutation happened since the last flush, serialize the
+    /// current session state (cheap: `session::to_string_pretty` over a
+    /// handful of small TOML tables — safe to run synchronously here, on
+    /// the UI thread, unlike the actual file write) and clear the dirty
+    /// flag, handing the caller `(path, text)` to write off the UI thread.
+    /// Returns `None` when there's nothing to flush (not dirty, no session
+    /// path configured, or serialization somehow failed — logged as a
+    /// warning either way, never a panic).
+    ///
+    /// Called from the background watcher's ~500ms tick (`new`) in
+    /// production. Tests call it directly instead of driving that timer:
+    /// gpui's test executor never advances its simulated clock under
+    /// `run_until_parked` (same reasoning as `apply_reload`'s doc comment),
+    /// so there's no practical way to wait out a real ~500ms poll in a
+    /// `#[gpui::test]` — this is the real flush logic either way; the
+    /// watcher loop is just what schedules calling it.
+    fn take_dirty_session_write(&mut self) -> Option<(PathBuf, String)> {
+        if !self.session_dirty {
+            return None;
+        }
+        self.session_dirty = false;
+        let path = self.services.session_path.clone()?;
+        let theme_mode = if self.services.theme.active_mode().is_dark() {
+            "dark"
+        } else {
+            "light"
+        };
+        let extra = session::SessionExtra {
+            theme_mode: Some(theme_mode.to_string()),
+        };
+        match session::to_string_pretty(&self.services.workspaces, &extra) {
+            Ok(text) => Some((path, text)),
+            Err(e) => {
+                eprintln!("[session] warning: failed to serialize session: {e}");
+                None
+            }
+        }
+    }
+
     /// Write the current workspace layout (and active theme mode) to the
-    /// session file, if one is configured (`ShellServices::session_path`).
-    /// Atomic (temp file + rename, see `session::save`) and small, so doing
-    /// this synchronously on the UI thread right after a dispatch is cheap
-    /// enough not to violate "nothing may stall the render thread" in
-    /// practice (a handful of small TOML tables, not a query). A write
-    /// failure (e.g. an unwritable directory) is a warning line, never a
-    /// panic — session persistence is a convenience, not a correctness
-    /// requirement (mirrors config's own "bad input is a warning"
-    /// philosophy).
+    /// session file, if one is configured (`ShellServices::session_path`),
+    /// synchronously and unconditionally (ignores `session_dirty` — this is
+    /// the "flush no matter what" path, not the coalesced per-dispatch
+    /// one). The only caller is `main.rs`'s best-effort `on_app_quit` hook:
+    /// a one-shot at shutdown, not a per-keystroke hot path, so a
+    /// synchronous atomic write (`session::save`) here is fine — it does
+    /// not reintroduce the render-thread stall Task 3 fix round 1 removed
+    /// from `dispatch`. A write failure (e.g. an unwritable directory) is a
+    /// warning line, never a panic — session persistence is a convenience,
+    /// not a correctness requirement (mirrors config's own "bad input is a
+    /// warning" philosophy).
     pub fn save_session(&self) {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
@@ -1749,16 +1830,86 @@ mod tests {
         services
     }
 
+    /// Fix round 1, Finding 1's regression: a workspace-mutating dispatch
+    /// must mark the session dirty and return *without* touching the
+    /// filesystem at all — no synchronous write on the UI thread, however
+    /// many dispatches fire back to back (this is exactly what OS
+    /// key-repeat does to `shift+h`, ~20-30 dispatches/sec while held). The
+    /// file only appears once something actually flushes
+    /// `take_dirty_session_write`'s pending write — see the end-to-end test
+    /// below for that half.
+    #[gpui::test]
+    fn dispatch_marks_the_session_dirty_without_writing_synchronously(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.toml");
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(
+                            test_services_with_session(session_path.clone()),
+                            None,
+                            None,
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Simulate key-repeat: many workspace-mutating dispatches in a row,
+        // no flush in between.
+        for _ in 0..10 {
+            cx.simulate_keystrokes("ctrl-v");
+        }
+
+        assert!(
+            !session_path.exists(),
+            "a dispatch alone must never write the session file synchronously — \
+             only a flush (the watcher tick in production, taken directly in \
+             tests) does"
+        );
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a workspace-mutating dispatch must still mark the session dirty"
+        );
+    }
+
     /// End-to-end: real keystrokes dispatched through `ShellView` (not
     /// `apply_workspace_action` called directly) build a layout across two
-    /// workspaces; `dispatch`'s post-action save (wired in this task)
-    /// writes it to a real session file each time, atomically. Loading
-    /// that file back with `session::load` — the exact function `main.rs`
-    /// calls on startup — must reproduce the same layouts, and a further
-    /// split on the restored `Workspaces` must allocate a `TileId` that
-    /// collides with none of the restored ones (the whole reason
-    /// `Workspaces::from_parts` computes `next_tile` from the restored
-    /// tiles rather than resetting it to 0).
+    /// workspaces, marking the session dirty on each workspace-mutating
+    /// dispatch (Task 3 fix round 1: no synchronous write — see the test
+    /// above). The flush path (`take_dirty_session_write` +
+    /// `session::write_atomic`, the same two calls the background watcher
+    /// makes every ~500ms in production) is invoked directly here, since
+    /// gpui's test executor never advances its simulated clock under
+    /// `run_until_parked`. Loading the written file back with
+    /// `session::load` — the exact function `main.rs` calls on startup —
+    /// must reproduce the same layouts, and a further split on the
+    /// restored `Workspaces` must allocate a `TileId` that collides with
+    /// none of the restored ones (the whole reason `Workspaces::from_parts`
+    /// computes `next_tile` from the restored tiles rather than resetting
+    /// it to 0).
     #[gpui::test]
     fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(
         cx: &mut gpui::TestAppContext,
@@ -1793,8 +1944,8 @@ mod tests {
         // Build a layout on workspace 1 (two tiles side by side, then the
         // left one split stacked — three tiles total), switch to workspace
         // 2 and add a tile there too, then land back on workspace 1. Every
-        // one of these is a workspace-mutating dispatch, so each triggers
-        // a save.
+        // one of these is a workspace-mutating dispatch, so each marks the
+        // session dirty; none of them writes anything by itself.
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("ctrl-w h");
@@ -1804,12 +1955,8 @@ mod tests {
         cx.simulate_keystrokes("alt-1");
 
         assert!(
-            session_path.exists(),
-            "a workspace-mutating dispatch must have saved the session file"
-        );
-        assert!(
-            !dir.path().join(".session.toml.tmp").exists(),
-            "the atomic-write temp file must not be left behind"
+            !session_path.exists(),
+            "no dispatch writes synchronously — the file must not exist before a flush"
         );
 
         let root = window.root(&mut cx).unwrap();
@@ -1819,6 +1966,25 @@ mod tests {
                 .downcast::<ShellView>()
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
+
+        // Invoke the flush path directly — the same two steps the
+        // background watcher's ~500ms tick performs in production.
+        let pending = shell.update(&mut cx, |shell, _cx| shell.take_dirty_session_write());
+        let (path, text) = pending.expect("a dirty session with a configured path must flush");
+        session::write_atomic(&path, &text).unwrap();
+
+        assert!(
+            session_path.exists(),
+            "the flush must have written the file"
+        );
+        assert!(
+            !dir.path().join(".session.toml.tmp").exists(),
+            "the atomic-write temp file must not be left behind"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "taking the pending write must clear the dirty flag"
+        );
 
         let live: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> =
             shell.read_with(&cx, |shell, _| {
@@ -1848,6 +2014,68 @@ mod tests {
         assert!(
             !before_ids.contains(&new_id),
             "alloc_tile on a restored Workspaces must not collide with a restored TileId"
+        );
+    }
+
+    /// `take_dirty_session_write` returns `None` (and doesn't panic) when
+    /// there's nothing dirty, and again on a second call right after a
+    /// flush — the dirty flag must actually be consumed, not just read.
+    #[gpui::test]
+    fn take_dirty_session_write_is_none_when_clean(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.toml");
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(
+                            test_services_with_session(session_path.clone()),
+                            None,
+                            None,
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert!(
+            shell
+                .update(&mut cx, |shell, _cx| shell.take_dirty_session_write())
+                .is_none(),
+            "nothing dirty yet — no pending write"
+        );
+
+        cx.simulate_keystrokes("ctrl-v");
+        let first = shell.update(&mut cx, |shell, _cx| shell.take_dirty_session_write());
+        assert!(
+            first.is_some(),
+            "the dispatch above must have marked it dirty"
+        );
+
+        assert!(
+            shell
+                .update(&mut cx, |shell, _cx| shell.take_dirty_session_write())
+                .is_none(),
+            "the dirty flag must be consumed by the first take, not left set"
         );
     }
 }

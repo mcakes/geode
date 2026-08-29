@@ -55,11 +55,14 @@ use std::path::Path;
 
 use crate::tiling::{Node, Orientation, TileId, Tree, Workspaces};
 
-/// Schema version written into every session file. Not currently enforced
-/// on load (a session file is app-internal state, not user-authored config
-/// with a compatibility contract) — recorded for forward documentation the
-/// same way `geode_core::config`'s `config_version` is, and to leave room
-/// for a real check if the format ever needs a breaking change.
+/// Schema version written into every session file, and enforced on load
+/// exactly like `geode_core::config::load_layer` enforces `config_version`
+/// for desk/user config docs: present and matching → fine; present and
+/// different → the whole session is invalid (an `Err`, naming the version
+/// found — `from_toml`'s caller, `load`, treats that as "fresh start,
+/// warn"); missing entirely → a warning, but the rest of the file still
+/// gets parsed (mirrors `load_layer` treating a missing version as
+/// "assume current" rather than a hard failure).
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
 /// Non-workspace session state (brief: `SessionExtra { theme_mode: Option<String> }`).
@@ -118,15 +121,34 @@ pub fn to_toml(workspaces: &Workspaces, extra: &SessionExtra) -> toml::Table {
 }
 
 /// Deserialize a session TOML table back into `Workspaces` + `SessionExtra`
-/// (pure, no I/O). Tolerant of unknown keys (only the fields documented at
-/// the top of this file are ever read). Any structural corruption — a
-/// `Split` with a bad arity/ratio-length mismatch or a non-finite/
-/// non-positive ratio (see [`Tree::from_parts`]), an unparseable node, an
-/// out-of-range `active` — collects into the `Err` variant rather than
-/// partially applying; [`load`] treats that as "fresh start, warn". A
-/// dangling `focused`/`fullscreen` reference is healed silently by
-/// `Tree::from_parts`, not an error.
-pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, SessionExtra), Vec<String>> {
+/// plus any non-fatal warnings (pure, no I/O). Tolerant of unknown keys
+/// (only the fields documented at the top of this file are ever read). Any
+/// structural corruption — a mismatched `config_version` (see
+/// [`SESSION_CONFIG_VERSION`]), a `Split` with a bad arity/ratio-length
+/// mismatch or a non-finite/non-positive ratio (see [`Tree::from_parts`]),
+/// an unparseable node, an out-of-range `active` — collects into the `Err`
+/// variant rather than partially applying; [`load`] treats that as "fresh
+/// start, warn". A dangling `focused`/`fullscreen` reference is healed
+/// silently by `Tree::from_parts`, not an error; a missing `config_version`
+/// is a warning that still lets the rest of the file parse.
+pub fn from_toml(
+    table: &toml::Table,
+) -> Result<(Workspaces, SessionExtra, Vec<String>), Vec<String>> {
+    let mut warnings = Vec::new();
+    match table.get("config_version") {
+        Some(toml::Value::Integer(v)) if *v == SESSION_CONFIG_VERSION => {}
+        Some(other) => {
+            return Err(vec![format!(
+                "unsupported session config_version {other} (this build supports {SESSION_CONFIG_VERSION})"
+            )]);
+        }
+        None => {
+            warnings.push(format!(
+                "missing config_version (assuming {SESSION_CONFIG_VERSION})"
+            ));
+        }
+    }
+
     let mut errors = Vec::new();
 
     let active = match table.get("active") {
@@ -174,7 +196,7 @@ pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, SessionExtra), Vec<
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
-    Ok((workspaces, SessionExtra { theme_mode }))
+    Ok((workspaces, SessionExtra { theme_mode }, warnings))
 }
 
 fn parse_workspace(key: &str, value: &toml::Value) -> Result<(u8, Tree), String> {
@@ -308,15 +330,37 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
     }
 }
 
-/// Atomically write the session file: serialize, write to a temp file in
-/// the same directory, then rename over `path` (rename is atomic on the
-/// same filesystem — a crash or concurrent read never observes a partial
-/// write). Creates the parent directory if it doesn't exist yet.
-pub fn save(path: &Path, workspaces: &Workspaces, extra: &SessionExtra) -> std::io::Result<()> {
+/// Pure serialization: `to_toml` + `toml::to_string_pretty`, wrapped into a
+/// single `Result` type. Cheap — a handful of small TOML tables — which is
+/// exactly why it's the half of session-saving that's safe to run
+/// synchronously on the UI thread; [`write_atomic`] is the other half (the
+/// actual file I/O) and must not be. This split exists for
+/// `ShellView`'s coalesced dirty-flag flush (Task 3 fix round 1: see
+/// `shell::mod`'s `take_dirty_session_write`), which serializes here on the
+/// UI thread and hands the resulting `String` to a background executor for
+/// [`write_atomic`].
+pub fn to_string_pretty(workspaces: &Workspaces, extra: &SessionExtra) -> Result<String, String> {
     let table = to_toml(workspaces, extra);
-    let text = toml::to_string_pretty(&table)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    toml::to_string_pretty(&table).map_err(|e| e.to_string())
+}
 
+/// Atomically write already-serialized session `text` to `path`: a temp
+/// file in the same directory, `fsync`, then rename over `path` (rename is
+/// atomic on the same filesystem — a crash or concurrent read never
+/// observes a partial write). Creates the parent directory if it doesn't
+/// exist yet.
+///
+/// This is real, potentially-blocking file I/O (Task 3 fix round 1: a
+/// review finding on the first cut of this module, which ran this inline
+/// on the UI thread once per workspace-mutating dispatch — holding e.g.
+/// shift+h at OS key-repeat, ~20-30 events/sec, could then stall the render
+/// thread on a slow filesystem). Callers driven by UI events must run this
+/// on a background executor, never inline — see `ShellView`'s ~500ms
+/// watcher-tick flush, which is the only per-dispatch path left after that
+/// fix; [`save`] (a synchronous, do-everything wrapper) remains fine for
+/// off-the-UI-thread callers: direct test use, and the best-effort
+/// `on_app_quit` final flush, which fires at most once, at shutdown.
+pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
     let dir = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -336,6 +380,17 @@ pub fn save(path: &Path, workspaces: &Workspaces, extra: &SessionExtra) -> std::
     }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
+}
+
+/// Serialize and atomically write in one synchronous call — for callers
+/// that don't need [`to_string_pretty`]/[`write_atomic`] split across a
+/// UI/background boundary (direct test use; `ShellView`'s best-effort
+/// `on_app_quit` flush, which is a one-shot at shutdown, not a per-keystroke
+/// hot path).
+pub fn save(path: &Path, workspaces: &Workspaces, extra: &SessionExtra) -> std::io::Result<()> {
+    let text = to_string_pretty(workspaces, extra)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    write_atomic(path, &text)
 }
 
 /// Load the session file at `path`, tolerantly: a missing file is a fresh
@@ -360,7 +415,7 @@ pub fn load(path: &Path) -> (Workspaces, SessionExtra, Vec<String>) {
     };
 
     match from_toml(&table) {
-        Ok((workspaces, extra)) => (workspaces, extra, Vec::new()),
+        Ok((workspaces, extra, warnings)) => (workspaces, extra, warnings),
         Err(errors) => fresh(errors),
     }
 }
@@ -383,7 +438,8 @@ mod tests {
             theme_mode: Some("dark".to_string()),
         };
         let table = to_toml(&ws, &extra);
-        let (restored, restored_extra) = from_toml(&table).unwrap();
+        let (restored, restored_extra, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored.active_index(), ws.active_index());
         assert!(restored.active().is_empty());
         assert_eq!(restored_extra, extra);
@@ -404,7 +460,8 @@ mod tests {
             theme_mode: Some("light".to_string()),
         };
         let table = to_toml(&ws, &extra);
-        let (restored, restored_extra) = from_toml(&table).unwrap();
+        let (restored, restored_extra, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
 
         assert_eq!(restored.active_index(), 1);
         assert_eq!(restored_extra, extra);
@@ -438,7 +495,8 @@ mod tests {
             !table.contains_key("extra"),
             "omit the extra table entirely when there is nothing to say"
         );
-        let (_, extra) = from_toml(&table).unwrap();
+        let (_, extra, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(extra.theme_mode, None);
     }
 
@@ -460,11 +518,13 @@ mod tests {
     // --- hostile inputs --------------------------------------------------
 
     #[test]
-    fn from_toml_on_an_empty_table_is_a_fresh_workspace_one() {
-        let (ws, extra) = from_toml(&toml::Table::new()).unwrap();
+    fn from_toml_on_an_empty_table_is_a_fresh_workspace_one_with_a_missing_version_warning() {
+        let (ws, extra, warnings) = from_toml(&toml::Table::new()).unwrap();
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
         assert_eq!(extra.theme_mode, None);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("config_version"));
     }
 
     #[test]
@@ -489,9 +549,9 @@ mod tests {
             "children".to_string(),
             toml::Value::Array(vec![toml::Value::Table(leaf1), toml::Value::Table(leaf2)]),
         );
-        // NaN ratio: bad — not representable as TOML float literal `nan`
-        // via the table API directly, so exercise the other reject case,
-        // a non-positive ratio, which is just as much "bad ratios".
+        // A non-positive ratio — bad ratios, one of two hostile-ratio
+        // shapes `Tree::from_parts` must reject; see
+        // `from_toml_rejects_a_nan_ratio` below for the other (NaN).
         node.insert(
             "ratios".to_string(),
             toml::Value::Array(vec![toml::Value::Float(0.0), toml::Value::Float(1.0)]),
@@ -503,6 +563,47 @@ mod tests {
         assert!(
             from_toml(&table).is_err(),
             "a non-positive ratio must fail the whole session, not silently apply"
+        );
+    }
+
+    #[test]
+    fn from_toml_rejects_a_nan_ratio() {
+        // `toml::Value::Float(f64::NAN)` is directly constructible (the
+        // `Value` enum just wraps an `f64`) — it's only the *text* literal
+        // `nan` that TOML's own grammar handles specially, which is
+        // irrelevant here since this builds a `Value` programmatically
+        // rather than parsing TOML source.
+        let mut table = toml::Table::new();
+        table.insert("active".to_string(), toml::Value::Integer(1));
+        let mut ws_table = toml::Table::new();
+        let mut ws1 = toml::Table::new();
+        let mut node = toml::Table::new();
+        node.insert("kind".to_string(), toml::Value::String("split".to_string()));
+        node.insert(
+            "orientation".to_string(),
+            toml::Value::String("horizontal".to_string()),
+        );
+        let mut leaf1 = toml::Table::new();
+        leaf1.insert("kind".to_string(), toml::Value::String("leaf".to_string()));
+        leaf1.insert("id".to_string(), toml::Value::Integer(1));
+        let mut leaf2 = toml::Table::new();
+        leaf2.insert("kind".to_string(), toml::Value::String("leaf".to_string()));
+        leaf2.insert("id".to_string(), toml::Value::Integer(2));
+        node.insert(
+            "children".to_string(),
+            toml::Value::Array(vec![toml::Value::Table(leaf1), toml::Value::Table(leaf2)]),
+        );
+        node.insert(
+            "ratios".to_string(),
+            toml::Value::Array(vec![toml::Value::Float(f64::NAN), toml::Value::Float(0.5)]),
+        );
+        ws1.insert("node".to_string(), toml::Value::Table(node));
+        ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
+
+        assert!(
+            from_toml(&table).is_err(),
+            "a NaN ratio must fail the whole session, not silently apply"
         );
     }
 
@@ -520,9 +621,55 @@ mod tests {
         ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
 
-        let (ws, _) = from_toml(&table).expect("dangling focused must be healed, not rejected");
+        let (ws, _, warnings) =
+            from_toml(&table).expect("dangling focused must be healed, not rejected");
+        assert_eq!(
+            warnings,
+            vec!["missing config_version (assuming 1)".to_string()],
+            "a dangling focused reference must not itself add a warning"
+        );
         assert_eq!(ws.active().focused(), None);
         assert_eq!(ws.active().tiles(), vec![TileId(1)]);
+    }
+
+    // --- config_version (fix round 1, Finding 2) ------------------------
+
+    #[test]
+    fn from_toml_rejects_a_mismatched_config_version() {
+        let mut table = toml::Table::new();
+        table.insert("config_version".to_string(), toml::Value::Integer(99));
+        let err =
+            from_toml(&table).expect_err("a mismatched version must invalidate the whole session");
+        assert_eq!(err.len(), 1);
+        assert!(
+            err[0].contains("99"),
+            "the error must name the version found: {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_toml_accepts_a_matching_config_version_with_no_warning() {
+        let mut table = toml::Table::new();
+        table.insert(
+            "config_version".to_string(),
+            toml::Value::Integer(SESSION_CONFIG_VERSION),
+        );
+        let (_, _, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn from_toml_warns_but_proceeds_on_a_missing_config_version() {
+        // Covered end-to-end above
+        // (`from_toml_on_an_empty_table_is_a_fresh_workspace_one_with_a_missing_version_warning`,
+        // `from_toml_heals_a_dangling_focused_reference`); this test pins
+        // the exact warning wording as its own regression.
+        let table = toml::Table::new();
+        let (_, _, warnings) = from_toml(&table).unwrap();
+        assert_eq!(
+            warnings,
+            vec!["missing config_version (assuming 1)".to_string()]
+        );
     }
 
     #[test]
@@ -583,6 +730,39 @@ mod tests {
     }
 
     #[test]
+    fn load_of_a_mismatched_config_version_is_a_fresh_start_with_a_warning_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "config_version = 99\nactive = 3\n").unwrap();
+        let (ws, _, warnings) = load(&path);
+        assert_eq!(
+            ws.active_index(),
+            1,
+            "a version mismatch must be a fresh start"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("99"),
+            "the warning must name the version found: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_of_a_missing_config_version_still_restores_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(&path, "active = 2\n").unwrap();
+        let (ws, _, warnings) = load(&path);
+        assert_eq!(
+            ws.active_index(),
+            2,
+            "a missing config_version must warn, not discard the rest of the file"
+        );
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("config_version"));
+    }
+
+    #[test]
     fn save_then_load_round_trips_through_real_files_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
@@ -623,7 +803,8 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         let table = to_toml(&ws, &SessionExtra::default());
-        let (mut restored, _) = from_toml(&table).unwrap();
+        let (mut restored, _, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
 
         let before_ids: std::collections::HashSet<_> =
             restored.active().tiles().into_iter().collect();
