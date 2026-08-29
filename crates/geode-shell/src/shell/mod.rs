@@ -586,11 +586,20 @@ mod tests {
 
     /// End-to-end command palette flow (Task 6), through the real
     /// key-event pipeline exactly like the tests above: `mod+p` opens it,
-    /// typing "split" filters down to (and ranks first) "Split
-    /// horizontal" — the only registered action or bundled theme whose
-    /// title contains that whole run as a subsequence — and Enter
-    /// dispatches the selected item through the normal chain, closing the
-    /// palette and splitting the (until then empty) active workspace.
+    /// typing "split" filters the list down to "Split horizontal" and
+    /// "Split vertical" — the only two titles containing that whole run
+    /// as a subsequence, and, having matched the identical literal
+    /// prefix "split", scored *identically* by `fuzzy_match` (verified by
+    /// hand: both score 45). Which one lands at index 0 is not a
+    /// fuzzy-match property; it's `PaletteState::filtered`'s stable sort
+    /// preserving `build_items`' input order, which is
+    /// `ActionRegistry::iter()`'s `BTreeMap<ActionId, _>` order — and
+    /// `"workspace::split_horizontal" < "workspace::split_vertical"`
+    /// (`h` < `v`) puts horizontal first. That tie-break is deterministic
+    /// (so this test is not flaky), just not the "the only match" story a
+    /// prior version of this comment told. Enter then dispatches the
+    /// selected item through the normal chain, closing the palette and
+    /// splitting the (until then empty) active workspace.
     #[gpui::test]
     fn mod_p_opens_types_filters_and_enter_dispatches_the_selected_action(
         cx: &mut gpui::TestAppContext,
@@ -642,7 +651,9 @@ mod tests {
         assert_eq!(
             selected_title,
             Some("Split horizontal".to_string()),
-            "typing \"split\" should filter/rank \"Split horizontal\" as the top match"
+            "typing \"split\" should rank \"Split horizontal\" first, ahead of the \
+             equally-scored \"Split vertical\", via the registry's alphabetical \
+             (h < v) ActionId order and filtered()'s stable sort"
         );
 
         cx.update(|window, cx| {
@@ -661,6 +672,99 @@ mod tests {
             tile_count, 1,
             "enter on \"Split horizontal\" should have dispatched \
              workspace::split_horizontal through the normal chain"
+        );
+    }
+
+    /// End-to-end: Enter on a *theme* row (not an action) changes the
+    /// active theme, through the same real key-event pipeline as the
+    /// action-dispatch test above — the brief-mandated "theme item ->
+    /// `ThemeService::apply`" path had no direct test coverage before
+    /// this one; it was previously verified only by reading
+    /// `dispatch_palette_item`'s source.
+    ///
+    /// Query "gruvbox" ranks "Theme: Gruvbox Dark" and "Theme: Gruvbox
+    /// Light" identically (both match the literal, fully-consecutive run
+    /// "gruvbox" right after the "Theme: " word boundary — same
+    /// computation as any other title sharing that whole run, so same
+    /// score); no other registered action or bundled theme title contains
+    /// "gruvbox" as a subsequence at all, bundled or not, so those two are
+    /// the entire tied-for-first set. As in the split-horizontal test
+    /// above, which one lands at index 0 is a deterministic tie-break —
+    /// `build_items` appends themes in `ThemeService::names()`'s sorted
+    /// order, and `"Gruvbox Dark" < "Gruvbox Light"` alphabetically — not
+    /// a property of the fuzzy match itself.
+    #[gpui::test]
+    fn mod_p_opens_types_filters_and_enter_dispatches_the_selected_theme(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let before = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+        assert_ne!(
+            before, "Gruvbox Dark",
+            "the starting theme must differ from the target so the assertion \
+             below actually proves something changed"
+        );
+
+        cx.simulate_keystrokes("alt-p");
+        cx.simulate_input("gruvbox");
+
+        let selected_title = shell.read_with(&cx, |shell, _| {
+            shell
+                .palette
+                .as_ref()
+                .and_then(PaletteState::selected_item)
+                .map(|item| item.title())
+        });
+        assert_eq!(
+            selected_title,
+            Some("Theme: Gruvbox Dark".to_string()),
+            "typing \"gruvbox\" should rank \"Theme: Gruvbox Dark\" first, ahead of \
+             the equally-scored \"Theme: Gruvbox Light\", via ThemeService::names()'s \
+             alphabetical order and filtered()'s stable sort"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("enter");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "enter should close the palette"
+        );
+        let after = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+        assert_eq!(
+            after, "Gruvbox Dark",
+            "enter on \"Theme: Gruvbox Dark\" should have dispatched it through \
+             ThemeService::apply, changing the active theme"
         );
     }
 
