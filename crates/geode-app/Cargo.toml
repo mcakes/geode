@@ -10,20 +10,9 @@ path = "src/main.rs"
 bench = false
 
 [dependencies]
-# gpui-component's own Cargo.toml depends on `gpui`/`gpui_platform` via an
-# unpinned git reference (no rev). Cargo keys a git dependency's identity on
-# URL + reference, so if we pinned a `rev` here, cargo would treat our copy
-# and gpui-component's copy as two different sources and build two
-# incompatible copies of gpui (type errors across the crate boundary) — and
-# `[patch]` can't fix this either, since cargo refuses to patch a git source
-# with a different reference to itself. So these two stay unpinned and rely
-# on the committed Cargo.lock for reproducibility, same as gpui-component's
-# own resolution. Resolved at the time of writing: rev
-# e3adf43f37d7a2a9c165a78b255d293b0848d2d0 (zed-industries/zed).
-gpui = { git = "https://github.com/zed-industries/zed" }
-# runtime_shaders: compile Metal shaders at runtime; builds without full Xcode. No-op on non-macOS.
-gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit", "runtime_shaders"] }
-# gpui-component / gpui-component-assets are only depended on by us, so
-# pinning them directly is safe (no sibling unpinned reference to collide with).
-gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "0e2fb7acdf1d40d4db3d458da3893fe9865e901e" }
-gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "0e2fb7acdf1d40d4db3d458da3893fe9865e901e" }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+geode-shell = { path = "../geode-shell" }
+geode-core.workspace = true

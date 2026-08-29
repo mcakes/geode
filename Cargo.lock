@@ -2210,6 +2210,8 @@ dependencies = [
 name = "geode-app"
 version = "0.1.0"
 dependencies = [
+ "geode-core",
+ "geode-shell",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -2244,6 +2246,8 @@ name = "geode-shell"
 version = "0.1.0"
 dependencies = [
  "geode-core",
+ "gpui",
+ "gpui-component",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
 ]
