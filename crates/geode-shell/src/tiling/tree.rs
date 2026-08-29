@@ -264,13 +264,44 @@ impl Tree {
         true
     }
 
-    /// Grow the focused tile's edge toward `dir` by `delta` (a fraction of
-    /// the containing split), taking the space from the adjacent sibling in
-    /// that direction (or the opposite sibling when at the split's edge).
-    /// Negative `delta` shrinks. Returns false (changing nothing) when no
-    /// ancestor split matches the direction's orientation or the transfer
-    /// would push either ratio below [`MIN_RATIO`].
-    pub fn resize(&mut self, dir: Direction, delta: f32) -> bool {
+    /// Move the divider adjacent to the focused tile in `dir` by `delta`
+    /// (a fraction of the containing split; `delta` is always given
+    /// positive — the direction itself carries the sign, vim-style: each of
+    /// the four resize keys moves *a* divider that direction, never "grows
+    /// the focused tile" as a fixed idea).
+    ///
+    /// Walks ancestors from the focused tile outward (same `path_to` walk
+    /// as before) to the deepest split whose orientation matches `dir`'s
+    /// axis; within it, at the focused child's index `i`, each direction
+    /// prefers the divider on *its own* side of the focused child, falling
+    /// back to the other side only when its own side doesn't exist:
+    /// - `Right`/`Down` (positive axis direction) prefer the divider on the
+    ///   focused child's positive side: if a next sibling exists
+    ///   (`i + 1 < len`), that divider moves — `ratios[i] += delta`,
+    ///   `ratios[i + 1] -= delta`. Otherwise (focused is the split's last
+    ///   child, no divider on that side) the divider on its *other* side
+    ///   moves instead — `ratios[i - 1] += delta`, `ratios[i] -= delta` —
+    ///   which now *shrinks* the focused tile (edge-flip: the key always
+    ///   moves a divider that direction, not always the tile the same way).
+    /// - `Left`/`Up` mirror this on the negative axis direction: prefer the
+    ///   divider on the focused child's negative side (`i > 0`) —
+    ///   `ratios[i - 1] -= delta`, `ratios[i] += delta` — falling back to
+    ///   the positive side (`i + 1 < len`) only when `i == 0`.
+    ///
+    /// The preferred side is direction-dependent, not just "does a sibling
+    /// exist" — on a 3+-way split with the focused child in the middle,
+    /// `Right`/`Down` and `Left`/`Up` each move a *different* divider (its
+    /// own side), not the same one.
+    ///
+    /// If neither side has a divider (a lone child — excluded by the >=2
+    /// invariant on real splits, but guards degenerate input), the walk
+    /// continues to a shallower matching-orientation ancestor; if none is
+    /// found, returns false.
+    ///
+    /// Never partially applies: both new ratios are computed first, and if
+    /// either would drop below [`MIN_RATIO`] nothing changes and this
+    /// returns false.
+    pub fn move_divider(&mut self, dir: Direction, delta: f32) -> bool {
         let Some(focused) = self.focused else {
             return false;
         };
@@ -297,33 +328,43 @@ impl Tree {
                 continue;
             }
             let i = path[depth];
-            let j = match dir {
+            let sign = match dir {
+                Direction::Right | Direction::Down => 1.0,
+                Direction::Left | Direction::Up => -1.0,
+            };
+            // Each direction prefers the divider on its own side of the
+            // focused child, falling back to the other side only when its
+            // own side has no divider (edge-flip). This must be
+            // direction-dependent: on a 3+-way split with the focused
+            // child in the middle, both sides have dividers, so Right/Down
+            // and Left/Up must not collapse onto the same one.
+            let (a, b) = match dir {
                 Direction::Right | Direction::Down => {
                     if i + 1 < ratios.len() {
-                        i + 1
+                        (i, i + 1)
                     } else if i > 0 {
-                        i - 1
+                        (i - 1, i)
                     } else {
                         continue;
                     }
                 }
                 Direction::Left | Direction::Up => {
                     if i > 0 {
-                        i - 1
+                        (i - 1, i)
                     } else if i + 1 < ratios.len() {
-                        i + 1
+                        (i, i + 1)
                     } else {
                         continue;
                     }
                 }
             };
-            let grown = ratios[i] + delta;
-            let shrunk = ratios[j] - delta;
-            if grown < MIN_RATIO || shrunk < MIN_RATIO {
+            let new_a = ratios[a] + sign * delta;
+            let new_b = ratios[b] - sign * delta;
+            if new_a < MIN_RATIO || new_b < MIN_RATIO {
                 return false;
             }
-            ratios[i] = grown;
-            ratios[j] = shrunk;
+            ratios[a] = new_a;
+            ratios[b] = new_b;
             return true;
         }
         false
@@ -859,64 +900,177 @@ mod tests {
     }
 
     #[test]
-    fn resize_transfers_ratio_to_neighbor() {
+    fn move_divider_widens_focused_left_tile_toward_right() {
+        // [1 | 2], focused 1 (left tile). Right moves the divider between
+        // them rightward: the focused left tile widens.
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         tree.split(TileId(2), Orientation::Horizontal);
         tree.focus(TileId(1));
-        assert!(tree.resize(Direction::Right, 0.1)); // grow 1 rightward
+        assert!(tree.move_divider(Direction::Right, 0.1));
         assert!(approx(rect_of(&tree, 1).w, 0.6));
         assert!(approx(rect_of(&tree, 2).w, 0.4));
         assert!(approx(rect_of(&tree, 2).x, 0.6));
     }
 
     #[test]
-    fn resize_shrinks_with_negative_delta() {
+    fn move_divider_narrows_focused_left_tile_toward_left() {
+        // Same layout, Left moves the same divider leftward: the focused
+        // left tile narrows.
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         tree.split(TileId(2), Orientation::Horizontal);
         tree.focus(TileId(1));
-        assert!(tree.resize(Direction::Right, -0.1));
+        assert!(tree.move_divider(Direction::Left, 0.1));
         assert!(approx(rect_of(&tree, 1).w, 0.4));
+        assert!(approx(rect_of(&tree, 2).w, 0.6));
     }
 
     #[test]
-    fn resize_clamps_at_min_ratio() {
+    fn move_divider_edge_flip_narrows_focused_right_tile_toward_right() {
+        // [1 | 2], focused 2 (rightmost — no divider on its right side).
+        // Right still moves *a* divider rightward: the only one available
+        // is 2's left divider, so it moves right and 2 narrows.
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         tree.split(TileId(2), Orientation::Horizontal);
-        tree.focus(TileId(1));
-        assert!(
-            !tree.resize(Direction::Right, 0.9),
-            "would push neighbor below MIN_RATIO"
-        );
-        assert!(
-            approx(rect_of(&tree, 1).w, 0.5),
-            "failed resize must change nothing"
-        );
-    }
-
-    #[test]
-    fn resize_finds_matching_orientation_ancestor() {
-        let mut tree = grid(); // focused: 1 (top-left)
-        // Up/Down resizing of tile 1 must adjust the left column's inner
-        // vertical split (1 over 4), not the outer horizontal one.
-        assert!(tree.resize(Direction::Down, 0.2));
-        assert!(approx(rect_of(&tree, 1).h, 0.7));
-        assert!(approx(rect_of(&tree, 4).h, 0.3));
-        // And Left/Right resizing adjusts the outer horizontal split.
-        assert!(tree.resize(Direction::Right, 0.1));
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert!(tree.move_divider(Direction::Right, 0.1));
         assert!(approx(rect_of(&tree, 1).w, 0.6));
         assert!(approx(rect_of(&tree, 2).w, 0.4));
     }
 
     #[test]
-    fn resize_with_no_matching_split_is_noop() {
+    fn move_divider_edge_flip_widens_focused_right_tile_toward_left() {
+        // Mirror: Left on the same focused rightmost tile moves its left
+        // divider left, so the focused tile widens.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert!(tree.move_divider(Direction::Left, 0.1));
+        assert!(approx(rect_of(&tree, 1).w, 0.4));
+        assert!(approx(rect_of(&tree, 2).w, 0.6));
+    }
+
+    #[test]
+    fn move_divider_vertical_stack_down_and_up() {
+        // Vertical analogue: [1 / 2] stacked, focused 1 (top). Down widens
+        // the top tile; Up (on the same focus) narrows it.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Vertical);
+        tree.split(TileId(2), Orientation::Vertical);
+        tree.focus(TileId(1));
+        assert!(tree.move_divider(Direction::Down, 0.1));
+        assert!(approx(rect_of(&tree, 1).h, 0.6));
+        assert!(approx(rect_of(&tree, 2).h, 0.4));
+        assert!(tree.move_divider(Direction::Up, 0.2));
+        assert!(approx(rect_of(&tree, 1).h, 0.4));
+        assert!(approx(rect_of(&tree, 2).h, 0.6));
+    }
+
+    #[test]
+    fn move_divider_middle_tile_in_a_row_moves_its_own_side_divider() {
+        // 3-way row [1 | 2 | 3], focused 2 (middle — a divider exists on
+        // BOTH sides). Right and Left must each move the divider on their
+        // own side, not collapse onto the same one: Right widens 2 into 3's
+        // space (moves the 2/3 divider); Left widens 2 into 1's space
+        // (moves the 1/2 divider). Neither touches the far tile.
+        let row = || {
+            let mut tree = Tree::default();
+            tree.split(TileId(1), Orientation::Horizontal);
+            tree.split(TileId(2), Orientation::Horizontal);
+            tree.split(TileId(3), Orientation::Horizontal);
+            tree.focus(TileId(2));
+            tree
+        };
+
+        let mut right = row();
+        assert!(right.move_divider(Direction::Right, 0.1));
+        assert!(approx(rect_of(&right, 1).w, 1.0 / 3.0), "tile 1 untouched");
+        assert!(approx(rect_of(&right, 2).w, 1.0 / 3.0 + 0.1));
+        assert!(approx(rect_of(&right, 3).w, 1.0 / 3.0 - 0.1));
+
+        let mut left = row();
+        assert!(left.move_divider(Direction::Left, 0.1));
+        assert!(approx(rect_of(&left, 1).w, 1.0 / 3.0 - 0.1));
+        assert!(approx(rect_of(&left, 2).w, 1.0 / 3.0 + 0.1));
+        assert!(approx(rect_of(&left, 3).w, 1.0 / 3.0), "tile 3 untouched");
+    }
+
+    #[test]
+    fn move_divider_middle_tile_in_a_stack_moves_its_own_side_divider() {
+        // Vertical analogue: 3-way stack [1 / 2 / 3], focused 2 (middle).
+        // Down moves the 2/3 divider (widens 2 downward, into 3's space);
+        // Up moves the 1/2 divider (widens 2 upward, into 1's space).
+        let stack = || {
+            let mut tree = Tree::default();
+            tree.split(TileId(1), Orientation::Vertical);
+            tree.split(TileId(2), Orientation::Vertical);
+            tree.split(TileId(3), Orientation::Vertical);
+            tree.focus(TileId(2));
+            tree
+        };
+
+        let mut down = stack();
+        assert!(down.move_divider(Direction::Down, 0.1));
+        assert!(approx(rect_of(&down, 1).h, 1.0 / 3.0), "tile 1 untouched");
+        assert!(approx(rect_of(&down, 2).h, 1.0 / 3.0 + 0.1));
+        assert!(approx(rect_of(&down, 3).h, 1.0 / 3.0 - 0.1));
+
+        let mut up = stack();
+        assert!(up.move_divider(Direction::Up, 0.1));
+        assert!(approx(rect_of(&up, 1).h, 1.0 / 3.0 - 0.1));
+        assert!(approx(rect_of(&up, 2).h, 1.0 / 3.0 + 0.1));
+        assert!(approx(rect_of(&up, 3).h, 1.0 / 3.0), "tile 3 untouched");
+    }
+
+    #[test]
+    fn move_divider_clamps_at_min_ratio_with_no_partial_mutation() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        // Repeated in-bounds moves approach the clamp...
+        assert!(tree.move_divider(Direction::Right, 0.4)); // -> [0.9, 0.1]
+        assert!(approx(rect_of(&tree, 1).w, 0.9));
+        // ...then one more push that would cross MIN_RATIO is rejected
+        // outright, changing nothing.
+        assert!(
+            !tree.move_divider(Direction::Right, 0.1),
+            "would push neighbor below MIN_RATIO"
+        );
+        assert!(
+            approx(rect_of(&tree, 1).w, 0.9),
+            "failed move must change nothing"
+        );
+        assert!(
+            approx(rect_of(&tree, 2).w, 0.1),
+            "failed move must change nothing"
+        );
+    }
+
+    #[test]
+    fn move_divider_finds_matching_orientation_ancestor() {
+        let mut tree = grid(); // focused: 1 (top-left)
+        // Up/Down on tile 1 must move the left column's inner vertical
+        // divider (between 1 and 4), not the outer horizontal one.
+        assert!(tree.move_divider(Direction::Down, 0.2));
+        assert!(approx(rect_of(&tree, 1).h, 0.7));
+        assert!(approx(rect_of(&tree, 4).h, 0.3));
+        // And Left/Right moves the outer horizontal divider.
+        assert!(tree.move_divider(Direction::Right, 0.1));
+        assert!(approx(rect_of(&tree, 1).w, 0.6));
+        assert!(approx(rect_of(&tree, 2).w, 0.4));
+    }
+
+    #[test]
+    fn move_divider_with_no_split_is_noop() {
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         assert!(
-            !tree.resize(Direction::Right, 0.1),
-            "single tile has nothing to resize"
+            !tree.move_divider(Direction::Right, 0.1),
+            "single tile has no divider to move"
         );
     }
 
@@ -1091,7 +1245,7 @@ mod tests {
         tree.split(TileId(2), Orientation::Horizontal);
         tree.focus(TileId(1));
         // Push toward the clamp, then split (equalizes), then close (renormalizes).
-        assert!(tree.resize(Direction::Right, 0.4)); // ratios [0.9, 0.1]
+        assert!(tree.move_divider(Direction::Right, 0.4)); // ratios [0.9, 0.1]
         tree.split(TileId(3), Orientation::Horizontal); // equalize to thirds
         tree.focus(TileId(2));
         tree.close(); // renormalize the survivors

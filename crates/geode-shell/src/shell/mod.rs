@@ -1085,11 +1085,14 @@ mod tests {
     }
 
     /// End-to-end: `shift+h` (`workspace::resize_left`, a direct binding —
-    /// no mode) grows the focused tile's edge toward the left by
-    /// `tiling::RESIZE_STEP`, shrinking its left neighbor by the same
-    /// amount — real key dispatch all the way to `Tree::resize`.
+    /// no mode) moves the divider adjacent to the focused tile leftward by
+    /// `tiling::RESIZE_STEP` — real key dispatch all the way to
+    /// `Tree::move_divider`. Focus here is the rightmost tile (no divider
+    /// on its right), so the only divider available is its left one; moving
+    /// it left widens the focused tile (the edge-flip case documented on
+    /// `Tree::move_divider`).
     #[gpui::test]
-    fn shift_h_keystroke_resizes_the_focused_tile(cx: &mut gpui::TestAppContext) {
+    fn shift_h_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -1133,8 +1136,8 @@ mod tests {
         });
         assert!(
             (focused_width - (0.5 + crate::tiling::RESIZE_STEP)).abs() < 1e-4,
-            "shift+h should have grown the focused tile leftward by RESIZE_STEP, \
-             got width {focused_width}"
+            "shift+h should have widened the focused (rightmost) tile by moving \
+             its left divider left by RESIZE_STEP, got width {focused_width}"
         );
     }
 

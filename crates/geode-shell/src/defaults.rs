@@ -14,8 +14,11 @@ use geode_core::config::Config;
 /// which is why the actions they bind to are named by resulting geometry
 /// (`split_right`/`split_down`) rather than by vim verb: naming them
 /// `split_vertical`/`split_horizontal` would read backwards against these
-/// keys. Resize is a direct binding, not a mode: `shift+h/j/k/l` grow the
-/// focused tile's edge toward that letter's direction by `RESIZE_STEP`.
+/// keys. Resize is a direct binding, not a mode: `shift+h/j/k/l` move the
+/// divider adjacent to the focused tile toward that letter's direction by
+/// `RESIZE_STEP` (vim's model — the key names the divider's direction, not
+/// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
+/// consequence when the focused tile has no divider on that side).
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
@@ -77,20 +80,20 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(
         reg,
         "workspace::resize_left",
-        "Resize: grow left",
+        "Move split left",
         "Workspace",
     );
     action(
         reg,
         "workspace::resize_down",
-        "Resize: grow down",
+        "Move split down",
         "Workspace",
     );
-    action(reg, "workspace::resize_up", "Resize: grow up", "Workspace");
+    action(reg, "workspace::resize_up", "Move split up", "Workspace");
     action(
         reg,
         "workspace::resize_right",
-        "Resize: grow right",
+        "Move split right",
         "Workspace",
     );
     // Vim naming: split_right = Orientation::Horizontal (side by side, vim

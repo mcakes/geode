@@ -185,24 +185,26 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
             ws.active_mut().move_direction(Direction::Right);
             true
         }
-        // "Resize: grow <dir>" (brief) — shift+h/j/k/l lean the focused
-        // tile's edge toward that direction by RESIZE_STEP; shrinking is
-        // growing the opposite way (Tree::resize takes a signed delta, but
-        // these direct bindings are always the "grow toward dir" case).
+        // "Move split <dir>" (vim model) — shift+h/j/k/l move a divider
+        // adjacent to the focused tile that direction, by RESIZE_STEP.
+        // `delta` is always positive here: `Direction` itself carries the
+        // sign in `Tree::move_divider` (see its doc comment for the
+        // edge-flip consequence when the focused tile is at the split's
+        // edge on that side).
         "workspace::resize_left" => {
-            ws.active_mut().resize(Direction::Left, RESIZE_STEP);
+            ws.active_mut().move_divider(Direction::Left, RESIZE_STEP);
             true
         }
         "workspace::resize_down" => {
-            ws.active_mut().resize(Direction::Down, RESIZE_STEP);
+            ws.active_mut().move_divider(Direction::Down, RESIZE_STEP);
             true
         }
         "workspace::resize_up" => {
-            ws.active_mut().resize(Direction::Up, RESIZE_STEP);
+            ws.active_mut().move_divider(Direction::Up, RESIZE_STEP);
             true
         }
         "workspace::resize_right" => {
-            ws.active_mut().resize(Direction::Right, RESIZE_STEP);
+            ws.active_mut().move_divider(Direction::Right, RESIZE_STEP);
             true
         }
         other => match other.strip_prefix("workspace::switch_") {
@@ -370,13 +372,14 @@ mod tests {
     }
 
     #[test]
-    fn resize_actions_grow_the_focused_tile_toward_the_named_direction() {
+    fn resize_left_moves_the_divider_left_widening_the_focused_rightmost_tile() {
         let mut ws = Workspaces::new();
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        // Two tiles side by side (0.5/0.5); focus is the second (rightmost).
-        // resize_left grows the focused tile's edge leftward, i.e. its
-        // width grows and the left neighbor shrinks.
+        // Two tiles side by side (0.5/0.5); focus is the second (rightmost,
+        // no divider on its right). resize_left moves the only available
+        // divider — its left one — leftward, which widens the focused tile
+        // (edge-flip: the key always moves a divider that direction).
         assert!(apply_workspace_action(
             &mut ws,
             &act("workspace::resize_left")
@@ -390,7 +393,34 @@ mod tests {
             .w;
         assert!(
             (focused_w - (0.5 + RESIZE_STEP)).abs() < 1e-4,
-            "resize_left should grow the focused tile by RESIZE_STEP, got {focused_w}"
+            "resize_left should widen the focused (rightmost) tile by RESIZE_STEP, got {focused_w}"
+        );
+    }
+
+    #[test]
+    fn resize_right_widens_the_focused_leftmost_tile_normal_case() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        // Now focus is the leftmost tile, which has a right neighbor:
+        // resize_right moves the divider between them rightward, widening
+        // the focused tile (the non-flip case — mirrors the tree-level
+        // `move_divider_widens_focused_left_tile_toward_right` test).
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::resize_right")
+        ));
+        let rects = ws.active().layout(Rect::UNIT);
+        let focused_w = rects
+            .iter()
+            .find(|(id, _)| Some(*id) == ws.active().focused())
+            .unwrap()
+            .1
+            .w;
+        assert!(
+            (focused_w - (0.5 + RESIZE_STEP)).abs() < 1e-4,
+            "resize_right should widen the focused (leftmost) tile by RESIZE_STEP, got {focused_w}"
         );
     }
 
