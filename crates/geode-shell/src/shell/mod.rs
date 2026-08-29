@@ -1,10 +1,11 @@
 //! The shell's window root view (spec §3): a single view owning the whole
 //! window contents, key dispatch, and workspace state. Renders the tiling
-//! tree (Task 3) as themed, absolutely-positioned tiles; the status bar
-//! (Task 4) will own a header strip above this content area, and Task 6
+//! tree (Task 3) as themed, absolutely-positioned tiles, with a fixed-height
+//! status bar (Task 4, `status::status_bar`) below the tile area. Task 6
 //! wires the real command palette.
 
 pub mod keys;
+pub mod status;
 
 pub use keys::convert_keystroke;
 
@@ -94,13 +95,14 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The content area is the whole window for now: the status bar
-        // (Task 4) will own its own height and shrink this once it lands.
         // `viewport_size` is the drawable area (excludes window chrome),
         // which is what `Tree::layout` should partition (gpui/window.rs).
+        // The status bar (Task 4) is a fixed-height strip below the tiles,
+        // so the tile area gets the viewport minus that height; `Tree::
+        // layout` is still called exactly once, over those shrunk bounds.
         let viewport = window.viewport_size();
         let width = f32::from(viewport.width);
-        let height = f32::from(viewport.height);
+        let content_height = (f32::from(viewport.height) - status::HEIGHT).max(0.0);
 
         let (focused, rects) = {
             let tree = self.services.workspaces.active();
@@ -110,12 +112,15 @@ impl Render for ShellView {
                     x: 0.0,
                     y: 0.0,
                     w: width,
-                    h: height,
+                    h: content_height,
                 }),
             )
         };
 
-        let mut surface = div().relative().size_full();
+        // Fixed-height (not `size_full`) so it never competes with the
+        // status bar for space below it: the tile tree is laid out over
+        // exactly this height above, and the container must match.
+        let mut surface = div().relative().w_full().h(px(content_height)).flex_none();
         if rects.is_empty() {
             surface = surface.flex().items_center().justify_center().child(
                 div()
@@ -159,6 +164,15 @@ impl Render for ShellView {
             }
         }
 
+        let non_empty = self.services.workspaces.non_empty_indices();
+        let status_bar = status::status_bar(
+            self.services.workspaces.active_index(),
+            &non_empty,
+            self.matcher.pending(),
+            "default", // Task 5 wires the real theme name.
+            cx,
+        );
+
         v_flex()
             .size_full()
             .track_focus(&self.focus_handle)
@@ -166,6 +180,7 @@ impl Render for ShellView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(surface)
+            .child(status_bar)
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
             // whoever it wraps must (spec: gpui-component usage.md "Overlay
@@ -255,6 +270,91 @@ mod tests {
         assert!(
             quads_after_split > 0,
             "expected the single tile to paint at least one quad"
+        );
+    }
+
+    /// Layers a test-only `"g g"` sequence binding on top of the builtin
+    /// keymap (spec §3.4: sequence bindings), so the status bar's
+    /// pending-keystroke display (Task 4) has something real to show. No
+    /// builtin binding starts a sequence today, so this is the cheapest
+    /// honest way to exercise it without waiting on Task 6's palette-Esc
+    /// flow.
+    fn test_services_with_gg_binding() -> ShellServices {
+        let config = Config::load(&ConfigSources::default());
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        registry
+            .register(crate::actions::ActionDef {
+                id: crate::actions::ActionId("test::gg".to_string()),
+                title: "Test gg".to_string(),
+                category: "Test".to_string(),
+            })
+            .unwrap();
+        let mod_alias = default_mod();
+        let builtin_doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let user_doc = LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: "keymap".to_string(),
+            file: "<test:user>".into(),
+            table: "[[bindings]]\n[bindings.keys]\n\"g g\" = \"test::gg\"\n"
+                .parse()
+                .unwrap(),
+        };
+        let (keymap, diags) = build_keymap(&[builtin_doc, user_doc], mod_alias, &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        ShellServices {
+            config,
+            registry,
+            keymap,
+            mod_alias,
+            workspaces: Workspaces::new(),
+        }
+    }
+
+    /// Pressing the first `g` of a `"g g"` sequence leaves the matcher
+    /// pending (which the status bar renders as `"g"`) and the window still
+    /// draws cleanly — the status bar's pending-keystroke path is live end
+    /// to end through the real key-event pipeline.
+    #[gpui::test]
+    fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view =
+                        cx.new(|cx| ShellView::new(test_services_with_gg_binding(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("g");
+
+        // The pending keystroke must not stall the render thread (spec
+        // PHILOSOPHY.md): the status bar draws the same frame it renders in.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let pending_len = shell.read_with(&cx, |shell, _| shell.matcher.pending().len());
+        assert_eq!(
+            pending_len, 1,
+            "first 'g' of the 'g g' sequence should leave one pending keystroke"
         );
     }
 }
