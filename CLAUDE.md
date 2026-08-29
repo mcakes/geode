@@ -50,6 +50,7 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 - **Every new lib/bin target needs `bench = false`** (and `[[bench]]` targets need `harness = false`) so `cargo bench` runs criterion cleanly instead of the built-in libtest harness. This is a workspace-wide invariant — copy the pattern from any existing crate.
 - `gpui_platform` uses the `runtime_shaders` feature so Metal shaders compile at runtime without a full Xcode install (no-op off macOS).
 - In `main`, `gpui_component::init(cx)` must run before any component use, and the root view is wrapped in `gpui_component::Root` (which also renders the dialog/notification layers).
+- Dialogs open through `shell::dialog::open_shell_dialog`, never `window.open_dialog` directly — it's the one standard door that cancels pending keymap sequences and closes an open palette before delegating to gpui-component's dialog layer.
 - `geode_demo_data::write_csv` does no quoting/escaping — it relies on all string columns drawing from fixed comma-free vocabularies. Revisit if a vocabulary ever grows free-form values.
 - Release and bench profiles keep debug symbols on purpose (profiling support, spec §7.4).
 

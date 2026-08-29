@@ -6,6 +6,7 @@
 //! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
+pub mod dialog;
 pub mod keys;
 pub mod settings_view;
 pub mod sidebar;
@@ -403,8 +404,10 @@ impl ShellView {
         } else if action.0 == "settings::open" {
             // Task 5: the real settings dialog (gpui-component's `setting`
             // module, wrapped in a `Dialog`). Reachable via `mod+,`, the
-            // palette, and the sidebar profile icon.
-            settings_view::open(cx.entity(), window, cx);
+            // palette, and the sidebar profile icon. Goes through
+            // `dialog::open_shell_dialog` (Task 9) via `settings_view::open`
+            // itself, so it gets the crate's uniform open-time hygiene.
+            settings_view::open(self, window, cx);
         }
     }
 
@@ -2999,6 +3002,142 @@ mod tests {
             shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
             crate::theme::Mode::Light,
             "set_dark_mode(false) should flip back to light"
+        );
+    }
+
+    /// Task 9: opening a dialog through `dialog::open_shell_dialog` (here,
+    /// `settings::open` — the only current call site, migrated onto the
+    /// utility) must cancel a pending keymap sequence, the same hygiene
+    /// `toggle_palette` already gives palette-open. Real `ctrl+w` keystroke
+    /// starts the vim window-prefix sequence (`ctrl+w h/j/k/l`, a real
+    /// builtin binding — see `ctrl_h_then_ctrl_w_hl_moves_focus_between_
+    /// tiles` above), which leaves one pending keystroke and paints the
+    /// which-key overlay (Task 8); opening the settings dialog must clear
+    /// both.
+    #[gpui::test]
+    fn dialog_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Start (but don't finish) the "ctrl+w h/j/k/l" sequence.
+        cx.simulate_keystrokes("ctrl-w");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.matcher.pending().len()),
+            1,
+            "sanity: ctrl+w alone should leave the vim window-prefix pending"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("whichkey-overlay").is_some(),
+            "sanity: the which-key overlay should paint while ctrl+w is pending"
+        );
+
+        // Open the settings dialog through the real dispatch path — since
+        // Task 9, `settings_view::open` routes through `open_shell_dialog`.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("settings::open".to_string()), window, cx);
+            });
+        });
+
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "settings::open should have opened the dialog"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.matcher.pending().is_empty()),
+            "opening a dialog through open_shell_dialog should cancel the \
+             pending ctrl+w sequence, same as palette-open does"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("whichkey-overlay").is_none(),
+            "the which-key overlay must not paint once the pending sequence \
+             has been cancelled"
+        );
+    }
+
+    /// Task 9: `open_shell_dialog` must close an open palette. `settings::
+    /// open` can't be reached with the palette open through its own Enter
+    /// path (`dispatch_palette_item` closes the palette before dispatching
+    /// anything, and `dispatch`'s `palette::toggle` arm is the only one that
+    /// re-touches `self.palette` — there is no route from an open palette
+    /// back into `dispatch`'s `settings::open` arm while it's still open),
+    /// so this drives `dialog::open_shell_dialog` directly to exercise the
+    /// utility's own hygiene in isolation from any one call site.
+    #[gpui::test]
+    fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "sanity: ctrl+k should open the palette"
+        );
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                dialog::open_shell_dialog(shell, window, cx, |dialog, _window, _cx| {
+                    dialog.title("Test dialog")
+                });
+            });
+        });
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "open_shell_dialog should have closed the open palette"
+        );
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "open_shell_dialog should have opened the dialog layer"
         );
     }
 }

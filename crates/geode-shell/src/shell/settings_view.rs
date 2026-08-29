@@ -43,7 +43,7 @@
 //! controls says so, honestly, rather than silently discarding the
 //! expectation that a UI change usually persists.
 
-use gpui::{App, Entity, ParentElement as _, SharedString, Styled as _, Window, div, px};
+use gpui::{App, Context, Entity, ParentElement as _, SharedString, Styled as _, Window, div, px};
 use gpui_component::{
     ActiveTheme as _, WindowExt as _,
     label::Label,
@@ -53,6 +53,7 @@ use gpui_component::{
 
 use crate::keymap::Modifiers;
 use crate::shell::ShellView;
+use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
 
 /// Open the settings dialog (`settings::open`: `mod+,`, the palette entry,
@@ -60,16 +61,26 @@ use crate::theme::Mode;
 /// already open — `window.open_dialog` stacks a fresh overlay layer on
 /// every call, and re-triggering the action while the dialog is already up
 /// (e.g. a second `mod+,`) should not pile up duplicate dialogs.
-pub fn open(view: Entity<ShellView>, window: &mut Window, cx: &mut App) {
+///
+/// Goes through [`open_shell_dialog`] (Task 9) rather than calling
+/// `window.open_dialog` itself — the crate's one standard door, so this
+/// dialog gets the same pending-sequence/palette hygiene as every other one.
+/// `view`'s `Entity` handle is grabbed via `cx.entity()` before the call,
+/// since the content closure below needs a clone to read/update
+/// `ShellView`'s services later, when the dialog actually renders — not
+/// `&mut ShellView` itself, which `open_shell_dialog` already borrows for
+/// its own hygiene.
+pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if window.has_active_dialog(cx) {
         return;
     }
-    window.open_dialog(cx, move |dialog, _window, _cx| {
-        let view = view.clone();
+    let entity = cx.entity();
+    open_shell_dialog(view, window, cx, move |dialog, _window, _cx| {
+        let entity = entity.clone();
         dialog
             .title("Settings")
             .w(px(720.))
-            .content(move |content, window, cx| content.child(build(view.clone(), window, cx)))
+            .content(move |content, window, cx| content.child(build(entity.clone(), window, cx)))
     });
 }
 
