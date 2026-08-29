@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Polish the shell per user direction: config hot reload, resize mode + move-tile bindings, session layout persistence, new chrome (top toolbar, left sidebar with workspace indicators and a profile/settings entry, slimmed status bar), a settings dialog on gpui-component's `setting` module, palette refinements (no placeholder text, fuzzy-match highlighting), and the ledgered deferred-minor cleanup. Multi-window explicitly excluded.
+**Goal:** Polish the shell per user direction: config hot reload, vim-prefix focus/move bindings with direct resize keys, session layout persistence, new chrome (top toolbar, left sidebar with workspace indicators and a profile/settings entry, slimmed status bar), a settings dialog on gpui-component's `setting` module, palette refinements (no placeholder text, fuzzy-match highlighting), and the ledgered deferred-minor cleanup. Multi-window explicitly excluded.
 
-**Architecture:** All in `geode-shell` (+ small `geode-app` wiring). Pure cores stay pure and TDD'd: reload-decision logic, layout (de)serialization + `Tree` reconstruction, fuzzy match with indices, mode state. gpui code follows the established drift-clause discipline.
+**Architecture:** All in `geode-shell` (+ small `geode-app` wiring). Pure cores stay pure and TDD'd: reload-decision logic, layout (de)serialization + `Tree` reconstruction, fuzzy match with indices. gpui code follows the established drift-clause discipline.
 
 **Tech Stack:** existing deps only (no `notify` — mtime polling via gpui background timer).
 
-**Spec:** foundation spec §3.1 (resize mode, move), §8 (hot reload, layouts-as-config); PHILOSOPHY (honest failure, keyboard-first, per-frame churn). User direction 2026-08-29: toolbar top; sidebar left with workspace indicators + profile icon → settings dialog (gpui-component `setting` module); palette placeholder text removed; fuzzy-matched characters highlighted.
+**Spec:** foundation spec §3.1 (resize, move; resize-as-mode simplified to direct bindings per user direction), §8 (hot reload, layouts-as-config); PHILOSOPHY (honest failure, keyboard-first, per-frame churn). User direction 2026-08-29: toolbar top; sidebar left with workspace indicators + profile icon → settings dialog (gpui-component `setting` module); palette placeholder text removed; fuzzy-matched characters highlighted.
 
 ## Global Constraints
 
@@ -25,13 +25,13 @@
 crates/geode-shell/src/reload.rs           pure reload-decision core + watcher plumbing
 crates/geode-shell/src/session.rs          layout (de)serialization, Tree reconstruction, session save/restore
 crates/geode-shell/src/tiling/tree.rs      gains validated reconstruction constructor
-crates/geode-shell/src/shell/mod.rs        mode state, new dispatch arms, chrome composition, settings dialog wiring
+crates/geode-shell/src/shell/mod.rs        new dispatch arms, chrome composition, settings dialog wiring
 crates/geode-shell/src/shell/toolbar.rs    top toolbar (pure element fn)
 crates/geode-shell/src/shell/sidebar.rs    left strip: workspace indicators + profile icon (pure element fn)
-crates/geode-shell/src/shell/status.rs     slimmed: mode, pending keys, reload indicator, theme name
+crates/geode-shell/src/shell/status.rs     slimmed: pending keys, reload indicator, theme name
 crates/geode-shell/src/shell/settings_view.rs  settings dialog content on gpui-component setting module
 crates/geode-shell/src/palette.rs          fuzzy indices + highlight render + polish
-crates/geode-shell/src/defaults.rs         new actions + bindings (resize mode, move, settings::open)
+crates/geode-shell/src/defaults.rs         new actions + bindings (resize, move, vim prefixes, settings::open)
 ```
 
 ---
@@ -49,18 +49,17 @@ crates/geode-shell/src/defaults.rs         new actions + bindings (resize mode, 
 
 ---
 
-### Task 2: Resize mode and move-tile bindings
+### Task 2: Vim rebinding, direct resize bindings, move-tile bindings
 
-**Files:** Modify `shell/mod.rs`, `defaults.rs`, `tiling/workspaces.rs`, `shell/status.rs`.
+**Files:** Modify `defaults.rs`, `tiling/workspaces.rs`, `shell/mod.rs` (tests only, most likely).
 
 **Interfaces:**
-- `ShellMode { Normal, Resize }` on ShellView; the context stack becomes `[workspace]` + `resize` flag context when in Resize mode (predicate `resize` gates the mode's bindings). Status bar shows `-- RESIZE --` (muted accent) while active.
-- **Vim-style rebinding (user direction):** focus movement becomes the vim window prefix — `"ctrl+w h/j/k/l"` (two-keystroke sequences; the engine supports them natively) replacing `mod+h/j/k/l`, which become unbound. Move-tile follows the vim analog: `"ctrl+w shift+h/j/k/l"`. The palette's primary binding becomes `ctrl+k` (replacing `mod+p`; keep `ctrl+shift+p` as the discoverable secondary). Update `BUILTIN_KEYMAP` accordingly; the palette-toggle intercept already resolves last-wins over bindings so it follows the new key automatically — verify its single-keystroke assumption still holds for `ctrl+k` (it does; sequences never were toggle candidates).
-- New actions in `defaults`: `workspace::resize_mode` (bound `mod+r`), and context-`resize`-gated `workspace::resize_left/down/up/right` (bound `h/j/k/l`), `workspace::resize_exit` (bound `escape` and `enter`); plus `workspace::move_left/down/up/right` (bound `ctrl+w shift+h/j/k/l` per above). Builtin keymap must still build diagnostic-free (guard test updated counts as minimums). Existing e2e tests that press `mod+h`-style focus keys must be updated to the `ctrl+w` sequences.
-- `apply_workspace_action` gains arms: `move_*` → `Tree::move_direction`; `resize_*` → `Tree::resize(dir, RESIZE_STEP)` with `pub const RESIZE_STEP: f32 = 0.03;`. Mode enter/exit is ShellView state, handled in its dispatch (like palette::toggle), not in the pure dispatcher.
-- Esc while in Resize mode must also clear any pending matcher state (cancel) — one honest rule: mode exit resets pending.
+- **Vim-style rebinding (user direction):** focus movement becomes the vim window prefix — `"ctrl+w h/j/k/l"` (two-keystroke sequences; the engine supports them natively) replacing `mod+h/j/k/l`. Move-tile follows the vim analog: `"ctrl+w shift+h/j/k/l"`. The palette's primary binding becomes `ctrl+k` (replacing `mod+p`; keep `ctrl+shift+p` as the discoverable secondary). Update `BUILTIN_KEYMAP` accordingly; the palette-toggle intercept already resolves last-wins over bindings so it follows the new key automatically — verify its single-keystroke assumption still holds for `ctrl+k` (it does; sequences never were toggle candidates).
+- **Resize is a direct binding, NOT a mode (user direction, revised):** no `ShellMode`, no `resize` context, no mode indicator, no `resize_mode`/`resize_exit` actions. The freed `mod+h/j/k/l` bind directly to `workspace::resize_left/down/up/right` in the normal `workspace` context. Semantics: `mod+h` grows the focused tile's edge toward the left by `RESIZE_STEP` (i.e. `Tree::resize(Direction::Left, RESIZE_STEP)`), and symmetrically for j/k/l — "lean the tile in that direction"; shrinking is growing the opposite way. Document this in the action titles ("Resize: grow left" etc. so the palette reads well).
+- New actions in `defaults`: `workspace::resize_left/down/up/right` (bound `mod+h/j/k/l`) and `workspace::move_left/down/up/right` (bound `ctrl+w shift+h/j/k/l`). Builtin keymap must still build diagnostic-free (guard test counts are minimums). Existing e2e tests that press `mod+h`-style focus keys must be updated to the `ctrl+w` sequences.
+- `apply_workspace_action` gains arms: `move_*` → `Tree::move_direction`; `resize_*` → `Tree::resize(dir, RESIZE_STEP)` with `pub const RESIZE_STEP: f32 = 0.03;`. All pure — no ShellView state involved.
 
-**Steps:** TDD dispatcher arms (pure) → wire mode + context + status → `#[gpui::test]`: mod+r, h (assert ratios changed), escape (assert mode back to Normal); and mod+shift+l swaps tiles → full verification → commit `feat: resize mode and move-tile bindings`.
+**Steps:** TDD dispatcher arms (pure) → rebind + retitle → `#[gpui::test]`: `ctrl+w l` moves focus; `mod+h` changes ratios; `ctrl+w shift+l` swaps tiles; `ctrl+k` opens the palette → full verification → commit `feat: vim-prefix focus/move bindings and direct resize keys`.
 
 ---
 
@@ -85,7 +84,7 @@ crates/geode-shell/src/defaults.rs         new actions + bindings (resize mode, 
 **Interfaces (all pure element fns like `status_bar`, except the TitleBar which is gpui-component's):**
 - **Toolbar = the native title bar row (user direction: no extra real estate).** Use gpui-component's `TitleBar` (`crates/ui/src/title_bar.rs` at the pinned checkout — it customizes the titlebar and hosts the window controls; `TitleBar::title_bar_options()` feeds `WindowOptions`; the `window_title` example shows the wiring; on macOS the traffic lights overlay it, on Windows it draws caption buttons). Content: the app title `geode` left, and — to prove the row hosts real content (user direction) — a **right-aligned filter text field** (gpui-component `Input` + `InputState` entity owned by ShellView, placeholder `filter`, compact width ~200px). It is deliberately **hooked up to nothing**: no consumer reads its value yet (comment: it becomes the global text filter, spec §4.1, in the data phase). Focus interplay must be handled: clicking the field focuses it and keys route to the input (shell chords won't fire — acceptable while typing a filter); `Esc` in the field returns focus to the shell root. The rest of the row stays reserved for grouping/scope state post-data-phase (comment). `main.rs` gains the `title_bar_options()` in its WindowOptions.
 - `sidebar(active: u8, non_empty: &[u8], cx)` — narrow (~40px) left strip, `sidebar` tokens: vertical workspace indicators (same visibility rule as before: active always, non-empty always, others hidden), each clickable → `workspace::switch_N` through the dispatch chain; bottom-anchored profile icon (gpui-component `Avatar` with initials fallback or a user `Icon`) that dispatches `settings::open` (action arrives in Task 5 — for this task register the action in defaults with a no-op arm in ShellView that Task 5 fills; keep the guard test clean).
-- `status_bar` slims to: mode indicator, pending keys, reload indicator (Task 1), theme name. Workspace indicators REMOVED (moved to sidebar).
+- `status_bar` slims to: pending keys, reload indicator (Task 1), theme name. Workspace indicators REMOVED (moved to sidebar).
 - Composition in ShellView render: toolbar top, then a row of [sidebar | tile area], status bar bottom; tile-area bounds account for toolbar + sidebar + status heights/widths in the `Tree::layout` rect (still called once).
 
 **Steps:** implement → adjust existing gpui::tests for new geometry if any assert on layout → full verification → honest manual check → commit `feat: top toolbar and workspace sidebar; slim the status bar`.
@@ -152,6 +151,6 @@ Reinstated (the earlier cut is obsolete): the `ctrl+w` prefix now creates a real
 
 ## Self-Review Notes
 
-- **Coverage of user direction:** titlebar-integrated toolbar with no extra row and no content yet (T4), sidebar with workspace indicators + profile icon → settings dialog on the `setting` module (T4+T5), vim-style `ctrl+w` focus/move prefix + `ctrl+k` palette (T2), palette placeholder removed (T6), fuzzy highlighting (T6). Multi-window: excluded per user. Hot reload (T1), resize mode (T2), session persistence (T3), which-key (T8 — reinstated because the `ctrl+w` prefix creates a real sequence family).
+- **Coverage of user direction:** titlebar-integrated toolbar with no extra row and no content yet (T4), sidebar with workspace indicators + profile icon → settings dialog on the `setting` module (T4+T5), vim-style `ctrl+w` focus/move prefix + `ctrl+k` palette (T2), palette placeholder removed (T6), fuzzy highlighting (T6). Multi-window: excluded per user. Hot reload (T1), direct resize + vim bindings (T2), session persistence (T3), which-key (T8 — reinstated because the `ctrl+w` prefix creates a real sequence family).
 - **Consistency:** new action ids (`workspace::resize_*`, `workspace::move_*`, `settings::open`, `workspace::resize_mode/exit`) all registered in defaults with bindings; guard test stays diagnostic-free; dispatcher arms match; watcher ignores `session.toml`; palette-open cancels pending (supersedes the 1b-ui deferred note).
 - **Order:** T1 and T2 independent; T3 before T4 only for `next_tile` API stability (not strictly required — briefs are self-contained); T4 before T5 (profile icon hosts the open path).
