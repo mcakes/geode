@@ -7,3 +7,4 @@
 pub mod actions;
 pub mod defaults;
 pub mod keymap;
+pub mod tiling;
