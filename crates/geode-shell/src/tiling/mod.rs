@@ -4,5 +4,7 @@
 //! so what you see is what hjkl navigates. No gpui here (spec §10.3).
 
 mod tree;
+mod workspaces;
 
 pub use tree::{Direction, Node, Orientation, Rect, TileId, Tree};
+pub use workspaces::{Workspaces, apply_workspace_action};
