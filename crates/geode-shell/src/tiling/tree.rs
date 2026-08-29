@@ -341,6 +341,92 @@ impl Tree {
         };
         true
     }
+
+    /// Construct a `Tree` from raw parts (session restore, Task 3): the
+    /// fields are private everywhere else, so this is the one place a
+    /// hostile/corrupted session file's data gets turned back into a `Tree`,
+    /// with validation instead of blind trust.
+    ///
+    /// Structural invalidity in `root` is `Err` (the shape genuinely can't
+    /// be interpreted as a layout): any `Split` with fewer than 2 children,
+    /// a `ratios` vec whose length doesn't match `children`, or any ratio
+    /// that is non-finite (NaN/infinite) or non-positive. A structurally
+    /// valid split's ratios are then renormalized to sum to exactly 1.0 —
+    /// this heals small drift (e.g. from a TOML float round-trip) rather
+    /// than rejecting it, since the brief only asks non-positive/NaN ratios
+    /// to be rejected.
+    ///
+    /// `focused`/`fullscreen` are a different kind of problem: a `TileId`
+    /// that doesn't exist in `root` as a leaf. That's harmless (nothing
+    /// downstream trusts them beyond "is this id currently a leaf",
+    /// per `contains`), so it's healed by clearing to `None` rather than
+    /// rejecting the whole tree over a dangling reference.
+    pub fn from_parts(
+        root: Option<Node>,
+        focused: Option<TileId>,
+        fullscreen: Option<TileId>,
+    ) -> Result<Tree, String> {
+        let root = root.map(validate_node).transpose()?;
+
+        let mut leaves = Vec::new();
+        if let Some(root) = &root {
+            collect_leaves(root, &mut leaves);
+        }
+        let focused = focused.filter(|id| leaves.contains(id));
+        let fullscreen = fullscreen.filter(|id| leaves.contains(id));
+
+        Ok(Tree {
+            root,
+            focused,
+            fullscreen,
+        })
+    }
+}
+
+/// Recursively validate one `Node` for [`Tree::from_parts`]: every `Split`
+/// must have >= 2 children with a matching-length `ratios` vec of finite,
+/// positive values; on success the ratios are renormalized to sum to 1.0.
+fn validate_node(node: Node) -> Result<Node, String> {
+    match node {
+        Node::Leaf(id) => Ok(Node::Leaf(id)),
+        Node::Split {
+            orientation,
+            children,
+            ratios,
+        } => {
+            if children.len() < 2 {
+                return Err(format!(
+                    "split has {} children, need at least 2",
+                    children.len()
+                ));
+            }
+            if children.len() != ratios.len() {
+                return Err(format!(
+                    "split has {} children but {} ratios",
+                    children.len(),
+                    ratios.len()
+                ));
+            }
+            for ratio in &ratios {
+                if !ratio.is_finite() || *ratio <= 0.0 {
+                    return Err(format!("ratio {ratio} is not finite and positive"));
+                }
+            }
+            // Every ratio was just checked finite and > 0, so the sum is
+            // finite and > 0 too — safe to divide by.
+            let sum: f32 = ratios.iter().sum();
+            let ratios: Vec<f32> = ratios.iter().map(|r| r / sum).collect();
+            let children = children
+                .into_iter()
+                .map(validate_node)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Node::Split {
+                orientation,
+                children,
+                ratios,
+            })
+        }
+    }
 }
 
 fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
@@ -866,6 +952,136 @@ mod tests {
         assert_eq!(tree.fullscreen(), None, "split must exit fullscreen");
         assert_eq!(tree.focused(), Some(TileId(9)));
         assert_eq!(rects(&tree).len(), 5, "all tiles visible again");
+    }
+
+    // --- Tree::from_parts (Task 3: session restore reconstruction) -----
+
+    #[test]
+    fn from_parts_rebuilds_an_equivalent_tree() {
+        let tree = grid();
+        let rebuilt =
+            Tree::from_parts(tree.root().cloned(), tree.focused(), tree.fullscreen()).unwrap();
+        assert_eq!(rebuilt.tiles(), tree.tiles());
+        assert_eq!(rebuilt.focused(), tree.focused());
+        assert_eq!(rebuilt.fullscreen(), tree.fullscreen());
+        assert_eq!(rebuilt.layout(Rect::UNIT), tree.layout(Rect::UNIT));
+    }
+
+    #[test]
+    fn from_parts_on_none_root_is_the_empty_tree() {
+        let tree = Tree::from_parts(None, None, None).unwrap();
+        assert!(tree.is_empty());
+        assert_eq!(tree.focused(), None);
+        assert_eq!(tree.fullscreen(), None);
+    }
+
+    #[test]
+    fn from_parts_rejects_a_split_with_fewer_than_two_children() {
+        let bad = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1))],
+            ratios: vec![1.0],
+        };
+        assert!(Tree::from_parts(Some(bad), None, None).is_err());
+    }
+
+    #[test]
+    fn from_parts_rejects_a_ratio_length_mismatch() {
+        let bad = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), Node::Leaf(TileId(2))],
+            ratios: vec![1.0],
+        };
+        assert!(Tree::from_parts(Some(bad), None, None).is_err());
+    }
+
+    #[test]
+    fn from_parts_rejects_a_nan_ratio() {
+        let bad = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), Node::Leaf(TileId(2))],
+            ratios: vec![f32::NAN, 0.5],
+        };
+        assert!(Tree::from_parts(Some(bad), None, None).is_err());
+    }
+
+    #[test]
+    fn from_parts_rejects_a_non_positive_ratio() {
+        let bad = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), Node::Leaf(TileId(2))],
+            ratios: vec![0.0, 1.0],
+        };
+        assert!(Tree::from_parts(Some(bad), None, None).is_err());
+
+        let negative = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), Node::Leaf(TileId(2))],
+            ratios: vec![-0.5, 1.5],
+        };
+        assert!(Tree::from_parts(Some(negative), None, None).is_err());
+    }
+
+    #[test]
+    fn from_parts_renormalizes_small_ratio_drift() {
+        let drifted = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), Node::Leaf(TileId(2))],
+            ratios: vec![0.501, 0.5], // sums to 1.001, not exactly 1.0
+        };
+        let tree = Tree::from_parts(Some(drifted), Some(TileId(1)), None).unwrap();
+        let rects = tree.layout(Rect::UNIT);
+        let total: f32 = rects.iter().map(|(_, r)| r.w).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-4,
+            "renormalized ratios must partition the unit square, got {total}"
+        );
+    }
+
+    #[test]
+    fn from_parts_heals_a_dangling_focused_reference() {
+        let node = Node::Leaf(TileId(1));
+        let tree = Tree::from_parts(Some(node), Some(TileId(99)), None).unwrap();
+        assert_eq!(
+            tree.focused(),
+            None,
+            "a focused id not present as a leaf must be healed to None, not rejected"
+        );
+    }
+
+    #[test]
+    fn from_parts_heals_a_dangling_fullscreen_reference() {
+        let node = Node::Leaf(TileId(1));
+        let tree = Tree::from_parts(Some(node), Some(TileId(1)), Some(TileId(99))).unwrap();
+        assert_eq!(tree.focused(), Some(TileId(1)));
+        assert_eq!(
+            tree.fullscreen(),
+            None,
+            "a fullscreen id not present as a leaf must be healed to None, not rejected"
+        );
+    }
+
+    #[test]
+    fn from_parts_preserves_a_valid_fullscreen_reference() {
+        let node = Node::Leaf(TileId(1));
+        let tree = Tree::from_parts(Some(node), Some(TileId(1)), Some(TileId(1))).unwrap();
+        assert_eq!(tree.fullscreen(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn from_parts_validates_nested_splits() {
+        // Outer split is fine; the inner one has a ratio-length mismatch.
+        let inner = Node::Split {
+            orientation: Orientation::Vertical,
+            children: vec![Node::Leaf(TileId(2)), Node::Leaf(TileId(3))],
+            ratios: vec![1.0], // wrong length
+        };
+        let outer = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![Node::Leaf(TileId(1)), inner],
+            ratios: vec![0.5, 0.5],
+        };
+        assert!(Tree::from_parts(Some(outer), None, None).is_err());
     }
 
     #[test]

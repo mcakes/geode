@@ -21,6 +21,7 @@ use crate::defaults::mod_alias_from_config;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::reload;
+use crate::session;
 use crate::theme::ThemeService;
 use crate::tiling::{Rect, Workspaces, apply_workspace_action};
 use geode_core::config::Config;
@@ -44,6 +45,11 @@ pub struct ShellServices {
     pub mod_alias: Modifiers,
     pub workspaces: Workspaces,
     pub theme: ThemeService,
+    /// Where `ShellView::dispatch` saves the session file after a
+    /// workspace-mutating action (Task 3, spec: "state-as-config"). `None`
+    /// in contexts with no writable user config dir (e.g. some test setups)
+    /// — session persistence is then just skipped, never a panic.
+    pub session_path: Option<PathBuf>,
 }
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
@@ -289,12 +295,51 @@ impl ShellView {
     /// handled here when that leaves them unhandled. Shared by the normal
     /// keymap-matcher path and the palette's Enter-to-dispatch path, so
     /// both take exactly the same action to the same place.
+    ///
+    /// Every successful workspace-mutating dispatch is followed by a
+    /// session save (Task 3, plan constraint: "session saves happen inside
+    /// the dispatch path after workspace-mutating actions, post-action, not
+    /// per frame"). `apply_workspace_action` returning `true` means the
+    /// action was recognized as a workspace verb (see its own doc comment:
+    /// this includes no-op edge cases like focusing past the last tile) —
+    /// saving on every one of those, not just the ones that actually
+    /// changed geometry, keeps this a single cheap post-action write
+    /// instead of a second "did anything really change" comparison.
     fn dispatch(&mut self, action: &ActionId, cx: &mut Context<Self>) {
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
-        if !handled && action.0 == "palette::toggle" {
+        if handled {
+            self.save_session();
+        } else if action.0 == "palette::toggle" {
             self.toggle_palette();
-        } else if !handled && action.0 == "theme::toggle_mode" {
+        } else if action.0 == "theme::toggle_mode" {
             self.services.theme.toggle_mode(cx);
+        }
+    }
+
+    /// Write the current workspace layout (and active theme mode) to the
+    /// session file, if one is configured (`ShellServices::session_path`).
+    /// Atomic (temp file + rename, see `session::save`) and small, so doing
+    /// this synchronously on the UI thread right after a dispatch is cheap
+    /// enough not to violate "nothing may stall the render thread" in
+    /// practice (a handful of small TOML tables, not a query). A write
+    /// failure (e.g. an unwritable directory) is a warning line, never a
+    /// panic — session persistence is a convenience, not a correctness
+    /// requirement (mirrors config's own "bad input is a warning"
+    /// philosophy).
+    pub fn save_session(&self) {
+        let Some(path) = self.services.session_path.as_ref() else {
+            return;
+        };
+        let theme_mode = if self.services.theme.active_mode().is_dark() {
+            "dark"
+        } else {
+            "light"
+        };
+        let extra = session::SessionExtra {
+            theme_mode: Some(theme_mode.to_string()),
+        };
+        if let Err(e) = session::save(path, &self.services.workspaces, &extra) {
+            eprintln!("[session] warning: failed to save session: {e}");
         }
     }
 
@@ -568,6 +613,7 @@ mod tests {
             mod_alias,
             workspaces: Workspaces::new(),
             theme,
+            session_path: None,
         }
     }
 
@@ -944,6 +990,7 @@ mod tests {
             mod_alias,
             workspaces: Workspaces::new(),
             theme,
+            session_path: None,
         }
     }
 
@@ -1262,6 +1309,7 @@ mod tests {
             mod_alias,
             workspaces: Workspaces::new(),
             theme,
+            session_path: None,
         }
     }
 
@@ -1691,5 +1739,115 @@ mod tests {
                 "the reload itself still succeeds — only the theme re-apply is guarded"
             );
         });
+    }
+
+    // --- Task 3: session save/restore wiring ----------------------------
+
+    fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
+        let mut services = test_services();
+        services.session_path = Some(session_path);
+        services
+    }
+
+    /// End-to-end: real keystrokes dispatched through `ShellView` (not
+    /// `apply_workspace_action` called directly) build a layout across two
+    /// workspaces; `dispatch`'s post-action save (wired in this task)
+    /// writes it to a real session file each time, atomically. Loading
+    /// that file back with `session::load` — the exact function `main.rs`
+    /// calls on startup — must reproduce the same layouts, and a further
+    /// split on the restored `Workspaces` must allocate a `TileId` that
+    /// collides with none of the restored ones (the whole reason
+    /// `Workspaces::from_parts` computes `next_tile` from the restored
+    /// tiles rather than resetting it to 0).
+    #[gpui::test]
+    fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.toml");
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(
+                            test_services_with_session(session_path.clone()),
+                            None,
+                            None,
+                            window,
+                            cx,
+                        )
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // Build a layout on workspace 1 (two tiles side by side, then the
+        // left one split stacked — three tiles total), switch to workspace
+        // 2 and add a tile there too, then land back on workspace 1. Every
+        // one of these is a workspace-mutating dispatch, so each triggers
+        // a save.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-w h");
+        cx.simulate_keystrokes("ctrl-h");
+        cx.simulate_keystrokes("alt-2");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("alt-1");
+
+        assert!(
+            session_path.exists(),
+            "a workspace-mutating dispatch must have saved the session file"
+        );
+        assert!(
+            !dir.path().join(".session.toml.tmp").exists(),
+            "the atomic-write temp file must not be left behind"
+        );
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let live: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> =
+            shell.read_with(&cx, |shell, _| {
+                shell
+                    .services
+                    .workspaces
+                    .spaces()
+                    .map(|(ix, tree)| (ix, tree.layout(Rect::UNIT)))
+                    .collect()
+            });
+
+        let (mut restored, _extra, warnings) = session::load(&session_path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let restored_layout: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> = restored
+            .spaces()
+            .map(|(ix, tree)| (ix, tree.layout(Rect::UNIT)))
+            .collect();
+        assert_eq!(
+            live, restored_layout,
+            "restoring the saved session must reproduce every workspace's layout"
+        );
+
+        let before_ids: std::collections::HashSet<_> =
+            restored.spaces().flat_map(|(_, t)| t.tiles()).collect();
+        let new_id = restored.alloc_tile();
+        assert!(
+            !before_ids.contains(&new_id),
+            "alloc_tile on a restored Workspaces must not collide with a restored TileId"
+        );
     }
 }

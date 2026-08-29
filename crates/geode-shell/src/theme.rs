@@ -299,6 +299,13 @@ impl ThemeService {
         warnings
     }
 
+    /// The active theme's mode — what a session file records at save time
+    /// (`session::SessionExtra::theme_mode`, Task 3) and what `main.rs`
+    /// restores via [`set_mode`](Self::set_mode) after `apply_from_config`.
+    pub fn active_mode(&self) -> Mode {
+        self.active_mode
+    }
+
     /// Flip light/dark for the active family (`theme::toggle_mode`). Stays
     /// on the same family when it ships both modes; when it doesn't (a
     /// single-mode family like "Harper"), falls back to [`DEFAULT_FAMILY`]
@@ -310,10 +317,25 @@ impl ThemeService {
         } else {
             Mode::Dark
         };
+        self.set_mode(target, cx);
+    }
+
+    /// Set the active family's mode directly (rather than flipping it —
+    /// see [`toggle_mode`](Self::toggle_mode)). Used by session restore
+    /// (`main.rs`, Task 3) to re-apply a saved mode *after*
+    /// `apply_from_config` already applied the config's own `[theme]`
+    /// mode — so the session's mode wins, on top of whatever family/mode
+    /// the config resolved. A no-op when already at `mode`. Falls back to
+    /// [`DEFAULT_FAMILY`] at `mode` when the active family doesn't ship it,
+    /// same fallback `toggle_mode` uses.
+    pub fn set_mode(&mut self, mode: Mode, cx: &mut App) {
+        if self.active_mode == mode {
+            return;
+        }
         let family = self.active_family.clone();
         let next = self
-            .find_family(&family, target)
-            .or_else(|| self.find_family(DEFAULT_FAMILY, target))
+            .find_family(&family, mode)
+            .or_else(|| self.find_family(DEFAULT_FAMILY, mode))
             .map(|(_, config)| config.clone());
         if let Some(config) = next {
             self.apply_theme(&config, cx);
@@ -485,6 +507,28 @@ mod gpui_tests {
                 "Gruvbox Light"
             );
         });
+    }
+
+    #[gpui::test]
+    fn set_mode_applies_the_target_mode_within_the_active_family(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (mut service, _) = load_bundled();
+        cx.update(|cx| assert!(service.apply("Gruvbox", Mode::Dark, cx)));
+        assert_eq!(service.active_mode(), Mode::Dark);
+
+        cx.update(|cx| service.set_mode(Mode::Light, cx));
+        assert_eq!(service.active_name(), "Gruvbox Light");
+        assert_eq!(service.active_mode(), Mode::Light);
+    }
+
+    #[gpui::test]
+    fn set_mode_to_the_current_mode_is_a_noop(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (mut service, _) = load_bundled();
+        cx.update(|cx| assert!(service.apply("Gruvbox", Mode::Dark, cx)));
+
+        cx.update(|cx| service.set_mode(Mode::Dark, cx));
+        assert_eq!(service.active_name(), "Gruvbox Dark");
     }
 
     #[gpui::test]

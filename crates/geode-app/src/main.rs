@@ -8,6 +8,7 @@ use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
 use geode_shell::keymap::build_keymap;
+use geode_shell::session;
 use geode_shell::shell::{ShellServices, ShellView};
 use geode_shell::theme;
 use geode_shell::tiling::Workspaces;
@@ -25,6 +26,52 @@ fn main() {
             for warning in services.theme.apply_from_config(&services.config, cx) {
                 eprintln!("[theme] warning: {warning}");
             }
+
+            // Restore the session (Task 3) before constructing ShellView:
+            // the saved workspace layout replaces the fresh `Workspaces::
+            // new()` set above, and — deliberately AFTER apply_from_config
+            // just ran — a saved theme mode is re-applied on top of it, so
+            // a session's toggled mode wins over the config's default
+            // mode (a runtime `theme::toggle_mode` survives a restart even
+            // if `app.toml`'s `[theme].mode` still says the old value).
+            if let Some(path) = &services.session_path {
+                let (workspaces, extra, warnings) = session::load(path);
+                for warning in &warnings {
+                    eprintln!("[session] warning: {warning}");
+                }
+                services.workspaces = workspaces;
+                if let Some(mode) = extra.theme_mode.as_deref() {
+                    match mode {
+                        "light" => services.theme.set_mode(theme::Mode::Light, cx),
+                        "dark" => services.theme.set_mode(theme::Mode::Dark, cx),
+                        other => {
+                            eprintln!("[session] warning: unknown theme_mode '{other}'; ignoring")
+                        }
+                    }
+                }
+            }
+
+            // Best-effort flush on quit: `App::on_app_quit` exists at the
+            // pinned gpui rev (checked against the vendored checkout), so
+            // wire it up as a belt-and-suspenders save — the post-dispatch
+            // save in `ShellView::dispatch` already covers crash-robustness
+            // for every workspace-mutating action; this only additionally
+            // catches a theme-mode-only change (`theme::toggle_mode`, which
+            // is not itself a workspace-mutating dispatch) made just before
+            // quitting with no workspace action after it.
+            cx.on_app_quit(|cx| {
+                for window in cx.windows() {
+                    if let Some(handle) = window.downcast::<Root>() {
+                        let _ = handle.update(cx, |root, _window, cx| {
+                            if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
+                                shell.read(cx).save_session();
+                            }
+                        });
+                    }
+                }
+                async {}
+            })
+            .detach();
 
             cx.spawn(async move |cx| {
                 cx.open_window(WindowOptions::default(), |window, cx| {
@@ -72,6 +119,11 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
         eprintln!("[theme] warning: {warning}");
     }
 
+    // Session file lives alongside user config (spec: state-as-config),
+    // `user_config_dir()/session.toml` — `None` whenever there's no
+    // writable user dir (mirrors desk/user themselves being optional).
+    let session_path = user.as_ref().map(|dir| dir.join("session.toml"));
+
     let services = ShellServices {
         config,
         registry,
@@ -79,6 +131,7 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
         mod_alias,
         workspaces: Workspaces::new(),
         theme,
+        session_path,
     };
     (services, desk, user)
 }

@@ -72,6 +72,52 @@ impl Workspaces {
             .map(|(ix, _)| *ix)
             .collect()
     }
+
+    /// Every workspace's index and tree, in index order (session save,
+    /// Task 3).
+    pub fn spaces(&self) -> impl Iterator<Item = (u8, &Tree)> {
+        self.spaces.iter().map(|(ix, tree)| (*ix, tree))
+    }
+
+    /// Construct a `Workspaces` from raw parts (session restore, Task 3),
+    /// validating and healing what a hostile/corrupted session file could
+    /// break: `active` must be in 1..=9, else `Err`; any workspace index
+    /// outside 1..=9 present in `spaces` is silently dropped (workspace
+    /// indices are always 1..=9, same range `switch` enforces); the active
+    /// workspace is inserted empty if it was missing from `spaces`
+    /// (mirrors `new`'s own invariant that `active` is always a key).
+    ///
+    /// `next_tile` is computed to resume past the maximum `TileId` found
+    /// across every restored tree, so a subsequent `alloc_tile` can never
+    /// collide with a restored id — that's the whole reason this
+    /// constructor exists rather than just handing `spaces`/`active` to a
+    /// struct literal (the fields are private everywhere else for exactly
+    /// this reason: `next_tile` must never be set independently of the ids
+    /// actually present).
+    pub fn from_parts(spaces: BTreeMap<u8, Tree>, active: u8) -> Result<Workspaces, String> {
+        if !(1..=9).contains(&active) {
+            return Err(format!("active workspace {active} is out of range 1..=9"));
+        }
+
+        let mut spaces: BTreeMap<u8, Tree> = spaces
+            .into_iter()
+            .filter(|(ix, _)| (1..=9).contains(ix))
+            .collect();
+        spaces.entry(active).or_default();
+
+        let next_tile = spaces
+            .values()
+            .flat_map(Tree::tiles)
+            .map(|id| id.0)
+            .max()
+            .unwrap_or(0);
+
+        Ok(Workspaces {
+            spaces,
+            active,
+            next_tile,
+        })
+    }
 }
 
 /// Fraction of the containing split moved per direct resize keystroke
@@ -346,6 +392,54 @@ mod tests {
             (focused_w - (0.5 + RESIZE_STEP)).abs() < 1e-4,
             "resize_left should grow the focused tile by RESIZE_STEP, got {focused_w}"
         );
+    }
+
+    // --- Workspaces::from_parts (Task 3: session restore) --------------
+
+    #[test]
+    fn from_parts_rejects_active_out_of_range() {
+        assert!(Workspaces::from_parts(BTreeMap::new(), 0).is_err());
+        assert!(Workspaces::from_parts(BTreeMap::new(), 10).is_err());
+    }
+
+    #[test]
+    fn from_parts_inserts_the_active_workspace_empty_if_missing() {
+        let ws = Workspaces::from_parts(BTreeMap::new(), 3).unwrap();
+        assert_eq!(ws.active_index(), 3);
+        assert!(ws.active().is_empty());
+    }
+
+    #[test]
+    fn from_parts_drops_out_of_range_workspace_keys() {
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, Tree::default());
+        spaces.insert(0, Tree::default());
+        spaces.insert(200, Tree::default());
+        let ws = Workspaces::from_parts(spaces, 1).unwrap();
+        assert_eq!(ws.spaces().map(|(ix, _)| ix).collect::<Vec<_>>(), vec![1]);
+    }
+
+    #[test]
+    fn from_parts_resumes_next_tile_past_the_max_restored_id() {
+        let mut tree = Tree::default();
+        tree.split(TileId(5), Orientation::Horizontal);
+        tree.split(TileId(12), Orientation::Horizontal);
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, tree);
+        let mut ws = Workspaces::from_parts(spaces, 1).unwrap();
+
+        let next = ws.alloc_tile();
+        assert_eq!(
+            next,
+            TileId(13),
+            "alloc_tile after restore must not collide with a restored id"
+        );
+    }
+
+    #[test]
+    fn from_parts_with_empty_spaces_starts_next_tile_at_one() {
+        let mut ws = Workspaces::from_parts(BTreeMap::new(), 1).unwrap();
+        assert_eq!(ws.alloc_tile(), TileId(1));
     }
 
     #[test]
