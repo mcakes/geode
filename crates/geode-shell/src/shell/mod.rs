@@ -13,8 +13,9 @@ use gpui::prelude::*;
 use gpui::{Context, FocusHandle, KeyDownEvent, MouseButton, Window, div, px};
 use gpui_component::{ActiveTheme as _, Root, v_flex};
 
-use crate::actions::ActionRegistry;
+use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers};
+use crate::palette::{self, PaletteItem, PaletteState};
 use crate::theme::ThemeService;
 use crate::tiling::{Rect, Workspaces, apply_workspace_action};
 use geode_core::config::Config;
@@ -40,10 +41,12 @@ pub struct ShellView {
     services: ShellServices,
     matcher: Matcher,
     focus_handle: FocusHandle,
-    /// Whether the command palette is open. Always false until Task 6 wires
-    /// the real palette; tracked here now so `palette::toggle` has somewhere
-    /// to land and the `palette` key-context frame exists.
-    palette_open: bool,
+    /// The open command palette's state (Task 6), or `None` when closed.
+    /// Built fresh from the registry/keymap/theme service each time
+    /// `palette::toggle` opens it (brief: the reverse binding index is
+    /// built once at palette-open, not per frame) and dropped on close —
+    /// nothing about it survives being closed and reopened.
+    palette: Option<PaletteState>,
 }
 
 impl ShellView {
@@ -54,18 +57,162 @@ impl ShellView {
             services,
             matcher: Matcher::default(),
             focus_handle,
-            palette_open: false,
+            palette: None,
         }
     }
 
     /// The active context stack for key resolution, outermost first:
     /// `workspace` is always active; `palette` layers on top while open.
+    /// Currently only consulted by [`is_palette_toggle`](Self::is_palette_toggle)
+    /// (to gate that binding's own `context`, if a user keymap ever adds
+    /// one) — `handle_key_down` never reaches `self.matcher.press` while
+    /// `self.palette` is `Some`, since palette-open key handling is
+    /// exclusive (see that method's doc comment).
     fn context_stack(&self) -> Vec<KeyContext> {
         let mut stack = vec![KeyContext::new("workspace")];
-        if self.palette_open {
+        if self.palette.is_some() {
             stack.push(KeyContext::new("palette"));
         }
         stack
+    }
+
+    /// True if `keystroke` exactly matches a single-key binding for
+    /// `palette::toggle`. Checked directly against the keymap rather than
+    /// through `self.matcher`, so the toggle key can open *and* close the
+    /// palette without ever touching (or being confused by) the matcher's
+    /// own pending-sequence state, which palette-open key handling
+    /// bypasses entirely.
+    fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke) -> bool {
+        let stack = self.context_stack();
+        self.services.keymap.bindings().iter().any(|binding| {
+            binding.action.0 == "palette::toggle"
+                && binding.keystrokes.len() == 1
+                && binding.keystrokes[0] == *keystroke
+                && binding.predicate.as_ref().is_none_or(|p| p.eval(&stack))
+        })
+    }
+
+    /// Open the palette (building a fresh `PaletteState` — actions in
+    /// registry order, then themes) if it's closed, or close it if it's
+    /// open.
+    fn toggle_palette(&mut self) {
+        if self.palette.is_some() {
+            self.palette = None;
+            return;
+        }
+        let bindings = palette::build_binding_index(&self.services.keymap);
+        let items = palette::build_items(&self.services.registry, &self.services.theme, &bindings);
+        self.palette = Some(PaletteState::new(items));
+    }
+
+    /// Apply one resolved action id through the shell's one dispatch chain
+    /// (spec: "one keymap, ours" — no parallel action-dispatch system).
+    /// Workspace verbs go through `apply_workspace_action`; the shell's own
+    /// non-workspace actions (`palette::toggle`, `theme::toggle_mode`) are
+    /// handled here when that leaves them unhandled. Shared by the normal
+    /// keymap-matcher path and the palette's Enter-to-dispatch path, so
+    /// both take exactly the same action to the same place.
+    fn dispatch(&mut self, action: &ActionId, cx: &mut Context<Self>) {
+        let handled = apply_workspace_action(&mut self.services.workspaces, action);
+        if !handled && action.0 == "palette::toggle" {
+            self.toggle_palette();
+        } else if !handled && action.0 == "theme::toggle_mode" {
+            self.services.theme.toggle_mode(cx);
+        }
+    }
+
+    /// Dispatch one selected palette row: an `Action` item goes through the
+    /// normal [`dispatch`](Self::dispatch) chain (brief: "action -> the
+    /// normal dispatch chain incl. theme::toggle_mode"); a `Theme` item
+    /// applies that theme directly via `ThemeService::apply`. The palette
+    /// is assumed already closed by the caller (Enter closes before
+    /// dispatching), so a `palette::toggle` item selected from within the
+    /// palette itself is a no-op rather than reopening it.
+    fn dispatch_palette_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
+        match item {
+            PaletteItem::Action(id, ..) => self.dispatch(id, cx),
+            PaletteItem::Theme(name) => {
+                // The name is already fully qualified (e.g. "Gruvbox
+                // Dark"), which `ThemeService::resolve` matches outright
+                // regardless of the `mode` argument — so the mode passed
+                // here is irrelevant to which theme gets applied.
+                self.services
+                    .theme
+                    .apply(name, crate::theme::Mode::Dark, cx);
+            }
+        }
+    }
+
+    /// Handle one key event while the palette is open. Exclusive routing
+    /// (plan constraint: "keyboard-first ... open, type, navigate,
+    /// dispatch, close"; brief: "Palette-open swallows all other bindings
+    /// ... keys go to the palette handler exclusively") — the shell's own
+    /// keymap `Matcher` is never consulted here, so no other binding (a
+    /// sequence, a workspace verb, anything) can leak through while typing
+    /// a query. The palette-toggle keystroke itself is intercepted earlier
+    /// in `handle_key_down`, before this method ever runs, so it does not
+    /// need a case here.
+    ///
+    /// Reads gpui's own `Keystroke` directly (`event.keystroke`, not the
+    /// shell-native one `convert_keystroke` produces) because free text
+    /// entry needs `key_char` (the actual typed/shifted character) and
+    /// named keys (`"backspace"`, `"up"`, `"down"`, `"enter"`, `"escape"`)
+    /// that the shell-native conversion's matcher-oriented shape doesn't
+    /// carry.
+    fn handle_palette_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let ks = &event.keystroke;
+        let mods = ks.modifiers;
+
+        match ks.key.as_str() {
+            "escape" => self.palette = None,
+            "enter" => {
+                let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
+                self.palette = None;
+                if let Some(item) = selected {
+                    self.dispatch_palette_item(&item, cx);
+                }
+            }
+            "backspace" => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.backspace();
+                }
+            }
+            "up" => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.move_selection(-1);
+                }
+            }
+            "down" => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.move_selection(1);
+                }
+            }
+            "p" if mods.control => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.move_selection(-1);
+                }
+            }
+            "n" if mods.control => {
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.move_selection(1);
+                }
+            }
+            _ => {
+                // Plain typing only: a chord that also holds ctrl/cmd/fn
+                // is a shortcut, not text entry, even if the platform
+                // still reports a `key_char` for it.
+                if !mods.control
+                    && !mods.platform
+                    && !mods.function
+                    && let (Some(chars), Some(palette)) =
+                        (ks.key_char.as_ref(), self.palette.as_mut())
+                {
+                    for c in chars.chars() {
+                        palette.push_char(c);
+                    }
+                }
+            }
+        }
     }
 
     fn handle_key_down(
@@ -74,18 +221,27 @@ impl ShellView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(keystroke) = convert_keystroke(&event.keystroke)
+            && self.is_palette_toggle(&keystroke)
+        {
+            self.toggle_palette();
+            cx.notify();
+            return;
+        }
+
+        if self.palette.is_some() {
+            self.handle_palette_key(event, cx);
+            cx.notify();
+            return;
+        }
+
         let Some(keystroke) = convert_keystroke(&event.keystroke) else {
             return;
         };
         let stack = self.context_stack();
         match self.matcher.press(&self.services.keymap, keystroke, &stack) {
             MatchResult::Matched(action) => {
-                let handled = apply_workspace_action(&mut self.services.workspaces, &action);
-                if !handled && action.0 == "palette::toggle" {
-                    self.palette_open = !self.palette_open;
-                } else if !handled && action.0 == "theme::toggle_mode" {
-                    self.services.theme.toggle_mode(cx);
-                }
+                self.dispatch(&action, cx);
                 cx.notify();
             }
             MatchResult::Pending | MatchResult::NoMatch => {
@@ -177,14 +333,23 @@ impl Render for ShellView {
             cx,
         );
 
+        let viewport_height = f32::from(viewport.height);
+
         v_flex()
             .size_full()
+            .relative()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(surface)
             .child(status_bar)
+            // The palette overlay paints above the tiles/status bar (later
+            // children paint above earlier siblings) but below gpui-
+            // component's own dialog/notification layers below.
+            .when_some(self.palette.as_ref(), |el, state| {
+                el.child(palette::render(state, width, viewport_height, cx))
+            })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
             // whoever it wraps must (spec: gpui-component usage.md "Overlay
@@ -416,6 +581,136 @@ mod tests {
         assert_eq!(
             pending_len, 1,
             "first 'g' of the 'g g' sequence should leave one pending keystroke"
+        );
+    }
+
+    /// End-to-end command palette flow (Task 6), through the real
+    /// key-event pipeline exactly like the tests above: `mod+p` opens it,
+    /// typing "split" filters down to (and ranks first) "Split
+    /// horizontal" — the only registered action or bundled theme whose
+    /// title contains that whole run as a subsequence — and Enter
+    /// dispatches the selected item through the normal chain, closing the
+    /// palette and splitting the (until then empty) active workspace.
+    #[gpui::test]
+    fn mod_p_opens_types_filters_and_enter_dispatches_the_selected_action(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "palette starts closed"
+        );
+
+        cx.simulate_keystrokes("alt-p");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "alt-p (mod+p = palette::toggle) should have opened the palette"
+        );
+
+        cx.simulate_input("split");
+        let selected_title = shell.read_with(&cx, |shell, _| {
+            shell
+                .palette
+                .as_ref()
+                .and_then(PaletteState::selected_item)
+                .map(|item| item.title())
+        });
+        assert_eq!(
+            selected_title,
+            Some("Split horizontal".to_string()),
+            "typing \"split\" should filter/rank \"Split horizontal\" as the top match"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("enter");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "enter should close the palette"
+        );
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 1,
+            "enter on \"Split horizontal\" should have dispatched \
+             workspace::split_horizontal through the normal chain"
+        );
+    }
+
+    /// Esc closes the palette without dispatching anything — typing a
+    /// query that would otherwise match and select an action must not
+    /// leave any trace once the palette is dismissed.
+    #[gpui::test]
+    fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("alt-p");
+        cx.simulate_input("split");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes("escape");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "escape should close the palette"
+        );
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 0,
+            "escape must not dispatch the item that was filtered/selected"
         );
     }
 }
