@@ -20,6 +20,8 @@ fn keystrokes_drive_the_tiling_tree() {
     let stack = vec![KeyContext::new("workspace")];
     let mut matcher = Matcher::default();
     let mut ws = Workspaces::new();
+    // Presses a single (non-sequence) keystroke and expects it to resolve
+    // to a matched action immediately.
     let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
         let ks = parse_keystroke(key, mod_alias).unwrap();
         match matcher.press(&keymap, ks, &stack) {
@@ -33,14 +35,35 @@ fn keystrokes_drive_the_tiling_tree() {
         }
     };
 
-    // mod+s twice: two tiles side by side.
-    press(&mut matcher, &mut ws, "mod+s");
-    press(&mut matcher, &mut ws, "mod+s");
+    // Presses a whitespace-separated sequence of keystrokes (e.g. the
+    // "ctrl+w h" vim window-prefix sequence); every keystroke but the last
+    // must leave the matcher Pending, and the last must resolve.
+    let press_seq = |matcher: &mut Matcher, ws: &mut Workspaces, spec: &str| {
+        let parts: Vec<&str> = spec.split_whitespace().collect();
+        for (i, part) in parts.iter().enumerate() {
+            let ks = parse_keystroke(part, mod_alias).unwrap();
+            match matcher.press(&keymap, ks, &stack) {
+                MatchResult::Matched(action) if i == parts.len() - 1 => {
+                    assert!(
+                        apply_workspace_action(ws, &action),
+                        "unhandled action {action}"
+                    );
+                }
+                MatchResult::Pending if i < parts.len() - 1 => {}
+                other => panic!("unexpected {other:?} at '{part}' in sequence '{spec}'"),
+            }
+        }
+    };
+
+    // ctrl+v twice: two tiles side by side (workspace::split_right).
+    press(&mut matcher, &mut ws, "ctrl+v");
+    press(&mut matcher, &mut ws, "ctrl+v");
     assert_eq!(ws.active().tiles().len(), 2);
 
-    // mod+h: focus left tile; mod+v: split it vertically.
-    press(&mut matcher, &mut ws, "mod+h");
-    press(&mut matcher, &mut ws, "mod+v");
+    // ctrl+w h: focus left tile (vim window-prefix sequence);
+    // ctrl+h: split it stacked (workspace::split_down).
+    press_seq(&mut matcher, &mut ws, "ctrl+w h");
+    press(&mut matcher, &mut ws, "ctrl+h");
     assert_eq!(ws.active().tiles().len(), 3);
     let rects = ws.active().layout(Rect::UNIT);
     assert_eq!(rects.len(), 3);
@@ -56,9 +79,9 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "mod+1");
     assert_eq!(ws.active().tiles().len(), 3);
 
-    // Directional focus works through the same pipeline.
+    // Directional focus works through the same pipeline (ctrl+w l sequence).
     let before = ws.active().focused();
-    press(&mut matcher, &mut ws, "mod+l");
+    press_seq(&mut matcher, &mut ws, "ctrl+w l");
     assert_ne!(ws.active().focused(), before);
     assert!(
         ws.active()

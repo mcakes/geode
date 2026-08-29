@@ -7,4 +7,4 @@ mod tree;
 mod workspaces;
 
 pub use tree::{Direction, Node, Orientation, Rect, TileId, Tree};
-pub use workspaces::{Workspaces, apply_workspace_action};
+pub use workspaces::{RESIZE_STEP, Workspaces, apply_workspace_action};

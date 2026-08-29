@@ -6,18 +6,36 @@ use crate::keymap::Modifiers;
 use geode_core::config::Config;
 
 /// The builtin keymap document, layered under desk/user keymaps.
+///
+/// Vim-idiom bindings (user direction, Phase 1c): focus and move-tile use
+/// the vim window prefix `ctrl+w` as a two-keystroke sequence (`ctrl+w h`
+/// etc.), mirroring `<C-w>h`/`<C-w>H`. Splits follow vim's own mnemonics —
+/// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
+/// which is why the actions they bind to are named by resulting geometry
+/// (`split_right`/`split_down`) rather than by vim verb: naming them
+/// `split_vertical`/`split_horizontal` would read backwards against these
+/// keys. Resize is a direct binding, not a mode: `shift+h/j/k/l` grow the
+/// focused tile's edge toward that letter's direction by `RESIZE_STEP`.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
 [bindings.keys]
-"mod+h" = "workspace::focus_left"
-"mod+j" = "workspace::focus_down"
-"mod+k" = "workspace::focus_up"
-"mod+l" = "workspace::focus_right"
-"mod+v" = "workspace::split_vertical"
-"mod+s" = "workspace::split_horizontal"
+"ctrl+w h" = "workspace::focus_left"
+"ctrl+w j" = "workspace::focus_down"
+"ctrl+w k" = "workspace::focus_up"
+"ctrl+w l" = "workspace::focus_right"
+"ctrl+w shift+h" = "workspace::move_left"
+"ctrl+w shift+j" = "workspace::move_down"
+"ctrl+w shift+k" = "workspace::move_up"
+"ctrl+w shift+l" = "workspace::move_right"
+"shift+h" = "workspace::resize_left"
+"shift+j" = "workspace::resize_down"
+"shift+k" = "workspace::resize_up"
+"shift+l" = "workspace::resize_right"
+"ctrl+v" = "workspace::split_right"
+"ctrl+h" = "workspace::split_down"
 "mod+f" = "workspace::fullscreen_tile"
-"mod+shift+q" = "workspace::close_tile"
+"ctrl+shift+w" = "workspace::close_tile"
 "mod+1" = "workspace::switch_1"
 "mod+2" = "workspace::switch_2"
 "mod+3" = "workspace::switch_3"
@@ -30,7 +48,7 @@ context = "workspace"
 
 [[bindings]]
 [bindings.keys]
-"mod+p" = "palette::toggle"
+"ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
 "mod+shift+t" = "theme::toggle_mode"
 "#;
@@ -51,18 +69,34 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "workspace::focus_down", "Focus down", "Workspace");
     action(reg, "workspace::focus_up", "Focus up", "Workspace");
     action(reg, "workspace::focus_right", "Focus right", "Workspace");
+    action(reg, "workspace::move_left", "Move left", "Workspace");
+    action(reg, "workspace::move_down", "Move down", "Workspace");
+    action(reg, "workspace::move_up", "Move up", "Workspace");
+    action(reg, "workspace::move_right", "Move right", "Workspace");
     action(
         reg,
-        "workspace::split_vertical",
-        "Split vertical",
+        "workspace::resize_left",
+        "Resize: grow left",
         "Workspace",
     );
     action(
         reg,
-        "workspace::split_horizontal",
-        "Split horizontal",
+        "workspace::resize_down",
+        "Resize: grow down",
         "Workspace",
     );
+    action(reg, "workspace::resize_up", "Resize: grow up", "Workspace");
+    action(
+        reg,
+        "workspace::resize_right",
+        "Resize: grow right",
+        "Workspace",
+    );
+    // Vim naming: split_right = Orientation::Horizontal (side by side, vim
+    // :vsplit, bound ctrl+v); split_down = Orientation::Vertical (stacked,
+    // vim :split, bound ctrl+h). See BUILTIN_KEYMAP's doc comment.
+    action(reg, "workspace::split_right", "Split right", "Workspace");
+    action(reg, "workspace::split_down", "Split down", "Workspace");
     action(
         reg,
         "workspace::fullscreen_tile",
@@ -118,7 +152,9 @@ mod tests {
             diags.is_empty(),
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
-        assert!(keymap.bindings().len() >= 18);
+        // 4 focus + 4 move + 4 resize + 2 splits + fullscreen + close + 9
+        // workspace switches + 2 palette::toggle bindings + theme toggle.
+        assert!(keymap.bindings().len() >= 28);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The command palette (Task 6, spec §3.2/§3.3): a universal, fuzzy-filtered
 //! list over every registered action and every bundled theme, driven purely
-//! by the keyboard (`mod+p` / `ctrl+shift+p` open, Esc closes; typing
+//! by the keyboard (`ctrl+k` / `ctrl+shift+p` open, Esc closes; typing
 //! filters; up/down or ctrl+p/ctrl+n move the selection; Enter dispatches).
 //!
 //! Everything above the `render` section is the pure core: `PaletteItem`,
@@ -242,7 +242,7 @@ pub fn render_binding(keystrokes: &[Keystroke]) -> String {
 /// next to each action. Built once per `Keymap::bindings()` call at
 /// palette-open time (brief: "not per frame"), not recomputed per render.
 /// When an action has more than one binding (e.g. `palette::toggle`'s
-/// `mod+p` and `ctrl+shift+p`), the first one encountered in
+/// `ctrl+k` and `ctrl+shift+p`), the first one encountered in
 /// `Keymap::bindings()`'s own (layer-then-declaration) order wins — the
 /// earliest-declared binding is treated as the "primary" one for display.
 pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
@@ -474,10 +474,10 @@ mod tests {
         let items = vec![
             action("workspace::focus_left", "Focus left", "Workspace", None),
             action(
-                "workspace::split_horizontal",
-                "Split horizontal",
+                "workspace::split_right",
+                "Split right",
                 "Workspace",
-                Some("alt+s"),
+                Some("ctrl+v"),
             ),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ];
@@ -489,12 +489,7 @@ mod tests {
     #[test]
     fn query_filters_out_non_matching_items() {
         let mut state = PaletteState::new(vec![
-            action(
-                "workspace::split_horizontal",
-                "Split horizontal",
-                "Workspace",
-                None,
-            ),
+            action("workspace::split_right", "Split right", "Workspace", None),
             action("workspace::focus_left", "Focus left", "Workspace", None),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ]);
@@ -502,7 +497,7 @@ mod tests {
             state.push_char(c);
         }
         let titles: Vec<String> = state.filtered().iter().map(|i| i.title()).collect();
-        assert_eq!(titles, vec!["Split horizontal".to_string()]);
+        assert_eq!(titles, vec!["Split right".to_string()]);
     }
 
     #[test]
@@ -639,14 +634,14 @@ mod tests {
     #[test]
     fn action_item_exposes_its_registry_fields_and_binding() {
         let item = action(
-            "workspace::split_horizontal",
-            "Split horizontal",
+            "workspace::split_right",
+            "Split right",
             "Workspace",
-            Some("alt+s"),
+            Some("ctrl+v"),
         );
-        assert_eq!(item.title(), "Split horizontal");
+        assert_eq!(item.title(), "Split right");
         assert_eq!(item.category(), "Workspace");
-        assert_eq!(item.binding(), Some("alt+s"));
+        assert_eq!(item.binding(), Some("ctrl+v"));
     }
 
     // -- render_binding / build_binding_index / build_items ---------------
@@ -692,17 +687,17 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let bindings = build_binding_index(&keymap);
-        // palette::toggle is bound to both "mod+p" and "ctrl+shift+p" in
+        // palette::toggle is bound to both "ctrl+k" and "ctrl+shift+p" in
         // BUILTIN_KEYMAP's [bindings.keys] table; TOML tables here iterate
         // by sorted key spelling (see keymap::build's own doc comment), so
-        // "ctrl+shift+p" (alphabetically first) is the one that wins as
+        // "ctrl+k" (alphabetically first: 'k' < 's') is the one that wins as
         // build_keymap's first-encountered binding, and so the one
         // build_binding_index's first-wins rule keeps for display.
         assert_eq!(
             bindings
                 .get(&ActionId("palette::toggle".to_string()))
                 .map(String::as_str),
-            Some("ctrl+shift+p")
+            Some("ctrl+k")
         );
 
         let items = build_items(&registry, &theme, &bindings);
@@ -731,8 +726,8 @@ mod tests {
 
         let split = items
             .iter()
-            .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::split_horizontal"))
+            .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::split_right"))
             .unwrap();
-        assert_eq!(split.binding(), Some("alt+s"));
+        assert_eq!(split.binding(), Some("ctrl+v"));
     }
 }

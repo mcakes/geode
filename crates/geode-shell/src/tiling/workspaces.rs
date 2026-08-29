@@ -74,6 +74,10 @@ impl Workspaces {
     }
 }
 
+/// Fraction of the containing split moved per direct resize keystroke
+/// (`shift+h/j/k/l`, spec/brief: resize is a direct binding, not a mode).
+pub const RESIZE_STEP: f32 = 0.03;
+
 /// Route a shell action onto the tiling verbs. Returns true when the action
 /// was recognized as a workspace action — even if it changed nothing (focus
 /// at an edge still counts as handled; the keystroke must not fall through
@@ -96,14 +100,19 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
             ws.active_mut().focus_direction(Direction::Right);
             true
         }
-        "workspace::split_vertical" => {
-            let id = ws.alloc_tile();
-            ws.active_mut().split(id, Orientation::Vertical);
-            true
-        }
-        "workspace::split_horizontal" => {
+        // Vim naming (user direction): split_right = Orientation::Horizontal
+        // (side by side, vim :vsplit, bound ctrl+v); split_down =
+        // Orientation::Vertical (stacked, vim :split, bound ctrl+h). The
+        // direction-named ids exist so the vim bindings don't read backwards
+        // (see BUILTIN_KEYMAP).
+        "workspace::split_right" => {
             let id = ws.alloc_tile();
             ws.active_mut().split(id, Orientation::Horizontal);
+            true
+        }
+        "workspace::split_down" => {
+            let id = ws.alloc_tile();
+            ws.active_mut().split(id, Orientation::Vertical);
             true
         }
         "workspace::close_tile" => {
@@ -112,6 +121,42 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
         }
         "workspace::fullscreen_tile" => {
             ws.active_mut().toggle_fullscreen();
+            true
+        }
+        "workspace::move_left" => {
+            ws.active_mut().move_direction(Direction::Left);
+            true
+        }
+        "workspace::move_down" => {
+            ws.active_mut().move_direction(Direction::Down);
+            true
+        }
+        "workspace::move_up" => {
+            ws.active_mut().move_direction(Direction::Up);
+            true
+        }
+        "workspace::move_right" => {
+            ws.active_mut().move_direction(Direction::Right);
+            true
+        }
+        // "Resize: grow <dir>" (brief) — shift+h/j/k/l lean the focused
+        // tile's edge toward that direction by RESIZE_STEP; shrinking is
+        // growing the opposite way (Tree::resize takes a signed delta, but
+        // these direct bindings are always the "grow toward dir" case).
+        "workspace::resize_left" => {
+            ws.active_mut().resize(Direction::Left, RESIZE_STEP);
+            true
+        }
+        "workspace::resize_down" => {
+            ws.active_mut().resize(Direction::Down, RESIZE_STEP);
+            true
+        }
+        "workspace::resize_up" => {
+            ws.active_mut().resize(Direction::Up, RESIZE_STEP);
+            true
+        }
+        "workspace::resize_right" => {
+            ws.active_mut().resize(Direction::Right, RESIZE_STEP);
             true
         }
         other => match other.strip_prefix("workspace::switch_") {
@@ -165,11 +210,11 @@ mod tests {
         let mut ws = Workspaces::new();
         assert!(apply_workspace_action(
             &mut ws,
-            &act("workspace::split_horizontal")
+            &act("workspace::split_right")
         ));
         assert!(apply_workspace_action(
             &mut ws,
-            &act("workspace::split_horizontal")
+            &act("workspace::split_right")
         ));
         assert_eq!(ws.active().tiles().len(), 2);
         let rects = ws.active().layout(Rect::UNIT);
@@ -179,8 +224,8 @@ mod tests {
     #[test]
     fn focus_and_fullscreen_and_close_actions_route() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_horizontal"));
-        apply_workspace_action(&mut ws, &act("workspace::split_horizontal"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
         assert!(apply_workspace_action(
             &mut ws,
             &act("workspace::focus_left")
@@ -224,12 +269,95 @@ mod tests {
     #[test]
     fn edge_focus_is_claimed_but_changes_nothing() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_horizontal"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
         let focused = ws.active().focused();
         assert!(apply_workspace_action(
             &mut ws,
             &act("workspace::focus_left")
         ));
         assert_eq!(ws.active().focused(), focused);
+    }
+
+    #[test]
+    fn split_down_creates_a_stacked_tile() {
+        let mut ws = Workspaces::new();
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::split_down")
+        ));
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::split_down")
+        ));
+        assert_eq!(ws.active().tiles().len(), 2);
+        let rects = ws.active().layout(Rect::UNIT);
+        // Vertical (stacked) split: both tiles half-height, not half-width.
+        assert!((rects[0].1.h - 0.5).abs() < 1e-4);
+        assert!((rects[0].1.w - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn move_actions_route_to_tree_move_direction() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        // Two tiles side by side; focus is on the second (rightmost).
+        let before = ws.active().layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::move_left")
+        ));
+        let after = ws.active().layout(Rect::UNIT);
+        assert_ne!(before, after, "move_left should swap the two tiles");
+    }
+
+    #[test]
+    fn move_with_no_neighbor_is_claimed_but_changes_nothing() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        let before = ws.active().layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::move_left")
+        ));
+        assert_eq!(ws.active().layout(Rect::UNIT), before);
+    }
+
+    #[test]
+    fn resize_actions_grow_the_focused_tile_toward_the_named_direction() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        // Two tiles side by side (0.5/0.5); focus is the second (rightmost).
+        // resize_left grows the focused tile's edge leftward, i.e. its
+        // width grows and the left neighbor shrinks.
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::resize_left")
+        ));
+        let rects = ws.active().layout(Rect::UNIT);
+        let focused_w = rects
+            .iter()
+            .find(|(id, _)| Some(*id) == ws.active().focused())
+            .unwrap()
+            .1
+            .w;
+        assert!(
+            (focused_w - (0.5 + RESIZE_STEP)).abs() < 1e-4,
+            "resize_left should grow the focused tile by RESIZE_STEP, got {focused_w}"
+        );
+    }
+
+    #[test]
+    fn resize_with_no_matching_split_is_claimed_but_changes_nothing() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        let before = ws.active().layout(Rect::UNIT);
+        // Single tile: no ancestor split to resize against.
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::resize_right")
+        ));
+        assert_eq!(ws.active().layout(Rect::UNIT), before);
     }
 }

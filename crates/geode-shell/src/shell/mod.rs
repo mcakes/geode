@@ -254,7 +254,7 @@ impl ShellView {
     /// for this exact key whose predicate passes the current context
     /// stack, the *last* one in `Keymap::bindings()`'s layer-then-
     /// declaration order is the one that actually governs the key — a
-    /// user/desk layer rebinding or unbinding (`"mod+p" = "none"`) it must
+    /// user/desk layer rebinding or unbinding (`"ctrl+k" = "none"`) it must
     /// shadow the builtin `palette::toggle` binding here exactly as it
     /// would through the matcher. So this resolves that same winning
     /// binding and only treats the keystroke as the palette toggle when
@@ -468,7 +468,7 @@ impl Render for ShellView {
             surface = surface.flex().items_center().justify_center().child(
                 div()
                     .text_color(cx.theme().muted_foreground)
-                    .child("mod+s / mod+v to open a tile"),
+                    .child("ctrl+h / ctrl+v to open a tile"),
             );
         } else {
             for (id, r) in rects {
@@ -571,12 +571,12 @@ mod tests {
         }
     }
 
-    /// End-to-end: a real `mod+s` keystroke, dispatched through gpui's own
+    /// End-to-end: a real `ctrl+v` keystroke, dispatched through gpui's own
     /// key-event pipeline (not called directly), lands on `ShellView` and
     /// changes workspace state. Exercises `convert_keystroke` -> `Matcher`
     /// -> `apply_workspace_action` wired the way the render path wires them.
     #[gpui::test]
-    fn mod_s_keystroke_splits_the_active_workspace(cx: &mut gpui::TestAppContext) {
+    fn ctrl_v_keystroke_splits_the_active_workspace(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -596,7 +596,7 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        cx.simulate_keystrokes("alt-s");
+        cx.simulate_keystrokes("ctrl-v");
 
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -615,7 +615,7 @@ mod tests {
         });
         assert_eq!(
             tile_count, 1,
-            "alt-s (mod+s = workspace::split_horizontal) should have created the first tile \
+            "ctrl+v (workspace::split_right) should have created the first tile \
              on the empty starting workspace"
         );
 
@@ -630,9 +630,233 @@ mod tests {
         );
     }
 
+    /// End-to-end: the vim window-prefix sequence `ctrl+w h`/`ctrl+w l`
+    /// (two keystrokes, `Matcher`'s sequence support) moves focus between
+    /// two tiles created via the new split bindings — `ctrl+h`
+    /// (`workspace::split_down`, which on the empty starting workspace just
+    /// opens the first tile per `Tree::split`'s documented "split verbs
+    /// double as open a tile" behavior) then `ctrl+v`
+    /// (`workspace::split_right`, side by side), leaving focus on the new
+    /// (right) tile. `ctrl+w h` must move focus to the left tile, and
+    /// `ctrl+w l` back to the right one.
+    #[gpui::test]
+    fn ctrl_h_then_ctrl_w_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-h");
+        cx.simulate_keystrokes("ctrl-v");
+
+        let right_tile =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+
+        cx.simulate_keystrokes("ctrl-w h");
+        let after_left =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        assert_ne!(
+            after_left, right_tile,
+            "ctrl+w h (workspace::focus_left, a two-keystroke sequence through the \
+             ctrl+w vim window prefix) should have moved focus off the right tile"
+        );
+
+        cx.simulate_keystrokes("ctrl-w l");
+        let after_right =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        assert_eq!(
+            after_right, right_tile,
+            "ctrl+w l (workspace::focus_right) should have moved focus back to the \
+             right tile"
+        );
+    }
+
+    /// End-to-end: `shift+h` (`workspace::resize_left`, a direct binding —
+    /// no mode) grows the focused tile's edge toward the left by
+    /// `tiling::RESIZE_STEP`, shrinking its left neighbor by the same
+    /// amount — real key dispatch all the way to `Tree::resize`.
+    #[gpui::test]
+    fn shift_h_keystroke_resizes_the_focused_tile(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Two tiles side by side (0.5/0.5 by default); focus lands on the
+        // second (right) tile after the second split.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+
+        cx.simulate_keystrokes("shift-h");
+
+        let focused_width = shell.read_with(&cx, |shell, _| {
+            let tree = shell.services.workspaces.active();
+            let rects = tree.layout(Rect::UNIT);
+            rects
+                .into_iter()
+                .find(|(id, _)| Some(*id) == tree.focused())
+                .unwrap()
+                .1
+                .w
+        });
+        assert!(
+            (focused_width - (0.5 + crate::tiling::RESIZE_STEP)).abs() < 1e-4,
+            "shift+h should have grown the focused tile leftward by RESIZE_STEP, \
+             got width {focused_width}"
+        );
+    }
+
+    /// End-to-end: `ctrl+w shift+l` (`workspace::move_right`, the vim
+    /// window-prefix sequence's move analog) swaps the focused tile with
+    /// its right neighbor, focus following the moved tile.
+    #[gpui::test]
+    fn ctrl_w_shift_l_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Two tiles side by side; focus is on the second (right) tile.
+        // Move focus to the left tile first, then swap it rightward.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-w h");
+
+        let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        let before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().layout(Rect::UNIT)
+        });
+
+        cx.simulate_keystrokes("ctrl-w shift-l");
+
+        let after_focused =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        let after = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().layout(Rect::UNIT)
+        });
+        assert_eq!(
+            after_focused, focused,
+            "move_right keeps focus on the same TileId"
+        );
+        assert_ne!(
+            before, after,
+            "ctrl+w shift+l should have swapped the two tiles' positions"
+        );
+    }
+
+    /// End-to-end: `ctrl+shift+w` (`workspace::close_tile`, rebound from
+    /// `mod+shift+q`) closes the focused tile.
+    #[gpui::test]
+    fn ctrl_shift_w_keystroke_closes_the_focused_tile(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tiles()
+                .len()),
+            2
+        );
+
+        cx.simulate_keystrokes("ctrl-shift-w");
+
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(
+            tile_count, 1,
+            "ctrl+shift+w (workspace::close_tile) should have closed the focused tile"
+        );
+    }
+
     /// End-to-end: a real `mod+shift+t` keystroke, dispatched through gpui's
     /// own key-event pipeline, flips the active theme's mode. Exercises the
-    /// same wiring as `mod_s_keystroke_splits_the_active_workspace` above,
+    /// same wiring as `ctrl_v_keystroke_splits_the_active_workspace` above,
     /// but through the `theme::toggle_mode` branch of `handle_key_down`
     /// added in Task 5.
     #[gpui::test]
@@ -683,10 +907,11 @@ mod tests {
 
     /// Layers a test-only `"g g"` sequence binding on top of the builtin
     /// keymap (spec §3.4: sequence bindings), so the status bar's
-    /// pending-keystroke display (Task 4) has something real to show. No
-    /// builtin binding starts a sequence today, so this is the cheapest
-    /// honest way to exercise it without waiting on Task 6's palette-Esc
-    /// flow.
+    /// pending-keystroke display (Task 4) has something real to show. The
+    /// builtin keymap does start real sequences now (`ctrl+w h/j/k/l` etc.,
+    /// Phase 1c), but `"g"` shares no prefix with `"ctrl+w"`, so this
+    /// isolated binding stays the cheapest way to exercise a lone pending
+    /// keystroke without any interaction from the real vim-prefix bindings.
     fn test_services_with_gg_binding() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
         let mut registry = ActionRegistry::default();
@@ -771,23 +996,26 @@ mod tests {
     }
 
     /// End-to-end command palette flow (Task 6), through the real
-    /// key-event pipeline exactly like the tests above: `mod+p` opens it,
-    /// typing "split" filters the list down to "Split horizontal" and
-    /// "Split vertical" — the only two titles containing that whole run
+    /// key-event pipeline exactly like the tests above: `ctrl+k` opens it,
+    /// typing "split" filters the list down to "Split right" and
+    /// "Split down" — the only two titles containing that whole run
     /// as a subsequence, and, having matched the identical literal
     /// prefix "split", scored *identically* by `fuzzy_match` (verified by
     /// hand: both score 45). Which one lands at index 0 is not a
     /// fuzzy-match property; it's `PaletteState::filtered`'s stable sort
     /// preserving `build_items`' input order, which is
     /// `ActionRegistry::iter()`'s `BTreeMap<ActionId, _>` order — and
-    /// `"workspace::split_horizontal" < "workspace::split_vertical"`
-    /// (`h` < `v`) puts horizontal first. That tie-break is deterministic
-    /// (so this test is not flaky), just not the "the only match" story a
-    /// prior version of this comment told. Enter then dispatches the
-    /// selected item through the normal chain, closing the palette and
-    /// splitting the (until then empty) active workspace.
+    /// `"workspace::split_down" < "workspace::split_right"` (`d` < `r`)
+    /// puts "Split down" first (the rename to direction-based ids flips
+    /// this tie-break from what it was under the old i3-named
+    /// `split_horizontal`/`split_vertical` ids — `h` < `v` put horizontal
+    /// first then; `d` < `r` puts down first now). That tie-break is
+    /// deterministic (so this test is not flaky), just not the "the only
+    /// match" story a prior version of this comment told. Enter then
+    /// dispatches the selected item through the normal chain, closing the
+    /// palette and splitting the (until then empty) active workspace.
     #[gpui::test]
-    fn mod_p_opens_types_filters_and_enter_dispatches_the_selected_action(
+    fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -820,10 +1048,10 @@ mod tests {
             "palette starts closed"
         );
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         assert!(
             shell.read_with(&cx, |shell, _| shell.palette.is_some()),
-            "alt-p (mod+p = palette::toggle) should have opened the palette"
+            "ctrl-k (ctrl+k = palette::toggle) should have opened the palette"
         );
 
         cx.simulate_input("split");
@@ -836,10 +1064,10 @@ mod tests {
         });
         assert_eq!(
             selected_title,
-            Some("Split horizontal".to_string()),
-            "typing \"split\" should rank \"Split horizontal\" first, ahead of the \
-             equally-scored \"Split vertical\", via the registry's alphabetical \
-             (h < v) ActionId order and filtered()'s stable sort"
+            Some("Split down".to_string()),
+            "typing \"split\" should rank \"Split down\" first, ahead of the \
+             equally-scored \"Split right\", via the registry's alphabetical \
+             (d < r) ActionId order and filtered()'s stable sort"
         );
 
         cx.update(|window, cx| {
@@ -856,8 +1084,8 @@ mod tests {
         });
         assert_eq!(
             tile_count, 1,
-            "enter on \"Split horizontal\" should have dispatched \
-             workspace::split_horizontal through the normal chain"
+            "enter on \"Split down\" should have dispatched \
+             workspace::split_down through the normal chain"
         );
     }
 
@@ -880,7 +1108,7 @@ mod tests {
     /// order, and `"Gruvbox Dark" < "Gruvbox Light"` alphabetically — not
     /// a property of the fuzzy match itself.
     #[gpui::test]
-    fn mod_p_opens_types_filters_and_enter_dispatches_the_selected_theme(
+    fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -917,7 +1145,7 @@ mod tests {
              below actually proves something changed"
         );
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         cx.simulate_input("gruvbox");
 
         let selected_title = shell.read_with(&cx, |shell, _| {
@@ -984,7 +1212,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         cx.simulate_input("split");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -1005,11 +1233,11 @@ mod tests {
     }
 
     /// Layers a user binding on top of the builtin keymap that rebinds
-    /// `mod+p` (BUILTIN_KEYMAP's `palette::toggle` key) to
-    /// `workspace::split_horizontal` instead. Per the layering contract
+    /// `ctrl+k` (BUILTIN_KEYMAP's `palette::toggle` key) to
+    /// `workspace::split_right` instead. Per the layering contract
     /// (last-exact-match-wins), this must fully shadow the builtin
     /// `palette::toggle` binding for that key.
-    fn test_services_with_mod_p_rebound_to_split() -> ShellServices {
+    fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
         let mut registry = ActionRegistry::default();
         register_builtin_actions(&mut registry);
@@ -1019,7 +1247,7 @@ mod tests {
             layer: geode_core::config::Layer::User,
             name: "keymap".to_string(),
             file: "<test:user>".into(),
-            table: "[[bindings]]\n[bindings.keys]\n\"mod+p\" = \"workspace::split_horizontal\"\n"
+            table: "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"workspace::split_right\"\n"
                 .parse()
                 .unwrap(),
         };
@@ -1038,16 +1266,16 @@ mod tests {
     }
 
     /// Regression for `is_palette_toggle` respecting keymap layering
-    /// (last-exact-match-wins, spec §3.4): a user layer rebinding `mod+p`
+    /// (last-exact-match-wins, spec §3.4): a user layer rebinding `ctrl+k`
     /// away from `palette::toggle` must mean pressing it does NOT open the
     /// palette — the pre-matcher intercept in `handle_key_down` must not
     /// fire just because *some* binding for that key, anywhere in the
     /// keymap, happens to be `palette::toggle`. The rebound action
-    /// (`workspace::split_horizontal`) must dispatch instead, through the
+    /// (`workspace::split_right`) must dispatch instead, through the
     /// normal matcher path, proving the key was fully handed over rather
     /// than merely swallowed.
     #[gpui::test]
-    fn user_layer_rebinding_mod_p_prevents_palette_open_and_dispatches_rebound_action(
+    fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_action(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -1057,7 +1285,7 @@ mod tests {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let view = cx.new(|cx| {
                         ShellView::new(
-                            test_services_with_mod_p_rebound_to_split(),
+                            test_services_with_ctrl_k_rebound_to_split(),
                             None,
                             None,
                             window,
@@ -1075,7 +1303,7 @@ mod tests {
             let _ = window.draw(cx);
         });
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
 
         cx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -1091,7 +1319,7 @@ mod tests {
 
         assert!(
             shell.read_with(&cx, |shell, _| shell.palette.is_none()),
-            "a user layer rebinding mod+p away from palette::toggle must shadow the \
+            "a user layer rebinding ctrl+k away from palette::toggle must shadow the \
              builtin binding — the palette must not open"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
@@ -1099,7 +1327,7 @@ mod tests {
         });
         assert_eq!(
             tile_count, 1,
-            "alt-p should have dispatched the rebound workspace::split_horizontal \
+            "ctrl-k should have dispatched the rebound workspace::split_right \
              action through the normal matcher path"
         );
     }
@@ -1138,7 +1366,7 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         cx.simulate_input("Toggle command palette");
 
         let selected_title = shell.read_with(&cx, |shell, _| {
@@ -1218,7 +1446,7 @@ mod tests {
         });
 
         // Open the palette so we can prove a successful reload closes it.
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
         let new_config = config_with_mod("ctrl");
@@ -1276,7 +1504,7 @@ mod tests {
 
         let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
 
-        cx.simulate_keystrokes("alt-p");
+        cx.simulate_keystrokes("ctrl-k");
         assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
         // A desk-layer doc with an unsupported config_version is an error

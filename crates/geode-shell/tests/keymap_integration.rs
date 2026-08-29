@@ -13,7 +13,7 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     // Desk rebinds mod+h; adds a sequence binding.
     std::fs::write(
         desk.path().join("keymap.toml"),
-        "config_version = 1\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::split_vertical\"\n\"g g\" = \"workspace::focus_up\"\n",
+        "config_version = 1\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::split_down\"\n\"g g\" = \"workspace::focus_up\"\n",
     )
     .unwrap();
     // User unbinds fullscreen. (Mod remapping is covered by defaults' unit
@@ -44,16 +44,21 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     // Desk override beats builtin.
     assert_eq!(
         matcher.press(&keymap, ks("mod+h"), &stack),
-        MatchResult::Matched(ActionId("workspace::split_vertical".into()))
+        MatchResult::Matched(ActionId("workspace::split_down".into()))
     );
     // User unbind swallows the builtin binding.
     assert_eq!(
         matcher.press(&keymap, ks("mod+f"), &stack),
         MatchResult::NoMatch
     );
-    // Untouched builtin binding still works.
+    // Untouched builtin binding still works — focus_down now lives behind
+    // the vim window-prefix sequence "ctrl+w j" (Phase 1c rebinding).
     assert_eq!(
-        matcher.press(&keymap, ks("mod+j"), &stack),
+        matcher.press(&keymap, ks("ctrl+w"), &stack),
+        MatchResult::Pending
+    );
+    assert_eq!(
+        matcher.press(&keymap, ks("j"), &stack),
         MatchResult::Matched(ActionId("workspace::focus_down".into()))
     );
     // Desk-added sequence: pending, then match.
