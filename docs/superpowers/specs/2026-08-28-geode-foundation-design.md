@@ -270,6 +270,45 @@ single-writer/multi-reader). Query cancellation is wired from day one: a
 superseded query (user regrouped again before the last regroup finished) is
 interrupted, not awaited.
 
+### 5.4 Scenario data, joins, and mixed cadences
+
+Beyond the **risk snapshot** (scalar per-position data: npv, pnl, greeks —
+refreshed every few minutes) there is **scenario data**: spot ladders,
+bucketed vega, bucketed rho — covering the same positions but hundreds to
+low thousands of values wide, produced only one to a few times a day.
+
+**Scenario data is separate datasets, never extra columns.** A dataset
+already owns exactly the properties that differ here: sources, refresh
+cadence, generation clock, retention policy, health. So `risk` keeps its
+few-minute generations while `spot_ladder`, `vega_buckets`, etc. keep their
+daily ones — no new machinery. A sparse merged table is rejected outright:
+it would make every few-minute risk swap rewrite unchanged scenario
+columns, break the atomic table-swap model, duplicate cold scenario data
+into every archived risk generation, and widen the hot blotter table.
+
+**Cross-dataset joins.** View definitions may join datasets on join keys
+declared in schema config (position id / instrument id). At target scale
+DuckDB hash-joins in milliseconds, so a future ladder-viewer module — or a
+blotter view pulling one scalar from scenario data ("down-5% PnL" as a
+column) — is config-level work on this seam, not new architecture.
+Consumers of scenario data are a later phase and deliberately not designed
+here; only the data model and ingestion pattern are fixed now.
+
+**Staleness across a join.** Each dataset keeps its own generation
+timestamp. Rule: *a joined view is as stale as its stalest input*, and any
+tile mixing cadences shows per-dataset freshness ("risk 14:32 · ladders
+07:00"), never one misleading timestamp. Time travel already resolves
+as-of per dataset, so it works over joins unchanged.
+
+**Shape of bucketed data.** Recommended storage is long-form —
+`(position_id, scenario, bucket, value)` — rather than thousands of wide
+columns: schemas stop churning when bucket definitions change, DuckDB
+prefers it, and consumers pivot at query time (view-shaping, so
+philosophy-clean). Adapters ingest whatever shape upstream produces and
+may unpivot at ingest, configured per dataset. The final shape call per
+scenario dataset belongs to the scenario-module spec; the architecture
+supports either.
+
 ## 6. Retention and the archive
 
 **Two-tier storage, so live never pays for history.**
