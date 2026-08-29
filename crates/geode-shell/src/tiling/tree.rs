@@ -272,26 +272,24 @@ impl Tree {
     ///
     /// Walks ancestors from the focused tile outward (same `path_to` walk
     /// as before) to the deepest split whose orientation matches `dir`'s
-    /// axis; within it, at the focused child's index `i`, each direction
-    /// prefers the divider on *its own* side of the focused child, falling
-    /// back to the other side only when its own side doesn't exist:
-    /// - `Right`/`Down` (positive axis direction) prefer the divider on the
-    ///   focused child's positive side: if a next sibling exists
-    ///   (`i + 1 < len`), that divider moves — `ratios[i] += delta`,
-    ///   `ratios[i + 1] -= delta`. Otherwise (focused is the split's last
-    ///   child, no divider on that side) the divider on its *other* side
-    ///   moves instead — `ratios[i - 1] += delta`, `ratios[i] -= delta` —
-    ///   which now *shrinks* the focused tile (edge-flip: the key always
-    ///   moves a divider that direction, not always the tile the same way).
-    /// - `Left`/`Up` mirror this on the negative axis direction: prefer the
-    ///   divider on the focused child's negative side (`i > 0`) —
-    ///   `ratios[i - 1] -= delta`, `ratios[i] += delta` — falling back to
-    ///   the positive side (`i + 1 < len`) only when `i == 0`.
+    /// axis; within it, at the focused child's index `i`, always prefers
+    /// the divider on the focused child's right/bottom side (positive axis
+    /// direction), falling back to the left/top side only when no right/
+    /// bottom divider exists:
+    /// - If a next sibling exists (`i + 1 < len`), that divider moves —
+    ///   `ratios[i] += sign * delta`, `ratios[i + 1] -= sign * delta`,
+    ///   where `sign` is +1 for Right/Down and -1 for Left/Up.
+    /// - Otherwise (focused is the split's rightmost/bottommost child),
+    ///   the divider on the *left/top* side moves instead — `ratios[i - 1] += sign * delta`,
+    ///   `ratios[i] -= sign * delta` — which reverses the effect on the
+    ///   focused tile (edge-flip: the key always moves a divider that
+    ///   direction, not always the tile the same way).
     ///
-    /// The preferred side is direction-dependent, not just "does a sibling
-    /// exist" — on a 3+-way split with the focused child in the middle,
-    /// `Right`/`Down` and `Left`/`Up` each move a *different* divider (its
-    /// own side), not the same one.
+    /// Result: `h`/`l` always operate the split on the focused tile's RIGHT
+    /// (h moves it left = narrower, l right = wider); `j`/`k` always the
+    /// BOTTOM split (j down = taller, k up = shorter); only a tile at the
+    /// right/bottom edge of its split falls back to its left/top divider
+    /// (where h then widens and l narrows — the edge flip, unchanged).
     ///
     /// If neither side has a divider (a lone child — excluded by the >=2
     /// invariant on real splits, but guards degenerate input), the walk
@@ -332,31 +330,15 @@ impl Tree {
                 Direction::Right | Direction::Down => 1.0,
                 Direction::Left | Direction::Up => -1.0,
             };
-            // Each direction prefers the divider on its own side of the
-            // focused child, falling back to the other side only when its
-            // own side has no divider (edge-flip). This must be
-            // direction-dependent: on a 3+-way split with the focused
-            // child in the middle, both sides have dividers, so Right/Down
-            // and Left/Up must not collapse onto the same one.
-            let (a, b) = match dir {
-                Direction::Right | Direction::Down => {
-                    if i + 1 < ratios.len() {
-                        (i, i + 1)
-                    } else if i > 0 {
-                        (i - 1, i)
-                    } else {
-                        continue;
-                    }
-                }
-                Direction::Left | Direction::Up => {
-                    if i > 0 {
-                        (i - 1, i)
-                    } else if i + 1 < ratios.len() {
-                        (i, i + 1)
-                    } else {
-                        continue;
-                    }
-                }
+            // Always prefer the divider on the focused child's right/bottom
+            // side (i, i+1), falling back to the left/top side (i-1, i) only
+            // when no right/bottom divider exists.
+            let (a, b) = if i + 1 < ratios.len() {
+                (i, i + 1)
+            } else if i > 0 {
+                (i - 1, i)
+            } else {
+                continue;
             };
             let new_a = ratios[a] + sign * delta;
             let new_b = ratios[b] - sign * delta;
@@ -970,12 +952,12 @@ mod tests {
     }
 
     #[test]
-    fn move_divider_middle_tile_in_a_row_moves_its_own_side_divider() {
+    fn move_divider_middle_tile_in_a_row_always_moves_right_divider() {
         // 3-way row [1 | 2 | 3], focused 2 (middle — a divider exists on
-        // BOTH sides). Right and Left must each move the divider on their
-        // own side, not collapse onto the same one: Right widens 2 into 3's
-        // space (moves the 2/3 divider); Left widens 2 into 1's space
-        // (moves the 1/2 divider). Neither touches the far tile.
+        // BOTH sides). Right and Left both move the divider on 2's right
+        // side (the 2/3 divider), just in opposite directions: Right moves
+        // it rightward (2 widens into 3's space); Left moves it leftward
+        // (2 narrows, 3 widens). Tile 1 is never touched.
         let row = || {
             let mut tree = Tree::default();
             tree.split(TileId(1), Orientation::Horizontal);
@@ -993,16 +975,17 @@ mod tests {
 
         let mut left = row();
         assert!(left.move_divider(Direction::Left, 0.1));
-        assert!(approx(rect_of(&left, 1).w, 1.0 / 3.0 - 0.1));
-        assert!(approx(rect_of(&left, 2).w, 1.0 / 3.0 + 0.1));
-        assert!(approx(rect_of(&left, 3).w, 1.0 / 3.0), "tile 3 untouched");
+        assert!(approx(rect_of(&left, 1).w, 1.0 / 3.0), "tile 1 untouched");
+        assert!(approx(rect_of(&left, 2).w, 1.0 / 3.0 - 0.1));
+        assert!(approx(rect_of(&left, 3).w, 1.0 / 3.0 + 0.1));
     }
 
     #[test]
-    fn move_divider_middle_tile_in_a_stack_moves_its_own_side_divider() {
+    fn move_divider_middle_tile_in_a_stack_always_moves_bottom_divider() {
         // Vertical analogue: 3-way stack [1 / 2 / 3], focused 2 (middle).
-        // Down moves the 2/3 divider (widens 2 downward, into 3's space);
-        // Up moves the 1/2 divider (widens 2 upward, into 1's space).
+        // Down and Up both move the divider on 2's bottom side (the 2/3 divider),
+        // just in opposite directions: Down moves it downward (2 widens into 3's
+        // space); Up moves it upward (2 narrows, 3 widens). Tile 1 is never touched.
         let stack = || {
             let mut tree = Tree::default();
             tree.split(TileId(1), Orientation::Vertical);
@@ -1020,9 +1003,9 @@ mod tests {
 
         let mut up = stack();
         assert!(up.move_divider(Direction::Up, 0.1));
-        assert!(approx(rect_of(&up, 1).h, 1.0 / 3.0 - 0.1));
-        assert!(approx(rect_of(&up, 2).h, 1.0 / 3.0 + 0.1));
-        assert!(approx(rect_of(&up, 3).h, 1.0 / 3.0), "tile 3 untouched");
+        assert!(approx(rect_of(&up, 1).h, 1.0 / 3.0), "tile 1 untouched");
+        assert!(approx(rect_of(&up, 2).h, 1.0 / 3.0 - 0.1));
+        assert!(approx(rect_of(&up, 3).h, 1.0 / 3.0 + 0.1));
     }
 
     #[test]
