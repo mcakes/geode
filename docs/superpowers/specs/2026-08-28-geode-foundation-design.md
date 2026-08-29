@@ -88,7 +88,8 @@ costs the render thread nothing until scrolled to.
 
 ### 3.1 Tiling layer (i3 semantics)
 
-A gpui window hosts numbered, nameable **workspaces** (`mod+1..9`). Each
+The app owns one global set of numbered, nameable **workspaces**
+(`mod+1..9`), displayed through one or more OS windows (§3.6). Each
 workspace is a tree of splits whose leaves are **tiles**; each tile hosts one
 module instance. Core verbs, chord-driven, i3 as the default map:
 
@@ -135,6 +136,35 @@ early, and exhaustively unit-tested (§10).
 
 Fully functional — click focus, drag splitters, header clicks to sort — but
 never required, and never the only path to anything.
+
+### 3.6 Multi-monitor: windows as viewports
+
+Borrowing i3's output model: **windows are viewports, workspaces are
+global.** The app owns one workspace set; each OS window displays exactly
+one workspace at a time. Day one there is one window. **Tear-off** — "move
+workspace to new window" (`mod+shift+enter`, also in the palette) — opens
+another OS window on another monitor showing that workspace. Closing a
+torn-off window returns its workspace to the pool; nothing is lost.
+
+`mod+N` gets i3's exact semantics: if workspace N is already visible in
+another window, focus jumps to that window (and monitor); otherwise the
+current window switches to workspace N. `mod+h/j/k/l` moves within the
+focused workspace's tile tree; directional focus across windows using
+monitor geometry is a nice-to-have, not v1 — `mod+N` covers cross-window
+jumps.
+
+Frame state is unaffected by windows: global scope/grouping/as-of span the
+whole app by definition; workspace scope travels with its workspace
+wherever displayed. A scope or `Ctrl+N` change flips every tile on every
+monitor atomically. Architecture is likewise unaffected: gpui runs all
+windows on one UI thread over shared entity state — one process, one
+`DataService`, one frame state.
+
+**Layouts capture window arrangement:** which workspaces are torn off,
+onto which monitor, at what size — so a saved layout restores the whole
+multi-monitor cockpit on startup, with graceful fallback (fold torn-off
+workspaces back into the main window) when the monitor set differs, e.g.
+at home versus on desk.
 
 ## 4. Shared frame state: scope, grouping, and time travel
 
