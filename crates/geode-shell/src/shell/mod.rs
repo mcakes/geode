@@ -11,6 +11,7 @@ pub mod settings_view;
 pub mod sidebar;
 pub mod status;
 pub mod toolbar;
+pub mod whichkey;
 
 pub use keys::convert_keystroke;
 
@@ -754,6 +755,19 @@ impl Render for ShellView {
         let width = f32::from(viewport.width);
         let viewport_height = f32::from(viewport.height);
 
+        // Which-key hint (Task 8): only computed while a sequence is
+        // actually pending — `continuations` over an empty `pending` would
+        // be well-defined (every binding "strictly extends" it) but the
+        // overlay has nothing to say when no sequence is in flight, so it
+        // must not appear then. Display-only: this reads `self.matcher`
+        // without touching it, so it can never affect what `handle_key_down`
+        // does with the next keystroke.
+        let pending = self.matcher.pending();
+        let which_key_continuations = (!pending.is_empty()).then(|| {
+            whichkey::continuations(&self.services.keymap, pending, &self.context_stack())
+        });
+        let registry = &self.services.registry;
+
         v_flex()
             .size_full()
             .relative()
@@ -769,6 +783,15 @@ impl Render for ShellView {
             // component's own dialog/notification layers below.
             .when_some(self.palette.as_ref(), |el, state| {
                 el.child(palette::render(state, width, viewport_height, cx))
+            })
+            .when_some(which_key_continuations, |el, continuations| {
+                el.child(whichkey::render(
+                    &continuations,
+                    registry,
+                    width,
+                    status::HEIGHT,
+                    cx,
+                ))
             })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
@@ -1330,7 +1353,10 @@ mod tests {
     /// Pressing the first `g` of a `"g g"` sequence leaves the matcher
     /// pending (which the status bar renders as `"g"`) and the window still
     /// draws cleanly — the status bar's pending-keystroke path is live end
-    /// to end through the real key-event pipeline.
+    /// to end through the real key-event pipeline. Task 8: the which-key
+    /// overlay (`whichkey-overlay`, same `debug_selector` test hook as the
+    /// empty-workspace hint) must be absent before any key is pressed and
+    /// painted with real bounds once the `g` is pending.
     #[gpui::test]
     fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -1352,6 +1378,11 @@ mod tests {
             let _ = window.draw(cx);
         });
 
+        assert!(
+            cx.debug_bounds("whichkey-overlay").is_none(),
+            "the which-key overlay must not paint while nothing is pending"
+        );
+
         cx.simulate_keystrokes("g");
 
         // The pending keystroke must not stall the render thread (spec
@@ -1372,6 +1403,13 @@ mod tests {
         assert_eq!(
             pending_len, 1,
             "first 'g' of the 'g g' sequence should leave one pending keystroke"
+        );
+
+        let overlay_bounds = cx.debug_bounds("whichkey-overlay");
+        assert!(
+            overlay_bounds.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the which-key overlay should have painted with non-zero bounds while \
+             pending, got {overlay_bounds:?}"
         );
     }
 

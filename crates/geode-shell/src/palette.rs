@@ -268,8 +268,10 @@ impl PaletteState {
 /// fixed ctrl/alt/shift/cmd order, `+`-joined (e.g. `"ctrl+shift+p"`).
 /// Deliberately a standalone copy of `shell::status`'s pending-keystroke
 /// formatting rather than a shared call into it: that module pulls in
-/// `gpui`/`gpui_component`, and this module's pure core must not.
-fn render_keystroke(ks: &Keystroke) -> String {
+/// `gpui`/`gpui_component`, and this module's pure core must not. `pub(
+/// crate)` so `shell::whichkey`'s pure core — equally gpui-free — can reuse
+/// it rather than adding a third copy.
+pub(crate) fn render_keystroke(ks: &Keystroke) -> String {
     let mut parts = Vec::new();
     if ks.mods.ctrl {
         parts.push("ctrl");
