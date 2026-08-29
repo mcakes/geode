@@ -3687,7 +3687,9 @@ mod tests {
 
         let quads_before = cx.update(|window, _cx| window.painted_quads().len());
 
-        cx.simulate_keystrokes("alt-,");
+        // settings::open is bound to ctrl+, (rebound from mod+, in commit
+        // 87aa731; this test merged in concurrently and carried the old key).
+        cx.simulate_keystrokes("ctrl-,");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
