@@ -6,3 +6,10 @@ publish.workspace = true
 
 [dependencies]
 rand = "0.9"
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "generate"
+harness = false
