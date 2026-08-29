@@ -15,6 +15,14 @@ pub struct Binding {
     pub layer: Layer,
     /// Global definition order across all layers. Informational: the matcher resolves ties by iteration order of Keymap::bindings(), which this mirrors — do not reorder bindings and rely on index alone.
     pub index: usize,
+    /// The raw `context` string from the source doc, pre-parse (`None` for
+    /// the no-context entry) — kept alongside the compiled `predicate`
+    /// because a compiled `Predicate` has no `Display`/round-trip back to
+    /// the exact source spelling. This is the seam the keybinding dialog
+    /// (Part B) uses to build a `keymap_edit::Rebind::context` that will
+    /// exactly re-match the `[[bindings]]` entry a given effective binding
+    /// actually came from — a `Predicate` alone can't do that.
+    pub context_source: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -62,10 +70,10 @@ pub fn build_keymap(
                 ));
                 continue;
             };
-            let predicate = match entry.get("context") {
-                None => None,
+            let (predicate, context_source) = match entry.get("context") {
+                None => (None, None),
                 Some(toml::Value::String(s)) => match parse_predicate(s) {
-                    Ok(p) => Some(p),
+                    Ok(p) => (Some(p), Some(s.clone())),
                     Err(e) => {
                         diags.push(Diagnostic::error(
                             doc.layer,
@@ -129,6 +137,7 @@ pub fn build_keymap(
                     action,
                     layer: doc.layer,
                     index,
+                    context_source: context_source.clone(),
                 });
                 index += 1;
             }
@@ -184,6 +193,28 @@ mod tests {
         assert_eq!(bindings[1].layer, Layer::User);
         assert!(bindings[1].predicate.is_none());
         assert!(bindings[0].index < bindings[1].index);
+    }
+
+    #[test]
+    fn context_source_carries_the_raw_pre_parse_context_string() {
+        let d = doc(
+            Layer::User,
+            "[[bindings]]\ncontext = \"workspace && !modal\"\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_left\"\n\n\
+             [[bindings]]\n[bindings.keys]\n\"mod+l\" = \"workspace::focus_right\"\n",
+        );
+        let (keymap, diags) = build_keymap(&[d], Modifiers::ALT, &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let bindings = keymap.bindings();
+        assert_eq!(
+            bindings[0].context_source.as_deref(),
+            Some("workspace && !modal"),
+            "context_source must be the exact source spelling, not a re-rendering of the \
+             compiled predicate"
+        );
+        assert_eq!(
+            bindings[1].context_source, None,
+            "the no-context entry must carry context_source: None"
+        );
     }
 
     #[test]

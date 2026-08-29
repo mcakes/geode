@@ -145,6 +145,13 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // the palette alongside the theme rows, which share the same category
     // (`palette::THEME_CATEGORY`).
     action(reg, "settings::open", "Open settings", "Appearance");
+    // The keybinding dialog (Part B). Palette-only by design: no key
+    // binding of its own in BUILTIN_KEYMAP — bootstrapping a dialog whose
+    // whole purpose is showing/editing keybindings out of a keybinding
+    // would be a little too cute, and the palette is always reachable
+    // regardless. Category "Keyboard", not "Appearance" — this edits
+    // behavior (bindings), not how the app looks.
+    action(reg, "keybindings::open", "Keyboard shortcuts", "Keyboard");
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).

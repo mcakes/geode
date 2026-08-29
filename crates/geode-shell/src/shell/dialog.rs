@@ -63,6 +63,7 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
+use crate::keymap::Keystroke;
 
 /// A modal's content builder, called as `build(shell, window, cx)` — see
 /// [`ShellModal::build`]'s own doc comment for why the first argument is a
@@ -70,6 +71,33 @@ use super::ShellView;
 /// spelling the `Rc<dyn Fn(...) -> AnyElement>` out at each of its two use
 /// sites (clippy's `type_complexity`, `-D warnings`-enforced in this repo).
 type ModalBuilder = Rc<dyn Fn(&ShellView, &mut Window, &mut App) -> AnyElement>;
+
+/// A modal's optional key-handling seam (Part B, the keybinding dialog):
+/// offered every keystroke while this modal is open, *before*
+/// [`ShellView::handle_key_down`]'s own Escape-closes-the-modal fallback —
+/// see that method's modal branch for the exact order. Returns `true` when
+/// the keystroke was consumed (no further handling — not even Escape's own
+/// close behavior); `false` lets the modal's built-in handling proceed,
+/// which today means only "Escape closes" (every other key was already
+/// unconditionally swallowed by the modal guard, with or without this
+/// seam).
+///
+/// Takes the shell's own [`Keystroke`] (`crate::keymap::Keystroke`, already
+/// run through [`super::convert_keystroke`] by the caller), not gpui's raw
+/// one — a modal's key handler wants the same normalized shape every other
+/// keymap-consuming path in this crate does (`vimnav::VimListNav::press`'s
+/// own parameter, for one), not `gpui::Keystroke`'s platform-specific
+/// fields.
+///
+/// `&mut ShellView` (not `Entity<ShellView>`) for the same reason
+/// [`ShellModal::build`] takes a plain `&ShellView`: this is invoked from
+/// inside [`ShellView::handle_key_down`], which already holds `&mut self` —
+/// an `Entity<ShellView>::update` here would be a reentrant access of the
+/// entity currently mid-method-call, not mid-render, but gpui's guard
+/// applies equally to both. A plain reborrow carries none of that risk and
+/// is exactly what the call site already has in hand.
+pub type ModalKeyHandler =
+    Rc<dyn Fn(&mut ShellView, &Keystroke, &mut Window, &mut Context<ShellView>) -> bool>;
 
 /// One open modal's state, stored on `ShellView` (`view.modal`) rather than
 /// in gpui-component's `Root`. `build` is `Rc`, not `Box`/`FnOnce`, so
@@ -117,6 +145,12 @@ pub struct ShellModal {
     /// this type's signature entirely rather than threaded through as a
     /// second parameter alongside it.
     pub build: ModalBuilder,
+    /// This modal's optional key-handling seam (Part B) — see
+    /// [`ModalKeyHandler`]'s own doc comment. `None` for every modal that
+    /// predates Part B (the settings modal): `open_shell_dialog` still sets
+    /// this to `None` unconditionally, so those call sites see no behavior
+    /// change at all.
+    pub on_key: Option<ModalKeyHandler>,
 }
 
 /// Open a modal through Geode's one standard door (Task 9's rule, unchanged
@@ -131,10 +165,30 @@ pub struct ShellModal {
 /// now that opening no longer calls `window.open_dialog`, hence `_window`.
 pub fn open_shell_dialog<F>(
     view: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+    title: impl Into<SharedString>,
+    build: F,
+) where
+    F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
+{
+    open_shell_dialog_with_key(view, window, cx, title, build, None);
+}
+
+/// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
+/// keybinding dialog needs first refusal on every keystroke while it's
+/// open, to drive vim navigation and rebind-capture — see that type's own
+/// doc comment). `open_shell_dialog` is simply this with `on_key: None`, so
+/// every pre-Part-B call site (the settings modal) is unaffected. Still the
+/// same one door, same open-time hygiene — this is the one place that
+/// constructs a [`ShellModal`], `open_shell_dialog` included.
+pub fn open_shell_dialog_with_key<F>(
+    view: &mut ShellView,
     _window: &mut Window,
     cx: &mut Context<ShellView>,
     title: impl Into<SharedString>,
     build: F,
+    on_key: Option<ModalKeyHandler>,
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
@@ -153,6 +207,7 @@ pub fn open_shell_dialog<F>(
     view.modal = Some(ShellModal {
         title: title.into(),
         build: Rc::new(build),
+        on_key,
     });
     cx.notify();
 }
