@@ -2468,7 +2468,12 @@ mod tests {
              wouldn't prove set_dark_mode actually flipped anything"
         );
 
-        cx.update(|_window, cx| settings_view::set_theme(&shell, "Gruvbox", cx));
+        // Fully qualified name, matching what the real dropdown passes
+        // (its options come from `ThemeService::names()`, already
+        // fully-qualified) — exercises `resolve`'s exact-name path
+        // (`find_exact`), not the bare-family fallback (`find_family`),
+        // which has its own direct coverage in `theme.rs`'s own tests.
+        cx.update(|_window, cx| settings_view::set_theme(&shell, "Gruvbox Light", cx));
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell
                 .services
@@ -2476,8 +2481,9 @@ mod tests {
                 .active_name()
                 .to_string()),
             "Gruvbox Light",
-            "set_theme should apply the named family at the currently active \
-             mode (light, the starting mode here) through ThemeService::apply"
+            "set_theme should apply the exact fully-qualified name through \
+             ThemeService::apply, regardless of the currently active mode \
+             argument (find_exact ignores it)"
         );
 
         cx.update(|_window, cx| settings_view::set_dark_mode(&shell, true, cx));
