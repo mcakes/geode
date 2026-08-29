@@ -57,6 +57,9 @@ impl Rect {
 /// Edge-adjacency tolerance for unit-space geometry comparisons.
 pub(crate) const EPS: f32 = 1e-3;
 
+/// Smallest fraction any split child may occupy.
+pub const MIN_RATIO: f32 = 0.05;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Leaf(TileId),
@@ -257,6 +260,84 @@ impl Tree {
         }
         true
     }
+
+    /// Grow the focused tile's edge toward `dir` by `delta` (a fraction of
+    /// the containing split), taking the space from the adjacent sibling in
+    /// that direction (or the opposite sibling when at the split's edge).
+    /// Negative `delta` shrinks. Returns false (changing nothing) when no
+    /// ancestor split matches the direction's orientation or the transfer
+    /// would push either ratio below [`MIN_RATIO`].
+    pub fn resize(&mut self, dir: Direction, delta: f32) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        let Some(root) = &mut self.root else {
+            return false;
+        };
+        let mut path = Vec::new();
+        if !path_to(root, focused, &mut path) {
+            return false;
+        }
+        // Walk ancestors from deepest to shallowest looking for a split
+        // whose orientation matches the resize direction.
+        for depth in (0..path.len()).rev() {
+            let node = node_at_mut(root, &path[..depth]);
+            let Node::Split {
+                orientation,
+                ratios,
+                ..
+            } = node
+            else {
+                continue;
+            };
+            if *orientation != dir.orientation() {
+                continue;
+            }
+            let i = path[depth];
+            let j = match dir {
+                Direction::Right | Direction::Down => {
+                    if i + 1 < ratios.len() {
+                        i + 1
+                    } else if i > 0 {
+                        i - 1
+                    } else {
+                        continue;
+                    }
+                }
+                Direction::Left | Direction::Up => {
+                    if i > 0 {
+                        i - 1
+                    } else if i + 1 < ratios.len() {
+                        i + 1
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            let grown = ratios[i] + delta;
+            let shrunk = ratios[j] - delta;
+            if grown < MIN_RATIO || shrunk < MIN_RATIO {
+                return false;
+            }
+            ratios[i] = grown;
+            ratios[j] = shrunk;
+            return true;
+        }
+        false
+    }
+
+    /// Toggle fullscreen on the focused tile. Returns false on an empty tree.
+    pub fn toggle_fullscreen(&mut self) -> bool {
+        let Some(focused) = self.focused else {
+            return false;
+        };
+        self.fullscreen = if self.fullscreen == Some(focused) {
+            None
+        } else {
+            Some(focused)
+        };
+        true
+    }
 }
 
 fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
@@ -270,6 +351,8 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     }
 }
 
+// Structural invariant: a Split always has >= 2 children (constructions
+// create pairs; collapse removes 1-child splits).
 fn first_leaf(node: &Node) -> TileId {
     match node {
         Node::Leaf(id) => *id,
@@ -391,6 +474,35 @@ fn layout_node(node: &Node, rect: Rect, out: &mut Vec<(TileId, Rect)>) {
             }
         }
     }
+}
+
+fn path_to(node: &Node, target: TileId, path: &mut Vec<usize>) -> bool {
+    match node {
+        Node::Leaf(id) => *id == target,
+        Node::Split { children, .. } => {
+            for (ix, child) in children.iter().enumerate() {
+                path.push(ix);
+                if path_to(child, target, path) {
+                    return true;
+                }
+                path.pop();
+            }
+            false
+        }
+    }
+}
+
+fn node_at_mut<'a>(node: &'a mut Node, path: &[usize]) -> &'a mut Node {
+    let mut current = node;
+    for &ix in path {
+        match current {
+            Node::Split { children, .. } => current = &mut children[ix],
+            // Invariant: `path` was produced by `path_to` over this same
+            // tree, so every prefix lands on a Split.
+            Node::Leaf(_) => unreachable!("path indexes into splits"),
+        }
+    }
+    current
 }
 
 #[cfg(test)]
@@ -649,12 +761,96 @@ mod tests {
         assert!(approx(rect_of(&tree, 1).x, 0.0));
     }
 
-    // Task 3: fullscreen_blocks_navigation
-    // #[test]
-    // fn fullscreen_blocks_navigation() {
-    //     let mut tree = grid();
-    //     tree.toggle_fullscreen(); // Task 3 provides this; here it gates layout
-    //     assert!(!tree.focus_direction(Direction::Right));
-    //     assert_eq!(tree.focused(), Some(TileId(1)));
-    // }
+    #[test]
+    fn fullscreen_blocks_navigation() {
+        let mut tree = grid();
+        tree.toggle_fullscreen(); // Task 3 provides this; here it gates layout
+        assert!(!tree.focus_direction(Direction::Right));
+        assert_eq!(tree.focused(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn resize_transfers_ratio_to_neighbor() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        assert!(tree.resize(Direction::Right, 0.1)); // grow 1 rightward
+        assert!(approx(rect_of(&tree, 1).w, 0.6));
+        assert!(approx(rect_of(&tree, 2).w, 0.4));
+        assert!(approx(rect_of(&tree, 2).x, 0.6));
+    }
+
+    #[test]
+    fn resize_shrinks_with_negative_delta() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        assert!(tree.resize(Direction::Right, -0.1));
+        assert!(approx(rect_of(&tree, 1).w, 0.4));
+    }
+
+    #[test]
+    fn resize_clamps_at_min_ratio() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        assert!(
+            !tree.resize(Direction::Right, 0.9),
+            "would push neighbor below MIN_RATIO"
+        );
+        assert!(
+            approx(rect_of(&tree, 1).w, 0.5),
+            "failed resize must change nothing"
+        );
+    }
+
+    #[test]
+    fn resize_finds_matching_orientation_ancestor() {
+        let mut tree = grid(); // focused: 1 (top-left)
+        // Up/Down resizing of tile 1 must adjust the left column's inner
+        // vertical split (1 over 4), not the outer horizontal one.
+        assert!(tree.resize(Direction::Down, 0.2));
+        assert!(approx(rect_of(&tree, 1).h, 0.7));
+        assert!(approx(rect_of(&tree, 4).h, 0.3));
+        // And Left/Right resizing adjusts the outer horizontal split.
+        assert!(tree.resize(Direction::Right, 0.1));
+        assert!(approx(rect_of(&tree, 1).w, 0.6));
+        assert!(approx(rect_of(&tree, 2).w, 0.4));
+    }
+
+    #[test]
+    fn resize_with_no_matching_split_is_noop() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert!(
+            !tree.resize(Direction::Right, 0.1),
+            "single tile has nothing to resize"
+        );
+    }
+
+    #[test]
+    fn fullscreen_toggles_and_layout_shows_only_that_tile() {
+        let mut tree = grid();
+        assert!(tree.toggle_fullscreen());
+        assert_eq!(tree.fullscreen(), Some(TileId(1)));
+        let out = rects(&tree);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, TileId(1));
+        assert!(approx(out[0].1.w, 1.0) && approx(out[0].1.h, 1.0));
+        assert!(tree.toggle_fullscreen());
+        assert_eq!(tree.fullscreen(), None);
+        assert_eq!(rects(&tree).len(), 4);
+    }
+
+    #[test]
+    fn closing_fullscreen_tile_clears_fullscreen() {
+        let mut tree = grid();
+        tree.toggle_fullscreen();
+        tree.close();
+        assert_eq!(tree.fullscreen(), None);
+        assert_eq!(rects(&tree).len(), 3);
+    }
 }
