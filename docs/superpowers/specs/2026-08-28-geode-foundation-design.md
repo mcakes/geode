@@ -136,7 +136,12 @@ early, and exhaustively unit-tested (§10).
 Fully functional — click focus, drag splitters, header clicks to sort — but
 never required, and never the only path to anything.
 
-## 4. Global scope, filtering, and time travel
+## 4. Shared frame state: scope, grouping, and time travel
+
+Three pieces of state frame what every tile shows: **scope** (which rows),
+**grouping** (how rows roll up), and **as-of** (which point in time). All
+three live in the shell, are switched globally, and reach modules through
+the same frame-subscription mechanism (§9.1).
 
 ### 4.1 The scope model
 
@@ -177,7 +182,31 @@ Interaction surface: a persistent **scope bar** at the top of the window
 for the global text filter, `:scope …` commands from any tile, and saved
 scopes recallable from the palette and shareable as config.
 
-### 4.4 Time travel (as-of)
+### 4.4 Grouping presets
+
+A **grouping** is an ordered tuple of fields defining how risk rolls up —
+e.g. `book / model_code / underlying / position / instrument`. The blotter
+renders the active grouping as a collapsible hierarchy (one level per
+field, `zc/zo/za` to collapse/expand), with aggregations from the view
+definition applied at every level.
+
+**Nine slots.** Users define up to nine named groupings in config (layered:
+desk defaults, personal overrides — like everything else) and switch the
+active one with `Ctrl+1..9`. Switching is frame-level: every grouped tile
+regroups together, atomically, same as a scope change — and equally fast,
+since a regroup is one requery per visible tile, inside the §7 budget.
+
+**Pinning.** A tile can pin its own grouping (e.g. via `:group
+underlier,expiry` or by pinning a slot), detaching it from the frame — the
+same opt-out pattern, with the same kind of visual marker, as unscoped
+tiles. Unpinning rejoins the frame's active slot.
+
+The active slot (number and field tuple) is always visible in the scope
+bar / status area, and slots are recallable and editable from the palette.
+View definitions still declare a *default* grouping (§5.1), used by a tile
+only when pinned to it or when no slot is active.
+
+### 4.5 Time travel (as-of)
 
 An **as-of** selector joins scope in the shell's shared frame state, with the
 same global/workspace layering. Setting as-of to 14:05 makes `DataService`
@@ -308,8 +337,8 @@ surfaces as source health, never as UI stall.
 ## 8. Configuration model
 
 **What is config:** sources and datasets (with schemas), view definitions,
-layouts, keymaps, saved scopes, themes, retention policies, dimension-picker
-definitions. If a trader or desk lead could plausibly want it different, it
+grouping presets (the nine slots), layouts, keymaps, saved scopes, themes,
+retention policies, dimension-picker definitions. If a trader or desk lead could plausibly want it different, it
 is config.
 
 **Layers, deep-merged in order:**
@@ -360,9 +389,9 @@ A module is a crate exposing a `Module` implementation:
 - **Tile lifecycle** — created into a tile; serializes state (view name,
   grouping, cursor…) into layout saves and restores from them; notified on
   hide/show so background tiles can drop subscriptions.
-- **Frame subscription** — scope/as-of/generation changes arrive through
-  one uniform mechanism, so cross-cutting behavior is identical in every
-  module by construction.
+- **Frame subscription** — scope/grouping/as-of/generation changes arrive
+  through one uniform mechanism, so cross-cutting behavior is identical in
+  every module by construction.
 
 Modules are compiled in and registered in a static list in `geode-app` —
 the only place the app knows the roster. No dynamic plugins, no scripting
@@ -371,11 +400,12 @@ bolt on later if ever justified).
 
 ### 9.2 Day-one modules (v1)
 
-1. **Blotter** — the flagship. Renders any view definition: grouping with
-   collapsible group rows and aggregations, sorting, filtering, vim
-   navigation, column operations (resize/reorder/hide, persisted to the
-   view), visual selection and yank, cell formatting including red/green
-   numerics and staleness styling.
+1. **Blotter** — the flagship. Renders any view definition: hierarchical
+   rollup along the active grouping slot (§4.4) with collapsible group
+   rows and aggregations, sorting, filtering, vim navigation, column
+   operations (resize/reorder/hide, persisted to the view), visual
+   selection and yank, cell formatting including red/green numerics and
+   staleness styling.
 2. **Config editor** — as in §8.
 3. **Diagnostics** — source health, generations and timestamps, ingest
    errors, memory by dataset, frame-time overlay toggle, effective-config
