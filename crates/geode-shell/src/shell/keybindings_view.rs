@@ -593,13 +593,58 @@ fn build(
         list = list.child(row_el);
     }
 
-    let hint_line = if state.listening.is_some() {
-        "Listening — type keys, Enter to save, Esc to cancel".to_string()
+    // Keystroke chips for the footer hints — the same `Kbd` rendering the
+    // rows use, so key names in helper text look like the keys they mean.
+    // `Kbd` renders exactly one keystroke, so multi-key idioms (`gg`) are
+    // adjacent chips and count prefixes (`5j`) stay plain text: a count is
+    // an example pattern, not a keystroke.
+    let chip = |spec: &str| {
+        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
+            .expect("footer hint keystrokes are hardcoded valid");
+        Kbd::new(to_gpui_keystroke(&ks)).into_any_element()
+    };
+    let sep = |text: &'static str| div().child(text).into_any_element();
+
+    let hint_line: AnyElement = if state.listening.is_some() {
+        h_flex()
+            .gap_1()
+            .items_center()
+            .flex_wrap()
+            .children(vec![
+                sep("Listening — type keys,"),
+                chip("enter"),
+                sep("to save,"),
+                chip("escape"),
+                sep("to cancel"),
+            ])
+            .into_any_element()
     } else if let Some(pending) = state.nav.pending_display() {
-        format!("{pending}…")
+        div().child(format!("{pending}…")).into_any_element()
     } else {
-        "j/k move · 5j/3k count · gg/G top/bottom · ctrl+d/u/f/b page · space/enter to rebind"
-            .to_string()
+        h_flex()
+            .gap_1()
+            .items_center()
+            .flex_wrap()
+            .children(vec![
+                chip("j"),
+                chip("k"),
+                sep("move (counts: 5j) ·"),
+                chip("g"),
+                chip("g"),
+                sep("/"),
+                chip("shift+g"),
+                sep("top/bottom ·"),
+                chip("ctrl+d"),
+                chip("ctrl+u"),
+                chip("ctrl+f"),
+                chip("ctrl+b"),
+                sep("page ·"),
+                chip("space"),
+                sep("/"),
+                chip("enter"),
+                sep("to rebind"),
+            ])
+            .into_any_element()
     };
 
     let footer = v_flex()
@@ -615,10 +660,18 @@ fn build(
                 .child(hint_line),
         )
         .child(
-            div()
+            h_flex()
+                .gap_1()
+                .items_center()
+                .flex_wrap()
                 .text_xs()
                 .text_color(theme.muted_foreground)
-                .child("Enter and Escape can't be captured — hand-edit keymap.toml for those."),
+                .children(vec![
+                    chip("enter"),
+                    sep("and"),
+                    chip("escape"),
+                    sep("can't be captured — hand-edit keymap.toml for those."),
+                ]),
         );
 
     v_flex()
