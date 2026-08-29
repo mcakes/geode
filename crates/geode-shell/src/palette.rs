@@ -1,7 +1,9 @@
 //! The command palette (Task 6, spec §3.2/§3.3): a universal, fuzzy-filtered
-//! list over every registered action and every bundled theme, driven purely
-//! by the keyboard (`ctrl+k` / `ctrl+shift+p` open, Esc closes; typing
-//! filters; up/down or ctrl+p/ctrl+n move the selection; Enter dispatches).
+//! list over every registered action and every bundled theme, driven by the
+//! keyboard (`ctrl+k` / `ctrl+shift+p` open, Esc closes; typing filters;
+//! up/down or ctrl+p/ctrl+n move the selection; Enter dispatches) and, since
+//! the palette-input-polish task, the mouse (click a row to select it, click
+//! outside the panel to dismiss — see `render`'s doc comment).
 //!
 //! Everything above the `render` section is the pure core: `PaletteItem`,
 //! `PaletteState`, `fuzzy_match`, and the keystroke-rendering/index-building
@@ -10,6 +12,17 @@
 //! — no deps, no gpui"). `render`, at the bottom, is the only part that
 //! touches `gpui`/`gpui_component`; `ShellView` (`shell::mod`) owns the
 //! `PaletteState` and drives it from real key events.
+//!
+//! **Query ownership** (palette-input-polish task): the query text itself is
+//! no longer part of the free-typing key handling this module used to do
+//! (`push_char`/`backspace`, both removed). `ShellView` now owns a real
+//! gpui-component `Entity<InputState>` for the query field (mirroring the
+//! toolbar's `filter_input`) and feeds `PaletteState::set_query` from an
+//! `InputEvent::Change` subscription — see that struct's and method's own
+//! doc comments, and `shell::mod`'s doc comment on `palette_input`, for the
+//! full routing story (why up/down/ctrl+p/ctrl+n/enter/escape still reach
+//! `ShellView::handle_palette_key` as bubbled `KeyDownEvent`s while
+//! printable/caret/ctrl+a/ctrl+v are consumed natively by the `Input`).
 
 use std::collections::BTreeMap;
 
@@ -191,20 +204,38 @@ impl PaletteState {
         self.selected
     }
 
-    /// Append one typed character to the query and reset the selection to
-    /// the top match. Filtering can shrink or reorder the result list out
-    /// from under a selection further down it, so every query edit snaps
-    /// the selection back to a row that's guaranteed to still exist.
-    pub fn push_char(&mut self, c: char) {
-        self.query.push(c);
+    /// Replace the whole query in one step and reset the selection to the
+    /// top match — the palette-input-polish task moved character-at-a-time
+    /// editing (the removed `push_char`/`backspace`) into a real
+    /// gpui-component `Input`; this is what feeds that `Entity<InputState>`'s
+    /// `InputEvent::Change` value back into the pure filter/selection core
+    /// (`ShellView`'s subscription, set up once in `new`, calls this on
+    /// every edit). Filtering can shrink or reorder the result list out from
+    /// under a selection further down it, so every query edit snaps the
+    /// selection back to a row that's guaranteed to still exist — same
+    /// reasoning `push_char`/`backspace` used to document, just triggered by
+    /// a whole-string replace instead of one character at a time.
+    pub fn set_query(&mut self, query: impl Into<String>) {
+        self.query = query.into();
         self.selected = 0;
     }
 
-    /// Remove the last character of the query (a no-op on an empty query),
-    /// resetting the selection for the same reason as [`push_char`].
-    pub fn backspace(&mut self) {
-        self.query.pop();
-        self.selected = 0;
+    /// Set the selection to an absolute row index — a mouse click on a
+    /// result row (`render`'s per-row `on_mouse_down`), which names exactly
+    /// which row was hit rather than a `±1` step the way keyboard nav does
+    /// (`move_selection`). Defensively clamped the same way that method is:
+    /// an empty filtered list leaves `selected` at 0 untouched, and an
+    /// index past the end of the current filtered list (stale by the time a
+    /// click is actually processed — e.g. the query changed between the
+    /// frame that painted the row and the click landing) clamps to the last
+    /// row rather than panicking or silently going out of range.
+    pub fn set_selected(&mut self, index: usize) {
+        let len = self.filtered().len();
+        if len == 0 {
+            self.selected = 0;
+            return;
+        }
+        self.selected = index.min(len - 1);
     }
 
     /// Every item whose title fuzzy-matches the current query
@@ -346,7 +377,11 @@ pub fn build_items(
 // ---------------------------------------------------------------------
 
 use gpui::prelude::*;
-use gpui::{App, FontWeight, HighlightStyle, IntoElement, ScrollHandle, StyledText, div, px};
+use gpui::{
+    App, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, ScrollHandle, StyledText,
+    Window, div, px,
+};
+use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fonts;
@@ -404,12 +439,40 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
 }
 
 /// The palette overlay: a centered, top-third, ~560px-wide panel on
-/// `cx.theme().popover`, an input line (rendered text + a trailing caret
-/// glyph — no `Input` entity needed for this), and every filtered result
-/// inside a fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the
-/// selected row highlighted (`cx.theme().selection` background,
-/// `cx.theme().primary` text — plan constraint: no raw colors, `cx.theme()`
-/// roles only) and its binding right-aligned in `cx.theme().muted_foreground`.
+/// `cx.theme().popover`, a real gpui-component `Input` for the query
+/// (`query_input` — native caret/selection/clipboard, see this module's own
+/// doc comment for the routing story), and every filtered result inside a
+/// fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the selected
+/// row highlighted (`cx.theme().selection` background, `cx.theme().primary`
+/// text — plan constraint: no raw colors, `cx.theme()` roles only) and its
+/// binding right-aligned in `cx.theme().muted_foreground`.
+///
+/// **`Input` styling** (inventoried against `Input`'s own builder methods at
+/// the pinned checkout, `crates/ui/src/input/input.rs`): `.appearance(false)`
+/// strips `Input`'s own background/border/rounding (`self.appearance`
+/// gates all three there), which would otherwise paint a second, competing
+/// box inside this panel's own chrome; it does *not* touch `Input`'s
+/// internal horizontal/vertical padding (`input_px`/`input_py`, applied
+/// unconditionally for a single-line input regardless of `appearance`), so
+/// `input_row` below needs no padding of its own beyond the bottom border
+/// that visually separates it from `list` — the same convention the
+/// toolbar's bare `Input::new(filter_input)` already uses (`shell::
+/// toolbar::toolbar`, no wrapping padding there either).
+///
+/// **Mouse** (palette-input-polish task): each row's `on_mouse_down`
+/// SELECTS it via `on_row_click` (a caller-supplied, cheaply `Clone`-able
+/// closure — see [`ShellView::render`](../shell/struct.ShellView.html)'s
+/// call site for how it's built from a `WeakEntity<ShellView>`, sidestepping
+/// per-row heap allocation) — moves the highlight only, Enter (still routed
+/// through `ShellView::handle_palette_key`) is what dispatches. The panel's
+/// own `on_mouse_down` calls `cx.stop_propagation()` (precedent:
+/// `dialog::render_modal`'s panel does the same over its backdrop) so a
+/// click anywhere inside the panel — a row, the input, empty space — never
+/// also reaches the full-window click-catcher `ShellView::render` wraps
+/// this element in, which would otherwise dismiss the palette out from
+/// under the very click that's interacting with it. That catcher (and its
+/// dismiss-on-click-outside handling) lives in `shell::mod`, not here — see
+/// that module's doc comment on why the backdrop-vs-panel split stays there.
 ///
 /// **Scroll mechanism, checked against the pinned gpui rev before building
 /// this** (`gpui::elements::div::{ScrollHandle, StatefulInteractiveElement}`,
@@ -424,12 +487,12 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
 /// on top of exactly this primitive; at 66 items neither is needed here,
 /// so this uses the primitive directly rather than pulling in `List`'s
 /// virtualized-row bookkeeping for a list this small). `ShellView`'s
-/// selection-change path (`move_selection` calls, plus the selection resets
-/// in `push_char`/`backspace`) calls `scroll_handle.scroll_to_item(new_
-/// selected)` — a real per-frame layout measurement, not a pixel-math
-/// guess — so the newly selected row always ends up visible; this function
-/// only wires the handle into the container, it never calls `scroll_to_item`
-/// itself.
+/// selection-change path (`move_selection` calls, the selection reset in
+/// `set_query`, and row clicks via `set_selected`) calls `scroll_handle.
+/// scroll_to_item(new_selected)` — a real per-frame layout measurement, not
+/// a pixel-math guess — so the newly selected row always ends up visible;
+/// this function only wires the handle into the container, it never calls
+/// `scroll_to_item` itself.
 ///
 /// `viewport_width`/`viewport_height` are the window's own drawable size
 /// (`Window::viewport_size`, same source `ShellView::render` already reads
@@ -439,6 +502,8 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
 pub fn render(
     state: &PaletteState,
     scroll_handle: &ScrollHandle,
+    query_input: &Entity<InputState>,
+    on_row_click: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
     viewport_width: f32,
     viewport_height: f32,
     cx: &App,
@@ -496,6 +561,14 @@ pub fn render(
             }
             // Test-only, see `list`'s `debug_selector` comment above.
             let row = row.debug_selector(move || format!("palette-row-{i}"));
+            // A click selects this row (moves the highlight, no dispatch —
+            // see this function's own doc comment); `on_row_click` is
+            // cloned per row rather than shared some other way because each
+            // row's closure needs to close over its own `i`.
+            let click = on_row_click.clone();
+            let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                click(i, window, cx);
+            });
             let label = h_flex()
                 .gap_2()
                 .items_center()
@@ -514,15 +587,18 @@ pub fn render(
     }
 
     // No placeholder helper text (plan constraint: removed entirely) — an
-    // empty query renders as just the trailing caret glyph, alone and
-    // first, rather than falling back to hint text.
+    // empty query renders as a bare, empty `Input`, caret first, rather than
+    // falling back to hint text. `.appearance(false)` strips `Input`'s own
+    // border/background (see this function's doc comment); the bottom
+    // border below is `input_row`'s own, standing in for the chrome
+    // `appearance(true)` would otherwise have drawn, just scoped to
+    // separating the query row from `list` rather than boxing the input
+    // itself.
     let input_row = div()
         .w_full()
-        .px_2()
-        .py_1()
         .border_b_1()
         .border_color(theme.border)
-        .child(format!("{}|", state.query()));
+        .child(Input::new(query_input).appearance(false).w_full());
 
     div()
         .absolute()
@@ -538,6 +614,17 @@ pub fn render(
         .border_1()
         .border_color(theme.border)
         .rounded(px(8.))
+        // Test-only, see `list`'s `debug_selector` comment above — lets a
+        // `#[gpui::test]` recover the panel's own painted bounds to click
+        // inside it (precedent: `dialog::render_modal`'s
+        // `"shell-modal-panel"`).
+        .debug_selector(|| "palette-panel".to_string())
+        // See this function's doc comment: stops a click anywhere in the
+        // panel from also reaching the click-catcher `ShellView::render`
+        // wraps this element in.
+        .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+            cx.stop_propagation();
+        })
         .child(input_row)
         .child(list)
 }
@@ -717,9 +804,7 @@ mod tests {
             action("workspace::focus_left", "Focus left", "Workspace", None),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ]);
-        for c in "split".chars() {
-            state.push_char(c);
-        }
+        state.set_query("split");
         let titles: Vec<String> = state
             .filtered()
             .iter()
@@ -734,9 +819,7 @@ mod tests {
             action("a", "Snap Pool", "Test", None),
             action("b", "Apple Pie", "Test", None),
         ]);
-        for c in "app".chars() {
-            state.push_char(c);
-        }
+        state.set_query("app");
         let titles: Vec<String> = state
             .filtered()
             .iter()
@@ -749,17 +832,33 @@ mod tests {
     }
 
     #[test]
-    fn backspace_removes_the_last_query_character() {
-        let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
-        state.push_char('x');
-        state.push_char('y');
-        state.backspace();
-        assert_eq!(state.query(), "x");
-        state.backspace();
-        assert_eq!(state.query(), "");
-        // Backspacing an already-empty query is a no-op, not a panic.
-        state.backspace();
-        assert_eq!(state.query(), "");
+    fn set_query_replaces_the_whole_query_and_resets_selection() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Apple", "Test", None),
+            action("b", "Banana", "Test", None),
+        ]);
+        state.move_selection(1);
+        assert_eq!(state.selected(), 1);
+
+        state.set_query("banana");
+        assert_eq!(state.query(), "banana");
+        assert_eq!(
+            state.selected(),
+            0,
+            "replacing the query should reset the selection to the top match"
+        );
+        let titles: Vec<String> = state
+            .filtered()
+            .iter()
+            .map(|(item, _)| item.title())
+            .collect();
+        assert_eq!(titles, vec!["Banana".to_string()]);
+
+        // A later call replaces the whole string, it doesn't append —
+        // proving this really is a whole-value setter, not `push_char` in
+        // disguise.
+        state.set_query("apple");
+        assert_eq!(state.query(), "apple");
     }
 
     #[test]
@@ -835,9 +934,7 @@ mod tests {
     #[test]
     fn move_selection_on_an_empty_result_set_does_not_panic() {
         let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
-        for c in "nomatch".chars() {
-            state.push_char(c);
-        }
+        state.set_query("nomatch");
         assert!(state.filtered().is_empty());
         state.move_selection(1);
         state.move_selection(-1);
@@ -855,12 +952,40 @@ mod tests {
         ]);
         state.move_selection(1);
         assert_eq!(state.selected(), 1);
-        state.push_char('a');
+        state.set_query("a");
         assert_eq!(state.selected(), 0);
 
         state.move_selection(1);
         assert_eq!(state.selected(), 1);
-        state.backspace();
+        state.set_query("");
+        assert_eq!(state.selected(), 0);
+    }
+
+    #[test]
+    fn set_selected_clamps_to_the_current_filtered_list() {
+        let items = vec![
+            action("a", "A", "Test", None),
+            action("b", "B", "Test", None),
+            action("c", "C", "Test", None),
+        ];
+        let mut state = PaletteState::new(items);
+
+        state.set_selected(2);
+        assert_eq!(state.selected(), 2);
+
+        // Past the end (e.g. the query narrowed the list between the frame
+        // that painted this row and the click landing) clamps to the last
+        // row rather than panicking or going out of range.
+        state.set_selected(50);
+        assert_eq!(state.selected(), 2);
+    }
+
+    #[test]
+    fn set_selected_on_an_empty_result_set_does_not_panic() {
+        let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
+        state.set_query("nomatch");
+        assert!(state.filtered().is_empty());
+        state.set_selected(3);
         assert_eq!(state.selected(), 0);
     }
 
@@ -880,9 +1005,7 @@ mod tests {
     #[test]
     fn selected_item_is_none_when_nothing_matches() {
         let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
-        for c in "nomatch".chars() {
-            state.push_char(c);
-        }
+        state.set_query("nomatch");
         assert_eq!(state.selected_item(), None);
     }
 
