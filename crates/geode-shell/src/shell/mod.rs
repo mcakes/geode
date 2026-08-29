@@ -3641,6 +3641,91 @@ mod tests {
         );
     }
 
+    /// Reproduction for the content-collapse regression: `settings_open_
+    /// opens_the_modal` only proves the backdrop/panel/title chrome
+    /// painted with non-zero bounds — every one of those is painted
+    /// directly by `dialog::render_modal` itself, so it stays green even
+    /// if the `Settings` composite nested inside the panel (theme
+    /// dropdown, dark-mode switch, keyboard group) renders at zero
+    /// height. This test checks the thing that test doesn't: the content
+    /// wrapper `settings_view::open` tags with `debug_selector("settings-
+    /// content")` must paint with a real, multi-field height (not just a
+    /// non-zero sliver), and the modal must have painted meaningfully more
+    /// quads than its chrome alone (backdrop + panel bg/border + title
+    /// text + close button is a small, fixed handful — a fully laid out
+    /// Settings composite paints far more: sidebar background, search
+    /// input, page/menu row, two group boxes, a dropdown control, a
+    /// switch, several labels).
+    ///
+    /// Uses `WindowOptions::default()`, same as every other modal test in
+    /// this file — gpui's own `default_bounds` gives that a realistic
+    /// 1536x1095 test window, not a cramped one, so this collapse is not
+    /// an artifact of an unrealistically small test viewport.
+    #[gpui::test]
+    fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let quads_before = cx.update(|window, _cx| window.painted_quads().len());
+
+        cx.simulate_keystrokes("alt-,");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: alt-, should have opened the settings modal"
+        );
+
+        let content_bounds = cx
+            .debug_bounds("settings-content")
+            .expect("the settings content wrapper should have painted bounds");
+        assert!(
+            content_bounds.size.height >= px(200.0),
+            "the settings content wrapper should paint tall enough to hold \
+             the Appearance/Keyboard groups (dropdown, switch, labels) — \
+             got {:?}. A collapse to a sliver height here means the Settings \
+             composite's own root (which demands `size_full`, pinned \
+             checkout `crates/ui/src/resizable/panel.rs`'s \
+             `ResizablePanelGroup::render`) resolved its percentage height \
+             against a parent with no definite height of its own.",
+            content_bounds.size
+        );
+
+        let quads_after = cx.update(|window, _cx| window.painted_quads().len());
+        let modal_quads = quads_after - quads_before;
+        assert!(
+            modal_quads >= 20,
+            "opening the settings modal should paint far more than just its \
+             chrome (backdrop + panel + title row + close button) — the \
+             Settings composite's own sidebar/search/groups/fields should \
+             contribute the bulk of it. Chrome alone paints only a handful \
+             of quads; got {modal_quads} total for the whole modal, which \
+             reads as chrome-only (collapsed content)."
+        );
+    }
+
     /// `settings_view::set_theme`/`set_dark_mode` are the exact handlers the
     /// dialog's theme dropdown/dark-mode switch invoke on selection/click
     /// (see those functions' doc comments: simulating a real click through
