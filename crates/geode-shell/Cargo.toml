@@ -12,6 +12,7 @@ geode-core.workspace = true
 gpui.workspace = true
 gpui-component.workspace = true
 toml = "1.1.4"
+serde_json = "1.0.151"
 
 [dev-dependencies]
 tempfile = "3.27.0"

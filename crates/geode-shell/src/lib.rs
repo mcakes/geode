@@ -8,4 +8,5 @@ pub mod actions;
 pub mod defaults;
 pub mod keymap;
 pub mod shell;
+pub mod theme;
 pub mod tiling;

@@ -76,8 +76,6 @@ pub fn status_bar(
         )
         .child(
             div()
-                // Task 5 wires the real theme name; "default" is a
-                // placeholder until then.
                 .text_color(theme.muted_foreground)
                 .child(theme_name.to_string()),
         )

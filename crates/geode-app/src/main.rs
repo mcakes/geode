@@ -9,6 +9,7 @@ use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
 use geode_shell::keymap::build_keymap;
 use geode_shell::shell::{ShellServices, ShellView};
+use geode_shell::theme;
 use geode_shell::tiling::Workspaces;
 use gpui::prelude::*;
 use gpui::{App, WindowOptions};
@@ -20,7 +21,10 @@ fn main() {
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
 
-            let services = build_shell_services();
+            let mut services = build_shell_services();
+            for warning in services.theme.apply_from_config(&services.config, cx) {
+                eprintln!("[theme] warning: {warning}");
+            }
 
             cx.spawn(async move |cx| {
                 cx.open_window(WindowOptions::default(), |window, cx| {
@@ -60,12 +64,18 @@ fn build_shell_services() -> ShellServices {
         print_diagnostic("keymap", diag);
     }
 
+    let (theme, theme_warnings) = theme::load_bundled();
+    for warning in &theme_warnings {
+        eprintln!("[theme] warning: {warning}");
+    }
+
     ShellServices {
         config,
         registry,
         keymap,
         mod_alias,
         workspaces: Workspaces::new(),
+        theme,
     }
 }
 

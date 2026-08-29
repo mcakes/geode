@@ -15,6 +15,7 @@ use gpui_component::{ActiveTheme as _, Root, v_flex};
 
 use crate::actions::ActionRegistry;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers};
+use crate::theme::ThemeService;
 use crate::tiling::{Rect, Workspaces, apply_workspace_action};
 use geode_core::config::Config;
 
@@ -28,6 +29,7 @@ pub struct ShellServices {
     pub keymap: Keymap,
     pub mod_alias: Modifiers,
     pub workspaces: Workspaces,
+    pub theme: ThemeService,
 }
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
@@ -81,6 +83,8 @@ impl ShellView {
                 let handled = apply_workspace_action(&mut self.services.workspaces, &action);
                 if !handled && action.0 == "palette::toggle" {
                     self.palette_open = !self.palette_open;
+                } else if !handled && action.0 == "theme::toggle_mode" {
+                    self.services.theme.toggle_mode(cx);
                 }
                 cx.notify();
             }
@@ -169,7 +173,7 @@ impl Render for ShellView {
             self.services.workspaces.active_index(),
             &non_empty,
             self.matcher.pending(),
-            "default", // Task 5 wires the real theme name.
+            self.services.theme.active_name(),
             cx,
         );
 
@@ -205,12 +209,15 @@ mod tests {
         let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
         let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
         assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = crate::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
         ShellServices {
             config,
             registry,
             keymap,
             mod_alias,
             workspaces: Workspaces::new(),
+            theme,
         }
     }
 
@@ -273,6 +280,57 @@ mod tests {
         );
     }
 
+    /// End-to-end: a real `mod+shift+t` keystroke, dispatched through gpui's
+    /// own key-event pipeline, flips the active theme's mode. Exercises the
+    /// same wiring as `mod_s_keystroke_splits_the_active_workspace` above,
+    /// but through the `theme::toggle_mode` branch of `handle_key_down`
+    /// added in Task 5.
+    #[gpui::test]
+    fn mod_shift_t_keystroke_toggles_the_theme_mode(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let before = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+
+        cx.simulate_keystrokes("alt-shift-t");
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let after = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+        assert_ne!(
+            before, after,
+            "alt-shift-t (mod+shift+t = theme::toggle_mode) should have changed the active theme"
+        );
+    }
+
     /// Layers a test-only `"g g"` sequence binding on top of the builtin
     /// keymap (spec §3.4: sequence bindings), so the status bar's
     /// pending-keystroke display (Task 4) has something real to show. No
@@ -302,12 +360,15 @@ mod tests {
         };
         let (keymap, diags) = build_keymap(&[builtin_doc, user_doc], mod_alias, &registry);
         assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = crate::theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
         ShellServices {
             config,
             registry,
             keymap,
             mod_alias,
             workspaces: Workspaces::new(),
+            theme,
         }
     }
 

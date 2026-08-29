@@ -32,6 +32,7 @@ context = "workspace"
 [bindings.keys]
 "mod+p" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
+"mod+shift+t" = "theme::toggle_mode"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -78,6 +79,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         );
     }
     action(reg, "palette::toggle", "Toggle command palette", "Palette");
+    action(
+        reg,
+        "theme::toggle_mode",
+        "Toggle light/dark theme",
+        "Theme",
+    );
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).
