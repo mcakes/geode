@@ -71,7 +71,11 @@ impl PaletteItem {
 /// Case-insensitive subsequence match: every character of `query`, in
 /// order, must occur somewhere in `candidate` (skipping characters as
 /// needed). `None` means `query` is not a subsequence of `candidate` at
-/// all; otherwise the result is a score where higher means a better match.
+/// all; otherwise the result is `(score, indices)` where higher `score`
+/// means a better match and `indices` are the **char** (not byte) offsets
+/// into `candidate` that matched, one per query character, in increasing
+/// order — `render`'s highlighting turns them into styled spans over the
+/// row title (see [`highlight_runs`]).
 ///
 /// Matching is greedy-leftmost (each query character claims the earliest
 /// remaining occurrence in `candidate`), and the score rewards, per
@@ -81,11 +85,18 @@ impl PaletteItem {
 /// grows with run length, so longer unbroken runs score more than the same
 /// number of scattered hits).
 ///
-/// An empty query matches everything with score 0 — see
-/// [`PaletteState::filtered`] for why that specific score value matters.
-pub fn fuzzy_match(query: &str, candidate: &str) -> Option<u32> {
+/// The indices are positions in `candidate.to_lowercase().chars()`. For
+/// every candidate this palette ever renders (plain-ASCII action titles
+/// and `"Theme: {name}"` rows) lowercasing never changes the char count, so
+/// those positions apply equally to the original-case `candidate` — a
+/// property `render` relies on rather than re-deriving.
+///
+/// An empty query matches everything with score 0 and no matched indices —
+/// see [`PaletteState::filtered`] for why that specific score value
+/// matters.
+pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
     if query.is_empty() {
-        return Some(0);
+        return Some((0, Vec::new()));
     }
 
     let cand: Vec<char> = candidate.to_lowercase().chars().collect();
@@ -93,6 +104,7 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<u32> {
     let mut prev_matched: Option<usize> = None;
     let mut consecutive_run: u32 = 0;
     let mut score: u32 = 0;
+    let mut indices: Vec<usize> = Vec::new();
 
     for qc in query.to_lowercase().chars() {
         let offset = cand[cand_idx..].iter().position(|&c| c == qc)?;
@@ -113,11 +125,52 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<u32> {
         }
 
         score += char_score;
+        indices.push(idx);
         prev_matched = Some(idx);
         cand_idx = idx + 1;
     }
 
-    Some(score)
+    Some((score, indices))
+}
+
+/// Merge [`fuzzy_match`]'s matched char indices into contiguous runs and
+/// convert each run to a byte [`Range`](std::ops::Range) over `title`,
+/// suitable for `gpui::StyledText::with_highlights`. Adjacent indices
+/// (`i`, `i+1`, `i+2`, ...) collapse into one range rather than one per
+/// character, so a prefix match like `"app"` against `"Apple Pie"`
+/// highlights `"App"` as a single run instead of three abutting ones —
+/// cheaper to build and (for a bold weight) visually identical either way.
+///
+/// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
+/// runs at all.
+fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
+    if indices.is_empty() {
+        return Vec::new();
+    }
+
+    // char index -> byte offset for every char boundary in `title`, plus
+    // one trailing sentinel for "one past the last char" so the final run
+    // can close out at `title.len()` without a special case.
+    let boundaries: Vec<usize> = title
+        .char_indices()
+        .map(|(b, _)| b)
+        .chain(std::iter::once(title.len()))
+        .collect();
+
+    let mut runs = Vec::new();
+    let mut run_start = indices[0];
+    let mut run_end = indices[0];
+    for &idx in &indices[1..] {
+        if idx == run_end + 1 {
+            run_end = idx;
+            continue;
+        }
+        runs.push(boundaries[run_start]..boundaries[run_end + 1]);
+        run_start = idx;
+        run_end = idx;
+    }
+    runs.push(boundaries[run_start]..boundaries[run_end + 1]);
+    runs
 }
 
 /// Fuzzy-filtered, keyboard-navigable palette state. Pure: no `gpui`, no
@@ -163,18 +216,25 @@ impl PaletteState {
     }
 
     /// Every item whose title fuzzy-matches the current query
-    /// ([`fuzzy_match`]), best match first. Ties — including an empty
-    /// query, where every item scores the same `Some(0)` — keep their
-    /// original `items` order, because `sort_by` is a stable sort: this is
-    /// exactly the brief's "empty query returns all in registry order".
-    pub fn filtered(&self) -> Vec<&PaletteItem> {
-        let mut scored: Vec<(&PaletteItem, u32)> = self
+    /// ([`fuzzy_match`]), best match first, paired with the matched char
+    /// indices `render` highlights. Ties — including an empty query, where
+    /// every item scores the same `Some(0)` — keep their original `items`
+    /// order, because `sort_by_key` is a stable sort: this is exactly the
+    /// brief's "empty query returns all in registry order".
+    pub fn filtered(&self) -> Vec<(&PaletteItem, Vec<usize>)> {
+        let mut scored: Vec<(&PaletteItem, u32, Vec<usize>)> = self
             .items
             .iter()
-            .filter_map(|item| fuzzy_match(&self.query, &item.title()).map(|score| (item, score)))
+            .filter_map(|item| {
+                fuzzy_match(&self.query, &item.title())
+                    .map(|(score, indices)| (item, score, indices))
+            })
             .collect();
-        scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
-        scored.into_iter().map(|(item, _)| item).collect()
+        scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
+        scored
+            .into_iter()
+            .map(|(item, _, indices)| (item, indices))
+            .collect()
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
@@ -200,7 +260,7 @@ impl PaletteState {
     pub fn selected_item(&self) -> Option<PaletteItem> {
         self.filtered()
             .get(self.selected)
-            .map(|item| (*item).clone())
+            .map(|(item, _)| (*item).clone())
     }
 }
 
@@ -284,11 +344,42 @@ pub fn build_items(
 // ---------------------------------------------------------------------
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, div, px};
+use gpui::{App, FontWeight, HighlightStyle, IntoElement, StyledText, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 /// Target overlay width in pixels (brief: "~560px wide").
 const WIDTH: f32 = 560.0;
+
+/// Render one row title with its [`fuzzy_match`]ed characters styled —
+/// `cx.theme().primary` plus a bold weight (plan constraint: no raw
+/// colors; bold is "cheap" per the brief).
+///
+/// **Mechanism, checked against the pinned gpui rev before building this**
+/// (`gpui::elements::text::StyledText`, re-exported at the crate root):
+/// `StyledText::with_highlights` takes `(byte Range, HighlightStyle)`
+/// pairs and — unlike `with_default_highlights` — needs no `TextStyle` of
+/// our own to seed the unhighlighted runs; it resolves them lazily from
+/// `Window::text_style()` at layout time, i.e. whatever ambient text style
+/// this element inherits from its ancestors (the row's `.text_color(...)`
+/// when selected). That is a better fit here than gpui-component's
+/// `highlighter` module (a full syntax-highlighter keyed to a language
+/// grammar — built for code panes, not fuzzy-match spans) or hand-rolled
+/// span children (would need to re-slice `title` into N+1 `div`s per row
+/// and fight `h_flex`'s gaps to keep them visually glued together).
+/// `highlight_runs` (pure core, above) does the char-index -> merged
+/// byte-range conversion this needs.
+fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
+    let runs = highlight_runs(title, indices);
+    if runs.is_empty() {
+        return StyledText::new(title.to_string());
+    }
+    let style = HighlightStyle {
+        color: Some(primary),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    StyledText::new(title.to_string()).with_highlights(runs.into_iter().map(|r| (r, style)))
+}
 
 /// The palette overlay: a centered, top-third, ~560px-wide panel on
 /// `cx.theme().popover`, an input line (rendered text + a trailing caret
@@ -326,7 +417,7 @@ pub fn render(
                 .child("No matches"),
         );
     } else {
-        for (i, item) in results.into_iter().take(MAX_VISIBLE).enumerate() {
+        for (i, (item, indices)) in results.into_iter().take(MAX_VISIBLE).enumerate() {
             let is_selected = i == state.selected();
             let mut row = h_flex()
                 .w_full()
@@ -342,7 +433,7 @@ pub fn render(
             let label = h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().child(item.title()))
+                .child(div().child(highlighted_title(&item.title(), &indices, theme.primary)))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
@@ -355,19 +446,16 @@ pub fn render(
         }
     }
 
+    // No placeholder helper text (plan constraint: removed entirely) — an
+    // empty query renders as just the trailing caret glyph, alone and
+    // first, rather than falling back to hint text.
     let input_row = div()
         .w_full()
         .px_2()
         .py_1()
         .border_b_1()
-        .border_color(theme.border);
-    let input_row = if state.query().is_empty() {
-        input_row
-            .text_color(theme.muted_foreground)
-            .child("Type a command or theme name...|")
-    } else {
-        input_row.child(format!("{}|", state.query()))
-    };
+        .border_color(theme.border)
+        .child(format!("{}|", state.query()));
 
     div()
         .absolute()
@@ -404,8 +492,8 @@ mod tests {
 
     #[test]
     fn empty_query_matches_everything_with_score_zero() {
-        assert_eq!(fuzzy_match("", "anything at all"), Some(0));
-        assert_eq!(fuzzy_match("", ""), Some(0));
+        assert_eq!(fuzzy_match("", "anything at all"), Some((0, Vec::new())));
+        assert_eq!(fuzzy_match("", ""), Some((0, Vec::new())));
     }
 
     #[test]
@@ -421,7 +509,7 @@ mod tests {
         assert_eq!(
             fuzzy_match("split", "split horizontal"),
             fuzzy_match("SPLIT", "split horizontal"),
-            "case should not affect the score, only whether it matches"
+            "case should not affect the score or indices, only whether it matches"
         );
     }
 
@@ -434,8 +522,8 @@ mod tests {
 
     #[test]
     fn prefix_match_scores_higher_than_scattered_match() {
-        let prefix = fuzzy_match("app", "Apple Pie").unwrap();
-        let scattered = fuzzy_match("app", "Snap Pool").unwrap();
+        let (prefix, _) = fuzzy_match("app", "Apple Pie").unwrap();
+        let (scattered, _) = fuzzy_match("app", "Snap Pool").unwrap();
         assert!(
             prefix > scattered,
             "prefix={prefix} should beat scattered={scattered}"
@@ -449,8 +537,8 @@ mod tests {
         // right after a separator (so word-start bonuses don't confound
         // the comparison) — the only thing distinguishing them is that
         // "splendid" matches s-p-l as one consecutive run.
-        let consecutive = fuzzy_match("spl", "splendid").unwrap();
-        let scattered = fuzzy_match("spl", "supplier").unwrap();
+        let (consecutive, _) = fuzzy_match("spl", "splendid").unwrap();
+        let (scattered, _) = fuzzy_match("spl", "supplier").unwrap();
         assert!(
             consecutive > scattered,
             "consecutive={consecutive} should beat scattered={scattered}"
@@ -459,12 +547,79 @@ mod tests {
 
     #[test]
     fn word_start_match_scores_higher_than_mid_word_match() {
-        let word_start = fuzzy_match("h", "split horizontal").unwrap();
-        let mid_word = fuzzy_match("h", "ghost").unwrap();
+        let (word_start, _) = fuzzy_match("h", "split horizontal").unwrap();
+        let (mid_word, _) = fuzzy_match("h", "ghost").unwrap();
         assert!(
             word_start > mid_word,
             "word_start={word_start} should beat mid_word={mid_word}"
         );
+    }
+
+    // -- fuzzy_match indices ----------------------------------------------
+
+    #[test]
+    fn indices_are_contiguous_for_a_prefix_match() {
+        // "app" against "Apple Pie" (lowered "apple pie") matches
+        // a(0) p(1) p(2) — one unbroken run at the very start.
+        let (_, indices) = fuzzy_match("app", "Apple Pie").unwrap();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn indices_land_on_the_word_start_character() {
+        // "split horizontal": s0 p1 l2 i3 t4 ' '5 h6 ... — the single "h"
+        // query character claims the word-start h, not some other h later
+        // in "horizontal".
+        let (_, indices) = fuzzy_match("h", "split horizontal").unwrap();
+        assert_eq!(indices, vec![6]);
+    }
+
+    #[test]
+    fn indices_scatter_for_a_non_contiguous_match() {
+        // "supplier": s0 u1 p2 p3 l4 i5 e6 r7 — "spl" greedy-leftmost
+        // matches s(0), then the first "p" at 2 (skipping "u"), then the
+        // first "l" after that at 4 (skipping the second "p") — three
+        // indices with gaps, not one run.
+        let (_, indices) = fuzzy_match("spl", "supplier").unwrap();
+        assert_eq!(indices, vec![0, 2, 4]);
+    }
+
+    #[test]
+    fn indices_one_per_query_character_in_increasing_order() {
+        let (_, indices) = fuzzy_match("plt", "split horizontal").unwrap();
+        assert_eq!(indices.len(), 3);
+        assert!(
+            indices.windows(2).all(|w| w[0] < w[1]),
+            "indices should be strictly increasing: {indices:?}"
+        );
+    }
+
+    // -- highlight_runs -----------------------------------------------------
+
+    #[test]
+    fn highlight_runs_merges_a_contiguous_prefix_into_one_range() {
+        assert_eq!(highlight_runs("Apple Pie", &[0, 1, 2]), vec![0..3]);
+    }
+
+    #[test]
+    fn highlight_runs_keeps_scattered_indices_as_separate_ranges() {
+        assert_eq!(
+            highlight_runs("supplier", &[0, 2, 4]),
+            vec![0..1, 2..3, 4..5]
+        );
+    }
+
+    #[test]
+    fn highlight_runs_on_no_matched_indices_is_empty() {
+        assert!(highlight_runs("anything", &[]).is_empty());
+    }
+
+    #[test]
+    fn highlight_runs_uses_byte_offsets_past_a_multibyte_prefix() {
+        // A non-ASCII char earlier in the string shifts later byte offsets
+        // away from the char index — proving the conversion is char-aware,
+        // not a byte-index passthrough. "é" is 2 bytes in UTF-8.
+        assert_eq!(highlight_runs("é match", &[2, 3]), vec![3..5]);
     }
 
     // -- PaletteState -----------------------------------------------------
@@ -483,7 +638,9 @@ mod tests {
         ];
         let expected = items.clone();
         let state = PaletteState::new(items);
-        assert_eq!(state.filtered(), expected.iter().collect::<Vec<_>>());
+        let expected_filtered: Vec<(&PaletteItem, Vec<usize>)> =
+            expected.iter().map(|item| (item, Vec::new())).collect();
+        assert_eq!(state.filtered(), expected_filtered);
     }
 
     #[test]
@@ -496,7 +653,11 @@ mod tests {
         for c in "split".chars() {
             state.push_char(c);
         }
-        let titles: Vec<String> = state.filtered().iter().map(|i| i.title()).collect();
+        let titles: Vec<String> = state
+            .filtered()
+            .iter()
+            .map(|(item, _)| item.title())
+            .collect();
         assert_eq!(titles, vec!["Split right".to_string()]);
     }
 
@@ -509,7 +670,11 @@ mod tests {
         for c in "app".chars() {
             state.push_char(c);
         }
-        let titles: Vec<String> = state.filtered().iter().map(|i| i.title()).collect();
+        let titles: Vec<String> = state
+            .filtered()
+            .iter()
+            .map(|(item, _)| item.title())
+            .collect();
         assert_eq!(
             titles,
             vec!["Apple Pie".to_string(), "Snap Pool".to_string()]

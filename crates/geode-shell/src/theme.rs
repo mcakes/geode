@@ -195,6 +195,19 @@ pub fn load_bundled() -> (ThemeService, Vec<String>) {
     (service, warnings)
 }
 
+/// Normalize a theme family name for lookup (Task 6): `-` and `_` become
+/// spaces, then the whole string is lowercased — so `"macos-classic"`,
+/// `"macos_classic"`, and `"macOS Classic"` all compare equal. Used only
+/// by [`ThemeService::find_family`]; [`ThemeService::find_exact`] still
+/// matches a `ThemeConfig.name` byte-for-byte, since that's already a
+/// known-good fully qualified name.
+fn normalize_theme_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c == '-' || c == '_' { ' ' } else { c })
+        .collect::<String>()
+        .to_lowercase()
+}
+
 impl ThemeService {
     /// Every bundled theme's fully qualified name (e.g. `"Gruvbox Dark"`),
     /// sorted and deduplicated — the palette's theme-picker list.
@@ -218,10 +231,12 @@ impl ThemeService {
 
     /// Pure lookup, no `cx`: an exact `ThemeConfig.name` match wins outright
     /// (e.g. `"Gruvbox Dark"`, ignoring `mode` — a fully qualified name
-    /// already says which mode it is); failing that, a case-insensitive
-    /// family name combined with `mode` (e.g. `"Gruvbox"` + dark ->
-    /// `"Gruvbox Dark"`). `None` means "no such theme" — callers decide the
-    /// default-theme fallback.
+    /// already says which mode it is); failing that, a case- and
+    /// punctuation-insensitive family name (`-`/`_` normalize to a space
+    /// before case-fold, Task 6 — see [`normalize_theme_name`]) combined
+    /// with `mode` (e.g. `"Gruvbox"` + dark -> `"Gruvbox Dark"`, or
+    /// `"macos-classic"` + light -> `"macOS Classic Light"`). `None` means
+    /// "no such theme" — callers decide the default-theme fallback.
     pub fn resolve(&self, name: &str, mode: Mode) -> Option<&Rc<ThemeConfig>> {
         self.find_exact(name)
             .or_else(|| self.find_family(name, mode))
@@ -235,10 +250,16 @@ impl ThemeService {
             .map(|(family, config)| (family.as_str(), config))
     }
 
+    /// Family-name lookup is punctuation- and case-insensitive: `-`/`_`
+    /// normalize to a space before case-folding (Task 6), so a palette
+    /// query like `"macos-classic"` resolves the same family as
+    /// `"macOS Classic"` (the actual bundled name, `assets/themes/
+    /// macos-classic.json`'s `ThemeSet.name`) or `"macos_classic"`.
     fn find_family(&self, family: &str, mode: Mode) -> Option<(&str, &Rc<ThemeConfig>)> {
+        let target = normalize_theme_name(family);
         self.entries
             .iter()
-            .find(|(fam, config)| fam.eq_ignore_ascii_case(family) && config.mode == mode)
+            .find(|(fam, config)| normalize_theme_name(fam) == target && config.mode == mode)
             .map(|(fam, config)| (fam.as_str(), config))
     }
 
@@ -428,6 +449,38 @@ mod tests {
                 .as_ref(),
             "Gruvbox Light",
             "family lookup is case-insensitive"
+        );
+    }
+
+    #[test]
+    fn resolve_normalizes_dashes_and_underscores_to_spaces_in_family_lookup() {
+        let (service, _) = load_bundled();
+        // The bundled family name is "macOS Classic" (a space); Task 6:
+        // dash/underscore variants of it must resolve the same theme.
+        assert_eq!(
+            service
+                .resolve("macos-classic", Mode::Light)
+                .unwrap()
+                .name
+                .as_ref(),
+            "macOS Classic Light"
+        );
+        assert_eq!(
+            service
+                .resolve("macos_classic", Mode::Dark)
+                .unwrap()
+                .name
+                .as_ref(),
+            "macOS Classic Dark"
+        );
+        assert_eq!(
+            service
+                .resolve("MacOS-Classic", Mode::Dark)
+                .unwrap()
+                .name
+                .as_ref(),
+            "macOS Classic Dark",
+            "normalization combines with the existing case-insensitivity"
         );
     }
 

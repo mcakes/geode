@@ -339,6 +339,15 @@ impl ShellView {
             self.palette = None;
             return;
         }
+        // Opening the palette cancels any pending keymap sequence (spec:
+        // palette-open cancels pending — supersedes the 1b-ui deferred
+        // note that pending state would survive a palette session). The
+        // palette has its own key handling (`handle_palette_key`) that
+        // never touches `self.matcher`, so without this an unfinished
+        // sequence like the first "g" of "g g" would sit in `self.matcher`
+        // across the whole palette session and then resume matching
+        // against whatever key closes the palette.
+        self.matcher.cancel();
         let bindings = palette::build_binding_index(&self.services.keymap);
         let items = palette::build_items(&self.services.registry, &self.services.theme, &bindings);
         self.palette = Some(PaletteState::new(items));
@@ -1209,6 +1218,72 @@ mod tests {
         assert_eq!(
             pending_len, 1,
             "first 'g' of the 'g g' sequence should leave one pending keystroke"
+        );
+    }
+
+    /// Opening the palette while a keystroke sequence is pending cancels
+    /// that pending state (Task 6: `Matcher::cancel()` on palette open —
+    /// supersedes a 1b-ui deferred note that pending state would survive a
+    /// palette session). Pressing the first "g" of "g g", opening then
+    /// closing the palette, and pressing a fresh "g" must NOT complete the
+    /// original "g g" sequence — it starts a new one instead.
+    #[gpui::test]
+    fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("g");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.matcher.pending().len()),
+            1,
+            "first 'g' of the 'g g' sequence should leave one pending keystroke"
+        );
+
+        cx.simulate_keystrokes("ctrl-k");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "ctrl-k should open the palette"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.matcher.pending().is_empty()),
+            "opening the palette should cancel the pending 'g'"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+            "escape should close the palette"
+        );
+
+        cx.simulate_keystrokes("g");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.matcher.pending().len()),
+            1,
+            "a fresh 'g' after the palette closes should start a new pending \
+             sequence, not silently complete the pre-palette one"
         );
     }
 
