@@ -51,6 +51,7 @@ context = "workspace"
 "ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
 "mod+shift+t" = "theme::toggle_mode"
+"mod+," = "settings::open"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -159,8 +160,9 @@ mod tests {
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
         // 4 focus + 4 move + 4 resize + 2 splits + fullscreen + close + 9
-        // workspace switches + 2 palette::toggle bindings + theme toggle.
-        assert!(keymap.bindings().len() >= 28);
+        // workspace switches + 2 palette::toggle bindings + theme toggle +
+        // settings::open (Task 5).
+        assert!(keymap.bindings().len() >= 29);
     }
 
     #[test]

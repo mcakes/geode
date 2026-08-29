@@ -7,6 +7,7 @@
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 pub mod keys;
+pub mod settings_view;
 pub mod sidebar;
 pub mod status;
 pub mod toolbar;
@@ -366,7 +367,7 @@ impl ShellView {
     /// ~500ms tick (see `new`'s loop and `take_dirty_session_write`) — Task
     /// 3 fix round 1: writing synchronously here, once per dispatch, could
     /// stall the render thread under OS key-repeat on a slow filesystem.
-    fn dispatch(&mut self, action: &ActionId, cx: &mut Context<Self>) {
+    fn dispatch(&mut self, action: &ActionId, window: &mut Window, cx: &mut Context<Self>) {
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
             self.session_dirty = true;
@@ -375,10 +376,10 @@ impl ShellView {
         } else if action.0 == "theme::toggle_mode" {
             self.services.theme.toggle_mode(cx);
         } else if action.0 == "settings::open" {
-            // Task 4: registered and palette/sidebar-reachable now; Task 5
-            // fills this arm in with the real settings dialog (gpui-
-            // component's `setting` module). Deliberately a no-op today —
-            // not a missing case, so it prints/panics nothing.
+            // Task 5: the real settings dialog (gpui-component's `setting`
+            // module, wrapped in a `Dialog`). Reachable via `mod+,`, the
+            // palette, and the sidebar profile icon.
+            settings_view::open(cx.entity(), window, cx);
         }
     }
 
@@ -462,10 +463,15 @@ impl ShellView {
     /// immediately reopen". Skipping it instead makes selecting that row a
     /// true toggle: the palette just closes and stays closed, exactly like
     /// pressing the toggle keystroke a second time would.
-    fn dispatch_palette_item(&mut self, item: &PaletteItem, cx: &mut Context<Self>) {
+    fn dispatch_palette_item(
+        &mut self,
+        item: &PaletteItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match item {
             PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
-            PaletteItem::Action(id, ..) => self.dispatch(id, cx),
+            PaletteItem::Action(id, ..) => self.dispatch(id, window, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
                 // Dark"), which `ThemeService::resolve` matches outright
@@ -494,7 +500,12 @@ impl ShellView {
     /// named keys (`"backspace"`, `"up"`, `"down"`, `"enter"`, `"escape"`)
     /// that the shell-native conversion's matcher-oriented shape doesn't
     /// carry.
-    fn handle_palette_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn handle_palette_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let ks = &event.keystroke;
         let mods = ks.modifiers;
 
@@ -504,7 +515,7 @@ impl ShellView {
                 let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
                 self.palette = None;
                 if let Some(item) = selected {
-                    self.dispatch_palette_item(&item, cx);
+                    self.dispatch_palette_item(&item, window, cx);
                 }
             }
             "backspace" => {
@@ -598,7 +609,7 @@ impl ShellView {
         }
 
         if self.palette.is_some() {
-            self.handle_palette_key(event, cx);
+            self.handle_palette_key(event, window, cx);
             cx.notify();
             return;
         }
@@ -609,7 +620,7 @@ impl ShellView {
         let stack = self.context_stack();
         match self.matcher.press(&self.services.keymap, keystroke, &stack) {
             MatchResult::Matched(action) => {
-                self.dispatch(&action, cx);
+                self.dispatch(&action, window, cx);
                 cx.notify();
             }
             MatchResult::Pending | MatchResult::NoMatch => {
@@ -753,6 +764,7 @@ mod tests {
     use crate::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use crate::keymap::build_keymap;
     use geode_core::config::{ConfigSources, LayerDoc};
+    use gpui_component::WindowExt as _;
 
     fn test_services() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
@@ -2309,13 +2321,14 @@ mod tests {
         );
     }
 
-    /// `settings::open` (Task 4: the sidebar's profile icon) is registered
-    /// and dispatches cleanly as a no-op through the normal chain — Task 5
-    /// fills in the real settings dialog. Also stands in for "the sidebar
-    /// paints": its click handler calling into this exact `dispatch` path
-    /// is what `sidebar::sidebar`'s profile icon wires up.
+    /// `settings::open` (dispatched via `mod+,`, the palette, or the
+    /// sidebar profile icon) opens the real settings dialog (Task 5):
+    /// `window.has_active_dialog` flips true, and the dialog chrome paints
+    /// additional quads over the empty-workspace baseline. Also stands in
+    /// for "the sidebar paints": its click handler calling into this exact
+    /// `dispatch` path is what `sidebar::sidebar`'s profile icon wires up.
     #[gpui::test]
-    fn settings_open_dispatches_as_a_clean_no_op(cx: &mut gpui::TestAppContext) {
+    fn settings_open_opens_the_dialog(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -2340,16 +2353,150 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        shell.update(&mut cx, |shell, cx| {
-            shell.dispatch(&ActionId("settings::open".to_string()), cx);
+        assert!(
+            !cx.update(|window, cx| window.has_active_dialog(cx)),
+            "sanity: no dialog is open before dispatch"
+        );
+        let quads_before = cx.update(|window, _cx| window.painted_quads().len());
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("settings::open".to_string()), window, cx);
+            });
         });
 
-        // Reaching this point without panicking, plus the workspace being
-        // untouched, is the whole assertion: `settings::open` is not a
-        // workspace verb and must not be mistaken for one.
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "settings::open should have opened a Dialog layer, tracked by \
+             gpui-component's own Root state"
+        );
+
+        // The workspace itself must stay untouched — settings::open is not
+        // a workspace verb and must not be mistaken for one.
         let tile_count = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tiles().len()
         });
         assert_eq!(tile_count, 0);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let quads_after = cx.update(|window, _cx| window.painted_quads().len());
+        assert!(
+            quads_after > quads_before,
+            "the dialog overlay (backdrop + chrome + settings content) should \
+             paint additional quads over the empty-workspace baseline"
+        );
+    }
+
+    /// A real `mod+,` keystroke, through the actual key-event pipeline,
+    /// dispatches `settings::open` and opens the dialog — end-to-end
+    /// coverage of the `BUILTIN_KEYMAP` binding added in Task 5, mirroring
+    /// `mod_shift_t_keystroke_toggles_the_theme_mode` above.
+    #[gpui::test]
+    fn mod_comma_keystroke_opens_the_settings_dialog(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // The builtin keymap's mod alias is Alt (default_mod), so `mod+,`
+        // is `alt+,`.
+        cx.simulate_keystrokes("alt-,");
+
+        assert!(
+            cx.update(|window, cx| window.has_active_dialog(cx)),
+            "alt-, (mod+, = settings::open) should have opened the settings dialog"
+        );
+    }
+
+    /// `settings_view::set_theme`/`set_dark_mode` are the exact handlers the
+    /// dialog's theme dropdown/dark-mode switch invoke on selection/click
+    /// (see those functions' doc comments: simulating a real click through
+    /// the dropdown's popup-menu overlay, or the switch's own mouse
+    /// handling, is impractical from a `#[gpui::test]` — this drives the
+    /// identical path instead). Exercises both live-apply and the
+    /// `ThemeService` bookkeeping (`active_name`/`active_mode`) staying in
+    /// sync, the same contract `theme::toggle_mode` already has coverage
+    /// for elsewhere in this file.
+    #[gpui::test]
+    fn settings_dialog_theme_and_mode_setters_apply_live_through_theme_service(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // test_services() never calls apply_from_config, so the starting
+        // state is exactly load_bundled()'s own default: "Default Light",
+        // mode Light (matches gpui_component::init's own initial theme).
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
+            crate::theme::Mode::Light,
+            "sanity: the starting mode must be Light, or the assertions below \
+             wouldn't prove set_dark_mode actually flipped anything"
+        );
+
+        cx.update(|_window, cx| settings_view::set_theme(&shell, "Gruvbox", cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .theme
+                .active_name()
+                .to_string()),
+            "Gruvbox Light",
+            "set_theme should apply the named family at the currently active \
+             mode (light, the starting mode here) through ThemeService::apply"
+        );
+
+        cx.update(|_window, cx| settings_view::set_dark_mode(&shell, true, cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .theme
+                .active_name()
+                .to_string()),
+            "Gruvbox Dark",
+            "set_dark_mode(true) should flip to the dark variant through \
+             ThemeService::set_mode, staying within the same family"
+        );
+
+        cx.update(|_window, cx| settings_view::set_dark_mode(&shell, false, cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
+            crate::theme::Mode::Light,
+            "set_dark_mode(false) should flip back to light"
+        );
     }
 }
