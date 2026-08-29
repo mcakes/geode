@@ -21,14 +21,6 @@ use crate::theme::ThemeService;
 /// `"Theme: {name}"` under category `"Appearance"`).
 const THEME_CATEGORY: &str = "Appearance";
 
-/// Cap on how many filtered results the overlay draws (brief: "the top
-/// ~12 results"). Lives in the pure core (not the `gpui` rendering section
-/// below, even though it's only a `usize`) because `PaletteState::
-/// move_selection` also needs it: the selection must never walk past the
-/// last row `render` actually draws, or arrow-key navigation could park
-/// the cursor on a row that's invisible.
-const MAX_VISIBLE: usize = 12;
-
 /// One row the palette can show. `Action` carries the id (for dispatch),
 /// its registry title/category, and its rendered binding text if the
 /// keymap has one bound. `Theme`'s `String` is a fully qualified bundled
@@ -238,13 +230,17 @@ impl PaletteState {
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
-    /// pass ±1), clamped to the current filtered list's bounds *and* to
-    /// [`MAX_VISIBLE`] — `render` only ever draws the first `MAX_VISIBLE`
-    /// filtered rows (`.take(MAX_VISIBLE)`), so a selection allowed past
-    /// that point would point at a row nothing on screen highlights.
-    /// Leaves the selection at 0 without panicking when nothing matches.
+    /// pass ±1), clamped to the current filtered list's bounds — the FULL
+    /// list, not just what fits in one screenful. `render` now draws every
+    /// filtered row inside a scrollable viewport (rather than truncating to
+    /// a fixed window), and the caller that drives real key events
+    /// (`ShellView::handle_palette_key`) is responsible for scrolling the
+    /// newly selected row into view after each call here — see
+    /// `gpui::ScrollHandle::scroll_to_item`, invoked from that same
+    /// selection-change path. Leaves the selection at 0 without panicking
+    /// when nothing matches.
     pub fn move_selection(&mut self, delta: i32) {
-        let len = self.filtered().len().min(MAX_VISIBLE);
+        let len = self.filtered().len();
         if len == 0 {
             self.selected = 0;
             return;
@@ -346,13 +342,31 @@ pub fn build_items(
 // ---------------------------------------------------------------------
 
 use gpui::prelude::*;
-use gpui::{App, FontWeight, HighlightStyle, IntoElement, StyledText, div, px};
+use gpui::{App, FontWeight, HighlightStyle, IntoElement, ScrollHandle, StyledText, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fonts;
 
 /// Target overlay width in pixels (brief: "~560px wide").
 const WIDTH: f32 = 560.0;
+
+/// Sizing hint only (no longer a selection clamp — see `PaletteState::
+/// move_selection`'s doc comment): the number of rows the results viewport
+/// is tall enough to show before it needs to scroll. Item count today is
+/// 66 (`register_builtin_actions`' 15 actions + `theme::load_bundled`'s 51
+/// bundled theme entries — counted directly, not estimated, while doing
+/// this task's inventory), well within what a plain scrollable `div`
+/// handles without virtualization — see `ROW_HEIGHT` below for how this
+/// becomes a pixel height.
+const VISIBLE_ROWS: usize = 12;
+
+/// Estimated row height in pixels (`px_2`/`py_1` padding plus one line of
+/// default-size text) — used only to size the scrollable viewport to
+/// [`VISIBLE_ROWS`] rows; not load-bearing for correctness the way it would
+/// be for a hand-rolled offset calculation, because scroll-follow here goes
+/// through `gpui::ScrollHandle::scroll_to_item`, which measures real
+/// per-row layout bounds rather than trusting this estimate.
+const ROW_HEIGHT: f32 = 28.0;
 
 /// Render one row title with its [`fuzzy_match`]ed characters styled —
 /// `cx.theme().primary` plus a bold weight (plan constraint: no raw
@@ -387,11 +401,31 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
 
 /// The palette overlay: a centered, top-third, ~560px-wide panel on
 /// `cx.theme().popover`, an input line (rendered text + a trailing caret
-/// glyph — no `Input` entity needed for this), and up to
-/// [`MAX_VISIBLE`] results with the selected row highlighted
-/// (`cx.theme().selection` background, `cx.theme().primary` text — plan
-/// constraint: no raw colors, `cx.theme()` roles only) and its binding
-/// right-aligned in `cx.theme().muted_foreground`.
+/// glyph — no `Input` entity needed for this), and every filtered result
+/// inside a fixed-height (~[`VISIBLE_ROWS`] rows), scrollable list with the
+/// selected row highlighted (`cx.theme().selection` background,
+/// `cx.theme().primary` text — plan constraint: no raw colors, `cx.theme()`
+/// roles only) and its binding right-aligned in `cx.theme().muted_foreground`.
+///
+/// **Scroll mechanism, checked against the pinned gpui rev before building
+/// this** (`gpui::elements::div::{ScrollHandle, StatefulInteractiveElement}`,
+/// re-exported at the crate root): `scroll_handle` is a `Clone`-cheap
+/// (`Rc<RefCell<..>>`) handle the caller owns across frames (`ShellView`
+/// keeps one alongside `PaletteState`, both rebuilt together on palette
+/// open); `.id(..).overflow_y_scroll().track_scroll(scroll_handle)` on the
+/// list container turns it into a real scrollable viewport with mouse-wheel
+/// support built in (gpui-component's own `Scrollable`/list machinery — see
+/// `crates/ui/src/scroll/`, `crates/ui/src/list/list.rs` in the pinned
+/// gpui-component checkout — layers a custom scrollbar and virtualization
+/// on top of exactly this primitive; at 66 items neither is needed here,
+/// so this uses the primitive directly rather than pulling in `List`'s
+/// virtualized-row bookkeeping for a list this small). `ShellView`'s
+/// selection-change path (`move_selection` calls, plus the selection resets
+/// in `push_char`/`backspace`) calls `scroll_handle.scroll_to_item(new_
+/// selected)` — a real per-frame layout measurement, not a pixel-math
+/// guess — so the newly selected row always ends up visible; this function
+/// only wires the handle into the container, it never calls `scroll_to_item`
+/// itself.
 ///
 /// `viewport_width`/`viewport_height` are the window's own drawable size
 /// (`Window::viewport_size`, same source `ShellView::render` already reads
@@ -400,6 +434,7 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
 /// `shell::status::status_bar`.
 pub fn render(
     state: &PaletteState,
+    scroll_handle: &ScrollHandle,
     viewport_width: f32,
     viewport_height: f32,
     cx: &App,
@@ -411,7 +446,28 @@ pub fn render(
 
     let results = state.filtered();
 
-    let mut list = v_flex().w_full();
+    // Fixed-height, scrollable viewport over the FULL filtered list (no
+    // truncation) — `.id(..)` makes this a `Stateful<Div>`, required for
+    // `overflow_y_scroll`/`track_scroll` (gpui::elements::div::
+    // StatefulInteractiveElement); mouse-wheel scrolling comes for free
+    // from `overflow_y_scroll` once the container is tracked. Sized to
+    // `VISIBLE_ROWS` * `ROW_HEIGHT` when there's more than one screenful,
+    // or exactly the content height otherwise, so a short result list
+    // doesn't leave dead scrollable space below it.
+    let mut list = v_flex()
+        .id("palette-results")
+        .w_full()
+        .h(px(
+            (results.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        ))
+        .overflow_y_scroll()
+        .track_scroll(scroll_handle)
+        // Test-only (no-op outside `cfg(test)`/`test-support`, see gpui's
+        // `debug_selector` doc comment): lets a `#[gpui::test]` recover
+        // this container's painted bounds via `VisualTestContext::
+        // debug_bounds` and check a row's bounds actually fall inside it
+        // — i.e. that scroll-follow, not just selection, moved.
+        .debug_selector(|| "palette-list".to_string());
     if results.is_empty() {
         list = list.child(
             div()
@@ -421,7 +477,7 @@ pub fn render(
                 .child("No matches"),
         );
     } else {
-        for (i, (item, indices)) in results.into_iter().take(MAX_VISIBLE).enumerate() {
+        for (i, (item, indices)) in results.into_iter().enumerate() {
             let is_selected = i == state.selected();
             let mut row = h_flex()
                 .w_full()
@@ -434,6 +490,8 @@ pub fn render(
             if is_selected {
                 row = row.bg(theme.selection).text_color(theme.primary);
             }
+            // Test-only, see `list`'s `debug_selector` comment above.
+            let row = row.debug_selector(move || format!("palette-row-{i}"));
             let label = h_flex()
                 .gap_2()
                 .items_center()
@@ -719,21 +777,25 @@ mod tests {
     }
 
     #[test]
-    fn move_selection_clamps_to_max_visible_even_with_more_matches() {
-        // More filtered items than the render path's MAX_VISIBLE cap — the
-        // selection must never walk down into a row `render`'s
-        // `.take(MAX_VISIBLE)` never draws.
-        let items: Vec<PaletteItem> = (0..MAX_VISIBLE + 8)
+    fn move_selection_reaches_the_last_of_many_filtered_items() {
+        // Item count well past one screenful (today's real registry+theme
+        // set is 66: 15 actions + 51 themes) — the selection must walk all the
+        // way to the last FILTERED row, not clamp at some fixed visible
+        // window. `render` now draws every filtered row inside a
+        // scrollable viewport rather than truncating, so there is no
+        // shorter bound to clamp against here any more.
+        const ITEM_COUNT: usize = 78;
+        let items: Vec<PaletteItem> = (0..ITEM_COUNT)
             .map(|i| action(&format!("a{i}"), &format!("Item {i}"), "Test", None))
             .collect();
         let mut state = PaletteState::new(items);
-        for _ in 0..(MAX_VISIBLE + 8) {
+        for _ in 0..(ITEM_COUNT + 8) {
             state.move_selection(1);
         }
         assert_eq!(
             state.selected(),
-            MAX_VISIBLE - 1,
-            "selection must clamp at the last visible row, not the last filtered row"
+            ITEM_COUNT - 1,
+            "selection must clamp at the last filtered row, however many there are"
         );
     }
 

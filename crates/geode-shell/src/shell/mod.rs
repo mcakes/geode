@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, Window, div, px,
+    Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, ScrollHandle, Window,
+    div, px,
 };
 use gpui_component::input::InputState;
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
@@ -78,6 +79,16 @@ pub struct ShellView {
     /// built once at palette-open, not per frame) and dropped on close —
     /// nothing about it survives being closed and reopened.
     palette: Option<PaletteState>,
+    /// Scroll state for the open palette's results list, tracked across
+    /// frames the same way `filter_input`'s `Entity<InputState>` is
+    /// (`gpui::ScrollHandle` is a cheap `Clone` — `Rc<RefCell<..>>` — but a
+    /// *fresh* one must still be handed to `track_scroll` every frame the
+    /// list renders, so this is that stable handle). Rebuilt alongside
+    /// `palette` in `toggle_palette` on every open, and driven from the
+    /// same selection-change path as `palette` itself (`move_selection`,
+    /// `push_char`, `backspace` in `handle_palette_key`) via `sync_palette_
+    /// scroll`, so the selected row always scrolls into view.
+    palette_scroll: ScrollHandle,
     /// Desk and user config directories the reload watcher polls (Task
     /// 1c-1). Owned here (not just captured by the background task) so the
     /// watcher's own loop re-reads them fresh from the entity each poll —
@@ -250,6 +261,7 @@ impl ShellView {
             matcher: Matcher::default(),
             focus_handle,
             palette: None,
+            palette_scroll: ScrollHandle::new(),
             desk_dir,
             user_dir,
             last_snapshot: reload::Snapshot::default(),
@@ -403,6 +415,25 @@ impl ShellView {
         let bindings = palette::build_binding_index(&self.services.keymap);
         let items = palette::build_items(&self.services.registry, &self.services.theme, &bindings);
         self.palette = Some(PaletteState::new(items));
+        // Fresh scroll state for a fresh palette session — a stale offset
+        // left over from a previous open (a different query, a different
+        // scroll position) must not carry over now that the results list
+        // scrolls a real viewport instead of always fitting on screen.
+        self.palette_scroll = ScrollHandle::new();
+    }
+
+    /// Scroll the palette's results viewport so the currently selected row
+    /// is visible (`gpui::ScrollHandle::scroll_to_item`, a real per-frame
+    /// layout measurement — see `palette::render`'s doc comment). Called
+    /// from every path in `handle_palette_key` that can change `self.
+    /// palette`'s selection: the two arrow/ctrl+p/ctrl+n branches, and the
+    /// query-edit branches (`push_char`/`backspace` both reset the
+    /// selection to row 0, which is itself a selection change the viewport
+    /// must follow). A no-op while the palette is closed.
+    fn sync_palette_scroll(&self) {
+        if let Some(palette) = self.palette.as_ref() {
+            self.palette_scroll.scroll_to_item(palette.selected());
+        }
     }
 
     /// Apply one resolved action id through the shell's one dispatch chain
@@ -632,26 +663,31 @@ impl ShellView {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.backspace();
                 }
+                self.sync_palette_scroll();
             }
             "up" => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.move_selection(-1);
                 }
+                self.sync_palette_scroll();
             }
             "down" => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.move_selection(1);
                 }
+                self.sync_palette_scroll();
             }
             "p" if mods.control => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.move_selection(-1);
                 }
+                self.sync_palette_scroll();
             }
             "n" if mods.control => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.move_selection(1);
                 }
+                self.sync_palette_scroll();
             }
             _ => {
                 // Plain typing only: a chord that also holds ctrl/cmd/fn
@@ -666,6 +702,7 @@ impl ShellView {
                     for c in chars.chars() {
                         palette.push_char(c);
                     }
+                    self.sync_palette_scroll();
                 }
             }
         }
@@ -916,7 +953,13 @@ impl Render for ShellView {
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
             .when_some(self.palette.as_ref(), |el, state| {
-                el.child(palette::render(state, width, viewport_height, cx))
+                el.child(palette::render(
+                    state,
+                    &self.palette_scroll,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
             })
             .when_some(which_key_continuations, |el, continuations| {
                 el.child(whichkey::render(
@@ -1801,6 +1844,91 @@ mod tests {
             after, "Gruvbox Dark",
             "enter on \"Theme: Gruvbox Dark\" should have dispatched it through \
              ThemeService::apply, changing the active theme"
+        );
+    }
+
+    /// The full-list scroll behavior this task adds: real `down` keystrokes
+    /// (not a direct `PaletteState::move_selection` call — this is the
+    /// actual key-event pipeline `handle_palette_key` drives) move the
+    /// selection well past `palette::VISIBLE_ROWS` (12) into rows that,
+    /// before this task, `render` would never have drawn (it truncated to
+    /// the top 12 filtered rows) and `move_selection`'s old clamp would
+    /// never have let the selection reach. Also checks, via gpui's
+    /// test-only `debug_selector`/
+    /// `debug_bounds` (wired up in `palette::render`), that the selected
+    /// row's *painted* bounds actually land inside the scrollable list
+    /// container's bounds — proving the viewport followed the selection
+    /// (`ShellView::sync_palette_scroll`'s `ScrollHandle::scroll_to_item`)
+    /// rather than just moving an index nothing on screen reflects.
+    #[gpui::test]
+    fn arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_view(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-k");
+
+        let total = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().unwrap().filtered().len()
+        });
+        assert!(
+            total > 20,
+            "this test needs a registry+theme set with more than one \
+             screenful of results (got {total}) to exercise scrolling past \
+             row 12 at all"
+        );
+
+        // 20 real `down` keystrokes through the actual key-event pipeline —
+        // well past the old MAX_VISIBLE=12 clamp.
+        let downs = vec!["down"; 20].join(" ");
+        cx.simulate_keystrokes(&downs);
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            20,
+            "20 real 'down' keystrokes should advance the selection to row \
+             20, well past the old 12-row clamp"
+        );
+
+        cx.update(|window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+        });
+
+        let list_bounds = cx
+            .debug_bounds("palette-list")
+            .expect("the results list container should have painted");
+        let row_bounds = cx
+            .debug_bounds("palette-row-20")
+            .expect("row 20 should still be part of the layout tree (no virtualization)");
+        assert!(
+            list_bounds.intersects(&row_bounds),
+            "row 20 {row_bounds:?} should be scrolled into the visible list \
+             viewport {list_bounds:?} after the selection moved onto it, not \
+             left above/below it with only its index having changed"
         );
     }
 
