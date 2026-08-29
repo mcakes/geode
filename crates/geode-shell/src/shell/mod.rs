@@ -488,6 +488,10 @@ impl ShellView {
             // `dialog::open_shell_dialog` (Task 9) via `settings_view::open`
             // itself, so it gets the crate's uniform open-time hygiene.
             settings_view::open(self, window, cx);
+        } else if action.0 == "keybindings::open" {
+            // Part B fills this: the keybinding dialog itself (vimnav.rs +
+            // keymap_edit.rs from this part are its pure cores). Reachable
+            // today only via the palette (defaults.rs: no key binding).
         }
     }
 
