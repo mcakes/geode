@@ -3505,4 +3505,91 @@ mod tests {
             "open_shell_dialog should have opened the dialog layer"
         );
     }
+
+    /// E2E test: closing a tile focuses the adjacent sibling (next in tree order),
+    /// not the first leaf. Build three side-by-side tiles by splitting right twice,
+    /// focus the middle one, close it, and assert focus is on the adjacent tile
+    /// (which would be different from the first leaf if the old rule applied).
+    #[gpui::test]
+    fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Create three tiles by splitting right twice (ctrl+v = split right).
+        // First ctrl+v on empty tree creates tile 1 and focuses it.
+        // Second ctrl+v creates tile 2 right of tile 1 and focuses it.
+        // Third ctrl+v creates tile 3 right of tile 2 and focuses it.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+
+        // Verify we have three tiles.
+        let tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(tile_count, 3, "should have created three tiles");
+
+        // Record the tile ids in tree order before focusing the middle one.
+        let tiles_before =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tiles());
+        assert_eq!(tiles_before.len(), 3);
+
+        // After three splits, the focused tile is the last one (tiles_before[2]).
+        // Focus the middle tile (at index 1) using focus_left (ctrl+w h).
+        cx.simulate_keystrokes("ctrl-w h");
+
+        let focused_tile =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        assert_eq!(
+            focused_tile,
+            Some(tiles_before[1]),
+            "should have focused the middle tile (one position left)"
+        );
+
+        // Close the middle tile (ctrl+shift+w).
+        cx.simulate_keystrokes("ctrl-shift-w");
+
+        // Verify we have two tiles left.
+        let remaining_tile_count = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tiles().len()
+        });
+        assert_eq!(remaining_tile_count, 2, "should have two tiles after close");
+
+        let tiles_after =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tiles());
+        // tiles_after should be [tiles_before[0], tiles_before[2]]
+        assert_eq!(tiles_after, vec![tiles_before[0], tiles_before[2]]);
+
+        // Assert that the focused tile is tiles_before[2] (the adjacent sibling in tree order).
+        let focused_after_close =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+
+        assert_eq!(
+            focused_after_close,
+            Some(tiles_before[2]),
+            "closing the middle tile should focus the adjacent sibling (tiles_before[2]), \
+             not the first leaf (tiles_before[0])"
+        );
+    }
 }

@@ -172,15 +172,31 @@ impl Tree {
     }
 
     /// Close the focused tile. Single-child splits collapse; sibling ratios
-    /// renormalize. Focus falls back to the tree's first leaf (documented
-    /// v1 simplification).
+    /// renormalize. Focus moves to the tree-order neighbor of the closed tile:
+    /// the leaf that was immediately after it in the pre-close leaf order,
+    /// or the previous one if the last leaf was closed. If no tiles remain,
+    /// focus becomes None.
     pub fn close(&mut self) {
         let Some(focused) = self.focused else { return };
         if self.fullscreen == Some(focused) {
             self.fullscreen = None;
         }
+
+        // Find the position of the focused tile in the pre-close leaf order.
+        let pre_close_tiles = self.tiles();
+        let k = pre_close_tiles
+            .iter()
+            .position(|&id| id == focused)
+            .unwrap_or(0);
+
+        // Remove the leaf from the tree.
         self.root = self.root.take().and_then(|n| remove_leaf(n, focused));
-        self.focused = self.root.as_ref().map(first_leaf);
+
+        // Focus the leaf that was immediately after the closed one, or the
+        // previous one if the closed tile was last.
+        let post_close_tiles = self.tiles();
+        let focus_index = std::cmp::min(k, post_close_tiles.len().saturating_sub(1));
+        self.focused = post_close_tiles.get(focus_index).copied();
     }
 
     /// Compute every visible tile's rectangle within `bounds`. When a tile
@@ -460,15 +476,6 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
                 collect_leaves(child, out);
             }
         }
-    }
-}
-
-// Structural invariant: a Split always has >= 2 children (constructions
-// create pairs; collapse removes 1-child splits).
-fn first_leaf(node: &Node) -> TileId {
-    match node {
-        Node::Leaf(id) => *id,
-        Node::Split { children, .. } => first_leaf(&children[0]),
     }
 }
 
@@ -1089,6 +1096,89 @@ mod tests {
         assert_eq!(tree.fullscreen(), None, "split must exit fullscreen");
         assert_eq!(tree.focused(), Some(TileId(9)));
         assert_eq!(rects(&tree).len(), 5, "all tiles visible again");
+    }
+
+    #[test]
+    fn close_three_siblings_focuses_adjacent() {
+        // [1 | 2 | 3]: close middle (2) → focus 3
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree.focus(TileId(2));
+        tree.close();
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(3)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(3)),
+            "closing middle tile should focus the next sibling"
+        );
+    }
+
+    #[test]
+    fn close_three_siblings_first_focuses_next() {
+        // [1 | 2 | 3]: close first (1) → focus 2
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        tree.close();
+        assert_eq!(tree.tiles(), vec![TileId(2), TileId(3)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(2)),
+            "closing first tile should focus the next tile"
+        );
+    }
+
+    #[test]
+    fn close_three_siblings_last_focuses_previous() {
+        // [1 | 2 | 3]: close last (3) → focus 2
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree.focus(TileId(3));
+        tree.close();
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(2)),
+            "closing last tile should focus the previous tile"
+        );
+    }
+
+    #[test]
+    fn close_nested_tile_focuses_tree_order_neighbor() {
+        // Using the 2x2 grid fixture: tiles in tree order are [1, 4, 2, 3]
+        // Close tile 1 (at index 0): should focus tile 4 (at new index 0, which was 1)
+        // This shows the neighbor rule applies to nested leaves where old behavior
+        // would have also focused the first leaf, but now we follow tree order.
+        let mut tree = grid(); // tiles: [1, 4, 2, 3], focused: 1
+        tree.close(); // closes tile 1 at index 0
+        assert_eq!(tree.tiles(), vec![TileId(4), TileId(2), TileId(3)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(4)),
+            "closing first nested tile should focus the tree-order neighbor"
+        );
+    }
+
+    #[test]
+    fn close_nested_tile_last_position_focuses_previous() {
+        // Using the 2x2 grid fixture: tiles in tree order are [1, 4, 2, 3]
+        // Focus and close tile 3 (at index 3): should focus tile 2 (at new index 2)
+        // This shows the neighbor rule works at nested leaves.
+        let mut tree = grid(); // tiles: [1, 4, 2, 3], focused: 1
+        tree.focus(TileId(3));
+        tree.close(); // closes tile 3 at index 3
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(4), TileId(2)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(2)),
+            "closing last nested tile should focus the previous tile"
+        );
     }
 
     // --- Tree::from_parts (Task 3: session restore reconstruction) -----
