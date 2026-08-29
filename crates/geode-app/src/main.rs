@@ -147,13 +147,7 @@ fn print_diagnostic(source: &str, diag: &Diagnostic) {
         Severity::Warning => "warning",
         Severity::Error => "error",
     };
-    let layer = diag.layer.map(|l| l.name()).unwrap_or("-");
-    let file = diag
-        .file
-        .as_deref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "-".to_string());
-    eprintln!("[{source}] {severity} ({layer} {file}): {}", diag.message);
+    eprintln!("[{source}] {severity} {diag}");
 }
 
 /// Desk and user config directories (spec §8): desk comes from

@@ -46,6 +46,24 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+impl std::fmt::Display for Diagnostic {
+    /// `[layer] file: message`, degrading cleanly when either is absent:
+    /// `[user] /path/keymap.toml: parse error` (both present), `[builtin]
+    /// <no file>: message` (file absent), `<no file>: message` (both
+    /// absent) — the leading `[layer] ` is simply omitted rather than
+    /// printing an empty bracket pair.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(layer) = self.layer {
+            write!(f, "[{}] ", layer.name())?;
+        }
+        match &self.file {
+            Some(file) => write!(f, "{}: ", file.display()),
+            None => write!(f, "<no file>: "),
+        }?;
+        write!(f, "{}", self.message)
+    }
+}
+
 impl Diagnostic {
     pub fn error(layer: Layer, file: PathBuf, message: impl Into<String>) -> Self {
         Self {
@@ -239,6 +257,47 @@ mod tests {
             config.explain("views", "risk.dataset"),
             Some(Layer::Builtin)
         );
+    }
+
+    // --- Diagnostic Display -------------------------------------------
+
+    #[test]
+    fn display_with_layer_and_file() {
+        let diag = Diagnostic::error(Layer::User, PathBuf::from("/path/keymap.toml"), "bad toml");
+        assert_eq!(diag.to_string(), "[user] /path/keymap.toml: bad toml");
+    }
+
+    #[test]
+    fn display_with_layer_and_no_file() {
+        let diag = Diagnostic {
+            severity: Severity::Error,
+            layer: Some(Layer::Builtin),
+            file: None,
+            message: "builtin doc invalid".to_string(),
+        };
+        assert_eq!(diag.to_string(), "[builtin] <no file>: builtin doc invalid");
+    }
+
+    #[test]
+    fn display_with_file_and_no_layer() {
+        let diag = Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: Some(PathBuf::from("app.toml")),
+            message: "unrecognized key".to_string(),
+        };
+        assert_eq!(diag.to_string(), "app.toml: unrecognized key");
+    }
+
+    #[test]
+    fn display_with_neither_layer_nor_file() {
+        let diag = Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: None,
+            message: "generic warning".to_string(),
+        };
+        assert_eq!(diag.to_string(), "<no file>: generic warning");
     }
 
     #[test]

@@ -609,8 +609,13 @@ impl ShellView {
             return;
         }
 
-        if let Some(keystroke) = convert_keystroke(&event.keystroke)
-            && self.is_palette_toggle(&keystroke)
+        // Converted once and reused below — the palette-toggle check and
+        // the closed-palette dispatch both need it, and re-converting the
+        // same raw event twice was pure waste.
+        let keystroke = convert_keystroke(&event.keystroke);
+
+        if let Some(ks) = &keystroke
+            && self.is_palette_toggle(ks)
         {
             self.toggle_palette();
             cx.notify();
@@ -623,7 +628,7 @@ impl ShellView {
             return;
         }
 
-        let Some(keystroke) = convert_keystroke(&event.keystroke) else {
+        let Some(keystroke) = keystroke else {
             return;
         };
         let stack = self.context_stack();
@@ -680,6 +685,13 @@ impl Render for ShellView {
         if rects.is_empty() {
             surface = surface.flex().items_center().justify_center().child(
                 div()
+                    // Test-only hook (no-op outside test/test-support
+                    // builds): lets a `#[gpui::test]` confirm this branch
+                    // actually painted via `VisualTestContext::debug_bounds`
+                    // — gpui's test API has no way to inspect painted text
+                    // content itself, so this is the closest honest check
+                    // available for "the hint painted".
+                    .debug_selector(|| "empty-hint".to_string())
                     .text_color(cx.theme().muted_foreground)
                     .child("ctrl+h / ctrl+v to open a tile"),
             );
@@ -794,6 +806,61 @@ mod tests {
             theme,
             session_path: None,
         }
+    }
+
+    /// The empty-workspace hint (`"ctrl+h / ctrl+v to open a tile"`) paints
+    /// when there are no tiles. gpui's test API (`painted_quads`) has no way
+    /// to inspect painted *text* content directly, so this asserts what it
+    /// can see honestly: the hint's container div — tagged with a
+    /// test-only `debug_selector` (a no-op outside test builds, see the
+    /// comment at its call site in `Render for ShellView`) — actually
+    /// painted, with real (non-zero) bounds, and that painting it produced
+    /// at least one quad in the scene. This does not prove the glyphs
+    /// themselves rasterized correctly — a known limitation of gpui's
+    /// current test surface, not something this test can close.
+    #[gpui::test]
+    fn empty_workspace_paints_the_hint(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let tile_count = window.root(&mut cx).unwrap().read_with(&cx, |root, cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+                .read(cx)
+                .services
+                .workspaces
+                .active()
+                .tiles()
+                .len()
+        });
+        assert_eq!(tile_count, 0, "sanity: workspace starts with no tiles");
+
+        let hint_bounds = cx.debug_bounds("empty-hint");
+        assert!(
+            hint_bounds.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the empty-hint div should have painted with non-zero bounds, got {hint_bounds:?}"
+        );
+
+        let quads = cx.update(|window, _cx| window.painted_quads().len());
+        assert!(
+            quads > 0,
+            "painting the empty-hint branch should have produced at least one quad"
+        );
     }
 
     /// End-to-end: a real `ctrl+v` keystroke, dispatched through gpui's own
@@ -966,6 +1033,93 @@ mod tests {
             (focused_width - (0.5 + crate::tiling::RESIZE_STEP)).abs() < 1e-4,
             "shift+h should have grown the focused tile leftward by RESIZE_STEP, \
              got width {focused_width}"
+        );
+    }
+
+    /// End-to-end (ledgered from 1b-ui T3): a real mouse-down at a
+    /// non-focused tile's on-screen coordinates focuses it, exercising the
+    /// `on_mouse_down` handler wired up in `Render for ShellView` (not the
+    /// keyboard path). Two tiles side by side; `ctrl+w h` first moves focus
+    /// off the freshly-split (right) tile so the click has something to
+    /// change. The click point is derived from the same layout `render`
+    /// itself uses — `Tree::layout` over the tile area, offset by the
+    /// sidebar/toolbar chrome (`sidebar::WIDTH`, `TITLE_BAR_HEIGHT`; see
+    /// CLAUDE.md's chrome-offset note) — rather than a hand-guessed pixel,
+    /// so the test tracks the real geometry instead of duplicating it.
+    #[gpui::test]
+    fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        // Two tiles side by side; move focus to the left tile so the right
+        // tile (about to be clicked) starts out unfocused.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-w h");
+
+        let before_focus =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+
+        // Same layout math as `Render for ShellView`: the tile area is the
+        // viewport minus the toolbar, sidebar, and status bar.
+        let (target_id, click_point) = cx.update(|window, cx| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+
+            let rects = shell.read(cx).services.workspaces.active().layout(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: tile_width,
+                h: content_height,
+            });
+            let (id, r) = rects
+                .into_iter()
+                .find(|(id, _)| Some(*id) != before_focus)
+                .expect("a second, non-focused tile exists");
+            let point = gpui::point(
+                px(sidebar::WIDTH + r.x + r.w / 2.0),
+                px(toolbar_height + r.y + r.h / 2.0),
+            );
+            (id, point)
+        });
+
+        cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
+
+        let after_focus =
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        assert_eq!(
+            after_focus,
+            Some(target_id),
+            "a mouse-down inside a non-focused tile should have focused it \
+             (before: {before_focus:?}, clicked tile: {target_id:?}, after: {after_focus:?})"
+        );
+        assert_ne!(
+            after_focus, before_focus,
+            "the click should have changed which tile is focused"
         );
     }
 
