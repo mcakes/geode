@@ -205,6 +205,44 @@ pub fn find_match(
     None
 }
 
+/// The byte range of the first case-insensitive occurrence of `query` in
+/// `text`, for span highlighting (`StyledText::with_highlights` takes byte
+/// ranges) — the *display* counterpart of [`find_match`]'s yes/no. `None`
+/// for an empty query or no occurrence.
+///
+/// Char-wise scan rather than `to_lowercase().find(..)` on the whole
+/// string: lowercasing can change byte lengths (ß → ss), which would skew
+/// a byte offset found in the lowered copy when mapped back onto `text`.
+/// Comparing per-char keeps every returned offset a real boundary in
+/// `text` itself.
+pub fn match_range(text: &str, query: &str) -> Option<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return None;
+    }
+    let query_lower: Vec<char> = query.chars().flat_map(char::to_lowercase).collect();
+    text.char_indices().find_map(|(start, _)| {
+        prefix_match_len(&text[start..], &query_lower).map(|len| start..start + len)
+    })
+}
+
+/// If `slice` begins with the (already-lowercased) query chars, the byte
+/// length of that matching prefix in `slice`'s own encoding; else `None`.
+fn prefix_match_len(slice: &str, query_lower: &[char]) -> Option<usize> {
+    let mut qpos = 0;
+    for (offset, ch) in slice.char_indices() {
+        for lc in ch.to_lowercase() {
+            if query_lower.get(qpos) != Some(&lc) {
+                return None;
+            }
+            qpos += 1;
+        }
+        if qpos >= query_lower.len() {
+            return Some(offset + ch.len_utf8());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +381,36 @@ mod tests {
         assert_eq!(find_match(&t, 0, FindDirection::Forward, "zzz"), None);
         assert_eq!(find_match(&t, 0, FindDirection::Forward, ""), None);
         assert_eq!(find_match(&[], 0, FindDirection::Forward, "a"), None);
+    }
+
+    #[test]
+    fn match_range_finds_the_first_case_insensitive_occurrence() {
+        assert_eq!(match_range("Focus left", "focus"), Some(0..5));
+        assert_eq!(match_range("Focus left", "LEFT"), Some(6..10));
+        assert_eq!(match_range("workspace::focus_left", "focus"), Some(11..16));
+    }
+
+    #[test]
+    fn match_range_none_for_no_match_or_empty_query() {
+        assert_eq!(match_range("Focus left", "zzz"), None);
+        assert_eq!(match_range("Focus left", ""), None);
+        assert_eq!(match_range("", "a"), None);
+    }
+
+    #[test]
+    fn match_range_returns_byte_offsets_on_char_boundaries() {
+        // Multibyte prefix: 'é' is 2 bytes — the range must be byte-
+        // addressed (for StyledText::with_highlights) yet still start on
+        // the real boundary of the matched span.
+        let text = "éclair Focus";
+        let range = match_range(text, "focus").expect("should match");
+        assert_eq!(&text[range], "Focus");
+    }
+
+    #[test]
+    fn match_range_matches_case_insensitively_across_multibyte_chars() {
+        let text = "ÉCLAIR";
+        let range = match_range(text, "éclair").expect("should match");
+        assert_eq!(range, 0..text.len());
     }
 }

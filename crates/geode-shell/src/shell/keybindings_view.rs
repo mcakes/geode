@@ -51,7 +51,10 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, MouseButton, StyledText, Window,
+    div, px,
+};
 use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -61,7 +64,7 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
 use crate::keymap_edit::{Displacement, Rebind, apply_rebind};
 use crate::palette;
-use crate::vimfind::{FindDirection, FindResult, VimFind, find_match};
+use crate::vimfind::{FindDirection, FindResult, VimFind, find_match, match_range};
 use crate::vimnav::{self, NavResult, VimListNav};
 
 use super::ShellView;
@@ -338,6 +341,19 @@ pub fn press_while_finding(state: &mut KeybindingsState, texts: &[String], ks: &
     }
 }
 
+/// The query whose matches the rows should highlight: the live one while
+/// a find session is editing (updating with every keystroke), else the
+/// last committed one — vim `hlsearch`: matches stay lit for `n`/`N`
+/// until the dialog closes (state is fresh per open; there is no `:noh`).
+/// `None` when neither exists or the live query is still empty.
+pub fn highlight_query(state: &KeybindingsState) -> Option<&str> {
+    state
+        .find
+        .query()
+        .or(state.find.last_query())
+        .filter(|q| !q.is_empty())
+}
+
 /// Repeat the last committed find in `dir` (`n`/`N`), excluding the
 /// current row so every press advances (wrapping). Returns false — the
 /// keystroke was not a find repeat — when nothing was ever committed;
@@ -604,6 +620,30 @@ fn spawn_rebind(
         .detach();
 }
 
+/// One line of a row's label with the find query's matched span lit —
+/// contiguous substring, so a background tint (`primary` at 20%, the same
+/// tint idiom the sidebar's active workspace disc uses — no raw colors)
+/// plus bold, via `StyledText::with_highlights` exactly as the palette's
+/// `highlighted_title` does (see its doc comment for why `StyledText`
+/// beats hand-rolled span divs here; byte range from
+/// [`vimfind::match_range`](crate::vimfind::match_range)). Plain text when
+/// there's no query or this line doesn't contain it.
+fn highlighted_text(text: &str, query: Option<&str>, primary: gpui::Hsla) -> AnyElement {
+    match query.and_then(|q| match_range(text, q)) {
+        Some(range) => {
+            let style = HighlightStyle {
+                background_color: Some(primary.opacity(0.2)),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            };
+            StyledText::new(text.to_string())
+                .with_highlights([(range, style)])
+                .into_any_element()
+        }
+        None => div().child(text.to_string()).into_any_element(),
+    }
+}
+
 /// The [`dialog::ShellModal::build`] closure body: a scrollable row list
 /// (title + category on the left, the current binding as [`Kbd`] chips —
 /// or "unbound" — on the right, live capture chips while listening) plus a
@@ -623,6 +663,7 @@ fn build(
     };
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let theme = cx.theme();
+    let hl_query = highlight_query(state);
 
     let mut list = v_flex()
         .id("keybindings-list")
@@ -652,12 +693,12 @@ fn build(
 
         let label = v_flex()
             .gap_0p5()
-            .child(div().child(row.title.clone()))
+            .child(highlighted_text(&row.title, hl_query, theme.primary))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(row.category.clone()),
+                    .child(highlighted_text(&row.category, hl_query, theme.primary)),
             );
 
         let binding_el: AnyElement = if is_listening {
@@ -1256,6 +1297,34 @@ mod tests {
         assert!(!state.find.is_active());
         assert_eq!(state.find_anchor, None);
         assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn highlight_query_prefers_the_live_query_then_the_committed_one() {
+        let mut state = KeybindingsState::default();
+        assert_eq!(highlight_query(&state), None);
+
+        // Freshly opened session, nothing typed: nothing lights up (an
+        // old committed query must not glow through an empty prompt).
+        state.find.start();
+        state.find.press(&key("a"));
+        state.find.press(&key("enter"));
+        assert_eq!(highlight_query(&state), Some("a"), "committed query");
+        state.find.start();
+        assert_eq!(
+            highlight_query(&state),
+            None,
+            "an active-but-empty session must blank the highlight, not \
+             show the stale committed query"
+        );
+        state.find.press(&key("b"));
+        assert_eq!(highlight_query(&state), Some("b"), "live query wins");
+        state.find.press(&key("escape"));
+        assert_eq!(
+            highlight_query(&state),
+            Some("a"),
+            "after cancel the committed query lights up again for n/N"
+        );
     }
 
     #[test]
