@@ -7,6 +7,7 @@
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
 pub mod dialog;
+pub mod keybindings_view;
 pub mod keys;
 pub mod settings_view;
 pub mod sidebar;
@@ -90,6 +91,25 @@ pub struct ShellView {
     /// to track alongside it — a modal's content owns whatever internal
     /// state it needs (e.g. the settings composite's own search input).
     modal: Option<dialog::ShellModal>,
+    /// The open keybinding dialog's own pure state (Part B), or `None` when
+    /// closed/never opened. Set fresh by [`keybindings_view::open`] each
+    /// time (mirrors `palette`'s "nothing survives a close/reopen"
+    /// contract) and read/mutated both by the modal's render closure
+    /// (`keybindings_view::build`, via a plain `&ShellView` reborrow — see
+    /// `ShellModal::build`'s doc comment) and by its
+    /// [`dialog::ModalKeyHandler`] (`keybindings_view::handle_key`, reached
+    /// through `handle_key_down`'s modal branch). Deliberately holds no
+    /// `gpui` types itself (`vimnav::VimListNav`, a selection index, and the
+    /// in-progress capture sequence only) so it stays unit-testable without
+    /// a window, the same way `PaletteState` does — the dialog's
+    /// `ScrollHandle` lives in the sibling `keybindings_scroll` field below
+    /// instead, following `palette`/`palette_scroll`'s own split exactly.
+    keybindings: Option<keybindings_view::KeybindingsState>,
+    /// Scroll state for the open keybinding dialog's row list — same
+    /// reasoning and lifecycle as `palette_scroll` (a fresh `ScrollHandle`
+    /// per open, driven by `keybindings_view`'s selection-change paths via
+    /// `ScrollHandle::scroll_to_item`).
+    keybindings_scroll: ScrollHandle,
     /// Scroll state for the open palette's results list, tracked across
     /// frames the same way `filter_input`'s `Entity<InputState>` is
     /// (`gpui::ScrollHandle` is a cheap `Clone` — `Rc<RefCell<..>>` — but a
@@ -273,6 +293,8 @@ impl ShellView {
             focus_handle,
             palette: None,
             modal: None,
+            keybindings: None,
+            keybindings_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
             desk_dir,
             user_dir,
@@ -489,9 +511,10 @@ impl ShellView {
             // itself, so it gets the crate's uniform open-time hygiene.
             settings_view::open(self, window, cx);
         } else if action.0 == "keybindings::open" {
-            // Part B fills this: the keybinding dialog itself (vimnav.rs +
-            // keymap_edit.rs from this part are its pure cores). Reachable
-            // today only via the palette (defaults.rs: no key binding).
+            // Part B: the keybinding dialog itself (vimnav.rs +
+            // keymap_edit.rs are its pure cores). Reachable today only via
+            // the palette (defaults.rs: no key binding).
+            keybindings_view::open(self, window, cx);
         }
     }
 
@@ -762,9 +785,30 @@ impl ShellView {
         // reaches this branch and closes the modal, matching the old
         // dialog's UX close enough (Task 9 design note).
         if self.modal.is_some() || window.has_active_dialog(cx) {
-            if self.modal.is_some() && event.keystroke.key == "escape" {
-                self.modal = None;
-                cx.notify();
+            if self.modal.is_some() {
+                // Part B: offer the modal's own key handler (if any) first
+                // refusal — the keybinding dialog's vim nav/rebind-capture
+                // seam (`dialog::ModalKeyHandler`, see its own doc comment
+                // for why this is the shell-native `Keystroke`, not gpui's
+                // raw one). `on_key` is cloned out of `self.modal` before
+                // being called for the same reentrancy reason `render`
+                // clones `title`/`build` out ahead of invoking them (see
+                // `ShellModal`'s doc comment): the closure needs `self` back
+                // as `&mut ShellView` while `self.modal`'s own borrow must
+                // already be released.
+                let handler = self.modal.as_ref().and_then(|m| m.on_key.clone());
+                let handled = handler.is_some_and(|handler| {
+                    convert_keystroke(&event.keystroke)
+                        .is_some_and(|ks| handler(self, &ks, window, cx))
+                });
+                if handled {
+                    cx.notify();
+                    return;
+                }
+                if event.keystroke.key == "escape" {
+                    self.modal = None;
+                    cx.notify();
+                }
             }
             return;
         }
@@ -1054,7 +1098,7 @@ mod tests {
     use super::*;
     use crate::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use crate::keymap::build_keymap;
-    use geode_core::config::{ConfigSources, LayerDoc};
+    use geode_core::config::{ConfigSources, Layer, LayerDoc};
     // `WindowExt` is already brought in by `use super::*` (top-of-file
     // import, needed by `handle_key_down`'s dialog guard below).
 
@@ -4038,6 +4082,482 @@ mod tests {
             Some(tiles_before[2]),
             "closing the middle tile should focus the adjacent sibling (tiles_before[2]), \
              not the first leaf (tiles_before[0])"
+        );
+    }
+
+    // --- Part B: the keybinding dialog -----------------------------------
+
+    /// `keybindings::open` dispatch paints the modal with one row per
+    /// registered action — mirrors `settings_open_opens_the_modal`'s own
+    /// "prove it painted, not just that a flag flipped" standard.
+    #[gpui::test]
+    fn keybindings_open_paints_the_modal_with_rows(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "keybindings::open should have set ShellView's own modal state"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.keybindings.is_some()),
+            "keybindings::open should have set ShellView's own keybindings state"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let list_bounds = cx.debug_bounds("keybindings-list");
+        assert!(
+            list_bounds
+                .is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+            "the row list should have painted with non-zero bounds, got {list_bounds:?}"
+        );
+        let row_0_bounds = cx.debug_bounds("keybindings-row-0");
+        assert!(
+            row_0_bounds
+                .is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+            "the first row should have painted with non-zero bounds, got {row_0_bounds:?}"
+        );
+    }
+
+    /// j/5j/gg/G/ctrl+d move the selection through `vimnav`, exactly as
+    /// `vimnav::tests` proves the pure core does — this proves the wiring
+    /// end to end, through a real keystroke and `ShellView::keybindings`.
+    #[gpui::test]
+    fn vim_navigation_moves_the_selection(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        let row_count = shell.read_with(&cx, |shell, _| {
+            keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap).len()
+        });
+        assert!(
+            row_count >= 5,
+            "sanity: expected several rows, got {row_count}"
+        );
+
+        fn selected_row(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
+            shell.read_with(cx, |shell, _| shell.keybindings.as_ref().unwrap().selected)
+        }
+        assert_eq!(
+            selected_row(&shell, &cx),
+            0,
+            "sanity: starts at the top row"
+        );
+
+        cx.simulate_keystrokes("j");
+        assert_eq!(selected_row(&shell, &cx), 1, "j should move down by one");
+
+        cx.simulate_keystrokes("5 j");
+        assert_eq!(
+            selected_row(&shell, &cx),
+            6,
+            "5j should move down by five more"
+        );
+
+        cx.simulate_keystrokes("shift-g");
+        assert_eq!(
+            selected_row(&shell, &cx),
+            row_count - 1,
+            "shift+g (G) should jump to the last row"
+        );
+
+        cx.simulate_keystrokes("g g");
+        assert_eq!(
+            selected_row(&shell, &cx),
+            0,
+            "gg should jump back to the top row"
+        );
+
+        cx.simulate_keystrokes("ctrl-d");
+        assert_eq!(
+            selected_row(&shell, &cx),
+            5,
+            "ctrl+d should move down by five"
+        );
+
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            selected_row(&shell, &cx),
+            0,
+            "ctrl+u should move back up by five, clamped at 0"
+        );
+    }
+
+    /// `space` on the selected row starts listening; `escape` while
+    /// listening cancels the capture WITHOUT closing the modal (falls back
+    /// to ordinary dialog nav) — distinct from `escape` with nothing
+    /// pending, which does close the modal (covered separately below).
+    #[gpui::test]
+    fn space_starts_listening_and_escape_while_listening_cancels_without_closing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        cx.simulate_keystrokes("space");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .is_some()),
+            "space should have started listening"
+        );
+
+        cx.simulate_keystrokes("ctrl-alt-x");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .as_ref()
+                .unwrap()
+                .len()),
+            1,
+            "the keystroke should have appended to the pending capture"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .is_none()),
+            "escape while listening should cancel the capture"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "escape while listening must NOT close the modal"
+        );
+    }
+
+    /// `escape` with nothing pending (ordinary nav mode) closes the modal —
+    /// same contract as every other Geode modal.
+    #[gpui::test]
+    fn escape_outside_listening_closes_the_modal(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+        assert!(shell.read_with(&cx, |shell, _| shell.modal.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
+            "escape with nothing pending should close the modal"
+        );
+    }
+
+    /// End-to-end (design doc, "Tests"): listening, typing a two-keystroke
+    /// sequence, then `enter` writes the new binding into the real user
+    /// `keymap.toml` — verified by re-parsing the written file through the
+    /// REAL production path (`LayerDoc` + `keymap::build_keymap`), the same
+    /// precedent `keymap_edit`'s own round-trip tests and `shell::mod`'s
+    /// `mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file`
+    /// both use for a background-executor write.
+    #[gpui::test]
+    fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+
+        let dir = tempfile::tempdir().unwrap();
+        let user_dir = dir.path().to_path_buf();
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        // The action bound at row 0 (top of sort order) at the moment the
+        // dialog opened — what the capture below should end up bound to.
+        let target_action = shell.read_with(&cx, |shell, _| {
+            keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap)[0]
+                .action
+                .clone()
+        });
+
+        cx.simulate_keystrokes("space");
+        // A two-keystroke sequence, proving multi-keystroke capture works,
+        // not just a single chord.
+        cx.simulate_keystrokes("ctrl-alt-x");
+        cx.simulate_keystrokes("y");
+        cx.simulate_keystrokes("enter");
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .is_none()),
+            "enter should have committed and left listening mode"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "committing a rebind must not close the dialog"
+        );
+
+        // `spawn_rebind` hands the actual write to the background executor
+        // (philosophy: no I/O on the UI thread) — drive it to completion.
+        cx.run_until_parked();
+
+        let text = std::fs::read_to_string(user_dir.join("keymap.toml"))
+            .expect("committing the capture must have written keymap.toml");
+        let table: toml::Table = text.parse().unwrap();
+        let doc = LayerDoc {
+            layer: Layer::User,
+            name: "keymap".to_string(),
+            file: user_dir.join("keymap.toml"),
+            table,
+        };
+
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &registry);
+        assert!(
+            diags.is_empty(),
+            "the written keymap.toml must build clean: {diags:?}"
+        );
+
+        let binding = keymap
+            .bindings()
+            .iter()
+            .find(|b| b.action == target_action && b.keystrokes.len() == 2)
+            .expect(
+                "the two-keystroke capture must have been written and resolve to the target action",
+            );
+        assert_eq!(binding.keystrokes[0].key, "x");
+        assert!(binding.keystrokes[0].mods.ctrl && binding.keystrokes[0].mods.alt);
+        assert_eq!(binding.keystrokes[1].key, "y");
+        assert_eq!(binding.keystrokes[1].mods, Modifiers::NONE);
+    }
+
+    /// A real mouse click selects a different row (`debug_bounds` gives the
+    /// row's real painted coordinates, same technique
+    /// `mouse_down_on_a_tile_focuses_it` and the settings-panel click tests
+    /// already use in this file) — then clicking that SAME, now-selected
+    /// row again starts listening.
+    #[gpui::test]
+    fn click_selects_a_row_and_clicking_it_again_starts_listening(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let row_1_bounds = cx
+            .debug_bounds("keybindings-row-1")
+            .expect("row 1 should have painted bounds to click into");
+        let inside_row_1 = gpui::point(
+            row_1_bounds.origin.x + gpui::px(10.0),
+            row_1_bounds.origin.y + gpui::px(10.0),
+        );
+
+        cx.simulate_mouse_down(inside_row_1, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected),
+            1,
+            "clicking row 1 should have selected it"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .is_none()),
+            "the first click on a different row must not start listening"
+        );
+
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row_1_bounds_again = cx
+            .debug_bounds("keybindings-row-1")
+            .expect("row 1 should still have painted bounds");
+        let inside_row_1_again = gpui::point(
+            row_1_bounds_again.origin.x + gpui::px(10.0),
+            row_1_bounds_again.origin.y + gpui::px(10.0),
+        );
+        cx.simulate_mouse_down(
+            inside_row_1_again,
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .listening
+                .is_some()),
+            "clicking the already-selected row again should start listening"
         );
     }
 }
