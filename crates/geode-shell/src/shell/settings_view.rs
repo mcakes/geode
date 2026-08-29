@@ -144,6 +144,61 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     });
 }
 
+/// Builds the Theme field via `SettingField::scrollable_dropdown`, not the
+/// plain `SettingField::dropdown` — the theme dropdown fix (root cause
+/// below), broken out of [`build`] into its own function so a plain
+/// `#[test]` can pin the choice down directly against the field's own
+/// `SettingFieldType`, the same way [`set_theme`]/[`set_dark_mode`] were
+/// already broken out so a test could drive their path directly (see their
+/// doc comments). Neither `SettingField` constructor needs an `App`/
+/// `Window` to build (only their `value`/`set_value` closures do, later,
+/// when actually called), so this needs no gpui test context at all — see
+/// `theme_dropdown_field_is_scrollable` below.
+///
+/// **Root cause**: with 38 theme names the popup menu's item list overflows
+/// a fixed-height (non-scrolling) viewport and cannot be scrolled by mouse
+/// wheel. `SettingField::dropdown` builds a `DropdownField` with
+/// `scrollable: false` (pinned checkout `crates/ui/src/setting/fields/
+/// mod.rs`), and `DropdownField::render` (`crates/ui/src/setting/fields/
+/// dropdown.rs`) forwards that straight to `PopupMenu::scrollable`, which
+/// gates the ONLY place the items container gets `max_h`/
+/// `overflow_y_scroll`/`track_scroll` (`crates/ui/src/menu/popup_menu.rs`,
+/// `PopupMenu::render`'s `.when(self.scrollable, ...)`). With it false the
+/// items div has no bound at all — it sizes to its 38 children and is
+/// painted through `Popup::render`'s `deferred(Positioner::corner(...))`
+/// (`crates/base/src/popup.rs`), a top-layer overlay anchored to the
+/// trigger but otherwise unclipped by our modal (or by anything but the
+/// window edge), so the unbounded content simply runs off the bottom of the
+/// screen with no scroll region for the mouse wheel to hit.
+/// `scrollable_dropdown` sets `scrollable: true`, which engages that same
+/// `max_h`/`overflow_y_scroll`/`track_scroll` bound (capped at
+/// `min(window_height * 0.5, 450px)` when no explicit `max_height` is set)
+/// plus a visible scrollbar — exactly the pattern the library's own
+/// long-list reference (`crates/story/src/stories/menu_story.rs`'s
+/// "Scrollable Menu (100 items)") uses via `PopupMenu::scrollable(true)`
+/// directly.
+///
+/// Also a strict improvement for keyboard reachability:
+/// `PopupMenu::set_selected_index` calls `self.scroll_handle.
+/// scroll_to_item(ix)` on every up/down move regardless of `scrollable`,
+/// but that only does anything once `track_scroll` has actually wired the
+/// handle to a bounded scroll region — with `scrollable: false` arrow keys
+/// still move `selected_index` (so `Enter` picks the logically-selected
+/// item), but the selection never scrolls into view, so items past the
+/// fold are functionally unreachable by sight. With `scrollable: true`
+/// both mouse wheel and arrow-key navigation reach all 38 items.
+fn theme_dropdown_field<V, S>(
+    dropdown_options: Vec<(SharedString, SharedString)>,
+    value: V,
+    set_value: S,
+) -> SettingField<SharedString>
+where
+    V: Fn(&App) -> SharedString + 'static,
+    S: Fn(SharedString, &mut App) + 'static,
+{
+    SettingField::scrollable_dropdown(dropdown_options, value, set_value)
+}
+
 /// Build the `Settings` composite content described in the module doc.
 ///
 /// Takes *both* `shell: &ShellView` and `view: Entity<ShellView>` — not
@@ -176,7 +231,7 @@ fn build(
     let appearance = SettingGroup::new().title("Appearance").items(vec![
         SettingItem::new(
             "Theme",
-            SettingField::dropdown(
+            theme_dropdown_field(
                 dropdown_options,
                 {
                     let view = view.clone();
@@ -287,6 +342,71 @@ pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut Ap
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_component::setting::{AnySettingField, SettingFieldType};
+
+    /// Reproduction/regression for the theme-dropdown scroll bug (root
+    /// cause documented on [`theme_dropdown_field`]): the fix is entirely a
+    /// choice of `SettingField` constructor
+    /// (`scrollable_dropdown` vs. plain `dropdown`), which
+    /// `SettingFieldType::Dropdown`'s own `scrollable` field records — no
+    /// gpui `App`/window/render pass is needed to observe it, since neither
+    /// constructor touches `App` except inside the `value`/`set_value`
+    /// closures (unused here; trivial stand-ins suffice).
+    ///
+    /// A full pixel-level reproduction (open the modal, click the real
+    /// Theme dropdown trigger via a simulated mouse event, draw, and assert
+    /// the popup menu's painted bounds fit the viewport) was attempted and
+    /// found impractical at this pinned rev, for the same reason this
+    /// module's own doc comment already gives for the dropdown's *value*
+    /// path: the popup menu is a `dropdown_menu_with_anchor` overlay
+    /// (`crates/ui/src/menu/dropdown_menu.rs`, built on `Popup`'s
+    /// `deferred(...)` overlay in `crates/base/src/popup.rs`) with no
+    /// `debug_selector` anywhere on the trigger `Button`, the `Popover`, or
+    /// `PopupMenu` itself — unlike the settings search input (clicked in
+    /// `escape_from_the_focused_settings_search_input_closes_the_modal`
+    /// above `shell::mod`'s test module), which sits at a simple, crate-
+    /// documented fixed offset from `settings-content`'s own top-left
+    /// corner, the Theme button's on-screen position depends on the
+    /// resolved width of `h_resizable`'s sidebar panel, the `container_
+    /// query` axis breakpoint it feeds into (`STACKED_LAYOUT_MAX_WIDTH`,
+    /// `crates/ui/src/setting/settings.rs`), and `GroupBox`/`SettingItem`
+    /// row padding (`crates/ui/src/setting/{group,item}.rs`) — none of it
+    /// exposed by a test hook, all of it pinned-checkout internal layout
+    /// this crate has no business hard-coding pixel offsets against. This
+    /// test instead pins the one thing actually under this crate's control:
+    /// that `build()`'s Theme field asks the library for the scrollable
+    /// variant. Source-level evidence for the rest of the causal chain
+    /// (unbounded popup height -> off-screen paint -> no scroll region)
+    /// lives in `theme_dropdown_field`'s doc comment and the fix report.
+    #[test]
+    fn theme_dropdown_field_is_scrollable() {
+        let field = theme_dropdown_field(
+            vec![(SharedString::from("dark"), SharedString::from("Dark"))],
+            |_: &App| SharedString::from("dark"),
+            |_: SharedString, _: &mut App| {},
+        );
+
+        match field.field_type() {
+            SettingFieldType::Dropdown { scrollable, .. } => assert!(
+                *scrollable,
+                "the Theme dropdown (38 items) must be built with \
+                 SettingField::scrollable_dropdown, not the plain \
+                 ::dropdown — the latter has no bound on the popup menu's \
+                 item-list height (PopupMenu::render only applies max_h/ \
+                 overflow_y_scroll/track_scroll `.when(self.scrollable, \
+                 ...)`), so with 38 items the menu paints unbounded, off \
+                 the bottom of the screen, with no scroll region for the \
+                 mouse wheel to reach"
+            ),
+            SettingFieldType::Switch
+            | SettingFieldType::Checkbox
+            | SettingFieldType::NumberInput { .. }
+            | SettingFieldType::Input
+            | SettingFieldType::Element { .. } => {
+                panic!("theme_dropdown_field should build a Dropdown-typed field")
+            }
+        }
+    }
 
     #[test]
     fn mod_alias_label_matches_each_named_alias() {
