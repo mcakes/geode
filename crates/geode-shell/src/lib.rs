@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod defaults;
+pub mod fonts;
 pub mod keymap;
 pub mod palette;
 pub mod reload;

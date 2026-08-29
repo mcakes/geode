@@ -28,6 +28,7 @@ use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h
 
 use crate::actions::{ActionId, ActionRegistry};
 use crate::defaults::mod_alias_from_config;
+use crate::fonts;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::reload;
@@ -787,6 +788,13 @@ impl Render for ShellView {
                         })
                         .when(is_focused, |el| el.border_2())
                         .when(!is_focused, |el| el.border_1())
+                        // `fonts::MONO` (Task 10): this placeholder label
+                        // stands in for real tile content until modules
+                        // land — the phase-3 blotter is what will actually
+                        // fill these tiles, and it'll use `fonts::MONO` for
+                        // its cells too, so the placeholder previews that
+                        // face rather than the default UI one.
+                        .font_family(fonts::MONO)
                         .text_color(cx.theme().muted_foreground)
                         // Click-to-focus is a convenience: keyboard (hjkl)
                         // remains the primary path through the same

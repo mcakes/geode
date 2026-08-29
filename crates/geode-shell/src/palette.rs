@@ -349,6 +349,8 @@ use gpui::prelude::*;
 use gpui::{App, FontWeight, HighlightStyle, IntoElement, StyledText, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
+use crate::fonts;
+
 /// Target overlay width in pixels (brief: "~560px wide").
 const WIDTH: f32 = 560.0;
 
@@ -442,6 +444,7 @@ pub fn render(
                         .child(item.category().to_string()),
                 );
             let binding = div()
+                .font_family(fonts::MONO)
                 .text_color(theme.muted_foreground)
                 .child(item.binding().unwrap_or("").to_string());
             list = list.child(row.child(label).child(binding));

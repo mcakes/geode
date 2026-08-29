@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
+use geode_shell::fonts;
 use geode_shell::keymap::build_keymap;
 use geode_shell::session;
 use geode_shell::shell::{ShellServices, ShellView};
@@ -21,6 +22,9 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
+            fonts::register(cx); // bundled Inter/JetBrains Mono (Task 10) —
+            // after init (installs the Theme global this edits), before the
+            // window opens so the first frame already carries them.
 
             let (mut services, desk, user) = build_shell_services();
             for warning in services.theme.apply_from_config(&services.config, cx) {

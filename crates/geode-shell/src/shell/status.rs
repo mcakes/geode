@@ -26,6 +26,7 @@ use gpui::{App, IntoElement, div, px};
 use gpui_component::ActiveTheme as _;
 use gpui_component::status_bar::StatusBar;
 
+use crate::fonts;
 use crate::keymap::Keystroke;
 
 /// Fixed height of the status bar, in pixels (spec target: ~26px).
@@ -52,11 +53,12 @@ pub fn status_bar(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut bar = StatusBar::new()
-        .flex_none()
-        .w_full()
-        .h(px(HEIGHT))
-        .left(div().text_color(theme.muted_foreground).child(pending_text));
+    let mut bar = StatusBar::new().flex_none().w_full().h(px(HEIGHT)).left(
+        div()
+            .font_family(fonts::MONO)
+            .text_color(theme.muted_foreground)
+            .child(pending_text),
+    );
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
     }
