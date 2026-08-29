@@ -5,4 +5,5 @@
 //! Dependency rule: this crate never depends on geode-data or on modules.
 
 pub mod actions;
+pub mod defaults;
 pub mod keymap;
