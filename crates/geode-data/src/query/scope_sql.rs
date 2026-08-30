@@ -22,7 +22,7 @@ use duckdb::types::Value;
 use geode_core::attribution::ScopeSemantics;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::{DatasetSpec, Grain};
-use geode_core::scope::{Expr, Literal, Scope};
+use geode_core::scope::{CompareOp, Expr, Literal, Scope};
 
 /// Values are joined with this before binding and split back in SQL. A
 /// control character no dimension value can contain.
@@ -37,6 +37,25 @@ pub struct ScopeSql {
     pub semantics: ScopeSemantics,
 }
 
+/// Which tables a query reads and the generation filter that goes with
+/// them (spec §6.5). Passed down so the semi-join probe reads the same
+/// era as its caller — a probe left on live inside an as-of query mixes
+/// today's data into a historical answer, and does it silently.
+#[derive(Clone, Copy)]
+pub struct Era<'a> {
+    pub kind: TableKind,
+    pub generations: Option<&'a str>,
+}
+
+impl Era<'_> {
+    pub fn live() -> Era<'static> {
+        Era {
+            kind: TableKind::Live,
+            generations: None,
+        }
+    }
+}
+
 /// `probe` is the grain a finer-than-`grain` predicate is tested against.
 /// It must be a grain the dataset declares — only those have tables — so
 /// the caller passes the spine grain rather than assuming the finest.
@@ -49,6 +68,7 @@ pub fn compile_scope(
     grain: Grain,
     dims: &DerivedDimensions,
     probe: Grain,
+    era: Era<'_>,
 ) -> Result<ScopeSql, StoreError> {
     // A contradiction selects nothing, and must say so in SQL. Returning
     // early matters: the contradicted dimension has already been dropped
@@ -129,16 +149,19 @@ pub fn compile_scope(
     // 3. Expression filter: AST lowered, literals bound.
     if let Some(expr) = &scope.expression {
         let mut expr_params = Vec::new();
-        let rendered = render_expr(expr, &mut expr_params);
-        let mentions_finer = expr
-            .columns()
-            .iter()
-            .any(|c| !grain.key_columns().contains(c));
+        let rendered = render_expr(expr, &mut expr_params, dims)?;
+        // Against the *base* column: a derived dimension over a key column
+        // is a direct predicate, and treating it as finer would route it
+        // through a pointless self-semi-join and badge the result
+        // "positions that have…" when it is nothing of the kind.
+        let is_finer = |c: &str| !grain.key_columns().contains(&dims.base_column(c));
+        let mentions_finer = expr.columns().iter().any(|c| is_finer(c));
         params.extend(expr_params);
         if mentions_finer {
             for c in expr.columns() {
-                if !grain.key_columns().contains(&c) && !semi_dimensions.iter().any(|s| s == c) {
-                    semi_dimensions.push(c.to_string());
+                let base = dims.base_column(c);
+                if is_finer(c) && !semi_dimensions.iter().any(|s| s == base) {
+                    semi_dimensions.push(base.to_string());
                 }
             }
             finer.push(rendered);
@@ -151,16 +174,30 @@ pub fn compile_scope(
     // those columns exist. The finest grain always carries every key
     // column, so it is the safe target.
     if !finer.is_empty() {
+        // `is not distinct from`, not `=`: the key columns are matching
+        // two rows of the *same* table, so a NULL here is a real value on
+        // both sides rather than a rolled-up placeholder. Plain equality
+        // would make a position with no LHU fail its own semi-join, and
+        // the row would still be present carrying a coarse measure of
+        // NULL — visibly inconsistent rather than merely absent.
         let join = grain
             .key_columns()
             .iter()
-            .map(|k| format!("probe.\"{k}\" = base.\"{k}\""))
+            .map(|k| format!("probe.\"{k}\" is not distinct from base.\"{k}\""))
             .collect::<Vec<_>>()
             .join(" and ");
+        // The probe must read the same era as its caller. Reading live
+        // from inside an as-of query mixes today's data into a historical
+        // answer — and does it silently, because the numbers still look
+        // like numbers (spec §6.5).
+        let mut where_terms = vec![join, finer.join(" and ")];
+        if let Some(generations) = era.generations {
+            where_terms.push(format!("({generations})"));
+        }
         direct.push(format!(
-            "exists (select 1 from {} probe where {join} and {})",
-            table_name(&ds.name, probe, TableKind::Live),
-            finer.join(" and ")
+            "exists (select 1 from {} probe where {})",
+            table_name(&ds.name, probe, era.kind),
+            where_terms.join(" and ")
         ));
     }
 
@@ -185,32 +222,107 @@ pub fn compile_scope(
     })
 }
 
+/// The source values a derived dimension maps to `wanted`, as bound
+/// parameters against its source column.
+///
+/// The stored column holds source values, so an expression naming a
+/// derived dimension has to be translated the same way a selection is —
+/// otherwise it binds a derived value against a source column and matches
+/// nothing, or names a column no table has.
+fn derived_membership(
+    d: &geode_core::dimensions::DerivedDimension,
+    wanted: &[&Literal],
+    negated: bool,
+    params: &mut Vec<Value>,
+) -> String {
+    let sources: Vec<&String> = d
+        .values
+        .iter()
+        .filter(|(_, derived)| {
+            wanted
+                .iter()
+                .any(|w| matches!(w, Literal::Str(s) if s == *derived))
+        })
+        .map(|(source, _)| source)
+        .collect();
+    if sources.is_empty() {
+        // No source value produces the requested derived value, so the
+        // predicate is a constant — and saying which constant beats
+        // emitting an empty `in ()`.
+        return if negated { "true" } else { "false" }.to_string();
+    }
+    let marks = sources
+        .iter()
+        .map(|s| {
+            params.push(Value::Text((*s).clone()));
+            "?"
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let not = if negated { "not " } else { "" };
+    format!("\"{}\" {not}in ({marks})", d.from)
+}
+
 /// Lower a validated expression, pushing every literal onto `params`.
-fn render_expr(expr: &Expr, params: &mut Vec<Value>) -> String {
-    match expr {
+///
+/// `dims` is threaded through so a derived dimension is resolved to its
+/// source column here too, not only in dimension selections (spec §6.8).
+fn render_expr(
+    expr: &Expr,
+    params: &mut Vec<Value>,
+    dims: &DerivedDimensions,
+) -> Result<String, StoreError> {
+    let unsupported = |column: &str, op: &str| StoreError::Sql {
+        statement: format!("scope expression on derived dimension '{column}'"),
+        source: duckdb::Error::InvalidParameterName(format!(
+            "'{column}' is a derived dimension, so '{op}' has no meaning on it; \
+             use = , != or in"
+        )),
+    };
+    Ok(match expr {
         Expr::And(a, b) => format!(
             "({} and {})",
-            render_expr(a, params),
-            render_expr(b, params)
+            render_expr(a, params, dims)?,
+            render_expr(b, params, dims)?
         ),
-        Expr::Or(a, b) => format!("({} or {})", render_expr(a, params), render_expr(b, params)),
-        Expr::Not(e) => format!("(not {})", render_expr(e, params)),
-        Expr::Compare { column, op, value } => {
-            params.push(literal_value(value));
-            format!("\"{column}\" {} ?", op.sql())
-        }
-        Expr::In { column, values } => {
-            let marks = values
-                .iter()
-                .map(|v| {
-                    params.push(literal_value(v));
-                    "?"
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("\"{column}\" in ({marks})")
-        }
-    }
+        Expr::Or(a, b) => format!(
+            "({} or {})",
+            render_expr(a, params, dims)?,
+            render_expr(b, params, dims)?
+        ),
+        Expr::Not(e) => format!("(not {})", render_expr(e, params, dims)?),
+        Expr::Compare { column, op, value } => match dims.get(column) {
+            // Equality is the only ordering-free comparison, and a
+            // derived dimension has no order of its own — `desk > 'EU'`
+            // would compare whatever the map happens to spell.
+            Some(d) => match op {
+                CompareOp::Eq => derived_membership(d, &[value], false, params),
+                CompareOp::Ne => derived_membership(d, &[value], true, params),
+                other => return Err(unsupported(column, other.sql())),
+            },
+            None => {
+                params.push(literal_value(value));
+                format!("\"{column}\" {} ?", op.sql())
+            }
+        },
+        Expr::In { column, values } => match dims.get(column) {
+            Some(d) => {
+                let wanted: Vec<&Literal> = values.iter().collect();
+                derived_membership(d, &wanted, false, params)
+            }
+            None => {
+                let marks = values
+                    .iter()
+                    .map(|v| {
+                        params.push(literal_value(v));
+                        "?"
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("\"{column}\" in ({marks})")
+            }
+        },
+    })
 }
 
 fn literal_value(l: &Literal) -> Value {
@@ -288,6 +400,7 @@ grain = "position"
             grain,
             &dims(),
             Grain::UnderlyingPair,
+            Era::live(),
         )
         .unwrap();
         (sql, dir, store)
@@ -344,6 +457,7 @@ grain = "position"
             Grain::Underlying,
             &dims(),
             Grain::UnderlyingPair,
+            Era::live(),
         )
         .unwrap();
         let b = compile_scope(
@@ -353,6 +467,7 @@ grain = "position"
             Grain::Underlying,
             &dims(),
             Grain::UnderlyingPair,
+            Era::live(),
         )
         .unwrap();
         assert_eq!(
@@ -463,6 +578,7 @@ grain = "position"
             Grain::Underlying,
             &dims(),
             Grain::UnderlyingPair,
+            Era::live(),
         )
         .unwrap();
         let total: f64 = store

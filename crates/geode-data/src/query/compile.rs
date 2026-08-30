@@ -221,11 +221,17 @@ pub fn compile_view(
             )
         }
     };
+    // One era for the whole statement: the spine, every aggregate, and
+    // the scope's semi-join probe must all read the same tables.
+    let era = crate::query::scope_sql::Era {
+        kind: kind_for_joins,
+        generations: gen_pred.as_deref(),
+    };
     let and_gen = |p: &str| match &gen_pred {
         Some(g) => format!("({p}) and ({g})"),
         None => p.to_string(),
     };
-    let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, spine_grain)?;
+    let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, spine_grain, era)?;
     params.extend(spine_scope.params.clone());
 
     if n == 0 {
@@ -317,7 +323,7 @@ pub fn compile_view(
     // One aggregate subquery per measure grain the view touches.
     for grain in view.measure_grains(schema) {
         let alias = format!("agg_{}", grain.table());
-        let grain_scope = compile_scope(conn, scope, ds, grain, dims, spine_grain)?;
+        let grain_scope = compile_scope(conn, scope, ds, grain, dims, spine_grain, era)?;
 
         // Only the grouping columns this grain has, and only within the
         // materialized depth — selecting a key the spine no longer groups
@@ -1108,6 +1114,151 @@ kind = "measure"
         let rows = run(&store, &q, &["row_depth", "delta01"]);
         let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
         assert_eq!(total[1], "None", "an unmapped desk selects nothing");
+    }
+
+    #[test]
+    fn an_as_of_query_reads_only_the_archive_even_through_a_semi_join() {
+        // The whole as-of compile path had no test, which is how two
+        // silent defects survived: the semi-join probe read `_live` with
+        // no generation predicate, so a historical answer quietly mixed in
+        // today's numbers (spec §6.5).
+        let (_d, store) = fixture();
+        let conn = store.writer();
+        // Two generations in the archive, and a *different* value live —
+        // if live leaks in, the totals move.
+        conn.execute_batch(
+            "insert into risk_snapshot_position_archive
+               select 'BK0','L0','P1','C', 100, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z';
+             insert into risk_snapshot_underlying_archive
+               select 'BK0','L0','P1','C','I1','SPX', 40, 'b', 1, 1,
+                      TIMESTAMPTZ '2026-08-01 00:00:00Z';",
+        )
+        .unwrap();
+
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["SPX".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+
+        assert!(
+            !q.sql.contains("_live"),
+            "an as-of query must not name a live table: {}",
+            q.sql
+        );
+        let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(100.0)",
+            "the archived value, not the live 7: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_null_key_still_satisfies_its_own_semi_join() {
+        // The semi-join matches a table against itself, so a NULL key is a
+        // real value on both sides — not the rolled-up placeholder the
+        // spine uses. Plain equality would drop the coarse measure while
+        // leaving the row visible, which reads as an inconsistency rather
+        // than an absence.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_live values
+                   ('BK0',NULL,'P9','C', 5, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK0',NULL,'P9','C','I9','SPX', 3, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["SPX".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(12.0)",
+            "the NULL-LHU position's 5 must count too: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_dimension_works_in_the_expression_grammar_too() {
+        // `desk = 'EU'` is a natural thing to type. Before this it either
+        // named a column no table has, or bound a derived value against
+        // the source column and matched nothing.
+        let (_d, store) = fixture();
+        let scoped = |text: &str| {
+            let q = compile_view(
+                store.writer(),
+                &view(),
+                &schema(),
+                &Scope {
+                    expression: Some(geode_core::scope::parse_expr(text).unwrap()),
+                    ..Scope::default()
+                },
+                &desks(),
+                &crate::query::as_of::AsOf::Live,
+                usize::MAX,
+            )
+            .unwrap();
+            let rows = run(&store, &q, &["row_depth", "delta01"]);
+            rows.iter()
+                .find(|r| r[0] == "Some(0.0)")
+                .map(|r| r[1].clone())
+                .unwrap()
+        };
+        assert_eq!(scoped("desk = 'EU'"), "Some(30.0)", "BK0 is desk EU");
+        assert_eq!(scoped("desk != 'EU'"), "None", "nothing else is loaded");
+        assert_eq!(scoped("desk in ('EU', 'US')"), "Some(30.0)");
+        assert_eq!(scoped("desk = 'NOWHERE'"), "None", "unmapped selects none");
+
+        // A derived dimension has no order of its own, so an ordering
+        // comparison is rejected rather than silently compared against
+        // whatever the map happens to spell.
+        let err = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &Scope {
+                expression: Some(geode_core::scope::parse_expr("desk > 'EU'").unwrap()),
+                ..Scope::default()
+            },
+            &desks(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        );
+        assert!(err.is_err(), "ordering on a derived dimension must fail");
     }
 
     #[test]
