@@ -107,14 +107,24 @@ enum DividerDragTarget {
 /// tree/dock rect for tree dividers, the whole content area for dock
 /// edges — mouse events arrive in window space, so the rect is stored
 /// pre-offset by the sidebar/toolbar chrome rather than converting every
-/// event), `axis` picks the resize cursor while dragging, and `moved`
-/// records whether any move actually changed the layout so mouse-up only
-/// dirties the session for a drag that resized something.
+/// event), `axis` picks the resize cursor while dragging, `workspace` is
+/// the active workspace index at mouse-down (review fix: the keyboard
+/// stays live during a drag, so mod+N can switch workspaces mid-drag —
+/// without this pin the next move would walk the NEW workspace's tree
+/// with the OLD one's address and bounds, and a structurally-valid
+/// address would apply to the wrong tree; a mismatch cancels the drag
+/// instead), and `moved` records whether any move actually changed the
+/// layout. `moved` latches on the first actual change and stays latched:
+/// a drag that wanders and returns to its exact starting position still
+/// dirties the session on release — accepted, recorded honestly, since
+/// the write is a cheap coalesced no-op and un-latching would need
+/// per-drag snapshots for a case nobody will notice.
 #[derive(Debug, Clone, PartialEq)]
 struct DividerDrag {
     target: DividerDragTarget,
     bounds: Rect,
     axis: Orientation,
+    workspace: u8,
     moved: bool,
 }
 
@@ -293,10 +303,14 @@ pub struct ShellView {
     /// drag verbs), and cleared by its mouse-up — which is also the point
     /// the session goes dirty, so a drag-resize persists exactly like a
     /// keyboard resize (coalesced onto the same ~500ms background flush).
-    /// Cancelled (top of `render`) whenever the palette or a modal opens
-    /// mid-drag, or a tree tile goes fullscreen — all three make the
-    /// dragged boundary invisible or unreachable, and silently resizing an
-    /// invisible layout would be a surprise on return.
+    /// Cancelled (top of `render`, via `cancel_divider_drag`) whenever the
+    /// palette or a modal opens mid-drag, a tree tile goes fullscreen, or
+    /// mod+N switches workspaces — all of which make the dragged boundary
+    /// invisible or unreachable, and silently resizing an invisible layout
+    /// would be a surprise on return. Cancel keeps whatever the drag
+    /// already applied AND still dirties the session if it moved (review
+    /// fix — "stop tracking the mouse", never "undo", and never a visible
+    /// resize the next restore would lose).
     divider_drag: Option<DividerDrag>,
     /// The toolbar's right-aligned filter field (Task 4). Deliberately
     /// inert — nothing reads its value; it becomes the global text filter
@@ -1158,10 +1172,25 @@ impl ShellView {
     /// Apply the active divider drag at a window-space cursor position
     /// (drag-splitters task): route to the matching pure verb with the
     /// geometry captured at mouse-down. Returns whether the layout
-    /// actually changed (a stale address or unchanged clamp result
-    /// doesn't), and records that in `moved` so mouse-up knows whether to
-    /// dirty the session. Pure math only — the caller notifies.
+    /// actually changed — and since the review round that is literal: the
+    /// pure verbs compare against the current value, so a stale address,
+    /// a hidden dock, and a move pinned at a clamp the divider is already
+    /// sitting at all report false, and the caller skips the notify (no
+    /// re-render for an identical layout). `moved` latches on the first
+    /// actual change (see [`DividerDrag`]'s doc for the
+    /// returns-to-start caveat). Refuses — and cancels — a drag whose
+    /// recorded workspace is no longer active (review fix): the render-top
+    /// guard normally cancels first, but the check here is what makes the
+    /// guarantee independent of event/render ordering. Pure math only —
+    /// the caller notifies.
     fn apply_divider_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(workspace) = self.divider_drag.as_ref().map(|drag| drag.workspace) else {
+            return false;
+        };
+        if workspace != self.services.workspaces.active_index() {
+            self.cancel_divider_drag();
+            return false;
+        }
         let Some(drag) = &self.divider_drag else {
             return false;
         };
@@ -1188,11 +1217,23 @@ impl ShellView {
     /// the dirty flag coalesces onto the watcher's ~500ms background
     /// flush, never a synchronous write on the UI thread.
     fn finish_divider_drag(&mut self, cx: &mut Context<Self>) {
-        if let Some(drag) = self.divider_drag.take() {
-            if drag.moved {
-                self.session_dirty = true;
-            }
-            cx.notify();
+        self.cancel_divider_drag();
+        cx.notify();
+    }
+
+    /// Drop the active drag, keeping everything it already applied
+    /// (cancel means "stop tracking the mouse", never "undo") and — review
+    /// fix — dirtying the session if the drag had resized anything: the
+    /// first cut's cancel paths discarded `moved`, leaving a visible
+    /// resize the next session restore would silently lose. Shared by the
+    /// mouse-up finish, the render-top invalidation guard, and
+    /// `apply_divider_drag`'s workspace check; deliberately notify-free so
+    /// the render-path callers don't schedule a frame from inside one.
+    fn cancel_divider_drag(&mut self) {
+        if let Some(drag) = self.divider_drag.take()
+            && drag.moved
+        {
+            self.session_dirty = true;
         }
     }
 }
@@ -1217,26 +1258,35 @@ impl Render for ShellView {
         // Cancel an in-flight divider drag when the surface it was
         // resizing is no longer the one on screen (drag-splitters task):
         // the palette or a modal opened mid-drag (keyboard stays live
-        // during a drag — ctrl+k works with the button held), or a tree
-        // tile went fullscreen (mod+f likewise). All three hide the
-        // dragged boundary, and letting the drag keep mutating an
-        // invisible layout would be a surprise on return. Same
+        // during a drag — ctrl+k works with the button held), a tree tile
+        // went fullscreen (mod+f likewise), or mod+N switched to another
+        // workspace (review fix: the recorded address and bounds belong to
+        // the workspace the drag started in; without this, the next move
+        // would apply them to the new workspace's tree). All of these hide
+        // the dragged boundary, and letting the drag keep mutating an
+        // invisible layout would be a surprise on return. Cancel means
+        // "stop tracking the mouse", NOT "undo": whatever the drag already
+        // applied stays applied and — review fix — still persists like
+        // any resize (`cancel_divider_drag` dirties the session when the
+        // drag had moved; the first cut silently dropped that, leaving a
+        // visible layout the next restore wouldn't reproduce). Same
         // consume-state-at-the-top-of-render precedent as
         // `pending_focus_restore` just above: render is the one place
         // every one of those paths reliably funnels through with the
         // state fresh.
-        if self.divider_drag.is_some()
-            && (self.palette.is_some()
+        if self.divider_drag.as_ref().is_some_and(|drag| {
+            self.palette.is_some()
                 || self.modal.is_some()
+                || drag.workspace != self.services.workspaces.active_index()
                 || self
                     .services
                     .workspaces
                     .active()
                     .tree()
                     .fullscreen()
-                    .is_some())
-        {
-            self.divider_drag = None;
+                    .is_some()
+        }) {
+            self.cancel_divider_drag();
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
@@ -1287,10 +1337,19 @@ impl Render for ShellView {
         // modal's backdrop both cover the whole window ABOVE the strips
         // but without occluding them, so a live strip underneath would
         // still take the same mouse-down that dismisses the overlay and
-        // start a drag from under it. Gating at paint time keeps the
-        // rule simple: strips exist exactly when the tiles they resize
-        // are the frontmost interactive surface.
-        let dividers_active = self.palette.is_none() && self.modal.is_none();
+        // start a drag from under it. The which-key hint (review fix) is
+        // the same leak in miniature: `whichkey::render` paints a solid
+        // panel with no `.occlude()` and no handlers, so a mouse-down
+        // inside its bounds would fall straight through to a strip
+        // beneath — it shows exactly while a keystroke sequence is
+        // pending, so that state gates too. (An already-in-flight drag is
+        // NOT cancelled for which-key the way palette/modal cancel it:
+        // the hint has no mouse handlers to fight the drag catcher, and
+        // the dragged boundary stays visible behind it.) Gating at paint
+        // time keeps the rule simple: strips exist exactly when the tiles
+        // they resize are the frontmost interactive surface.
+        let dividers_active =
+            self.palette.is_none() && self.modal.is_none() && self.matcher.pending().is_empty();
         // Mouse events arrive in window coordinates while the tile
         // geometry lives in surface coordinates (the surface starts below
         // the toolbar, right of the sidebar) — the drag rects captured at
@@ -1621,6 +1680,11 @@ impl Render for ShellView {
                                 target: target.clone(),
                                 bounds: drag_bounds,
                                 axis,
+                                // Pin the workspace the drag belongs to
+                                // (read at mouse-down, not paint): a
+                                // mod+N switch mid-drag cancels rather
+                                // than retargeting — see `DividerDrag`.
+                                workspace: view.services.workspaces.active_index(),
                                 moved: false,
                             });
                             cx.stop_propagation();
@@ -2590,6 +2654,210 @@ mod tests {
         assert!(
             cx.debug_bounds("divider-strip-0").is_some(),
             "leaving fullscreen brings the strips back"
+        );
+    }
+
+    /// Review fix 1, end-to-end: the keyboard stays live during a drag,
+    /// so `mod+2` mid-drag switches workspaces — the drag must cancel
+    /// (the recorded address and bounds belong to workspace 1), and a
+    /// continued mouse-move must NOT resize workspace 2's tree even
+    /// though the same address is structurally valid there. Both
+    /// workspaces are set up with the identical two-tile layout precisely
+    /// so a wrongly-retargeted move WOULD visibly change workspace 2.
+    #[gpui::test]
+    fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+
+        // Workspace 1: two tiles. Workspace 2: two tiles, same layout.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("alt-2");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("alt-1");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (grab, drop_a, drop_b) = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            let mid_y = toolbar_height + content_height / 2.0;
+            (
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.3), px(mid_y)),
+            )
+        });
+
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(drop_a, MouseButton::Left, gpui::Modifiers::none());
+
+        // Switch to workspace 2 with the button still down, then keep
+        // moving.
+        cx.simulate_keystrokes("alt-2");
+        let ws2_before: Vec<_> = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+        cx.simulate_mouse_move(drop_b, MouseButton::Left, gpui::Modifiers::none());
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "the workspace switch should have cancelled the drag"
+        );
+        let ws2_after: Vec<_> = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+        assert_eq!(
+            ws2_before, ws2_after,
+            "the continued move must not resize workspace 2's tree"
+        );
+        // Workspace 1 keeps the part of the drag that was applied before
+        // the switch (cancel is not undo), and — review fix 2 — that
+        // applied resize persists: the cancel dirtied the session.
+        cx.simulate_keystrokes("alt-1");
+        let ws1_widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect::UNIT)
+                .iter()
+                .map(|(_, r)| r.w)
+                .collect()
+        });
+        assert!(
+            (ws1_widths[0] - 0.25).abs() < 1e-3,
+            "workspace 1 keeps the applied resize, got {ws1_widths:?}"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a cancelled drag that had moved must still persist its resize"
+        );
+    }
+
+    /// Review fix 2, end-to-end: opening the palette mid-drag cancels the
+    /// drag but keeps — and persists — what it already applied. The first
+    /// cut dropped the drag without dirtying the session, so the visible
+    /// resize silently diverged from the next restore.
+    #[gpui::test]
+    fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+        let (grab, drop) = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            let mid_y = toolbar_height + content_height / 2.0;
+            (
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            )
+        });
+
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "mid-drag, nothing is persisted yet"
+        );
+
+        cx.simulate_keystrokes("ctrl-k"); // open the palette mid-drag
+
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "opening the palette should cancel the drag"
+        );
+        let widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect::UNIT)
+                .iter()
+                .map(|(_, r)| r.w)
+                .collect()
+        });
+        assert!(
+            (widths[0] - 0.25).abs() < 1e-3,
+            "cancel keeps the applied resize (it is not an undo), got {widths:?}"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "the applied resize must persist even though the drag was cancelled"
+        );
+    }
+
+    /// Review fix 4: the which-key hint paints a solid panel with no
+    /// occlusion and no handlers, so a mouse-down through it would fall
+    /// onto a strip beneath — a pending keystroke sequence must therefore
+    /// gate the strips off exactly like the palette/modal overlays do,
+    /// and completing the sequence brings them back.
+    #[gpui::test]
+    fn a_pending_key_sequence_gates_the_divider_strips(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| {
+                        ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
+                    });
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_some(),
+            "two tiles paint their splitter strip"
+        );
+
+        cx.simulate_keystrokes("g"); // first key of the "g g" sequence
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("whichkey-overlay").is_some(),
+            "sanity: the which-key overlay is up while the sequence is pending"
+        );
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_none(),
+            "a pending sequence (which-key showing) must gate the strips off"
+        );
+
+        cx.simulate_keystrokes("g"); // completes the sequence
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_some(),
+            "resolving the sequence brings the strips back"
         );
     }
 

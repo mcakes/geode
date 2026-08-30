@@ -69,7 +69,15 @@ pub const MIN_RATIO: f32 = 0.05;
 /// can change in between (a keyboard split mid-drag, a session reload), so
 /// it deliberately names *structure* rather than borrowing into it:
 /// [`Tree::drag_divider`] re-validates the whole path on every application
-/// and treats anything stale as a no-op, never a panic.
+/// and treats anything stale as a no-op, never a panic. Accepted limit of
+/// name-by-structure (review round): a same-tree structural mutation
+/// mid-drag can leave an address that still *validates* but names a
+/// different boundary than the one grabbed (e.g. a split inserted before
+/// it renumbers siblings). The shell cancels drags on every guarded path
+/// (overlay open, workspace switch, fullscreen), so the remaining exposure
+/// is a keyboard split/close raced against a held button — worst case a
+/// benign misresize of a neighboring, still-clamped pair, never a panic or
+/// an invariant break.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DividerAddress {
     pub path: Vec<usize>,
@@ -491,6 +499,11 @@ impl Tree {
     /// zero-extent bounds, or a pair whose total is already below
     /// `2 × MIN_RATIO` (constructible via `from_parts`, which renormalizes
     /// but doesn't enforce `MIN_RATIO`; a clamp range would be inverted).
+    /// Also `false` — the review-round no-change contract — when the
+    /// clamped result equals the ratio the pair already has (a repeated
+    /// position, or a drag pinned at a clamp it's already sitting at):
+    /// "true" strictly means "the layout changed", so the caller can key
+    /// re-renders and dirty bookkeeping off it directly.
     pub fn drag_divider(&mut self, address: &DividerAddress, x: f32, y: f32, bounds: Rect) -> bool {
         let Some(root) = &mut self.root else {
             return false;
@@ -551,6 +564,16 @@ impl Tree {
             return false;
         }
         let new_a = ((pos - origin) / extent - start).clamp(MIN_RATIO, total - MIN_RATIO);
+        // No-change detection (review fix): without it, every move pinned
+        // at a clamp the divider is already sitting at would report true
+        // and trigger a re-render for an identical layout. 1e-6 epsilon in
+        // ratio space: far below any perceptible change (one pixel on an
+        // 8K-wide split is ~1e-4 of it), far above f32 noise at this
+        // scale — and the common no-op cases (same cursor position, same
+        // clamp bound) reproduce bit-identical values anyway.
+        if (new_a - ratios[i]).abs() < 1e-6 {
+            return false;
+        }
         ratios[i] = new_a;
         ratios[i + 1] = total - new_a;
         true
@@ -1489,6 +1512,28 @@ mod tests {
         };
         assert!(!tree.drag_divider(&addr, 0.0, 0.0, flat));
         assert!(approx(rect_of(&tree, 1).w, 0.5), "tree untouched");
+    }
+
+    #[test]
+    fn drag_divider_reports_false_when_nothing_changes() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        // A real move reports true; repeating the exact position reports
+        // false (nothing changed), so callers can skip re-renders.
+        assert!(tree.drag_divider(&addr, 400.0, 0.0, DRAG_BOUNDS));
+        assert!(!tree.drag_divider(&addr, 400.0, 0.0, DRAG_BOUNDS));
+        // Pinning at a clamp: the move that first hits it is a change...
+        assert!(tree.drag_divider(&addr, -500.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, MIN_RATIO));
+        // ...but every further move pinned at the same clamp is not.
+        assert!(!tree.drag_divider(&addr, -600.0, 0.0, DRAG_BOUNDS));
+        assert!(!tree.drag_divider(&addr, -9999.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, MIN_RATIO), "still pinned");
     }
 
     #[test]
