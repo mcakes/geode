@@ -1,11 +1,14 @@
 //! Scope to SQL (spec §6.2). Three predicate kinds composed with AND,
 //! every value bound rather than spliced.
 //!
-//! Dimension selections go through a connection-local temp table and a
-//! semi-join. duckdb-rs cannot bind a list parameter — `Value::List`
-//! binding is an explicit error, verified against 1.10505 — and the temp
-//! table also keeps the statement text stable regardless of selection
-//! size, so the prepared plan stays cacheable.
+//! Dimension selections bind one delimiter-joined varchar and split it in
+//! SQL. duckdb-rs cannot bind a list parameter — `Value::List` binding is
+//! an explicit error, verified against 1.10505. A connection-local temp
+//! table was the first design and does not work here: compilation happens
+//! on the service's connection and execution on a pool worker's, and temp
+//! tables are connection-local. `string_split` keeps the statement text
+//! stable regardless of selection size, so the prepared plan stays
+//! cacheable, which was the temp table's other reason for existing.
 //!
 //! A predicate naming a column that does not exist at the requested grain
 //! becomes a semi-join against the grain where it does, and the result is
@@ -47,6 +50,18 @@ pub fn compile_scope(
     dims: &DerivedDimensions,
     probe: Grain,
 ) -> Result<ScopeSql, StoreError> {
+    // A contradiction selects nothing, and must say so in SQL. Returning
+    // early matters: the contradicted dimension has already been dropped
+    // from `dimensions`, so compiling the rest would produce a predicate
+    // that is *wider* than either layer asked for (see `Scope::and_then`).
+    if scope.impossible {
+        return Ok(ScopeSql {
+            predicate: "false".to_string(),
+            params: Vec::new(),
+            semantics: ScopeSemantics::Direct,
+        });
+    }
+
     let mut direct: Vec<String> = Vec::new();
     let mut finer: Vec<String> = Vec::new();
     let mut params: Vec<Value> = Vec::new();
@@ -58,7 +73,31 @@ pub fn compile_scope(
             continue;
         }
         let base = dims.base_column(&sel.column).to_string();
-        params.push(Value::Text(sel.values.join(SELECTION_DELIMITER)));
+
+        // A selection on a derived dimension names *derived* values, but
+        // the stored column holds source values — so the selection has to
+        // be translated back through the map. Binding the derived values
+        // against the source column compiles cleanly and silently matches
+        // nothing, which is the worst way for this to fail (spec §6.8).
+        let values: Vec<String> = match dims.get(&sel.column) {
+            None => sel.values.clone(),
+            Some(d) => d
+                .values
+                .iter()
+                .filter(|(_, derived)| sel.values.contains(derived))
+                .map(|(source, _)| source.clone())
+                .collect(),
+        };
+        if values.is_empty() {
+            // Selected a derived value the map does not produce: nothing
+            // can match, and saying so beats an empty `in ()`.
+            return Ok(ScopeSql {
+                predicate: "false".to_string(),
+                params: Vec::new(),
+                semantics: ScopeSemantics::Direct,
+            });
+        }
+        params.push(Value::Text(values.join(SELECTION_DELIMITER)));
         let clause =
             format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))");
         if grain.key_columns().contains(&base.as_str()) {
@@ -295,8 +334,8 @@ grain = "position"
             }],
             ..Scope::default()
         };
-        // Same connection, so the two temp tables get different names;
-        // compare the shape with the generated name removed.
+        // One bound varchar either way, so the two statements must be
+        // character-identical — that is what keeps the plan cacheable.
         let (dir, store) = store();
         let a = compile_scope(
             store.writer(),

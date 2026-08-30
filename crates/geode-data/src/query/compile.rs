@@ -82,6 +82,74 @@ fn grouping_sets(group_cols: &[String], max_depth: usize) -> String {
     format!("grouping sets ({})", sets.join(", "))
 }
 
+/// Single-quote escaping for a literal inlined into SQL. Derived
+/// dimension values come from config, which is trusted but not
+/// necessarily quote-free.
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+/// A derived dimension as a scalar expression over its source column
+/// (spec §6.8): `case "book" when 'BK000' then 'IDX_EXO_EU' ... end`.
+///
+/// A scalar projection rather than a joined lookup table on purpose. A
+/// join can duplicate rows when the key repeats and can match NULL keys
+/// against rolled-up levels — both defects this compiler has had — while
+/// a `case` is a pure function of the row: it cannot change cardinality,
+/// and an unmapped value falls through to NULL, which is the honest
+/// answer for a book the desk map does not cover.
+fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
+    if d.values.is_empty() {
+        return format!("NULL::varchar as \"{}\"", d.name);
+    }
+    let arms: Vec<String> = d
+        .values
+        .iter()
+        .map(|(source, derived)| {
+            format!("when {} then {}", sql_literal(source), sql_literal(derived))
+        })
+        .collect();
+    format!(
+        "case \"{from}\" {arms} end as \"{name}\"",
+        from = d.from,
+        arms = arms.join(" "),
+        name = d.name
+    )
+}
+
+/// The scanned relation, with any derived dimensions this query groups by
+/// projected onto it. Wrapping the table rather than rewriting every
+/// reference keeps `group by`, `grouping()` and the scope's `base` alias
+/// working on a plain column name.
+fn scan(table: &str, derived: &[&geode_core::dimensions::DerivedDimension]) -> String {
+    if derived.is_empty() {
+        return table.to_string();
+    }
+    format!(
+        "(select *, {} from {table})",
+        derived
+            .iter()
+            .map(|d| derived_expr(d))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+/// Derived dimensions among `columns` whose source column exists at
+/// `grain`. A dimension whose source is not on the table would compile to
+/// a `case` over a column that is not there.
+fn derived_for<'a>(
+    columns: &[String],
+    dims: &'a DerivedDimensions,
+    grain: Grain,
+) -> Vec<&'a geode_core::dimensions::DerivedDimension> {
+    columns
+        .iter()
+        .filter_map(|c| dims.get(c))
+        .filter(|d| grain.key_columns().contains(&d.from.as_str()))
+        .collect()
+}
+
 /// Derived ENUM type names currently present for a dataset.
 fn existing_enum_types(conn: &Connection, dataset: &str) -> Result<Vec<String>, StoreError> {
     let sql = "select type_name from duckdb_types() where type_name like ?";
@@ -173,8 +241,11 @@ pub fn compile_view(
         // is what makes it exactly one row.
         ctes.push(format!(
             "spine as (select 0 as row_depth, count(*) as _rows \
-             from {table} where {pred})",
-            table = table_name(&view.dataset, spine_grain, kind_for_joins),
+             from {table} base where {pred})",
+            table = scan(
+                &table_name(&view.dataset, spine_grain, kind_for_joins),
+                &derived_for(&view.grouping, dims, spine_grain),
+            ),
             pred = and_gen(&spine_scope.predicate),
         ));
     } else {
@@ -187,10 +258,13 @@ pub fn compile_view(
         ctes.push(format!(
             "spine as (select {select}, \
              ({depth} - bit_count(grouping({group}))) as row_depth \
-             from {table} where {pred} group by {sets})",
+             from {table} base where {pred} group by {sets})",
             select = materialized.join(", "),
             group = materialized.join(", "),
-            table = table_name(&view.dataset, spine_grain, kind_for_joins),
+            table = scan(
+                &table_name(&view.dataset, spine_grain, kind_for_joins),
+                &derived_for(&view.grouping[..depth], dims, spine_grain),
+            ),
             pred = and_gen(&spine_scope.predicate),
             sets = grouping_sets(&group_cols, depth),
         ));
@@ -279,6 +353,18 @@ pub fn compile_view(
             })
             .collect();
 
+        // How many of *this grain's* grouping columns are present at each
+        // spine depth. The aggregate groups by the same prefixes projected
+        // onto the columns it has, so this is the map between the spine's
+        // depth and the aggregate's own level.
+        let own_present: Vec<usize> = (0..=depth)
+            .map(|d| {
+                own.iter()
+                    .filter(|c| view.grouping[..d].contains(c))
+                    .count()
+            })
+            .collect();
+
         // The same depths, projected onto the columns this grain has.
         let sub_group = if own.is_empty() {
             String::new()
@@ -296,12 +382,30 @@ pub fn compile_view(
             sets.dedup();
             format!(" group by grouping sets ({})", sets.join(", "))
         };
+        // The aggregate carries its own level, for the same reason the
+        // spine does: matching on key values alone cannot tell a
+        // rolled-up NULL from a NULL that is really in the data, so a
+        // single NULL `lhu` would attach the aggregate's higher levels to
+        // the leaf row and fan it out.
+        let sub_depth = if own.is_empty() {
+            "0 as sub_depth".to_string()
+        } else {
+            format!(
+                "({} - bit_count(grouping({}))) as sub_depth",
+                own.len(),
+                own_q.join(", ")
+            )
+        };
         ctes.push(format!(
-            "{alias} as (select {keys}{comma}{aggs} from {table} where {pred}{sub_group})",
+            "{alias} as (select {keys}{comma}{sub_depth}, {aggs} \
+             from {table} base where {pred}{sub_group})",
             keys = own_q.join(", "),
             comma = if own.is_empty() { "" } else { ", " },
             aggs = aggs.join(", "),
-            table = table_name(&view.dataset, grain, kind_for_joins),
+            table = scan(
+                &table_name(&view.dataset, grain, kind_for_joins),
+                &derived_for(&own, dims, grain),
+            ),
             pred = and_gen(&grain_scope.predicate),
         ));
         // The grain subquery's params follow the spine's, in CTE order.
@@ -310,8 +414,18 @@ pub fn compile_view(
         let on = if own.is_empty() {
             "true".to_string()
         } else {
+            let level = format!(
+                "{alias}.sub_depth = case s.row_depth {} else 0 end",
+                own_present
+                    .iter()
+                    .enumerate()
+                    .map(|(d, present)| format!("when {d} then {present}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
             own.iter()
                 .map(|c| format!("{alias}.\"{c}\" is not distinct from s.\"{c}\""))
+                .chain(std::iter::once(level))
                 .collect::<Vec<_>>()
                 .join(" and ")
         };
@@ -359,10 +473,11 @@ pub fn compile_view(
         let Some(joined_ds) = schema.dataset(&join.dataset) else {
             continue;
         };
-        stalest_input.push(join.dataset.clone());
 
-        if !join.on.iter().all(|k| view.grouping.contains(k)) {
-            // Nothing to join against: the key is not on the spine.
+        // The key must be on the spine *as materialized*. Testing the
+        // whole grouping would reference a column the bounded spine does
+        // not group by, which is a binder error rather than a NULL.
+        if !join.on.iter().all(|k| view.grouping[..depth].contains(k)) {
             continue;
         }
         let Some(joined_grain) = joined_ds.grains().into_iter().find(|g| {
@@ -372,26 +487,77 @@ pub fn compile_view(
         }) else {
             continue;
         };
+        // Only once the join is known to actually happen: a skipped join
+        // must not make the view report itself as stale as a dataset it
+        // never read (spec §5.4).
+        stalest_input.push(join.dataset.clone());
+
+        // Which of the joined dataset's columns this view actually wants.
+        let wanted: Vec<&String> = view
+            .columns
+            .iter()
+            .filter_map(|c| match c {
+                ViewColumn::Dimension { name } => Some(name),
+                _ => None,
+            })
+            .filter(|name| joined_ds.column(name).is_some() && !view.grouping.contains(*name))
+            .collect();
+
+        // A joined dataset's table is keyed finer than the join key — an
+        // instrument's reference row exists per position that holds it —
+        // so joining the table directly multiplies every spine row by how
+        // many rows share the key. Aggregating to the join key first is
+        // what makes this a lookup rather than a fan-out. `any_value` is
+        // the right reducer because these are attributes that should
+        // agree; where they do not, that is what the cross-file conflict
+        // detector reports (spec §3.5), not something to average.
+        let joined_gen = match as_of {
+            crate::query::as_of::AsOf::Live => None,
+            crate::query::as_of::AsOf::At(t) => {
+                // Each dataset has its own generations, so the spine's
+                // predicate does not apply here. Without this a
+                // historical join reads every archived generation at once.
+                let archive = table_name(&join.dataset, joined_grain, TableKind::Archive);
+                let gens = crate::query::as_of::resolve_generations(conn, &archive, *t)?;
+                Some(crate::query::as_of::generation_predicate(&gens))
+            }
+        };
+        let projection: Vec<String> = join
+            .on
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .chain(
+                wanted
+                    .iter()
+                    .map(|name| format!("any_value(\"{name}\") as \"{name}\"")),
+            )
+            .collect();
 
         let alias = format!("join_{i}");
+        // Plain `=`, not `is not distinct from`: above the join's level
+        // the spine has already NULLed the key, and NULL must not match.
+        // `is not distinct from` would attach a reference row whose key is
+        // NULL to every rolled-up row above it.
         let on = join
             .on
             .iter()
-            .map(|k| format!("{alias}.\"{k}\" is not distinct from s.\"{k}\""))
+            .map(|k| format!("{alias}.\"{k}\" = s.\"{k}\""))
             .collect::<Vec<_>>()
             .join(" and ");
         joins.push(format!(
-            "left join {} {alias} on {on}",
-            table_name(&join.dataset, joined_grain, kind_for_joins)
+            "left join (select {projection} from {table} where {pred} group by {keys}) {alias} on {on}",
+            projection = projection.join(", "),
+            table = table_name(&join.dataset, joined_grain, kind_for_joins),
+            pred = joined_gen.as_deref().unwrap_or("true"),
+            keys = join
+                .on
+                .iter()
+                .map(|k| format!("\"{k}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
         ));
 
-        for c in &view.columns {
-            let ViewColumn::Dimension { name } = c else {
-                continue;
-            };
-            if joined_ds.column(name).is_none() || view.grouping.contains(name) {
-                continue;
-            }
+        for name in wanted {
             let col_grain = joined_ds.column(name).and_then(|c| c.grain());
             selects.push(format!("{alias}.\"{name}\" as \"{name}\""));
             columns.push(CompiledColumn {
@@ -651,6 +817,100 @@ kind = "dimension"
         );
     }
 
+    /// The joined view over a store that already has the reference table.
+    fn joined_query(
+        store: &crate::store::Store,
+        schema: &SchemaSpec,
+        max_depth: usize,
+    ) -> CompiledQuery {
+        compile_view(
+            store.writer(),
+            &joined_view(),
+            schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            max_depth,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_reference_row_per_holder_does_not_multiply_the_spine() {
+        // The reference table is keyed per position, so one instrument
+        // held by two positions has two rows. Joining the table directly
+        // would duplicate every spine row that matched — and duplicate its
+        // measures with it.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into instrument_ref_instrument_live values
+                   ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I1', 4200.0, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = joined_query(&store, &schema, usize::MAX);
+        let rows = run(&store, &q, &["row_depth", "instrument_ref", "strike"]);
+        let mut deduped = rows.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(
+            rows.len(),
+            deduped.len(),
+            "two reference rows for one instrument duplicated the spine: {rows:?}"
+        );
+        assert_eq!(rows.len(), 2, "grand total and one instrument: {rows:?}");
+    }
+
+    #[test]
+    fn a_null_reference_key_does_not_attach_to_every_rolled_up_row() {
+        // `is not distinct from` would make a NULL key match the NULLs a
+        // rolled-up level carries, so the grand total would borrow this
+        // row's strike and read as though it belonged to one instrument.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into instrument_ref_instrument_live values
+                   ('BK0','L0','P1','C', NULL, 9999.0, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = joined_query(&store, &schema, usize::MAX);
+        let rows = run(&store, &q, &["row_depth", "strike"]);
+        let total: Vec<&Vec<String>> = rows.iter().filter(|r| r[0] == "Some(0.0)").collect();
+        assert_eq!(total.len(), 1, "one grand total: {rows:?}");
+        assert_eq!(
+            total[0][1], "None",
+            "the total must not borrow a NULL-keyed strike: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_joined_view_bounded_to_the_total_still_compiles_and_runs() {
+        // At depth 0 the spine groups by nothing, so a join key tested
+        // against the *full* grouping would reference a column that is not
+        // there — a binder error, not a NULL.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        let q = joined_query(&store, &schema, 0);
+        let rows = run(&store, &q, &["row_depth"]);
+        assert_eq!(rows.len(), 1, "the grand total alone: {rows:?}");
+    }
+
     #[test]
     fn every_dataset_read_is_recorded_for_the_stalest_input_rule() {
         let (_d, store) = fixture();
@@ -671,6 +931,211 @@ kind = "dimension"
         let mut inputs = q.stalest_input.clone();
         inputs.sort();
         assert_eq!(inputs, vec!["instrument_ref", "risk_snapshot"]);
+    }
+
+    /// Run a compiled query and return the rows as `(row_depth, values)`.
+    /// The tests that matter here are about what the database *does*, not
+    /// what the SQL string looks like.
+    fn run(store: &crate::store::Store, q: &CompiledQuery, columns: &[&str]) -> Vec<Vec<String>> {
+        let conn = store.writer();
+        let mut stmt = conn
+            .prepare(&q.sql)
+            .unwrap_or_else(|e| panic!("prepare failed: {e}\n{}", q.sql));
+        let rows = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                Ok(columns
+                    .iter()
+                    .map(|c| {
+                        r.get::<_, Option<f64>>(*c)
+                            .map(|v| format!("{v:?}"))
+                            .or_else(|_| r.get::<_, Option<i64>>(*c).map(|v| format!("{v:?}")))
+                            .or_else(|_| r.get::<_, Option<String>>(*c).map(|v| format!("{v:?}")))
+                            .unwrap_or_else(|_| "?".into())
+                    })
+                    .collect::<Vec<String>>())
+            })
+            .unwrap_or_else(|e| panic!("execute failed: {e}\n{}", q.sql));
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn a_real_null_in_a_grouping_column_does_not_fan_out_the_tree() {
+        // A rolled-up level carries NULL in the columns below it, so
+        // matching an aggregate on key values alone cannot tell that NULL
+        // apart from one that is genuinely in the data — and the higher
+        // aggregate levels then attach to the leaf as well, duplicating
+        // rows and double-counting. Books with no LHU are ordinary in the
+        // real feed (2a reports them rather than dropping them).
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_live values
+                   ('BK0',NULL,'P9','C', 5, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK0',NULL,'P9','C','I9','SPX', 3, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = compile(&store);
+        // Every grouping column, or legitimately distinct rows would look
+        // like duplicates and the assertion would be about the wrong thing.
+        let rows = run(
+            &store,
+            &q,
+            &["row_depth", "lhu", "underlying_ref", "position_ref"],
+        );
+
+        // Every level must appear exactly once per group.
+        let mut seen = rows.clone();
+        seen.sort();
+        let mut deduped = seen.clone();
+        deduped.dedup();
+        assert_eq!(
+            seen, deduped,
+            "the same level appeared more than once — the join fanned out"
+        );
+
+        // And the grand total must still be the sum of the leaves, not a
+        // multiple of it: 7 + 5 across the two positions.
+        let totals = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let grand: Vec<&Vec<String>> = totals.iter().filter(|r| r[0] == "Some(0.0)").collect();
+        assert_eq!(grand.len(), 1, "one grand total row: {totals:?}");
+        assert_eq!(grand[0][1], "Some(12.0)", "7 + 5, not doubled: {totals:?}");
+    }
+
+    /// `desk` derived from `book` — the standing §6.8 case.
+    fn desks() -> DerivedDimensions {
+        let doc = geode_core::config::merge_docs(
+            "dimensions",
+            &[geode_core::config::LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\nEU = [\"BK0\"]\nUS = [\"BK9\"]\n",
+            )
+            .unwrap()],
+        );
+        DerivedDimensions::from_doc(&doc).0
+    }
+
+    fn desk_view() -> ViewSpec {
+        let text = r#"
+[by_desk]
+dataset = "risk_snapshot"
+grouping = ["desk"]
+[[by_desk.columns]]
+name = "delta01"
+kind = "measure"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn grouping_by_a_derived_dimension_produces_its_mapped_values() {
+        // The map lives in config and has to reach the SQL: without it the
+        // spine groups by a column no table has.
+        let (_d, store) = fixture();
+        let q = compile_view(
+            store.writer(),
+            &desk_view(),
+            &schema(),
+            &Scope::default(),
+            &desks(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "desk", "delta01"]);
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "Some(1.0)" && r[1] == "Some(\"EU\")"),
+            "BK0 must roll up under desk EU: {rows:?}"
+        );
+        // 10 + 20 across the fixture's two underlyings, under one desk.
+        let eu = rows.iter().find(|r| r[1] == "Some(\"EU\")").unwrap();
+        assert_eq!(eu[2], "Some(30.0)", "{rows:?}");
+    }
+
+    #[test]
+    fn scoping_by_a_derived_dimension_translates_back_to_source_values() {
+        // The silent one: the stored column holds `book`, so binding the
+        // derived value 'EU' against it compiles fine and matches nothing.
+        // An empty result is indistinguishable from a real empty result.
+        let (_d, store) = fixture();
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "desk".into(),
+                values: vec!["EU".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &desk_view(),
+            &schema(),
+            &scope,
+            &desks(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(30.0)",
+            "scoping to desk EU must keep BK0's rows: {rows:?}"
+        );
+
+        // And a desk the map does not produce selects nothing, rather
+        // than everything.
+        let unknown = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "desk".into(),
+                values: vec!["NOWHERE".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &desk_view(),
+            &schema(),
+            &unknown,
+            &desks(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[1], "None", "an unmapped desk selects nothing");
+    }
+
+    #[test]
+    fn a_scope_finer_than_the_measure_grain_actually_executes() {
+        // The semi-join path: `daily_trading_pnl` lives at position grain,
+        // but the scope names `underlying_ref`, which does not exist
+        // there. Asserting the SQL merely *contains* "exists" would pass
+        // on SQL the database rejects, so this runs it.
+        let (_d, store) = fixture();
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["SPX".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth"]);
+        assert!(!rows.is_empty(), "the scoped query returned nothing");
     }
 
     #[test]
