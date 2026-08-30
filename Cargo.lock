@@ -2498,6 +2498,8 @@ dependencies = [
  "duckdb",
  "geode-core",
  "geode-demo-data",
+ "glob",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
