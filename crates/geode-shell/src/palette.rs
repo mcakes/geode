@@ -491,9 +491,10 @@ const WIDTH: f32 = 560.0;
 /// Sizing hint only (no longer a selection clamp — see `PaletteState::
 /// move_selection`'s doc comment): the number of rows the results viewport
 /// is tall enough to show before it needs to scroll. Item count today is
-/// 66 (`register_builtin_actions`' 15 actions + `theme::load_bundled`'s 51
-/// bundled theme entries — counted directly, not estimated, while doing
-/// this task's inventory), well within what a plain scrollable `div`
+/// 79 (`register_builtin_actions`' 40 actions + `theme::load_bundled`'s 39
+/// bundled theme entries — counted directly, not estimated, by
+/// `build_binding_index_and_items_cover_the_whole_registry_and_theme_set`),
+/// well within what a plain scrollable `div`
 /// handles without virtualization — see `ROW_HEIGHT` below for how this
 /// becomes a pixel height.
 const VISIBLE_ROWS: usize = 12;

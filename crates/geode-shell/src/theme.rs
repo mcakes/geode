@@ -23,7 +23,10 @@
 //! friendly crate API, so per the brief both are vendored verbatim into
 //! `assets/themes/` (22 files: `default.json` plus the 21 family files) and
 //! embedded here with `include_str!` — no runtime file I/O, binary stays
-//! self-contained.
+//! self-contained. `bloomberg.json` sits alongside them as the 23rd file:
+//! Geode's own theme rather than a vendored one — a dark-only Bloomberg
+//! Terminal palette (black ground, amber text, blue column heads), written
+//! against the same `ThemeSet` schema so it needs no special handling.
 //!
 //! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
 //! `ThemeConfig` (`crates/ui/src/theme/schema.rs`) — a theme JSON file is a
@@ -93,6 +96,10 @@ const BUNDLED: &[(&str, &str)] = &[
     (
         "adventure",
         include_str!("../../../assets/themes/adventure.json"),
+    ),
+    (
+        "bloomberg",
+        include_str!("../../../assets/themes/bloomberg.json"),
     ),
     ("alduin", include_str!("../../../assets/themes/alduin.json")),
     (
@@ -530,13 +537,40 @@ mod tests {
     fn bundled_themes_all_parse_clean() {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
-        // 22 vendored files, several with more than one variant (e.g. Tokyo
-        // Night ships 3 dark variants) — comfortably more than one-per-file.
+        // 23 files (22 vendored plus Geode's own `bloomberg.json`), several
+        // with more than one variant (e.g. Tokyo Night ships 3 dark
+        // variants) — comfortably more than one-per-file.
         assert!(
             service.entries.len() >= BUNDLED.len(),
             "expected at least one ThemeConfig per bundled file, got {}",
             service.entries.len()
         );
+    }
+
+    #[test]
+    fn bloomberg_is_bundled_as_a_dark_only_family() {
+        let (service, warnings) = load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(service.names().contains(&"Bloomberg".to_string()));
+        // Family lookup normalizes case (see `normalize_theme_name`), so a
+        // config `theme.name = "bloomberg"` and a palette pick of the
+        // display name land on the same single dark variant.
+        assert_eq!(
+            service
+                .resolve("bloomberg", Mode::Dark)
+                .unwrap()
+                .name
+                .as_ref(),
+            "Bloomberg"
+        );
+        // Dark-only family, named bare like Twilight/Harper: the exact-name
+        // match wins outright, so a stale `theme.mode = "light"` alongside
+        // it still resolves the dark theme rather than falling back.
+        let light = service
+            .resolve("Bloomberg", Mode::Light)
+            .expect("exact name matches regardless of the mode argument");
+        assert_eq!(light.name.as_ref(), "Bloomberg");
+        assert!(light.mode.is_dark());
     }
 
     #[test]
