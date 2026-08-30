@@ -146,10 +146,10 @@ pub struct ShellModal {
     /// second parameter alongside it.
     pub build: ModalBuilder,
     /// This modal's optional key-handling seam (Part B) — see
-    /// [`ModalKeyHandler`]'s own doc comment. `None` for every modal that
-    /// predates Part B (the settings modal): `open_shell_dialog` still sets
-    /// this to `None` unconditionally, so those call sites see no behavior
-    /// change at all.
+    /// [`ModalKeyHandler`]'s own doc comment. Both shipped dialogs (the
+    /// keybinding dialog, and the settings dialog since its row-list
+    /// rewrite) now pass a handler; `open_shell_dialog` still sets this to
+    /// `None` unconditionally for any future modal without key needs.
     pub on_key: Option<ModalKeyHandler>,
 }
 
@@ -178,10 +178,12 @@ pub fn open_shell_dialog<F>(
 /// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
 /// keybinding dialog needs first refusal on every keystroke while it's
 /// open, to drive vim navigation and rebind-capture — see that type's own
-/// doc comment). `open_shell_dialog` is simply this with `on_key: None`, so
-/// every pre-Part-B call site (the settings modal) is unaffected. Still the
-/// same one door, same open-time hygiene — this is the one place that
-/// constructs a [`ShellModal`], `open_shell_dialog` included.
+/// doc comment; the settings dialog joined it with the row-list rewrite,
+/// for vim nav/find/stepping). `open_shell_dialog` is simply this with
+/// `on_key: None` — no production modal uses it today, but it stays as the
+/// door for any future handler-less modal. Still the same one door, same
+/// open-time hygiene — this is the one place that constructs a
+/// [`ShellModal`], `open_shell_dialog` included.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -219,9 +221,10 @@ pub fn open_shell_dialog_with_key<F>(
 /// use): a small dialog's panel still hugs its own content, this only
 /// stops a tall one from growing past 80% of the viewport, past which its
 /// content region (also set up in [`render_modal`]) scrolls internally
-/// instead. `settings_view::open` reads this same constant to size its own
-/// content wrapper — see that call site's doc comment for why a *second*,
-/// independent use of this ratio is required rather than one being enough.
+/// instead. (The settings-dialog rewrite removed this constant's one
+/// external reader — `settings_view::open`'s composite-era content
+/// wrapper, which had to re-derive its own explicit height from this same
+/// ratio; see the history note on [`render_modal`]'s height contract.)
 pub(crate) const MODAL_MAX_HEIGHT_RATIO: f32 = 0.8;
 
 /// Fraction of the viewport height every modal's top edge sits below the
@@ -232,22 +235,6 @@ pub(crate) const MODAL_MAX_HEIGHT_RATIO: f32 = 0.8;
 /// 10% margin below as above, and anything smaller hangs from the shared
 /// top edge.
 pub(crate) const MODAL_TOP_RATIO: f32 = 0.1;
-
-/// Vertical space [`render_modal`]'s own chrome — the title row
-/// (`.text_lg()` title + small ghost close button) plus the panel's
-/// `pt_4()`/`pb_4()`/`gap_3()` — takes up around the content region, in
-/// px. `settings_view::open` subtracts this from its own target content
-/// height (which is independently capped at [`MODAL_MAX_HEIGHT_RATIO`] of
-/// the viewport, same as the panel) so the two caps don't collide: without
-/// this allowance, content sized to *exactly* the panel's own `max_h`
-/// leaves no room for the title row, and the content region's `flex_auto`
-/// gets shrunk by the chrome's own height every time, permanently
-/// scrolling off the last few pixels of content even when the window is
-/// plenty tall. A measured/generous estimate, not pixel-exact — being a
-/// little too generous just leaves a little headroom under the content;
-/// being too stingy is the failure mode this constant exists to avoid, so
-/// it errs high.
-pub(crate) const MODAL_CHROME_ALLOWANCE: f32 = 96.;
 
 /// Render one open modal's chrome: a full-window backdrop on
 /// `cx.theme().overlay` (the same token gpui-component's own `Dialog`
@@ -278,11 +265,13 @@ pub(crate) const MODAL_CHROME_ALLOWANCE: f32 = 96.;
 /// size and collapses to nothing when the panel above it has no definite
 /// height of its own to grow into) lets the region size itself to whatever
 /// its content naturally needs, then shrink and scroll if the panel's
-/// `max_h` cap ends up smaller than that. Neither of those alone fixes
-/// `gpui_component::setting::Settings` collapsing to zero height inside
-/// this wrapper, though — see `settings_view::open`'s doc comment for why
-/// that composite specifically also needs its *own* content wrapper to
-/// carry an explicit height, not just a `flex_auto`/`max_h` ancestor.
+/// `max_h` cap ends up smaller than that. (History: the composite-era
+/// settings dialog additionally needed its own explicitly-heighted content
+/// wrapper here, because `gpui_component::setting::Settings`' root demanded
+/// `size_full` — a percentage with nothing definite to resolve against.
+/// The settings-dialog rewrite removed that composite; both list dialogs
+/// now size their row lists explicitly, so `flex_auto` + `max_h` alone is
+/// the whole contract again.)
 ///
 /// Interaction: a mouse-down on the backdrop closes the modal
 /// (`cx.listener` — needs `Entity<ShellView>` access to clear `view.modal`,

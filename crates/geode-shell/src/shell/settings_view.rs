@@ -1,364 +1,378 @@
-//! The settings modal (Task 5, migrated onto Task 9's instant-modal chrome
-//! — see `dialog`'s module doc): Geode's own `dialog::render_modal` wrapping
-//! the crate's own `setting` module composite. No gpui-component `Dialog`
-//! import lives here anymore — `open` hands its content straight to
-//! [`open_shell_dialog`], which is the only place that still knows anything
-//! about how a modal gets painted.
+//! The settings modal (`ctrl+,`, `settings::open`): a keyboard-driven flat
+//! row list in the exact mold of the keybinding dialog
+//! ([`super::keybindings_view`]) — the settings-dialog rewrite that
+//! REPLACED the gpui-component `Settings`/`SettingPage`/`SettingGroup`/
+//! `SettingItem`/`SettingField` composite this module used to wrap.
 //!
-//! ## Inventory findings (pinned checkout rev `0e2fb7a`,
-//! `crates/ui/src/setting/{fields,group,item,page,settings}.rs`, plus the
-//! reference example `crates/story/src/stories/settings_story.rs`)
+//! ## Why the composite went away
 //!
-//! - The hierarchy is `Settings` (the whole panel: search + page sidebar +
-//!   active page) -> `SettingPage` -> `SettingGroup` -> `SettingItem` ->
-//!   `SettingField` (typed get/set closures over `&App`/`&mut App`, with a
-//!   built-in renderer per field kind: `switch`/`checkbox`, `dropdown`,
-//!   `input`, `number_input`, or a fully custom `element`/`render`).
-//! - **No fallback needed, and none is available**: `SettingGroup::render`
-//!   and `SettingPage::render` are `pub(crate)` in the pinned checkout —
-//!   reachable only from inside the `gpui_component` crate itself. The
-//!   *only* public rendering entry point into this module, from an outside
-//!   crate like this one, is `Settings`'s own `RenderOnce` impl (public,
-//!   since `Settings: IntoElement`). So `Settings::new(id).page(...)` is not
-//!   a stylistic choice among several ways to reach this UI; it is the only
-//!   one the crate exposes. (Confirmed by reading `setting/mod.rs`'s
-//!   `pub use` list against each file's own visibility, not just by
-//!   inference from the story example using it.)
-//! - `settings_story.rs`'s "Dark Mode" field calls `Theme::global_mut(cx)`/
-//!   `Theme::change` directly, because that story owns no equivalent
-//!   service. This module's fields never do that: every get/set closure
-//!   routes through the same `ThemeService` methods `theme::toggle_mode`
-//!   already uses (`apply`, `set_mode`), via `Entity<ShellView>::update` —
-//!   see [`set_theme`]/[`set_dark_mode`] — so `ThemeService`'s own
-//!   `active_name`/`active_mode`/`active_family` bookkeeping (what the
-//!   status bar and session-save read) never goes stale behind a
-//!   side-channel `Theme::change` call.
+//! The old dialog was the one surface in Geode that didn't speak the
+//! shell's own language: mouse-first controls (a dropdown popup, a switch,
+//! button groups), its own search input with its own focus, none of the
+//! vim vocabulary every other list surface here has (`crate::vimnav`
+//! motions, `/` find via `crate::vimfind`), and a stack of documented
+//! layout workarounds just to keep the composite from collapsing inside
+//! our own modal chrome (see `dialog::render_modal`'s height-contract doc
+//! comment for the scar tissue that remains). The keybinding dialog
+//! established the house pattern — pure unit-testable state + a
+//! [`dialog::ModalKeyHandler`] with first refusal on every keystroke + a
+//! `build` closure painting a flat scrollable row list — and this module
+//! now applies that pattern to settings wholesale.
 //!
-//! Content v1 (brief): one page, two groups — **Appearance** (theme family
-//! dropdown, light/dark switch, and a font-size toggle button group —
-//! small/medium/large, see the `fontsize` module — all live-applying) and
-//! **Keyboard** (a find-style toggle button group — vim/fzf `/` behavior
-//! in list dialogs, see `vimfind::FindStyle` — plus the read-only mod-key
-//! display). Neither group is resettable: there is no
-//! meaningful "default" to reset *to* here (the config file is the real
-//! default, and writing it back is the config-editor phase's job, not
-//! this dialog's) — a reset button implying otherwise would be misleading.
+//! ## The row model
 //!
-//! **Persistence**: changes apply live (through `ThemeService`, same as
-//! `theme::toggle_mode`), then persist into the user config layer —
-//! [`set_theme`]/[`set_dark_mode`] both call `ShellView::persist_theme`
-//! right after applying, which writes `<user_dir>/app.toml`'s `[theme]`
-//! table via `theme::persist_to_user_config` (`toml_edit`, format- and
-//! comment-preserving). The muted caption under the theme controls reflects
-//! this now: "saved to your app.toml".
+//! Four rows, derived FRESH from `ShellView` state on every render and
+//! every keystroke ([`derive_rows`] via [`rows_for`] — same no-caching
+//! contract as `keybindings_view::derive_rows`): Theme, Dark mode, and
+//! Font size under **Appearance**, Find style under **Keyboard**. Each row
+//! is one enumerated setting — an ordered list of value labels plus the
+//! index of the currently-active one — and editing is *stepping*:
+//! `h`/`left` and `l`/`right` step the selected row's value (wrapping at
+//! both ends, [`step`]), `enter`/`space` cycle forward, and a click on the
+//! already-selected row cycles forward too (the mirror of keybindings'
+//! click-to-listen). A step applies IMMEDIATELY through the same
+//! apply-then-persist seams the old dialog's controls used
+//! ([`set_theme`]/[`set_dark_mode`]/[`set_font_size`]/[`set_find_style`]'s
+//! shared `*_on` cores) — theme stepping is a live preview, and
+//! persistence stays on the existing background paths
+//! (`ShellView::persist_theme` and friends; no I/O lands on the render
+//! thread here).
+//!
+//! The old dialog's read-only content — the "Mod key: …" line and the
+//! "saved to your app.toml" caption — survives as muted inert footer
+//! lines, not rows: there is nothing to step on either.
+//!
+//! ## What deliberately did NOT change
+//!
+//! The four setter helpers ([`set_theme`], [`set_dark_mode`],
+//! [`set_font_size`], [`set_find_style`]) keep their exact
+//! `Entity<ShellView>`-taking signatures and semantics — they are the
+//! seam `shell::mod`'s tests drive directly, and nothing about *applying*
+//! a setting changed, only the control surface in front of it. Each now
+//! delegates to a `*_on(&mut ShellView, ...)` core so this module's own
+//! [`handle_key`] (which already holds `&mut ShellView` mid-key-dispatch
+//! and must not reenter the entity via `Entity::update`) can apply the
+//! identical path.
+//!
+//! ## Find (`/`), both styles
+//!
+//! Identical semantics to the keybinding dialog, via the shared session
+//! drivers in [`crate::vimfind`] (promoted out of `keybindings_view` by
+//! this same rewrite): vim style jumps the selection incrementally from
+//! the anchor with `n`/`shift+n` repeats; fzf style narrows the rendered
+//! list, `up`/`down` step the matches, and `enter` picks — with the one
+//! settings-specific meaning of *picking*: the session just ends, full
+//! list back, selection on the picked row (there is no "listening" to
+//! start here — [`vimfind::FzfOutcome::Picked`] needs no extra work at
+//! all). Searchable text per row is title + category
+//! ([`searchable_text`]) — exactly what the row displays, matching
+//! keybindings' philosophy of never matching invisible text.
 
-use gpui::{
-    App, Context, Entity, InteractiveElement as _, IntoElement as _, ParentElement as _,
-    SharedString, Styled as _, Window, div, px,
-};
-use gpui_component::{
-    ActiveTheme as _, Selectable as _, Sizable as _,
-    button::{Button, ButtonGroup},
-    label::Label,
-    setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings},
-    v_flex,
-};
+use std::rc::Rc;
+
+use gpui::prelude::*;
+use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fontsize::FontSize;
+use crate::keymap::Keystroke;
 use crate::keymap::Modifiers;
 use crate::shell::ShellView;
 use crate::shell::dialog;
-use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
-use crate::vimfind::FindStyle;
+use crate::vimfind::{self, FindDirection, FindStyle, VimFind, filter_matches};
+use crate::vimnav::{self, NavResult, VimListNav};
 
-/// Open the settings modal (`settings::open`: `ctrl+,`, the palette entry,
-/// and the sidebar profile icon all reach this). A no-op if a modal is
-/// already open — `open_shell_dialog` unconditionally sets `view.modal`,
-/// and re-triggering the action while one is already up (e.g. a second
-/// `ctrl+,`) should not clobber whatever's currently open with a fresh
-/// settings modal.
+use super::keybindings_view::{highlighted_text, key_chip};
+
+// ---------------------------------------------------------------------
+// Pure core — no gpui. Row derivation, value stepping, session state.
+// ---------------------------------------------------------------------
+
+/// Which setting a row edits — the row's stable identity (what click
+/// handlers are keyed by, mirroring how keybindings rows are keyed by
+/// `ActionId` rather than list position) and what [`apply_setting`]
+/// dispatches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingId {
+    Theme,
+    DarkMode,
+    FontSize,
+    FindStyle,
+}
+
+/// One row of the settings dialog: an enumerated setting — its displayed
+/// title/category, every value it can take (as display labels, in
+/// stepping order), and the index of the currently-active value. Derived
+/// fresh per render/keystroke by [`derive_rows`]; never cached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingRow {
+    pub id: SettingId,
+    pub title: &'static str,
+    pub category: &'static str,
+    pub values: Vec<String>,
+    pub current: usize,
+}
+
+/// Build the dialog's four rows from plain inputs (no gpui, no
+/// `ShellView` — [`rows_for`] is the thin shell-reading wrapper), in the
+/// dialog's fixed display order: the Appearance rows first (Theme, Dark
+/// mode, Font size), then Keyboard (Find style). A boolean setting is a
+/// two-value enum (`off`/`on`) so stepping and cycling need no special
+/// case — wrapping a two-element list IS a toggle.
 ///
-/// Goes through [`open_shell_dialog`] (Task 9) rather than touching `view.
-/// modal` itself — the crate's one standard door, so this modal gets the
-/// same pending-sequence/palette hygiene as every other one (see
-/// `dialog`'s module doc: Task 9's instant-modal redesign keeps that rule
-/// even though opening no longer means `window.open_dialog`). `view`'s
-/// `Entity` handle is grabbed via `cx.entity()` before the call, since the
-/// content closure below needs a clone to read/update `ShellView`'s
-/// services later, when the modal actually renders — not `&mut ShellView`
-/// itself, which `open_shell_dialog` already borrows for its own hygiene.
-pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if view.modal.is_some() {
-        return;
+/// An `active_theme` not present in `theme_names` (impossible via the UI —
+/// `ThemeService::apply` only ever activates a bundled name — but cheap to
+/// be deterministic about) marks the first theme as current rather than
+/// panicking or carrying an out-of-range index into [`step`].
+pub fn derive_rows(
+    theme_names: &[String],
+    active_theme: &str,
+    dark: bool,
+    font_size: FontSize,
+    find_style: FindStyle,
+) -> Vec<SettingRow> {
+    vec![
+        SettingRow {
+            id: SettingId::Theme,
+            title: "Theme",
+            category: "Appearance",
+            current: theme_names
+                .iter()
+                .position(|n| n == active_theme)
+                .unwrap_or(0),
+            values: theme_names.to_vec(),
+        },
+        SettingRow {
+            id: SettingId::DarkMode,
+            title: "Dark mode",
+            category: "Appearance",
+            values: vec!["off".to_string(), "on".to_string()],
+            current: usize::from(dark),
+        },
+        SettingRow {
+            id: SettingId::FontSize,
+            title: "Font size",
+            category: "Appearance",
+            values: FontSize::ALL
+                .iter()
+                .map(|s| s.label().to_string())
+                .collect(),
+            current: FontSize::ALL
+                .iter()
+                .position(|&s| s == font_size)
+                .expect("font_size is always one of FontSize::ALL"),
+        },
+        SettingRow {
+            id: SettingId::FindStyle,
+            title: "Find style",
+            category: "Keyboard",
+            values: FindStyle::ALL
+                .iter()
+                .map(|s| s.label().to_string())
+                .collect(),
+            current: FindStyle::ALL
+                .iter()
+                .position(|&s| s == find_style)
+                .expect("find_style is always one of FindStyle::ALL"),
+        },
+    ]
+}
+
+/// Which way a value step goes — `h`/`left` vs. `l`/`right` (and
+/// `enter`/`space`/same-row click, which cycle forward = `Right`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepDirection {
+    Left,
+    Right,
+}
+
+/// The value index one step from `current` in a `len`-value list,
+/// WRAPPING at both ends — deliberately unlike `vimnav::apply`'s clamped
+/// list navigation: a settings value is a cycle (fzf → vim → fzf), not a
+/// list with ends, and wrap is what makes `enter`'s cycle-forward reach
+/// every value. `len == 0` yields 0 (unreachable for real rows — every
+/// setting has at least two values — but deterministic).
+pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
+    if len == 0 {
+        return 0;
     }
-    let entity = cx.entity();
-    // The fixed 720px width the old `Dialog` set on itself (`.w(px(720.))`)
-    // — `Settings`' own root (`h_resizable`, pinned checkout `crates/ui/
-    // src/setting/settings.rs`) has no intrinsic width of its own (its
-    // sidebar is sized as `w(relative(1.))`, 100% of whatever ancestor
-    // hands it one), so this crate's own modal chrome — generic over
-    // arbitrary content, with no width opinion of its own — needs this
-    // call site to keep providing one, same as before.
-    open_shell_dialog(view, window, cx, "Settings", move |shell, window, cx| {
-        // Content-collapse fix (root cause): `Settings`' own root
-        // (`ResizablePanelGroup::render`, pinned checkout `crates/base/src/
-        // resizable/panel.rs`) is `.size_full()` — a *percentage* height,
-        // which only resolves against a parent whose own height was
-        // explicitly specified, not one that is itself sized from its
-        // content (directly, or transitively through a `flex_auto`/`max_h`
-        // ancestor with no explicit height of its own — confirmed
-        // empirically: giving `dialog::render_modal`'s content wrapper a
-        // `flex_1()` (flex-basis 0%) instead of `flex_auto()` collapsed it
-        // right back to a sliver too, because `flex_1`'s zero basis, with
-        // no definite space on its own un-sized ancestor to grow into,
-        // discards this div's own explicit height from consideration
-        // entirely — the wrapper needs `flex_auto()`, which sizes from its
-        // content, i.e. from *this* div's real height). So this wrapper —
-        // the direct, immediate parent of `Settings` — needs its own
-        // explicit height, not `h_full()` (still just a percentage, still
-        // 0 against this div's un-sized parent). Reading `window.
-        // viewport_size()` here, applying the *same* `dialog::
-        // MODAL_MAX_HEIGHT_RATIO` the panel caps itself at, minus
-        // `dialog::MODAL_CHROME_ALLOWANCE` for the title row/paddings the
-        // panel also has to fit inside that same cap, keeps this content
-        // comfortably within the panel's cap in the common case; when it
-        // doesn't (a very short window), `render_modal`'s content wrapper
-        // (`flex_auto()` + `overflow_y_scrollbar()`) simply scrolls the
-        // excess instead of pushing the panel past its own `max_h`.
-        let content_height = (f32::from(window.viewport_size().height)
-            * dialog::MODAL_MAX_HEIGHT_RATIO
-            - dialog::MODAL_CHROME_ALLOWANCE)
-            .max(200.);
-        div()
-            .w(px(720.))
-            .h(px(content_height))
-            // Test-only hook (no-op outside test/test-support builds, see
-            // gpui's own `debug_selector` doc comment): lets a
-            // `#[gpui::test]` recover this wrapper's painted bounds via
-            // `VisualTestContext::debug_bounds`, to click into the
-            // `Settings` composite's own search input (Task 9 review fix:
-            // there is no public way to reach that input's `FocusHandle`
-            // directly — `SettingsState`/`search_input` are `pub(super)` in
-            // the pinned gpui-component checkout, reachable only from
-            // inside that crate's own `setting` module — so a real click at
-            // its on-screen position, inside this wrapper's bounds, is the
-            // only way an external test can drive focus into it).
-            .debug_selector(|| "settings-content".to_string())
-            .child(build(shell, entity.clone(), window, cx))
-            .into_any_element()
-    });
+    match dir {
+        StepDirection::Right => (current + 1) % len,
+        StepDirection::Left => (current + len - 1) % len,
+    }
 }
 
-/// Builds the Theme field via `SettingField::scrollable_dropdown`, not the
-/// plain `SettingField::dropdown` — the theme dropdown fix (root cause
-/// below), broken out of [`build`] into its own function so a plain
-/// `#[test]` can pin the choice down directly against the field's own
-/// `SettingFieldType`, the same way [`set_theme`]/[`set_dark_mode`] were
-/// already broken out so a test could drive their path directly (see their
-/// doc comments). Neither `SettingField` constructor needs an `App`/
-/// `Window` to build (only their `value`/`set_value` closures do, later,
-/// when actually called), so this needs no gpui test context at all — see
-/// `theme_dropdown_field_is_scrollable` below.
-///
-/// **Root cause**: with 38 theme names the popup menu's item list overflows
-/// a fixed-height (non-scrolling) viewport and cannot be scrolled by mouse
-/// wheel. `SettingField::dropdown` builds a `DropdownField` with
-/// `scrollable: false` (pinned checkout `crates/ui/src/setting/fields/
-/// mod.rs`), and `DropdownField::render` (`crates/ui/src/setting/fields/
-/// dropdown.rs`) forwards that straight to `PopupMenu::scrollable`, which
-/// gates the ONLY place the items container gets `max_h`/
-/// `overflow_y_scroll`/`track_scroll` (`crates/ui/src/menu/popup_menu.rs`,
-/// `PopupMenu::render`'s `.when(self.scrollable, ...)`). With it false the
-/// items div has no bound at all — it sizes to its 38 children and is
-/// painted through `Popup::render`'s `deferred(Positioner::corner(...))`
-/// (`crates/base/src/popup.rs`), a top-layer overlay anchored to the
-/// trigger but otherwise unclipped by our modal (or by anything but the
-/// window edge), so the unbounded content simply runs off the bottom of the
-/// screen with no scroll region for the mouse wheel to hit.
-/// `scrollable_dropdown` sets `scrollable: true`, which engages that same
-/// `max_h`/`overflow_y_scroll`/`track_scroll` bound (capped at
-/// `min(window_height * 0.5, 450px)` when no explicit `max_height` is set)
-/// plus a visible scrollbar — exactly the pattern the library's own
-/// long-list reference (`crates/story/src/stories/menu_story.rs`'s
-/// "Scrollable Menu (100 items)") uses via `PopupMenu::scrollable(true)`
-/// directly.
-///
-/// Also a strict improvement for keyboard reachability:
-/// `PopupMenu::set_selected_index` calls `self.scroll_handle.
-/// scroll_to_item(ix)` on every up/down move regardless of `scrollable`,
-/// but that only does anything once `track_scroll` has actually wired the
-/// handle to a bounded scroll region — with `scrollable: false` arrow keys
-/// still move `selected_index` (so `Enter` picks the logically-selected
-/// item), but the selection never scrolls into view, so items past the
-/// fold are functionally unreachable by sight. With `scrollable: true`
-/// both mouse wheel and arrow-key navigation reach all 38 items.
-fn theme_dropdown_field<V, S>(
-    dropdown_options: Vec<(SharedString, SharedString)>,
-    value: V,
-    set_value: S,
-) -> SettingField<SharedString>
-where
-    V: Fn(&App) -> SharedString + 'static,
-    S: Fn(SharedString, &mut App) + 'static,
-{
-    SettingField::scrollable_dropdown(dropdown_options, value, set_value)
+/// Persistent state for one open settings dialog session — the exact
+/// shape of `KeybindingsState` minus the rebind-capture field (there is
+/// nothing to "listen" for here; editing is stepping, which is
+/// instantaneous). Fresh on every open ([`open`]), holds no gpui types
+/// (the scroll handle lives on `ShellView::settings_scroll`, the same
+/// split every other dialog uses), so every transition is unit-testable
+/// without a window.
+#[derive(Debug, Default)]
+pub struct SettingsState {
+    pub selected: usize,
+    pub nav: VimListNav,
+    /// Vim-style `/` find over the rows ([`crate::vimfind`]): the session
+    /// state machine plus the committed query for vim-style `n`/`N`.
+    pub find: VimFind,
+    /// The selection when `/` was pressed — the incremental jump's origin,
+    /// and what `escape` restores. `None` outside a find session.
+    pub find_anchor: Option<usize>,
 }
 
-/// Build the `Settings` composite content described in the module doc.
-///
-/// Takes *both* `shell: &ShellView` and `view: Entity<ShellView>` — not
-/// redundant, see `ShellModal::build`'s doc comment for the full story:
-/// `shell` is this exact call's plain-borrow read of whatever's needed
-/// *right now* (`theme_names`, `mod_alias`, both read once per build to
-/// seed the dropdown/mod-key display), safe because it's a Rust borrow, not
-/// an entity-handle access, even though this runs nested inside `ShellView
-/// ::render` itself; `view` is the `Entity` clone every get/set closure
-/// below captures for its OWN, later, read/update (fetching a field's
-/// current value at that field's own layout/paint time, or applying a
-/// user's edit at click/change time) — both safely outside `ShellView::
-/// render`'s call frame by the time they actually run, so `Entity::read`/
-/// `update` there carries none of the reentrancy risk a synchronous
-/// `view.read(cx)` right here would.
-fn build(
-    shell: &ShellView,
-    view: Entity<ShellView>,
-    _window: &mut Window,
-    _cx: &mut App,
-) -> Settings {
-    let theme_names = shell.services.theme.names();
-    let mod_alias = shell.services.mod_alias;
+impl SettingsState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
-    let dropdown_options: Vec<(SharedString, SharedString)> = theme_names
-        .into_iter()
-        .map(|name| (SharedString::from(name.clone()), SharedString::from(name)))
-        .collect();
+/// The text one row exposes to `/` find: title and category — exactly
+/// what the row displays as its identity, and nothing more. The value
+/// labels deliberately do NOT participate (same philosophy as
+/// keybindings' `searchable_text` excluding the invisible action id, one
+/// step further: values ARE visible, but `/gruvbox` jumping to the Theme
+/// row only when Gruvbox happens to be active — and `/large` matching
+/// Font size only sometimes — would make matching depend on current
+/// state rather than on what the row *is*).
+pub fn searchable_text(row: &SettingRow) -> String {
+    format!("{} {}", row.title, row.category)
+}
 
-    let appearance = SettingGroup::new().title("Appearance").items(vec![
-        SettingItem::new(
-            "Theme",
-            theme_dropdown_field(
-                dropdown_options,
-                {
-                    let view = view.clone();
-                    move |cx: &App| {
-                        SharedString::from(view.read(cx).services.theme.active_name().to_string())
-                    }
-                },
-                {
-                    let view = view.clone();
-                    move |value: SharedString, cx: &mut App| set_theme(&view, value.as_ref(), cx)
-                },
-            ),
-        )
-        .description("Theme family, from the bundled set (a lens, not a brand exercise)."),
-        SettingItem::new(
-            "Dark mode",
-            SettingField::switch(
-                {
-                    let view = view.clone();
-                    move |cx: &App| view.read(cx).services.theme.active_mode().is_dark()
-                },
-                {
-                    let view = view.clone();
-                    move |checked: bool, cx: &mut App| set_dark_mode(&view, checked, cx)
-                },
-            ),
-        )
-        .description("Light/dark variant of the active theme family."),
-        // A toggle button group (user direction — not a dropdown; three
-        // fixed options don't earn a popup) via the custom-render field
-        // kind, since the built-in field renderers don't include one.
-        SettingItem::new(
-            "Font size",
-            SettingField::render({
-                let view = view.clone();
-                move |_options, _window, cx: &mut App| {
-                    let current = view.read(cx).font_size;
-                    let view = view.clone();
-                    ButtonGroup::new("font-size")
-                        .outline()
-                        .small()
-                        .children(FontSize::ALL.map(|size| {
-                            Button::new(size.config_value())
-                                .label(size.label())
-                                .selected(size == current)
-                        }))
-                        .on_click(move |clicks: &Vec<usize>, _window, cx| {
-                            if let Some(&size) =
-                                clicks.first().and_then(|&ix| FontSize::ALL.get(ix))
-                            {
-                                set_font_size(&view, size, cx);
-                            }
-                        })
-                }
-            }),
-        )
-        .description("UI text scale — sets the window's base (rem) size."),
-        SettingItem::render(|_, _, cx| {
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child("saved to your app.toml")
-        }),
-    ]);
+/// What a click on row `clicked_ix` does to already-open dialog state:
+/// clicking any other row selects it (cancelling any in-progress find
+/// session or pending nav gesture — the click wins, same as keybindings'
+/// `click_selects_or_listens`); clicking the already-selected row means
+/// "cycle this row's value forward" — returns `true` so the gpui caller
+/// ([`on_row_clicked`]) applies the step, keeping this function pure.
+pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> bool {
+    state.find.cancel();
+    state.find_anchor = None;
+    if state.selected == clicked_ix {
+        true
+    } else {
+        state.selected = clicked_ix;
+        state.nav.cancel();
+        false
+    }
+}
 
-    let keyboard = SettingGroup::new().title("Keyboard").items(vec![
-        // Same toggle-button-group idiom as "Font size" above (house
-        // rule: two fixed options don't earn a dropdown), via the same
-        // custom-render field kind.
-        SettingItem::new(
-            "Find style",
-            SettingField::render({
-                let view = view.clone();
-                move |_options, _window, cx: &mut App| {
-                    let current = view.read(cx).find_style;
-                    let view = view.clone();
-                    ButtonGroup::new("find-style")
-                        .outline()
-                        .small()
-                        .children(FindStyle::ALL.map(|style| {
-                            Button::new(style.config_value())
-                                .label(style.label())
-                                .selected(style == current)
-                        }))
-                        .on_click(move |clicks: &Vec<usize>, _window, cx| {
-                            if let Some(&style) =
-                                clicks.first().and_then(|&ix| FindStyle::ALL.get(ix))
-                            {
-                                set_find_style(&view, style, cx);
-                            }
-                        })
-                }
-            }),
-        )
-        .description(
-            "How / search behaves in list dialogs — vim jumps the selection; fzf filters the rows.",
-        ),
-        SettingItem::render(move |_, _, cx| {
-            v_flex()
-                .gap_1()
-                .child(Label::new(format!(
-                    "Mod key: {}",
-                    mod_alias_label(mod_alias)
-                )))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("set via [keymap] mod in config"),
-                )
-        }),
-    ]);
+// ---------------------------------------------------------------------
+// Applying a value — the same seams the old dialog's controls drove.
+// ---------------------------------------------------------------------
 
-    let page = SettingPage::new("Settings")
-        .default_open(true)
-        .resettable(false)
-        .groups(vec![appearance, keyboard]);
+/// Apply value `value_ix` of the setting `id` names to the live shell —
+/// the one place [`handle_key`]'s stepping and [`on_row_clicked`]'s
+/// cycle-forward both land. Dispatches to the `*_on` core of the matching
+/// setter helper, so a keyboard step is byte-for-byte the same apply +
+/// persist path a direct [`set_theme`]/[`set_font_size`]/... call takes.
+/// An out-of-range `value_ix` (unreachable — [`step`] wraps within the
+/// row's own `values`) is a no-op rather than a panic.
+fn apply_setting(
+    shell: &mut ShellView,
+    id: SettingId,
+    value_ix: usize,
+    cx: &mut Context<ShellView>,
+) {
+    match id {
+        SettingId::Theme => {
+            let names = shell.services.theme.names();
+            if let Some(name) = names.get(value_ix) {
+                set_theme_on(shell, &name.clone(), cx);
+            }
+        }
+        SettingId::DarkMode => set_dark_mode_on(shell, value_ix == 1, cx),
+        SettingId::FontSize => {
+            if let Some(&size) = FontSize::ALL.get(value_ix) {
+                set_font_size_on(shell, size, cx);
+            }
+        }
+        SettingId::FindStyle => {
+            if let Some(&style) = FindStyle::ALL.get(value_ix) {
+                set_find_style_on(shell, style, cx);
+            }
+        }
+    }
+}
 
-    Settings::new("geode-settings")
-        .sidebar_width(px(200.))
-        .page(page)
+/// Apply `name` at the theme's currently active mode via
+/// `ThemeService::apply`, then persist it (`ShellView::persist_theme`) —
+/// the core both [`set_theme`] (the `Entity`-taking seam `shell::mod`'s
+/// tests drive) and [`apply_setting`] (this dialog's own stepping, which
+/// already holds `&mut ShellView` mid-key-dispatch and must not reenter
+/// the entity) share.
+fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
+    let mode = shell.services.theme.active_mode();
+    shell.services.theme.apply(name, mode, cx);
+    shell.persist_theme(cx);
+    cx.notify();
+}
+
+/// [`set_theme_on`]'s sibling for the dark-mode row/switch value.
+fn set_dark_mode_on(shell: &mut ShellView, dark: bool, cx: &mut Context<ShellView>) {
+    let mode = if dark { Mode::Dark } else { Mode::Light };
+    shell.services.theme.set_mode(mode, cx);
+    shell.persist_theme(cx);
+    cx.notify();
+}
+
+/// [`set_theme_on`]'s sibling for font size. The `notify` triggers a
+/// re-render, and `ShellView::render` applies the new rem size there
+/// (this core has no `Window` to apply it here — see the `fontsize`
+/// module doc).
+fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<ShellView>) {
+    shell.font_size = size;
+    shell.persist_font_size(cx);
+    cx.notify();
+}
+
+/// [`set_theme_on`]'s sibling for find style. Nothing to apply beyond the
+/// state itself: both list dialogs read `ShellView::find_style` fresh on
+/// every keystroke and render — including THIS one, so stepping the row
+/// re-labels its own value and swaps the dialog's own find behavior (and
+/// its footer's find hints) on the very next render.
+fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<ShellView>) {
+    shell.find_style = style;
+    shell.persist_find_style(cx);
+    cx.notify();
+}
+
+/// Apply a theme by name — the `Entity<ShellView>`-taking seam kept from
+/// the pre-rewrite dialog (its doc'd purpose — a directly drivable
+/// handler for tests, since the old dropdown's popup overlay couldn't be
+/// clicked from a `#[gpui::test]` — still holds, and `shell::mod`'s tests
+/// still call it). Now a thin `Entity::update` wrapper over
+/// [`set_theme_on`], the same core this dialog's `h`/`l` stepping applies
+/// through. Only test code calls these four wrappers since the rewrite
+/// (the dialog itself already holds `&mut ShellView` mid-key-dispatch and
+/// must use the cores directly), hence the not-test `dead_code`
+/// allowance rather than `#[cfg(test)]`: they stay compiled, documented,
+/// and reachable for any future non-modal caller.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
+    view.update(cx, |shell, cx| set_theme_on(shell, name, cx));
+}
+
+/// Apply the mode a dark-mode value implies — same survival story as
+/// [`set_theme`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut App) {
+    view.update(cx, |shell, cx| set_dark_mode_on(shell, checked, cx));
+}
+
+/// Set the UI font size and persist it (`[ui] font_size`) — same survival
+/// story as [`set_theme`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_font_size(view: &Entity<ShellView>, size: FontSize, cx: &mut App) {
+    view.update(cx, |shell, cx| set_font_size_on(shell, size, cx));
+}
+
+/// Set the find style and persist it (`[ui] find_style`) — same survival
+/// story as [`set_theme`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_find_style(view: &Entity<ShellView>, style: FindStyle, cx: &mut App) {
+    view.update(cx, |shell, cx| set_find_style_on(shell, style, cx));
 }
 
 /// The `[keymap] mod` value that produces `mods` (see
@@ -375,130 +389,684 @@ fn mod_alias_label(mods: Modifiers) -> &'static str {
     }
 }
 
-/// Apply `name` at the theme's currently active mode via
-/// `ThemeService::apply`, then persist it (`ShellView::persist_theme`) —
-/// the theme dropdown's setter. Kept as a standalone function (rather than
-/// inlined only in the closure above) so a `#[gpui::test]` can drive
-/// exactly this path directly: the dropdown's own popup menu is a
-/// pinned-rev `dropdown_menu_with_anchor` overlay this crate has no direct
-/// handle to simulate a click into, so the test-plan choice (recorded in
-/// the task report) is to call this same handler the control invokes
-/// rather than simulate the click.
-pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
-    view.update(cx, |shell, cx| {
-        let mode = shell.services.theme.active_mode();
-        shell.services.theme.apply(name, mode, cx);
-        shell.persist_theme(cx);
-        cx.notify();
-    });
+// ---------------------------------------------------------------------
+// gpui wiring — everything above this line is the pure core (plus the
+// apply seams, which touch ShellView but no rendering).
+// ---------------------------------------------------------------------
+
+/// Row height estimate for sizing the viewport (two lines: title plus
+/// muted category) — same non-load-bearing caveat as
+/// `keybindings_view::ROW_HEIGHT`.
+const ROW_HEIGHT: f32 = 44.0;
+/// Rows visible before the list scrolls. Four rows today, so nothing
+/// scrolls — kept anyway so the list's sizing arithmetic stays identical
+/// to keybindings' and a fifth setting never needs layout thought.
+const VISIBLE_ROWS: usize = 10;
+/// Target dialog content width in pixels — same as the keybinding
+/// dialog's, so the two sibling dialogs read as one family.
+const WIDTH: f32 = 640.0;
+
+/// [`derive_rows`] over the live shell state — the one place the pure row
+/// model meets `ShellView`. Called fresh on every render ([`build`]) and
+/// every keystroke ([`handle_key`]); rows are never cached, so a step's
+/// effect (or a config hot reload's) is visible on the very next derive.
+fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
+    derive_rows(
+        &shell.services.theme.names(),
+        shell.services.theme.active_name(),
+        shell.services.theme.active_mode().is_dark(),
+        shell.font_size,
+        shell.find_style,
+    )
 }
 
-/// Apply the mode a dark-mode switch's `checked` value implies via
-/// `ThemeService::set_mode`, then persist it — same reasoning as
-/// [`set_theme`].
-pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut App) {
-    let mode = if checked { Mode::Dark } else { Mode::Light };
-    view.update(cx, |shell, cx| {
-        shell.services.theme.set_mode(mode, cx);
-        shell.persist_theme(cx);
-        cx.notify();
-    });
+/// Open the settings modal (`settings::open`: `ctrl+,`, the palette
+/// entry, and the sidebar profile icon all reach this). A no-op if a
+/// modal is already open — re-triggering the action must not clobber
+/// whatever's up. Fresh [`SettingsState`] every open, nothing survives a
+/// close/reopen — the same contract as the palette and the keybinding
+/// dialog. Goes through [`dialog::open_shell_dialog_with_key`] (the one
+/// standard door, with the Part B key seam): this dialog needs first
+/// refusal on every keystroke for vim nav, `/` find, and value stepping.
+pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    if view.modal.is_some() {
+        return;
+    }
+    view.settings = Some(SettingsState::new());
+    let entity = cx.entity();
+    dialog::open_shell_dialog_with_key(
+        view,
+        window,
+        cx,
+        "Settings",
+        move |shell, window, cx| build(shell, &entity, window, cx),
+        Some(Rc::new(handle_key)),
+    );
 }
 
-/// Set the UI font size and persist it (`[ui] font_size`) — the font-size
-/// button group's setter, standalone for the same direct-drive testability
-/// reasoning as [`set_theme`]. The `notify` triggers a re-render, and
-/// `ShellView::render` applies the new rem size there (the setter has no
-/// `Window` of its own to apply it here — see the `fontsize` module doc).
-pub(crate) fn set_font_size(view: &Entity<ShellView>, size: FontSize, cx: &mut App) {
-    view.update(cx, |shell, cx| {
-        shell.font_size = size;
-        shell.persist_font_size(cx);
+/// The [`dialog::ModalKeyHandler`] for this dialog, mirroring
+/// `keybindings_view::handle_key`'s priority order with stepping in place
+/// of rebind capture:
+///
+/// 1. an active find session owns every keystroke (vim or fzf per
+///    `ShellView::find_style`, via the shared `vimfind` drivers — an fzf
+///    pick needs nothing extra here, the session ending IS the pick);
+/// 2. `/` starts a session; `n`/`shift+n` repeat-find in vim style only;
+/// 3. `vimnav` motions (j/k with counts, gg/G, ctrl+d/u/f/b);
+/// 4. bare `h`/`left` and `l`/`right` step the selected row's value
+///    (wrapping), bare `enter`/`space` cycle it forward — applied
+///    immediately through [`apply_setting`]. Reached only when `vimnav`
+///    reported `NotNav`, which also means a pending count/`g` gesture
+///    aborts on these keys rather than combining with them (`5l` steps
+///    once — counts belong to j/k alone, same rule as everywhere else);
+/// 5. anything else — bare `escape` included — returns `false`, falling
+///    through to `handle_key_down`'s own "escape closes the modal".
+fn handle_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    _window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let rows = rows_for(shell);
+    let find_style = shell.find_style;
+    let Some(state) = shell.settings.as_mut() else {
+        return false;
+    };
+
+    // Find mode — priority 1: an active session owns every keystroke
+    // (even ones it ignores, so stray chords can't leak into list nav or
+    // value stepping mid-search).
+    if state.find.is_active() {
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        match find_style {
+            FindStyle::Vim => vimfind::press_while_finding(
+                &mut state.find,
+                &mut state.selected,
+                &mut state.find_anchor,
+                &texts,
+                ks,
+            ),
+            FindStyle::Fzf => {
+                // `Picked` needs no interpretation here (module doc: the
+                // session ending, anchor dropped, selection on the picked
+                // row — all done inside the driver — IS the pick).
+                let _ = vimfind::press_while_finding_fzf(
+                    &mut state.find,
+                    &mut state.selected,
+                    &mut state.find_anchor,
+                    &texts,
+                    ks,
+                );
+            }
+        }
+        // Scroll within whatever list is actually rendered — the narrowed
+        // match list during a live fzf session, the full list otherwise
+        // (same position mapping as keybindings').
+        let scroll_ix = if find_style == FindStyle::Fzf && state.find.is_active() {
+            filter_matches(&texts, state.find.query().unwrap_or(""))
+                .iter()
+                .position(|&ix| ix == state.selected)
+                .unwrap_or(0)
+        } else {
+            state.selected
+        };
+        shell.settings_scroll.scroll_to_item(scroll_ix);
         cx.notify();
-    });
+        return true;
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "/" {
+        state.find_anchor = Some(state.selected);
+        state.find.start();
+        state.nav.cancel();
+        cx.notify();
+        return true;
+    }
+    // `n`/`shift+n` repeat-find is vim-mode-only (fzf sessions end by
+    // picking or cancelling; there is no committed query to repeat).
+    if find_style == FindStyle::Vim
+        && ks.key == "n"
+        && (ks.mods == Modifiers::NONE
+            || ks.mods
+                == Modifiers {
+                    shift: true,
+                    ..Modifiers::NONE
+                })
+    {
+        let dir = if ks.mods.shift {
+            FindDirection::Backward
+        } else {
+            FindDirection::Forward
+        };
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        if vimfind::repeat_find(&state.find, &mut state.selected, &texts, dir) {
+            let selected = state.selected;
+            shell.settings_scroll.scroll_to_item(selected);
+            cx.notify();
+            return true;
+        }
+    }
+
+    match state.nav.press(ks) {
+        NavResult::Command(cmd) => {
+            state.selected = vimnav::apply(state.selected, rows.len(), cmd);
+            let selected = state.selected;
+            shell.settings_scroll.scroll_to_item(selected);
+            cx.notify();
+            true
+        }
+        NavResult::Pending => {
+            cx.notify();
+            true
+        }
+        NavResult::NotNav => {
+            let dir = match (ks.mods == Modifiers::NONE, ks.key.as_str()) {
+                (true, "h" | "left") => Some(StepDirection::Left),
+                (true, "l" | "right" | "enter" | "space") => Some(StepDirection::Right),
+                _ => None,
+            };
+            let Some(dir) = dir else {
+                return false;
+            };
+            let Some(row) = rows.get(state.selected) else {
+                return false;
+            };
+            let (id, new_ix) = (row.id, step(row.values.len(), row.current, dir));
+            apply_setting(shell, id, new_ix, cx);
+            cx.notify();
+            true
+        }
+    }
 }
 
-/// Set the find style and persist it (`[ui] find_style`) — the find-style
-/// button group's setter, standalone for the same direct-drive
-/// testability reasoning as [`set_theme`]/[`set_font_size`]. Nothing to
-/// apply beyond the state itself: `keybindings_view` reads
-/// `ShellView::find_style` fresh on every keystroke and render.
-pub(crate) fn set_find_style(view: &Entity<ShellView>, style: FindStyle, cx: &mut App) {
-    view.update(cx, |shell, cx| {
-        shell.find_style = style;
-        shell.persist_find_style(cx);
-        cx.notify();
-    });
+/// Selection/step logic for a real mouse click on the row for `clicked`
+/// (`SettingId`, resolved back to an index against freshly derived rows —
+/// same identity-not-position keying as keybindings' `on_row_clicked`).
+/// The gpui-facing wrapper around the pure [`click_selects_or_steps`]: a
+/// `true` (already-selected row) cycles that row's value forward.
+fn on_row_clicked(shell: &mut ShellView, clicked: SettingId, cx: &mut Context<ShellView>) {
+    let rows = rows_for(shell);
+    let Some(ix) = rows.iter().position(|r| r.id == clicked) else {
+        return;
+    };
+    let Some(state) = shell.settings.as_mut() else {
+        return;
+    };
+    let cycle = click_selects_or_steps(state, ix);
+    let selected = state.selected;
+    shell.settings_scroll.scroll_to_item(selected);
+    if cycle {
+        let row = &rows[ix];
+        let new_ix = step(row.values.len(), row.current, StepDirection::Right);
+        apply_setting(shell, row.id, new_ix, cx);
+    }
+    cx.notify();
+}
+
+/// The [`dialog::ShellModal::build`] closure body: a scrollable row list
+/// (title + muted category on the left, with find-match highlighting; the
+/// current value label on the right in the mono data face) plus the
+/// footer — the live `/query` line or the three-row chip hints, then the
+/// two muted inert lines the old dialog's read-only content became.
+/// `entity` is the `Entity<ShellView>` every row's click handler captures
+/// to reach [`on_row_clicked`] at click time; `shell` is this call's own
+/// plain-borrow read (see `ShellModal::build`'s doc comment for why both).
+fn build(
+    shell: &ShellView,
+    entity: &Entity<ShellView>,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(state) = shell.settings.as_ref() else {
+        return div().into_any_element();
+    };
+    let rows = rows_for(shell);
+    let theme = cx.theme();
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let hl_query = state.find.highlight_query();
+
+    // While an fzf find session is active the list renders ONLY the
+    // matching rows — same filter idiom, same full-list `debug_selector`
+    // indices, as the keybinding dialog (rows keep their identity across
+    // filtering because click handlers are keyed by `SettingId`).
+    let fzf_session = shell.find_style == FindStyle::Fzf && state.find.is_active();
+    let visible: Vec<usize> = if fzf_session {
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        filter_matches(&texts, state.find.query().unwrap_or(""))
+    } else {
+        (0..rows.len()).collect()
+    };
+
+    let mut list = v_flex()
+        .id("settings-list")
+        .w(px(WIDTH))
+        .h(px(
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        ))
+        .overflow_y_scroll()
+        .track_scroll(&shell.settings_scroll)
+        .debug_selector(|| "settings-list".to_string());
+
+    for &i in &visible {
+        let row = &rows[i];
+        let is_selected = i == state.selected;
+
+        let mut row_el = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .gap_3()
+            .px_2()
+            .py_1()
+            .rounded(px(4.));
+        if is_selected {
+            row_el = row_el.bg(theme.selection).text_color(theme.primary);
+        }
+
+        let label = v_flex()
+            .gap_0p5()
+            .child(highlighted_text(row.title, hl_query, theme.primary))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(highlighted_text(row.category, hl_query, theme.primary)),
+            );
+
+        // The current value, in the data face — a value readout, not
+        // prose, same register as the binding chips across the hall.
+        let value_el = div()
+            .font_family(crate::fonts::MONO)
+            .text_sm()
+            .flex_shrink_0()
+            .child(row.values[row.current].clone());
+
+        let entity_for_row = entity.clone();
+        let id = row.id;
+        let row_el = row_el
+            .child(label)
+            .child(value_el)
+            .debug_selector(move || format!("settings-row-{i}"))
+            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+                entity_for_row.update(cx, |shell, cx| {
+                    on_row_clicked(shell, id, cx);
+                });
+            });
+
+        list = list.child(row_el);
+    }
+
+    if fzf_session && visible.is_empty() {
+        // Zero matches: one muted line where the rows would be, same as
+        // keybindings — an empty filter reads as a state, not a glitch.
+        // Enter is inert here (the shared driver); the session stays live.
+        list = list.child(
+            div()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("no matches"),
+        );
+    }
+
+    // Footer hint chips — `keybindings_view::key_chip`, reused so key
+    // names in helper text look identical across the two sibling dialogs.
+    let chip = move |spec: &str| {
+        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
+            .expect("footer hint keystrokes are hardcoded valid");
+        key_chip(&ks, chip_fg, chip_bg)
+    };
+    let sep = |text: &'static str| div().child(text).into_any_element();
+
+    let hint_line: AnyElement = if let Some(find_display) = state.find.pending_display() {
+        // The live `/query` line, vim command-line style, both find
+        // styles — rendered in the data face so the query reads as typed
+        // input, not prose.
+        div()
+            .font_family(crate::fonts::MONO)
+            .child(find_display)
+            .into_any_element()
+    } else {
+        // Three rows, one idiom family each — motion, find, edit — same
+        // table shape as the keybinding dialog's hints (and the same
+        // "pending nav gestures don't take over this line" choice).
+        v_flex()
+            .gap_0p5()
+            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
+                chip("j"),
+                chip("k"),
+                sep("move (counts: 5j) ·"),
+                chip("g"),
+                chip("g"),
+                sep("/"),
+                chip("shift+g"),
+                sep("top/bottom ·"),
+                chip("ctrl+d"),
+                chip("ctrl+u"),
+                chip("ctrl+f"),
+                chip("ctrl+b"),
+                sep("page"),
+            ]))
+            .child(match shell.find_style {
+                FindStyle::Vim => h_flex().gap_1().items_center().flex_wrap().children(vec![
+                    chip("/"),
+                    sep("find,"),
+                    chip("n"),
+                    sep("/"),
+                    chip("shift+n"),
+                    sep("next"),
+                ]),
+                FindStyle::Fzf => h_flex().gap_1().items_center().flex_wrap().children(vec![
+                    chip("/"),
+                    sep("filter,"),
+                    chip("up"),
+                    sep("/"),
+                    chip("down"),
+                    sep("move,"),
+                    chip("enter"),
+                    sep("pick"),
+                ]),
+            })
+            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
+                chip("h"),
+                sep("/"),
+                chip("l"),
+                sep("change value ·"),
+                chip("enter"),
+                sep("cycle"),
+            ]))
+            .into_any_element()
+    };
+
+    let footer = v_flex()
+        .w(px(WIDTH))
+        .gap_1()
+        .pt_2()
+        .border_t_1()
+        .border_color(theme.border)
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child(hint_line),
+        )
+        // The old dialog's read-only content, now two muted inert lines
+        // (module doc): the mod key is set in config, not here; and every
+        // row above saves through the same file.
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(format!(
+                    "Mod key: {} — set via [keymap] mod in config",
+                    mod_alias_label(shell.services.mod_alias)
+                )),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child("saved to your app.toml"),
+        );
+
+    v_flex()
+        .gap_2()
+        .child(list)
+        .child(footer)
+        .into_any_element()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui_component::setting::{AnySettingField, SettingFieldType};
 
-    /// Reproduction/regression for the theme-dropdown scroll bug (root
-    /// cause documented on [`theme_dropdown_field`]): the fix is entirely a
-    /// choice of `SettingField` constructor
-    /// (`scrollable_dropdown` vs. plain `dropdown`), which
-    /// `SettingFieldType::Dropdown`'s own `scrollable` field records — no
-    /// gpui `App`/window/render pass is needed to observe it, since neither
-    /// constructor touches `App` except inside the `value`/`set_value`
-    /// closures (unused here; trivial stand-ins suffice).
-    ///
-    /// A full pixel-level reproduction (open the modal, click the real
-    /// Theme dropdown trigger via a simulated mouse event, draw, and assert
-    /// the popup menu's painted bounds fit the viewport) was attempted and
-    /// found impractical at this pinned rev, for the same reason this
-    /// module's own doc comment already gives for the dropdown's *value*
-    /// path: the popup menu is a `dropdown_menu_with_anchor` overlay
-    /// (`crates/ui/src/menu/dropdown_menu.rs`, built on `Popup`'s
-    /// `deferred(...)` overlay in `crates/base/src/popup.rs`) with no
-    /// `debug_selector` anywhere on the trigger `Button`, the `Popover`, or
-    /// `PopupMenu` itself — unlike the settings search input (clicked in
-    /// `escape_from_the_focused_settings_search_input_closes_the_modal`
-    /// above `shell::mod`'s test module), which sits at a simple, crate-
-    /// documented fixed offset from `settings-content`'s own top-left
-    /// corner, the Theme button's on-screen position depends on the
-    /// resolved width of `h_resizable`'s sidebar panel, the `container_
-    /// query` axis breakpoint it feeds into (`STACKED_LAYOUT_MAX_WIDTH`,
-    /// `crates/ui/src/setting/settings.rs`), and `GroupBox`/`SettingItem`
-    /// row padding (`crates/ui/src/setting/{group,item}.rs`) — none of it
-    /// exposed by a test hook, all of it pinned-checkout internal layout
-    /// this crate has no business hard-coding pixel offsets against. This
-    /// test instead pins the one thing actually under this crate's control:
-    /// that `build()`'s Theme field asks the library for the scrollable
-    /// variant. Source-level evidence for the rest of the causal chain
-    /// (unbounded popup height -> off-screen paint -> no scroll region)
-    /// lives in `theme_dropdown_field`'s doc comment and the fix report.
-    #[test]
-    fn theme_dropdown_field_is_scrollable() {
-        let field = theme_dropdown_field(
-            vec![(SharedString::from("dark"), SharedString::from("Dark"))],
-            |_: &App| SharedString::from("dark"),
-            |_: SharedString, _: &mut App| {},
-        );
-
-        match field.field_type() {
-            SettingFieldType::Dropdown { scrollable, .. } => assert!(
-                *scrollable,
-                "the Theme dropdown (38 items) must be built with \
-                 SettingField::scrollable_dropdown, not the plain \
-                 ::dropdown — the latter has no bound on the popup menu's \
-                 item-list height (PopupMenu::render only applies max_h/ \
-                 overflow_y_scroll/track_scroll `.when(self.scrollable, \
-                 ...)`), so with 38 items the menu paints unbounded, off \
-                 the bottom of the screen, with no scroll region for the \
-                 mouse wheel to reach"
-            ),
-            SettingFieldType::Switch
-            | SettingFieldType::Checkbox
-            | SettingFieldType::NumberInput { .. }
-            | SettingFieldType::Input
-            | SettingFieldType::Element { .. } => {
-                panic!("theme_dropdown_field should build a Dropdown-typed field")
-            }
+    fn key(k: &str) -> Keystroke {
+        Keystroke {
+            mods: Modifiers::NONE,
+            key: k.to_string(),
         }
     }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn rows() -> Vec<SettingRow> {
+        derive_rows(
+            &names(&["Default Light", "Gruvbox Dark"]),
+            "Gruvbox Dark",
+            true,
+            FontSize::Medium,
+            FindStyle::Vim,
+        )
+    }
+
+    // -- derive_rows --------------------------------------------------
+
+    #[test]
+    fn rows_come_in_display_order_with_their_categories() {
+        let rows = rows();
+        let identity: Vec<(SettingId, &str, &str)> =
+            rows.iter().map(|r| (r.id, r.title, r.category)).collect();
+        assert_eq!(
+            identity,
+            vec![
+                (SettingId::Theme, "Theme", "Appearance"),
+                (SettingId::DarkMode, "Dark mode", "Appearance"),
+                (SettingId::FontSize, "Font size", "Appearance"),
+                (SettingId::FindStyle, "Find style", "Keyboard"),
+            ]
+        );
+    }
+
+    #[test]
+    fn each_row_carries_its_value_labels_and_current_index() {
+        let rows = rows();
+        assert_eq!(rows[0].values, names(&["Default Light", "Gruvbox Dark"]));
+        assert_eq!(rows[0].current, 1, "the active theme is current");
+        assert_eq!(rows[1].values, names(&["off", "on"]));
+        assert_eq!(rows[1].current, 1, "dark = true reads as 'on'");
+        assert_eq!(rows[2].values, names(&["Small", "Medium", "Large"]));
+        assert_eq!(rows[2].current, 1, "FontSize::Medium is ALL[1]");
+        assert_eq!(rows[3].values, names(&["Vim", "Fzf"]));
+        assert_eq!(rows[3].current, 0, "FindStyle::Vim is ALL[0]");
+    }
+
+    #[test]
+    fn a_light_mode_shell_reads_dark_mode_off() {
+        let rows = derive_rows(&names(&["A"]), "A", false, FontSize::Small, FindStyle::Fzf);
+        assert_eq!(rows[1].current, 0, "dark = false reads as 'off'");
+        assert_eq!(rows[2].current, 0);
+        assert_eq!(rows[3].current, 1);
+    }
+
+    #[test]
+    fn an_unknown_active_theme_falls_back_to_the_first_name() {
+        let rows = derive_rows(
+            &names(&["A", "B"]),
+            "no-such-theme",
+            false,
+            FontSize::Medium,
+            FindStyle::Vim,
+        );
+        assert_eq!(
+            rows[0].current, 0,
+            "deterministic fallback, never an out-of-range index"
+        );
+    }
+
+    // -- step ----------------------------------------------------------
+
+    #[test]
+    fn step_moves_one_value_in_each_direction() {
+        assert_eq!(step(3, 1, StepDirection::Right), 2);
+        assert_eq!(step(3, 1, StepDirection::Left), 0);
+    }
+
+    #[test]
+    fn step_wraps_at_both_ends() {
+        assert_eq!(step(3, 2, StepDirection::Right), 0, "right past the end");
+        assert_eq!(step(3, 0, StepDirection::Left), 2, "left past the start");
+    }
+
+    #[test]
+    fn stepping_a_two_value_row_is_a_toggle_either_way() {
+        // Bool rows are two-value enums — wrap makes h and l both toggle.
+        assert_eq!(step(2, 0, StepDirection::Right), 1);
+        assert_eq!(step(2, 1, StepDirection::Right), 0);
+        assert_eq!(step(2, 0, StepDirection::Left), 1);
+        assert_eq!(step(2, 1, StepDirection::Left), 0);
+    }
+
+    #[test]
+    fn step_on_an_empty_list_stays_at_zero() {
+        assert_eq!(step(0, 0, StepDirection::Right), 0);
+        assert_eq!(step(0, 0, StepDirection::Left), 0);
+    }
+
+    // -- searchable_text ------------------------------------------------
+
+    #[test]
+    fn searchable_text_is_title_and_category_never_the_values() {
+        let rows = rows();
+        assert_eq!(searchable_text(&rows[0]), "Theme Appearance");
+        assert_eq!(searchable_text(&rows[3]), "Find style Keyboard");
+        assert!(
+            !searchable_text(&rows[0]).contains("Gruvbox"),
+            "value labels must not participate — matching would depend on \
+             the current value rather than what the row is"
+        );
+    }
+
+    // -- find sessions over settings rows (the shared drivers) ----------
+
+    fn texts() -> Vec<String> {
+        rows().iter().map(searchable_text).collect()
+    }
+
+    fn finding_state(selected: usize) -> SettingsState {
+        let mut state = SettingsState {
+            selected,
+            find_anchor: Some(selected),
+            ..Default::default()
+        };
+        state.find.start();
+        state
+    }
+
+    #[test]
+    fn vim_find_jumps_the_selection_to_a_matching_row() {
+        let texts = texts();
+        let mut state = finding_state(0);
+        for k in ["k", "e", "y"] {
+            vimfind::press_while_finding(
+                &mut state.find,
+                &mut state.selected,
+                &mut state.find_anchor,
+                &texts,
+                &key(k),
+            );
+        }
+        assert_eq!(
+            state.selected, 3,
+            "'key' matches the Keyboard category — Find style's row"
+        );
+        vimfind::press_while_finding(
+            &mut state.find,
+            &mut state.selected,
+            &mut state.find_anchor,
+            &texts,
+            &key("escape"),
+        );
+        assert_eq!(state.selected, 0, "escape restores the anchor");
+    }
+
+    #[test]
+    fn fzf_pick_just_ends_the_session_with_selection_on_the_picked_row() {
+        // The settings-specific pick semantics (module doc): enter ends
+        // the session — full list back, selection kept — and nothing
+        // else. No listening state exists to start.
+        let texts = texts();
+        let mut state = finding_state(0);
+        vimfind::press_while_finding_fzf(
+            &mut state.find,
+            &mut state.selected,
+            &mut state.find_anchor,
+            &texts,
+            &key("f"),
+        );
+        assert_eq!(state.selected, 2, "first 'f' match is Font size");
+        let outcome = vimfind::press_while_finding_fzf(
+            &mut state.find,
+            &mut state.selected,
+            &mut state.find_anchor,
+            &texts,
+            &key("enter"),
+        );
+        assert_eq!(outcome, vimfind::FzfOutcome::Picked);
+        assert!(!state.find.is_active(), "the session is over");
+        assert_eq!(state.selected, 2, "selection stays on the picked row");
+        assert_eq!(state.find_anchor, None, "no anchor residue");
+    }
+
+    #[test]
+    fn fzf_enter_on_zero_matches_stays_inert() {
+        let texts = texts();
+        let mut state = finding_state(1);
+        for k in ["z", "z"] {
+            vimfind::press_while_finding_fzf(
+                &mut state.find,
+                &mut state.selected,
+                &mut state.find_anchor,
+                &texts,
+                &key(k),
+            );
+        }
+        let outcome = vimfind::press_while_finding_fzf(
+            &mut state.find,
+            &mut state.selected,
+            &mut state.find_anchor,
+            &texts,
+            &key("enter"),
+        );
+        assert_eq!(outcome, vimfind::FzfOutcome::Continue);
+        assert!(state.find.is_active(), "no row to pick — session survives");
+    }
+
+    // -- click_selects_or_steps ------------------------------------------
+
+    #[test]
+    fn clicking_a_different_row_selects_it_without_stepping() {
+        let mut state = SettingsState {
+            selected: 0,
+            ..Default::default()
+        };
+        assert!(!click_selects_or_steps(&mut state, 2));
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn clicking_the_selected_row_asks_for_a_forward_cycle() {
+        let mut state = SettingsState {
+            selected: 2,
+            ..Default::default()
+        };
+        assert!(click_selects_or_steps(&mut state, 2));
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn a_click_cancels_an_active_find_session() {
+        let mut state = finding_state(0);
+        assert!(state.find.is_active());
+        assert!(!click_selects_or_steps(&mut state, 1));
+        assert!(!state.find.is_active());
+        assert_eq!(state.find_anchor, None);
+        assert_eq!(state.selected, 1);
+    }
+
+    // -- mod_alias_label -------------------------------------------------
 
     #[test]
     fn mod_alias_label_matches_each_named_alias() {
