@@ -10,7 +10,7 @@ pub mod ddl;
 pub mod publish;
 pub mod retention;
 
-pub use catalog::{Catalog, FileGeneration, FileId};
+pub use catalog::{AttributeConflict, Catalog, FileGeneration, FileId};
 pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
 pub use retention::{RetentionPolicy, SweepReport, checkpoint, sweep};
 

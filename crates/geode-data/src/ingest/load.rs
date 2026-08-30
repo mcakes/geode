@@ -34,7 +34,11 @@ pub struct LoadOutcome {
     pub gen_id: i64,
     pub rows: usize,
     pub health: Health,
+    /// Disagreement *within* this file.
     pub conflicts: Vec<Conflict>,
+    /// Disagreement between this file and everything already loaded — a
+    /// different signal, so it is kept apart rather than merged in.
+    pub cross_file: Vec<crate::store::AttributeConflict>,
     pub missing_optional: Vec<String>,
     pub missing_required: Vec<String>,
     /// Source columns the schema does not declare. Not stored — the declared
@@ -280,12 +284,22 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         health: health.clone(),
     })?;
 
+    // 7. Cross-file disagreement, recorded per load so diagnostics can
+    // show a trend (spec §3.5). Read after publishing, because it is the
+    // whole live table that has to agree, not this file.
+    let mut cross_file = Vec::new();
+    for grain in req.dataset.grains() {
+        cross_file.extend(catalog.attribute_conflicts(req.dataset_name, req.dataset, grain)?);
+    }
+    catalog.record_attribute_conflicts(req.dataset_name, &cross_file, Utc::now())?;
+
     Ok(LoadOutcome {
         file_id,
         gen_id,
         rows: rows as usize,
         health,
         conflicts: split.conflicts,
+        cross_file,
         missing_optional,
         missing_required,
         extra_columns,
@@ -385,6 +399,7 @@ mod tests {
     use super::*;
     use crate::health::Health;
     use crate::store::Store;
+    use geode_core::schema::Grain;
 
     pub(crate) fn schema() -> geode_core::schema::DatasetSpec {
         use geode_core::config::{LayerDoc, merge_docs};
@@ -614,6 +629,93 @@ source_name = "ModelCode"
                     && c.grain == geode_core::schema::Grain::Instrument),
             "the detector must report the planted model_code disagreement: {found:?}"
         );
+    }
+
+    /// Rewrite every value of one CSV column, leaving the rest intact.
+    fn rewrite_column(csv: &str, header: &str, value: &str) -> String {
+        let mut lines = csv.lines();
+        let head = lines.next().expect("header");
+        let at = head
+            .split(',')
+            .position(|h| h == header)
+            .expect("column present");
+        let mut out = String::from(head);
+        for line in lines {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            fields[at] = value;
+            out.push('\n');
+            out.push_str(&fields.join(","));
+        }
+        out
+    }
+
+    #[test]
+    fn the_same_instrument_disagreeing_across_files_is_recorded() {
+        // 2a detects disagreement within a file. Instruments are reused
+        // across books, and those books' files are written at different
+        // times, so cross-file disagreement is the common case (spec §3.5).
+        let f = fixture();
+        let file = ready_file(&f);
+        load(&f, file);
+
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let one_file = cat
+            .attribute_conflicts("risk_snapshot", &f.ds, Grain::Instrument)
+            .unwrap();
+        assert!(
+            !one_file.iter().any(|c| c.column == "model_code"),
+            "one file's rows dedup to one value per instrument: {one_file:?}"
+        );
+
+        // The same instruments again under a different batch, carrying a
+        // different model code — a separate partition, so both survive in
+        // live and the disagreement only exists *between* the files.
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let twin = file.csv_path.with_file_name("risk_20260830_twin.csv");
+        std::fs::write(&twin, rewrite_column(&text, "ModelCode", "ZZZZ")).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+        load_file(
+            &f.store,
+            &LoadRequest {
+                dataset: &f.ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &twin,
+                sentinel: &sentinel,
+                batch: "twin",
+            },
+        )
+        .unwrap();
+
+        let conflicts = cat
+            .attribute_conflicts("risk_snapshot", &f.ds, Grain::Instrument)
+            .unwrap();
+        let model = conflicts
+            .iter()
+            .find(|c| c.column == "model_code")
+            .unwrap_or_else(|| panic!("model_code disagreement missed: {conflicts:?}"));
+        assert!(model.entities > 0);
+    }
+
+    #[test]
+    fn conflict_counts_are_recorded_so_diagnostics_can_show_a_trend() {
+        // A single reading says little; a column that conflicts on every
+        // load is evidence its declared grain is wrong (spec §3.4).
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let observed = vec![crate::store::AttributeConflict {
+            grain: Grain::Instrument,
+            column: "model_code".into(),
+            entities: 3,
+        }];
+        cat.record_attribute_conflicts("risk_snapshot", &observed, Utc::now())
+            .unwrap();
+        cat.record_attribute_conflicts("risk_snapshot", &observed, Utc::now())
+            .unwrap();
+        let history = cat.attribute_conflict_history("risk_snapshot").unwrap();
+        assert_eq!(history.len(), 2, "each load appends: {history:?}");
+        assert_eq!(history[0].1.entities, 3);
     }
 
     #[test]

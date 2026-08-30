@@ -10,6 +10,7 @@ use crate::health::Health;
 use crate::store::StoreError;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
+use geode_core::schema::{ColumnRole, DatasetSpec, Grain};
 use std::path::{Path, PathBuf};
 
 pub type FileId = i64;
@@ -31,6 +32,18 @@ pub struct FileGeneration {
     pub row_count: usize,
     pub books: Vec<String>,
     pub health: Health,
+}
+
+/// An attribute column whose value for one entity disagrees across files.
+/// The within-file equivalent is `ingest::split::Conflict`; this one is
+/// counted per *entity* rather than per grain group, because the whole
+/// point is that one entity appears under several keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeConflict {
+    pub grain: Grain,
+    pub column: String,
+    /// How many distinct entities at this grain disagree with themselves.
+    pub entities: usize,
 }
 
 pub struct Catalog<'a> {
@@ -56,6 +69,13 @@ CREATE SEQUENCE IF NOT EXISTS file_generations_id START 1;
 CREATE TABLE IF NOT EXISTS file_books (
   file_id BIGINT,
   book VARCHAR
+);
+CREATE TABLE IF NOT EXISTS attribute_conflicts (
+  observed_at TIMESTAMP WITH TIME ZONE,
+  dataset VARCHAR,
+  grain VARCHAR,
+  column_name VARCHAR,
+  entities BIGINT
 );
 ";
 
@@ -259,6 +279,145 @@ impl<'a> Catalog<'a> {
             .filter(|(b, _)| books.is_empty() || books.contains(b))
             .map(|(_, t)| t)
             .min())
+    }
+
+    /// Attribute columns whose value for one entity disagrees across the
+    /// whole live table (spec §3.5).
+    ///
+    /// The same shape as the within-file detector in `ingest::split`, run
+    /// over everything rather than one file's staging table — and grouped
+    /// by the grain's *identity* columns rather than its key, because an
+    /// instrument reused in two books has two keys and one identity. That
+    /// grouping is what makes this cross-file rather than a re-run of the
+    /// check ingest already did.
+    ///
+    /// Diagnostic, not corrective: newest source time still wins. The
+    /// value is the signal — a column that conflicts on every load is
+    /// evidence it does not live at this grain at all (spec §3.4).
+    pub fn attribute_conflicts(
+        &self,
+        dataset: &str,
+        ds: &DatasetSpec,
+        grain: Grain,
+    ) -> Result<Vec<AttributeConflict>, StoreError> {
+        let attributes: Vec<&str> = ds
+            .columns
+            .iter()
+            .filter(|c| matches!(c.role, ColumnRole::Attribute { grain: g } if g == grain))
+            .map(|c| c.name.as_str())
+            .collect();
+        if attributes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let identity: Vec<String> = grain
+            .identity_columns()
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect();
+        let inner: Vec<String> = attributes
+            .iter()
+            .map(|c| format!("min(\"{c}\") as \"{c}_lo\", max(\"{c}\") as \"{c}_hi\""))
+            .collect();
+        let outer: Vec<String> = attributes
+            .iter()
+            .map(|c| {
+                format!("count(*) filter (where \"{c}_lo\" is distinct from \"{c}_hi\") as \"{c}\"")
+            })
+            .collect();
+        let sql = format!(
+            "select {outer} from (select {id}, {inner} from {table} group by {id})",
+            outer = outer.join(", "),
+            id = identity.join(", "),
+            inner = inner.join(", "),
+            table =
+                crate::store::ddl::table_name(dataset, grain, crate::store::ddl::TableKind::Live),
+        );
+        let err = |source| StoreError::Sql {
+            statement: sql.clone(),
+            source,
+        };
+        let mut stmt = self.conn.prepare(&sql).map_err(err)?;
+        let mut rows = stmt.query([]).map_err(err)?;
+        let mut out = Vec::new();
+        if let Some(row) = rows.next().map_err(err)? {
+            for (i, column) in attributes.iter().enumerate() {
+                let entities: i64 = row.get(i).unwrap_or(0);
+                if entities > 0 {
+                    out.push(AttributeConflict {
+                        grain,
+                        column: (*column).to_string(),
+                        entities: entities as usize,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Append a reading. Diagnostics want the trend, not the latest number.
+    pub fn record_attribute_conflicts(
+        &self,
+        dataset: &str,
+        conflicts: &[AttributeConflict],
+        observed_at: DateTime<Utc>,
+    ) -> Result<(), StoreError> {
+        let sql = "insert into attribute_conflicts \
+                   (observed_at, dataset, grain, column_name, entities) values (?, ?, ?, ?, ?)";
+        for c in conflicts {
+            self.conn
+                .execute(
+                    sql,
+                    duckdb::params![
+                        observed_at,
+                        dataset,
+                        c.grain.short(),
+                        c.column,
+                        c.entities as i64
+                    ],
+                )
+                .map_err(|source| StoreError::Sql {
+                    statement: sql.into(),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Every recorded reading for a dataset, oldest first.
+    pub fn attribute_conflict_history(
+        &self,
+        dataset: &str,
+    ) -> Result<Vec<(DateTime<Utc>, AttributeConflict)>, StoreError> {
+        let sql = "select observed_at, grain, column_name, entities from attribute_conflicts \
+                   where dataset = ? order by observed_at, column_name";
+        let err = |source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        };
+        let mut stmt = self.conn.prepare(sql).map_err(err)?;
+        let rows = stmt
+            .query_map(duckdb::params![dataset], |r| {
+                Ok((
+                    r.get::<_, DateTime<Utc>>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(err)?;
+        Ok(rows
+            .filter_map(|r| r.ok())
+            .filter_map(|(at, grain, column, entities)| {
+                Some((
+                    at,
+                    AttributeConflict {
+                        grain: Grain::parse(&grain)?,
+                        column,
+                        entities: entities as usize,
+                    },
+                ))
+            })
+            .collect())
     }
 }
 
