@@ -320,19 +320,41 @@ the UI path.
 ### 4.3 The publication unit is the file
 
 Because a file may carry several books and a book may be split across
-files, the replacement key is `source_file_id`, not `book`.
-Publishing file F atomically replaces exactly the rows previously
-loaded from F. This handles both awkward cases with no waiting and no
-configured file-to-book mapping — discovery stays automatic.
+files, the replacement key is neither `book` alone nor the file alone.
+It is the **partition key `(dataset, slot, book)`**, where a *slot* is
+the file's name with its date and time component removed, extracted by
+a per-source pattern (`slot_pattern` in config; the whole stem when no
+pattern is declared). `risk_2026-08-30_BK000_part1.csv` and
+`risk_2026-08-29_BK000_part1.csv` share the slot `BK000_part1`.
+
+Publishing a file atomically replaces the live rows for every
+partition it covers, its books taken from the sentinel. A file
+carrying two books replaces two partitions; a book split across two
+files occupies two slots and each replaces only its own. Both awkward
+cases are handled with no waiting and no configured file-to-book
+mapping — discovery stays automatic.
+
+`source_file_id` still identifies the physical file, for provenance,
+change detection and health, but a file identity is not a partition
+identity: filenames carry dates, so keying replacement on the file
+would make every business date accumulate in live instead of
+superseding the last.
 
 One transaction on the writer connection:
 
+One transaction per file, over the partitions `P` it covers:
+
 ```
-INSERT INTO <ds>_archive SELECT *, <current_gen> FROM <ds>_live
-    WHERE source_file_id = F;
-DELETE FROM <ds>_live WHERE source_file_id = F;
+INSERT INTO <ds>_archive
+    SELECT *, <current_gen>, <current_source_time> FROM <ds>_live
+    WHERE (slot, book) IN P;
+DELETE FROM <ds>_live WHERE (slot, book) IN P;
 INSERT INTO <ds>_live SELECT * FROM <staging>;
 ```
+
+Live therefore carries `slot` and `source_file_id` alongside the grain
+key: `slot` is what replacement matches on, `source_file_id` is what
+provenance and health report against.
 
 Publishes serialize; one at a time through the single writer.
 
@@ -350,9 +372,11 @@ Two consequences:
   generation at or before T, per file partition.
 - **The publish rule is guarded.** A file's rows enter `live` only if
   its source time is newer than what live currently holds for that
-  partition. Otherwise they are written straight to `archive`. Without
-  this guard a backfill would silently overwrite this morning's risk
-  with last Tuesday's.
+  partition (§4.3). Otherwise they are written straight to `archive`.
+  Without this guard a backfill would silently overwrite this morning's
+  risk with last Tuesday's — and since a backfilled file shares its
+  slot with the current one, it targets exactly the partition that must
+  not be clobbered.
 
 ### 4.5 Freshness metadata
 
