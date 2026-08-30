@@ -52,8 +52,8 @@ impl Workspace {
         self.region
     }
 
-    /// Empty means *really* empty: no tiles in the tree AND none parked in
-    /// any dock (a workspace whose only tile is hidden in a dock still
+    /// Empty means *really* empty: no tiles in the tree AND none in any
+    /// dock's tree (a workspace whose only tile is hidden in a dock still
     /// counts as non-empty — the sidebar indicator must not pretend the
     /// tile is gone).
     pub fn is_empty(&self) -> bool {
@@ -61,12 +61,13 @@ impl Workspace {
     }
 
     /// The tile that currently has focus, wherever it lives — the tree's
-    /// focused tile while `region` is `Main`, the focused dock's occupant
-    /// otherwise. `None` only on a workspace with nothing focusable.
+    /// focused tile while `region` is `Main`, the focused dock's own
+    /// tree's focused tile otherwise. `None` only on a workspace with
+    /// nothing focusable.
     pub fn focused_tile(&self) -> Option<TileId> {
         match self.region {
             FocusRegion::Main => self.tree.focused(),
-            FocusRegion::Dock(side) => self.docks.get(side).tile(),
+            FocusRegion::Dock(side) => self.docks.get(side).tree().focused(),
         }
     }
 
@@ -97,10 +98,26 @@ impl Workspace {
         }
     }
 
-    /// Click-to-focus on a dock: only a focusable (visible + occupied)
-    /// dock can take focus — an empty or hidden dock never can.
+    /// Focus a dock as a region: only a focusable (visible + occupied)
+    /// dock can take focus — an empty or hidden dock never can. The dock's
+    /// own tree keeps whatever tile it last had focused (focus memory,
+    /// straight from `Tree`).
     pub fn focus_dock(&mut self, side: DockSide) -> bool {
         if self.docks.get(side).focusable() {
+            self.region = FocusRegion::Dock(side);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Click-to-focus on a specific tile inside a dock (dock-trees task —
+    /// the dock counterpart of [`Workspace::focus_main_tile`]): focus that
+    /// tile within the dock's own tree AND move the region there. Refused
+    /// (false) when the dock is hidden or the tile isn't in its tree —
+    /// a failed click must not move the region.
+    pub fn focus_dock_tile(&mut self, side: DockSide, id: TileId) -> bool {
+        if self.docks.get(side).visible() && self.docks.get_mut(side).tree_mut().focus(id) {
             self.region = FocusRegion::Dock(side);
             true
         } else {
@@ -113,12 +130,15 @@ impl Workspace {
     /// focus cross into the dock on that side — Left/Right into the
     /// left/right dock, Down into the bottom one, Up never (the toolbar
     /// owns the top). While a tree tile is fullscreen the docks are not
-    /// painted at all, so focus never crosses into them. From a dock, only
-    /// the direction back toward center does anything: it lands on the
-    /// tree's focused tile, or — when the tree is empty — crosses straight
+    /// painted at all, so focus never crosses into them. From a dock, the
+    /// dock's *own* tree navigates first, exactly like the main tree
+    /// (dock-trees task); only when it has no neighbor that way does the
+    /// region cross — and region crossing stays edge-triggered and
+    /// inward-only: the direction back toward center lands on the tree's
+    /// focused tile, or — when the tree is empty — crosses straight
     /// through to the opposite side dock if that is focusable (the bottom
     /// dock has no opposite, so from it an inward Up over an empty tree
-    /// stays put). Every other direction from a dock is a no-op.
+    /// stays put). Every other direction at a dock tree's edge is a no-op.
     pub fn focus_direction(&mut self, dir: Direction) {
         match self.region {
             FocusRegion::Main => {
@@ -141,6 +161,9 @@ impl Workspace {
                 }
             }
             FocusRegion::Dock(side) => {
+                if self.docks.get_mut(side).tree_mut().focus_direction(dir) {
+                    return;
+                }
                 let inward = match side {
                     DockSide::Left => Direction::Right,
                     DockSide::Right => Direction::Left,
@@ -167,28 +190,43 @@ impl Workspace {
         }
     }
 
-    /// Move-tile (`ctrl+shift+arrows`) stays a tree concept: swap with the
-    /// geometric neighbor while `Main` is focused, no-op from a dock (a
-    /// dock has no neighbors to swap with — `dock::move_*` is the verb
-    /// that moves tiles between regions).
+    /// Move-tile (`ctrl+shift+arrows`), region-aware (dock-trees task):
+    /// swap with the geometric neighbor within whichever tree holds focus
+    /// — the main tree while `Main` is focused, the focused dock's own
+    /// tree otherwise. A directional move never crosses regions: at the
+    /// dock tree's edge it is a no-op, exactly like the main tree at its
+    /// own edge (`dock::move_*` is the verb that moves tiles between
+    /// regions).
     pub fn move_direction(&mut self, dir: Direction) {
-        if self.region == FocusRegion::Main {
-            self.tree.move_direction(dir);
+        match self.region {
+            FocusRegion::Main => {
+                self.tree.move_direction(dir);
+            }
+            FocusRegion::Dock(side) => {
+                self.docks.get_mut(side).tree_mut().move_direction(dir);
+            }
         }
     }
 
     /// Resize, region-aware. While `Main` is focused this is exactly the
     /// old behavior: move the divider adjacent to the focused tile by
-    /// [`RESIZE_STEP`]. While a dock is focused, the same step adjusts
-    /// that dock's `size` — [`RESIZE_STEP`] is a fraction of the
-    /// containing split there and a fraction of the content area here,
-    /// the same kind of unit, so the one constant serves both (recorded
-    /// choice: no separate dock step; 0.03 of the content area per press
-    /// feels the same as 0.03 of a split). The key names the direction the
+    /// [`RESIZE_STEP`]. While a dock is focused: dividers first, frame
+    /// fallback (dock-trees task) — the dock's own tree gets first claim
+    /// via its `move_divider`, so a split dock resizes internally exactly
+    /// like the main tree; only when no divider moves (a lone tile, no
+    /// split along that axis, or the step was clamped out by `MIN_RATIO` —
+    /// i.e. `move_divider` reported no change) does the *same press* fall
+    /// back to resizing the dock frame itself, adjusting the dock's
+    /// `size`. [`RESIZE_STEP`] is a fraction of the containing split there
+    /// and a fraction of the content area here, the same kind of unit, so
+    /// the one constant serves both (recorded choice: no separate dock
+    /// step). For the frame fallback the key names the direction the
     /// dock's *inner* edge moves: the left dock grows on Right and shrinks
     /// on Left, the right dock mirrors that, the bottom dock grows on Up
     /// and shrinks on Down; the two arrows along the dock's own axis are
-    /// no-ops. Clamping to the dock size range happens in
+    /// no-ops (a divider along that axis inside the dock tree still moves,
+    /// though — the fallback is per-press, not per-direction-class).
+    /// Clamping to the dock size range happens in
     /// [`super::docks::Dock::set_size`].
     pub fn resize(&mut self, dir: Direction) {
         match self.region {
@@ -196,6 +234,14 @@ impl Workspace {
                 self.tree.move_divider(dir, RESIZE_STEP);
             }
             FocusRegion::Dock(side) => {
+                if self
+                    .docks
+                    .get_mut(side)
+                    .tree_mut()
+                    .move_divider(dir, RESIZE_STEP)
+                {
+                    return;
+                }
                 let grow = match (side, dir) {
                     (DockSide::Left, Direction::Right) => 1.0,
                     (DockSide::Left, Direction::Left) => -1.0,
@@ -213,42 +259,60 @@ impl Workspace {
     }
 
     /// Close the focused tile, wherever it lives. In `Main` this is the
-    /// tree's own close (refocus rule unchanged). In a dock the tile is
-    /// removed entirely, the now-empty dock auto-hides, and focus falls
-    /// back per [`Workspace::fallback_region`].
+    /// tree's own close (refocus rule unchanged). In a dock it is the dock
+    /// tree's own close just the same (dock-trees task — the tree
+    /// refocuses a neighbor within the dock); only when that close empties
+    /// the dock's tree does the dock auto-hide and focus fall back per
+    /// [`Workspace::fallback_region`].
     pub fn close_tile(&mut self) {
         match self.region {
             FocusRegion::Main => self.tree.close(),
             FocusRegion::Dock(side) => {
                 let dock = self.docks.get_mut(side);
-                dock.set_tile(None);
-                dock.set_visible(false);
-                self.region = self.fallback_region();
+                dock.tree_mut().close();
+                if dock.tree().is_empty() {
+                    dock.set_visible(false);
+                    self.region = self.fallback_region();
+                }
             }
         }
     }
 
-    /// Fullscreen stays tree-only: while a dock is focused this is a no-op
-    /// (still claimed as handled by the router — the keystroke must not
-    /// fall through).
+    /// Fullscreen stays main-tree-only, even now that docks are trees:
+    /// while a dock is focused this is a no-op (still claimed as handled
+    /// by the router — the keystroke must not fall through). A fullscreen
+    /// dock tile would cover only its dock's little frame, a state with no
+    /// meaning the dock frame toggle (`dock::toggle_*`) doesn't already
+    /// serve better.
     pub fn toggle_fullscreen(&mut self) {
         if self.region == FocusRegion::Main {
             self.tree.toggle_fullscreen();
         }
     }
 
-    /// Split-orientation toggling is a tree concept like the splits
-    /// themselves: no-op while a dock is focused.
+    /// Reorient the split around the focused tile, in whichever tree holds
+    /// focus (dock-trees task: orientations come with the tree — a dock's
+    /// stack of tiles can be turned into a row and back just like the main
+    /// tree's).
     pub fn toggle_split_orientation(&mut self) {
-        if self.region == FocusRegion::Main {
-            self.tree.toggle_split_orientation();
+        match self.region {
+            FocusRegion::Main => {
+                self.tree.toggle_split_orientation();
+            }
+            FocusRegion::Dock(side) => {
+                self.docks
+                    .get_mut(side)
+                    .tree_mut()
+                    .toggle_split_orientation();
+            }
         }
     }
 
     /// Toggle one dock's visibility. Hidden→visible always works, even on
     /// an empty dock (it shows and renders its "move a tile here" hint).
-    /// Visible→hidden keeps the dock's tile parked (toggle back and it's
-    /// still there); if the hidden dock held focus, focus falls back per
+    /// Visible→hidden keeps the dock's whole tree parked — splits, ratios,
+    /// and focus memory included (toggle back and it's all still there);
+    /// if the hidden dock held focus, focus falls back per
     /// [`Workspace::fallback_region`].
     pub fn toggle_dock(&mut self, side: DockSide) {
         let dock = self.docks.get_mut(side);
@@ -262,101 +326,122 @@ impl Workspace {
         }
     }
 
+    /// The orientation a tile arrives with when inserted into a region by
+    /// a `dock::move_*` (both directions — into a dock's tree and back
+    /// into the main tree — use the side it crossed): Horizontal for a
+    /// left/right dock (the tile arrives side by side), Vertical for the
+    /// bottom one (it arrives stacked).
+    fn dock_insert_orientation(side: DockSide) -> Orientation {
+        match side {
+            DockSide::Left | DockSide::Right => Orientation::Horizontal,
+            DockSide::Bottom => Orientation::Vertical,
+        }
+    }
+
     /// `dock::move_<side>` — move the currently focused tile (wherever it
-    /// lives) with respect to dock `side`:
+    /// lives) with respect to dock `side`. Dock-trees task: the old
+    /// "at most one tile per dock, occupied target swaps" rule is gone —
+    /// a dock holds a whole tree, so moves *insert*:
     ///
-    /// - Focused in `Main`: the tile leaves the tree and parks in the
-    ///   dock, which auto-shows and takes focus. If the dock was occupied
-    ///   the two tiles *swap* — the dock's old tile takes the moved tile's
-    ///   exact slot in the tree (a leaf-replacement via
-    ///   [`Tree::replace_leaf`], deliberately not a remove-then-split,
-    ///   which would re-equalize ratios); otherwise the tree refocuses a
-    ///   neighbor exactly like close does ([`Tree::remove_focused`]). A
-    ///   fullscreen tile exits fullscreen first (see
-    ///   [`Tree::exit_fullscreen`]).
+    /// - Focused in `Main`: the tile leaves the tree (the tree refocuses a
+    ///   neighbor exactly like close does — [`Tree::remove_focused`]) and
+    ///   enters dock `side`'s tree at that tree's focused leaf via
+    ///   [`Tree::split`] (which is precisely "insert at focus": becomes
+    ///   root on an empty tree, focus moves to the inserted tile),
+    ///   orientation per [`Workspace::dock_insert_orientation`]. The dock
+    ///   auto-shows and takes focus. A fullscreen tile exits fullscreen
+    ///   first (see [`Tree::exit_fullscreen`]).
     /// - Focused in dock `side` already: the move is "send it back" — the
-    ///   tile re-enters the tree at the tree's focused leaf as a split
-    ///   (drift note: the brief named a new `Tree::insert_at_focus` API
-    ///   for this; [`Tree::split`] already *is* that operation — inserts
-    ///   at the focused leaf, becomes root on an empty tree, moves focus
-    ///   to the inserted tile — so no second API was added). Orientation:
-    ///   Horizontal returning from left/right (the tile arrives side by
-    ///   side), Vertical from the bottom (it arrives stacked). The
-    ///   now-empty dock auto-hides; focus follows the tile into `Main`.
-    /// - Focused in another dock: the tile moves dock-to-dock; if the
-    ///   target was occupied the two dock tiles swap (the old occupant
-    ///   lands in the source dock, which stays visible), else the source
-    ///   empties and auto-hides. The target auto-shows and takes focus.
+    ///   dock tree's focused tile (only that one; repeated presses drain
+    ///   the dock one tile per press) re-enters the main tree at its
+    ///   focused leaf as a split, same orientation convention. The dock
+    ///   auto-hides only when its tree empties; focus follows the tile
+    ///   into `Main` either way.
+    /// - Focused in another dock: the source dock tree's focused tile
+    ///   moves dock-to-dock, inserted into the target's tree likewise; the
+    ///   source auto-hides only when it empties. The target auto-shows and
+    ///   takes focus.
     /// - Nothing focused anywhere (empty workspace): no-op.
     pub fn move_to_dock(&mut self, side: DockSide) {
         match self.region {
             FocusRegion::Main => {
-                let Some(moved) = self.tree.focused() else {
-                    return;
+                let Some(moved) = self.tree.remove_focused() else {
+                    return; // empty workspace: claimed no-op
                 };
+                // `remove_focused` only clears fullscreen when the removed
+                // tile held it; clear it unconditionally — a lingering
+                // fullscreen (possible only via a hostile restore that
+                // decoupled focus from fullscreen) would cover the whole
+                // surface and hide the dock the tile just landed in.
                 self.tree.exit_fullscreen();
-                match self.docks.get(side).tile() {
-                    Some(displaced) => {
-                        // `moved` is the tree's focused tile (a leaf by
-                        // definition) and `displaced` lives only in the
-                        // dock (one-place-per-TileId invariant), so this
-                        // cannot fail; the debug_assert keeps the swap
-                        // honest if that invariant ever broke — a silent
-                        // false here followed by `set_tile(Some(moved))`
-                        // below would drop the displaced tile and
-                        // duplicate the moved one (review nit: match the
-                        // defensive posture of the dock arms below).
-                        let replaced = self.tree.replace_leaf(moved, displaced);
-                        debug_assert!(
-                            replaced,
-                            "swap leaf-replacement failed: {moved:?} not a leaf or \
-                             {displaced:?} already in the tree"
-                        );
-                    }
-                    None => {
-                        self.tree.remove_focused();
-                    }
-                }
                 let dock = self.docks.get_mut(side);
-                dock.set_tile(Some(moved));
+                dock.tree_mut()
+                    .split(moved, Self::dock_insert_orientation(side));
                 dock.set_visible(true);
                 self.region = FocusRegion::Dock(side);
             }
             FocusRegion::Dock(from) if from == side => {
-                let Some(moved) = self.docks.get(side).tile() else {
-                    // Unreachable while the region invariant holds; heal
-                    // rather than trust it blindly.
+                let Some(moved) = self.docks.get_mut(side).tree_mut().remove_focused() else {
+                    // Unreachable while the region invariant holds (a
+                    // focused dock is occupied); heal rather than trust
+                    // it blindly.
                     self.region = self.fallback_region();
                     return;
                 };
-                let orientation = match side {
-                    DockSide::Left | DockSide::Right => Orientation::Horizontal,
-                    DockSide::Bottom => Orientation::Vertical,
-                };
-                self.tree.split(moved, orientation);
+                self.tree.split(moved, Self::dock_insert_orientation(side));
                 let dock = self.docks.get_mut(side);
-                dock.set_tile(None);
-                dock.set_visible(false);
+                if dock.tree().is_empty() {
+                    dock.set_visible(false);
+                }
                 self.region = FocusRegion::Main;
             }
             FocusRegion::Dock(from) => {
-                let Some(moved) = self.docks.get(from).tile() else {
+                let Some(moved) = self.docks.get_mut(from).tree_mut().remove_focused() else {
                     self.region = self.fallback_region();
                     return;
                 };
-                let displaced = self.docks.get(side).tile();
-                let target = self.docks.get_mut(side);
-                target.set_tile(Some(moved));
-                target.set_visible(true);
-                let source = self.docks.get_mut(from);
-                match displaced {
-                    Some(displaced) => source.set_tile(Some(displaced)),
-                    None => {
-                        source.set_tile(None);
-                        source.set_visible(false);
-                    }
+                if self.docks.get(from).tree().is_empty() {
+                    self.docks.get_mut(from).set_visible(false);
                 }
+                let target = self.docks.get_mut(side);
+                target
+                    .tree_mut()
+                    .split(moved, Self::dock_insert_orientation(side));
+                target.set_visible(true);
                 self.region = FocusRegion::Dock(side);
+            }
+        }
+    }
+
+    /// Heal duplicate tile claims across one workspace-or-app-wide set of
+    /// dock trees against an already-`claimed` list (dock-trees task —
+    /// shared by [`Workspace::from_parts`], which seeds `claimed` with its
+    /// own tree, and [`Workspaces::from_parts`], which seeds it with every
+    /// workspace's tree): docks are walked in [`DockSide::ALL`] order and
+    /// each dock's tiles in tree order, so "tree wins, then first claim
+    /// wins" stays deterministic. A duplicate leaf is *removed from the
+    /// dock's tree* (the tree-shaped generalization of the old "drop the
+    /// dock's claim"; [`Tree::remove`] collapses/renormalizes like close),
+    /// with `label` prefixing each warning ("" for the local pass).
+    fn heal_duplicate_dock_claims(
+        docks: &mut Docks,
+        claimed: &mut Vec<TileId>,
+        label: &str,
+        warnings: &mut Vec<String>,
+    ) {
+        for side in DockSide::ALL {
+            let dock = docks.get_mut(side);
+            for tile in dock.tree().tiles() {
+                if claimed.contains(&tile) {
+                    warnings.push(format!(
+                        "{label}dock tile {} is already placed elsewhere; \
+                         removing it from the {side:?} dock's tree",
+                        tile.0
+                    ));
+                    dock.tree_mut().remove(tile);
+                } else {
+                    claimed.push(tile);
+                }
             }
         }
     }
@@ -364,30 +449,32 @@ impl Workspace {
     /// Reconstruct one workspace from raw session parts, healing what a
     /// hostile/corrupted session file could break *locally* (cross-
     /// workspace duplicate dock claims need the whole set and are healed
-    /// in [`Workspaces::from_parts`]): a dock tile that also appears in
-    /// this workspace's own tree or an earlier of its own docks loses the
-    /// dock's claim (the tree/earlier dock wins — a `TileId` lives in
-    /// exactly one place), and a `region` pointing at a dock that isn't
-    /// focusable falls back to `Main`. Each healing step contributes a
-    /// warning string; none is ever an error.
+    /// in [`Workspaces::from_parts`]): a dock-tree tile that also appears
+    /// in this workspace's own tree or an earlier of its own docks is
+    /// removed from the dock's tree (the tree/earlier dock wins — a
+    /// `TileId` lives in exactly one of the four trees), and a `region`
+    /// pointing at a dock that isn't focusable falls back to `Main`. Each
+    /// healing step contributes a warning string; none is ever an error.
     pub fn from_parts(tree: Tree, docks: Docks, region: FocusRegion) -> (Workspace, Vec<String>) {
         let mut warnings = Vec::new();
+        let mut tree = tree;
         let mut docks = docks;
-        let mut claimed: Vec<TileId> = tree.tiles();
-        for side in DockSide::ALL {
-            let dock = docks.get_mut(side);
-            if let Some(tile) = dock.tile() {
-                if claimed.contains(&tile) {
-                    warnings.push(format!(
-                        "dock tile {} is already placed elsewhere; dropping the {side:?} dock's claim",
-                        tile.0
-                    ));
-                    dock.set_tile(None);
-                } else {
-                    claimed.push(tile);
-                }
-            }
+        // Mirror `Dock::from_parts`'s focus heal for the main tree (review
+        // fix): a non-empty tree whose `focused` was healed away (dangling
+        // reference → `None` in `Tree::from_parts`) refocuses its first
+        // tile, silently — the verbs lean on "focused is Some whenever
+        // root is Some" (e.g. `move_to_dock`'s same-side arm removes a
+        // tile from a dock and hands it to this tree's `split`; without a
+        // focus, the split would have to fall back to its degenerate
+        // first-leaf anchor, and before that guard existed it silently
+        // dropped the tile).
+        if tree.focused().is_none()
+            && let Some(&first) = tree.tiles().first()
+        {
+            tree.focus(first);
         }
+        let mut claimed: Vec<TileId> = tree.tiles();
+        Self::heal_duplicate_dock_claims(&mut docks, &mut claimed, "", &mut warnings);
         let mut ws = Workspace {
             tree,
             docks,
@@ -489,16 +576,18 @@ impl Workspaces {
         TileId(self.next_tile)
     }
 
-    /// Split the active workspace's tree, allocating the new tile's id —
-    /// unless a dock currently holds focus: splits are a tree concept, so
-    /// the verb is then a claimed no-op, and crucially no id is allocated
-    /// for a tile that will never exist.
+    /// Split at the focus, wherever it lives (dock-trees task: the old
+    /// "splits are refused while a dock holds focus" rule is gone — a dock
+    /// holds a full tree, so `ctrl+h`/`ctrl+v` split within the focused
+    /// dock's tree exactly as they do the main tree), allocating the new
+    /// tile's id from the single app-wide allocator either way.
     pub fn split_active(&mut self, orientation: Orientation) {
-        if self.active().region() != FocusRegion::Main {
-            return;
-        }
         let id = self.alloc_tile();
-        self.active_mut().tree.split(id, orientation);
+        let ws = self.active_mut();
+        match ws.region {
+            FocusRegion::Main => ws.tree.split(id, orientation),
+            FocusRegion::Dock(side) => ws.docks.get_mut(side).tree_mut().split(id, orientation),
+        }
     }
 
     /// Workspace indices that currently hold at least one tile (in the
@@ -527,11 +616,12 @@ impl Workspaces {
     ///
     /// Dock-regions task: dock claims are healed *across* workspaces here
     /// (the per-workspace pass in [`Workspace::from_parts`] can only see
-    /// its own tree/docks) — a dock tile that also appears in any other
-    /// workspace's tree, or in an earlier (index, then side) dock claim,
-    /// is dropped with a warning, and a `region` left pointing at a
-    /// no-longer-focusable dock falls back. Healing, never failure: the
-    /// `Ok` variant carries the warnings.
+    /// its own tree/docks) — a dock-tree tile that also appears in any
+    /// other workspace's main tree, or in an earlier (index, then side,
+    /// then tree order) dock claim, is removed from its dock's tree with a
+    /// warning, and a `region` left pointing at a no-longer-focusable dock
+    /// falls back. Healing, never failure: the `Ok` variant carries the
+    /// warnings.
     ///
     /// `next_tile` is computed to resume past the maximum `TileId` found
     /// across every restored tree AND dock, so a subsequent `alloc_tile`
@@ -554,29 +644,20 @@ impl Workspaces {
             .collect();
         spaces.entry(active).or_default();
 
-        // Cross-workspace dock-claim healing: every tree tile (all
+        // Cross-workspace dock-claim healing: every main-tree tile (all
         // workspaces) is claimed first — the tree always wins over a dock
-        // — then dock claims are walked in (index, side) order, first
-        // claim wins.
+        // — then dock trees are walked in (index, side, tree) order, first
+        // claim wins; a duplicate leaf is removed from its dock tree.
         let mut warnings = Vec::new();
         let mut claimed: Vec<TileId> = spaces.values().flat_map(|ws| ws.tree.tiles()).collect();
         for (ix, ws) in spaces.iter_mut() {
-            for side in DockSide::ALL {
-                let dock = ws.docks.get_mut(side);
-                if let Some(tile) = dock.tile() {
-                    if claimed.contains(&tile) {
-                        warnings.push(format!(
-                            "workspace {ix}: dock tile {} is already placed elsewhere; \
-                             dropping the {side:?} dock's claim",
-                            tile.0
-                        ));
-                        dock.set_tile(None);
-                    } else {
-                        claimed.push(tile);
-                    }
-                }
-            }
-            // A dropped claim can invalidate the region that pointed at it.
+            Workspace::heal_duplicate_dock_claims(
+                &mut ws.docks,
+                &mut claimed,
+                &format!("workspace {ix}: "),
+                &mut warnings,
+            );
+            // A removed claim can empty the dock the region pointed at.
             if let FocusRegion::Dock(side) = ws.region
                 && !ws.docks.get(side).focusable()
             {
@@ -672,7 +753,9 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
         }
         // "Move split <dir>" (vim model) — shift+arrows move a divider
         // adjacent to the focused tile that direction, by RESIZE_STEP —
-        // or, while a dock is focused, move that dock's inner edge (see
+        // in whichever tree holds focus; while a dock is focused and no
+        // divider can move, the same press moves the dock's inner edge
+        // instead (dividers first, frame fallback — see
         // `Workspace::resize`).
         "workspace::resize_left" => {
             ws.active_mut().resize(Direction::Left);
@@ -727,6 +810,7 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tiling::Node;
     use crate::tiling::docks::{DOCK_DEFAULT_SIZE, DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock};
 
     fn act(s: &str) -> ActionId {
@@ -977,7 +1061,7 @@ mod tests {
         tree.split(TileId(3), Orientation::Horizontal);
         let mut docks = Docks::default();
         let dock = docks.get_mut(DockSide::Left);
-        dock.set_tile(Some(TileId(20)));
+        dock.tree_mut().split(TileId(20), Orientation::Horizontal);
         dock.set_visible(true);
         let (workspace, warnings) =
             Workspace::from_parts(tree, docks, FocusRegion::Dock(DockSide::Left));
@@ -1001,15 +1085,15 @@ mod tests {
 
     #[test]
     fn from_parts_drops_a_dock_claim_duplicated_in_another_workspace() {
-        // Workspace 1's tree holds tile 7; workspace 2's left dock claims
-        // the same id. The tree wins; the dock claim is dropped with a
-        // warning, and workspace 2's region (which pointed at that dock)
-        // falls back to Main.
+        // Workspace 1's tree holds tile 7; workspace 2's left dock tree
+        // claims the same id. The tree wins; the duplicate leaf is removed
+        // from the dock's tree with a warning, and workspace 2's region
+        // (which pointed at that now-empty dock) falls back to Main.
         let mut tree = Tree::default();
         tree.split(TileId(7), Orientation::Horizontal);
         let mut docks = Docks::default();
         let dock = docks.get_mut(DockSide::Left);
-        dock.set_tile(Some(TileId(7)));
+        dock.tree_mut().split(TileId(7), Orientation::Horizontal);
         dock.set_visible(true);
         let (dup_ws, local_warnings) =
             Workspace::from_parts(Tree::default(), docks, FocusRegion::Dock(DockSide::Left));
@@ -1020,9 +1104,43 @@ mod tests {
         spaces.insert(1, Workspace::from(tree));
         spaces.insert(2, dup_ws);
         let (ws, warnings) = Workspaces::from_parts(spaces, 2).unwrap();
-        assert_eq!(warnings.len(), 2, "{warnings:?}"); // dropped claim + region fallback
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
+        assert_eq!(warnings.len(), 2, "{warnings:?}"); // removed leaf + region fallback
+        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
         assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn from_parts_keeps_a_dock_trees_unique_tiles_when_one_leaf_is_a_duplicate() {
+        // A dock tree holding [8, 7] where 7 also lives in another
+        // workspace's main tree: only the duplicate leaf is removed — the
+        // dock keeps its other tile, stays focusable, and the region
+        // pointing at it survives.
+        let mut tree = Tree::default();
+        tree.split(TileId(7), Orientation::Horizontal);
+        let mut docks = Docks::default();
+        let dock = docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(8), Orientation::Horizontal);
+        dock.tree_mut().split(TileId(7), Orientation::Horizontal);
+        dock.set_visible(true);
+        let (dup_ws, _) =
+            Workspace::from_parts(Tree::default(), docks, FocusRegion::Dock(DockSide::Left));
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, Workspace::from(tree));
+        spaces.insert(2, dup_ws);
+        let (ws, warnings) = Workspaces::from_parts(spaces, 2).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles(), vec![TileId(8)]);
+        assert_eq!(
+            dock.tree().focused(),
+            Some(TileId(8)),
+            "removing the focused duplicate refocuses within the dock"
+        );
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "a still-occupied dock keeps the focus the file asked for"
+        );
     }
 
     #[test]
@@ -1030,12 +1148,37 @@ mod tests {
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         let mut docks = Docks::default();
-        docks.get_mut(DockSide::Right).set_tile(Some(TileId(1)));
+        docks
+            .get_mut(DockSide::Right)
+            .tree_mut()
+            .split(TileId(1), Orientation::Horizontal);
         docks.get_mut(DockSide::Right).set_visible(true);
         let (ws, warnings) = Workspace::from_parts(tree, docks, FocusRegion::Main);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(ws.docks().get(DockSide::Right).tile(), None);
+        assert!(ws.docks().get(DockSide::Right).tree().is_empty());
         assert_eq!(ws.tree().tiles(), vec![TileId(1)]);
+    }
+
+    #[test]
+    fn workspace_from_parts_drops_a_claim_duplicated_across_its_own_docks() {
+        // Left dock (earlier in DockSide::ALL) wins over the right dock:
+        // first-claim-wins, deterministically.
+        let mut docks = Docks::default();
+        docks
+            .get_mut(DockSide::Left)
+            .tree_mut()
+            .split(TileId(5), Orientation::Horizontal);
+        docks
+            .get_mut(DockSide::Right)
+            .tree_mut()
+            .split(TileId(5), Orientation::Horizontal);
+        let (ws, warnings) = Workspace::from_parts(Tree::default(), docks, FocusRegion::Main);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            ws.docks().get(DockSide::Left).tree().tiles(),
+            vec![TileId(5)]
+        );
+        assert!(ws.docks().get(DockSide::Right).tree().is_empty());
     }
 
     #[test]
@@ -1052,7 +1195,10 @@ mod tests {
         tree.toggle_fullscreen();
         assert_eq!(tree.fullscreen(), Some(TileId(1)));
         let mut docks = Docks::default();
-        docks.get_mut(DockSide::Left).set_tile(Some(TileId(2)));
+        docks
+            .get_mut(DockSide::Left)
+            .tree_mut()
+            .split(TileId(2), Orientation::Horizontal);
         docks.get_mut(DockSide::Left).set_visible(true);
         let (ws, warnings) = Workspace::from_parts(tree, docks, FocusRegion::Dock(DockSide::Left));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
@@ -1079,6 +1225,60 @@ mod tests {
         let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(ws.tree().fullscreen(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn workspace_from_parts_heals_a_missing_main_tree_focus_to_the_first_tile() {
+        // Review fix: `Tree::from_parts` heals a dangling `focused` to
+        // None while keeping the root — restored as-is, the main tree
+        // then violated "focused is Some whenever root is Some" and the
+        // move-back verb could drop a tile into `split`'s degenerate arm.
+        // The workspace-level heal mirrors `Dock::from_parts`: refocus
+        // the first tile, silently.
+        let tree = Tree::from_parts(Some(Node::Leaf(TileId(3))), None, None).unwrap();
+        assert_eq!(tree.focused(), None, "fixture sanity");
+        let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            ws.tree().focused(),
+            Some(TileId(3)),
+            "a non-empty restored tree must have a focused tile"
+        );
+    }
+
+    #[test]
+    fn move_back_after_a_hostile_restore_never_loses_the_tile() {
+        // Review repro: main-tree node with a dangling/missing `focused`,
+        // focus in an occupied left dock. The move-back chord removes the
+        // tile from the dock and hands it to the main tree's split —
+        // before the fixes that split silently dropped it. Both ends now
+        // guard: restore heals the main tree's focus, and even without
+        // focus, split anchors at the first leaf.
+        let tree = Tree::from_parts(Some(Node::Leaf(TileId(1))), None, None).unwrap();
+        let mut docks = Docks::default();
+        let dock = docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(2), Orientation::Horizontal);
+        dock.set_visible(true);
+        let (workspace, warnings) =
+            Workspace::from_parts(tree, docks, FocusRegion::Dock(DockSide::Left));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, workspace);
+        let (mut ws, warnings) = Workspaces::from_parts(spaces, 1).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // move back
+
+        let mut all: Vec<TileId> = ws.active().tree().tiles();
+        all.extend(ws.active().docks().tiles());
+        all.sort();
+        assert_eq!(
+            all,
+            vec![TileId(1), TileId(2)],
+            "the moved tile must land in the main tree, never vanish"
+        );
+        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
     }
 
     #[test]
@@ -1151,21 +1351,23 @@ mod tests {
     }
 
     #[test]
-    fn a_hidden_dock_keeps_its_tile() {
+    fn a_hidden_dock_keeps_its_whole_tree() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let parked = ws.active().docks().get(DockSide::Left).tile();
-        assert!(parked.is_some());
+        // Split inside the dock so hiding has real structure to preserve.
+        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        let parked = ws.active().docks().get(DockSide::Left).tree().clone();
+        assert_eq!(parked.tiles().len(), 2);
         apply_workspace_action(&mut ws, &act("dock::toggle_left"));
         assert!(!ws.active().docks().get(DockSide::Left).visible());
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tile(),
+            *ws.active().docks().get(DockSide::Left).tree(),
             parked,
-            "hiding must not evict the parked tile"
+            "hiding must not evict or disturb the parked tree (focus memory included)"
         );
         apply_workspace_action(&mut ws, &act("dock::toggle_left"));
         assert!(ws.active().docks().get(DockSide::Left).visible());
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), parked);
+        assert_eq!(*ws.active().docks().get(DockSide::Left).tree(), parked);
     }
 
     #[test]
@@ -1225,7 +1427,12 @@ mod tests {
         let moved = ws.active().tree().focused().unwrap();
         assert!(apply_workspace_action(&mut ws, &act("dock::move_left")));
         let dock = ws.active().docks().get(DockSide::Left);
-        assert_eq!(dock.tile(), Some(moved));
+        assert_eq!(dock.tree().tiles(), vec![moved]);
+        assert_eq!(
+            dock.tree().focused(),
+            Some(moved),
+            "focus follows into the dock's tree"
+        );
         assert!(dock.visible(), "the dock auto-shows");
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
         assert_eq!(ws.active().tree().tiles().len(), 1, "tile left the tree");
@@ -1236,47 +1443,55 @@ mod tests {
     }
 
     #[test]
-    fn move_from_main_into_an_occupied_dock_swaps_via_leaf_replacement() {
+    fn move_from_main_into_an_occupied_dock_inserts_into_the_docks_tree() {
+        // Dock-trees semantics: the old occupied-target *swap* rule is
+        // gone — moving into an occupied dock splits the moved tile in at
+        // the dock tree's focused leaf, so the dock simply holds both.
         let mut ws = two_tiles();
-        // Park the right tile in the left dock, then move focus to the
-        // remaining tree tile and unbalance the layout so a naive
-        // remove-then-split would be detectable.
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let parked = ws.active().docks().get(DockSide::Left).tile().unwrap();
-        // Return to the tree and split it so it has structure: [a | b].
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::resize_left"));
+        let parked = ws.active().docks().get(DockSide::Left).tree().focused();
+        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
         let moved = ws.active().tree().focused().unwrap();
-        let slot_before = ws
-            .active()
-            .tree()
-            .layout(Rect::UNIT)
-            .into_iter()
-            .find(|(id, _)| *id == moved)
-            .unwrap()
-            .1;
 
         apply_workspace_action(&mut ws, &act("dock::move_left"));
 
-        // The dock now holds the moved tile; the displaced tile occupies
-        // the moved tile's exact old slot (leaf replacement, not a fresh
-        // split that would re-equalize ratios).
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), Some(moved));
-        let slot_after = ws
-            .active()
-            .tree()
-            .layout(Rect::UNIT)
-            .into_iter()
-            .find(|(id, _)| *id == parked)
-            .unwrap()
-            .1;
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles().len(), 2, "both tiles live in the dock");
+        assert!(dock.tree().contains(parked.unwrap()));
+        assert!(dock.tree().contains(moved));
         assert_eq!(
-            slot_before, slot_after,
-            "the displaced dock tile must take the moved tile's exact slot"
+            dock.tree().focused(),
+            Some(moved),
+            "focus lands on the tile that just arrived"
+        );
+        // Side-dock insert orientation is horizontal (side by side).
+        let rects = dock.tree().layout(Rect::UNIT);
+        assert!(
+            rects.iter().all(|(_, r)| approx(r.h, 1.0)),
+            "left-dock insert must be a horizontal split, got {rects:?}"
+        );
+        assert!(
+            ws.active().tree().is_empty(),
+            "the main tree drained completely"
         );
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+    }
+
+    #[test]
+    fn move_into_the_bottom_dock_inserts_stacked() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
+        apply_workspace_action(&mut ws, &act("workspace::focus_up")); // → Main
+        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
+        let dock = ws.active().docks().get(DockSide::Bottom);
+        let rects = dock.tree().layout(Rect::UNIT);
+        assert_eq!(rects.len(), 2);
+        assert!(
+            rects
+                .iter()
+                .all(|(_, r)| approx(r.w, 1.0) && approx(r.h, 0.5)),
+            "bottom-dock insert must be a stacked (vertical) split, got {rects:?}"
+        );
     }
 
     #[test]
@@ -1294,11 +1509,46 @@ mod tests {
         );
         assert_eq!(ws.active().tree().tiles().len(), 2);
         let dock = ws.active().docks().get(DockSide::Left);
-        assert_eq!(dock.tile(), None);
+        assert!(dock.tree().is_empty());
         assert!(!dock.visible(), "the emptied dock auto-hides");
         // Side-dock return is a horizontal (side by side) split.
         let rects = ws.active().tree().layout(Rect::UNIT);
         assert!(rects.iter().all(|(_, r)| approx(r.h, 1.0)));
+    }
+
+    #[test]
+    fn repeated_move_presses_drain_a_multi_tile_dock_one_tile_per_press() {
+        // Two tiles into the left dock, then send them back one press at a
+        // time: the first press moves only the dock's focused tile (region
+        // follows it to Main; the dock stays visible with the remainder),
+        // the second — after focusing the dock again — moves the last one
+        // and only then does the dock auto-hide.
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+            2
+        );
+        assert!(ws.active().tree().is_empty());
+
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // drain #1
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles().len(), 1, "one tile per press");
+        assert!(dock.visible(), "a non-empty dock must not auto-hide");
+        assert_eq!(ws.active().tree().tiles().len(), 1);
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+
+        // Focus returns to the dock (edge-cross left), then drain again.
+        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // drain #2
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert!(dock.tree().is_empty());
+        assert!(!dock.visible(), "the emptied dock auto-hides");
+        assert_eq!(ws.active().tree().tiles().len(), 2);
+        assert_eq!(ws.active().region(), FocusRegion::Main);
     }
 
     #[test]
@@ -1338,28 +1588,35 @@ mod tests {
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("dock::move_bottom"));
         assert_eq!(
-            ws.active().docks().get(DockSide::Bottom).tile(),
-            Some(moved)
+            ws.active().docks().get(DockSide::Bottom).tree().tiles(),
+            vec![moved]
         );
         assert!(ws.active().docks().get(DockSide::Bottom).visible());
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
         let left = ws.active().docks().get(DockSide::Left);
-        assert_eq!(left.tile(), None);
+        assert!(left.tree().is_empty());
         assert!(!left.visible(), "the emptied source dock auto-hides");
     }
 
     #[test]
-    fn move_between_docks_swaps_when_the_target_is_occupied() {
+    fn move_between_docks_inserts_into_an_occupied_targets_tree() {
+        // Dock-trees semantics: no swap — the source dock's focused tile
+        // joins the target dock's tree; the emptied source auto-hides.
         let mut ws = both_side_docks_occupied_tree_empty();
-        let a = ws.active().docks().get(DockSide::Left).tile().unwrap();
-        let b = ws.active().docks().get(DockSide::Right).tile().unwrap();
+        let a = ws.active().docks().get(DockSide::Left).tree().focused();
+        let b = ws.active().docks().get(DockSide::Right).tree().focused();
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
-        // b (focused, in the right dock) moves to the left dock; a lands
-        // in the right dock (the source), which stays visible.
+        // b (focused, in the right dock) moves into the left dock's tree,
+        // alongside a; the emptied right dock auto-hides.
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), Some(b));
-        assert_eq!(ws.active().docks().get(DockSide::Right).tile(), Some(a));
-        assert!(ws.active().docks().get(DockSide::Right).visible());
+        let left = ws.active().docks().get(DockSide::Left);
+        assert_eq!(left.tree().tiles().len(), 2);
+        assert!(left.tree().contains(a.unwrap()));
+        assert!(left.tree().contains(b.unwrap()));
+        assert_eq!(left.tree().focused(), b, "focus follows the moved tile");
+        let right = ws.active().docks().get(DockSide::Right);
+        assert!(right.tree().is_empty());
+        assert!(!right.visible(), "the emptied source dock auto-hides");
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     }
 
@@ -1368,7 +1625,7 @@ mod tests {
         let mut ws = Workspaces::new();
         assert!(apply_workspace_action(&mut ws, &act("dock::move_left")));
         assert!(ws.active().is_empty());
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
+        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
         assert!(!ws.active().docks().get(DockSide::Left).visible());
         assert_eq!(ws.active().region(), FocusRegion::Main);
     }
@@ -1392,7 +1649,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
         apply_workspace_action(&mut ws, &act("workspace::split_right")); // third tile
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // swap
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // insert (dock holds two)
         apply_workspace_action(&mut ws, &act("dock::move_bottom")); // dock→dock
         let mut all: Vec<TileId> = ws.active().tree().tiles();
         all.extend(ws.active().docks().tiles());
@@ -1437,6 +1694,73 @@ mod tests {
         assert_eq!(ws.active().region(), FocusRegion::Main);
         apply_workspace_action(&mut ws, &act("workspace::focus_down"));
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+    }
+
+    #[test]
+    fn directional_focus_navigates_within_a_docks_tree_before_crossing() {
+        // Two stacked tiles in the left dock, focus on the bottom one.
+        // Up moves within the dock's own tree; only at the dock tree's
+        // edge does the inward direction cross back to Main.
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        let bottom = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .focused()
+            .unwrap();
+        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_ne!(
+            dock.tree().focused(),
+            Some(bottom),
+            "Up must move within the dock's tree first"
+        );
+        // At the top edge now: Up stays put (not the inward direction).
+        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        // Right (inward for the left dock, no neighbor in the stack)
+        // crosses back to Main.
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn inward_focus_crosses_only_at_the_dock_trees_edge() {
+        // A left dock split side-by-side (two columns): from the left
+        // column, Right moves to the dock's own right column; a second
+        // Right — now at the edge — crosses into Main.
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        // Focus the dock's left column.
+        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        let left_col = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .focused()
+            .unwrap();
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "the first Right stays inside the dock"
+        );
+        assert_ne!(
+            ws.active().docks().get(DockSide::Left).tree().focused(),
+            Some(left_col)
+        );
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Main,
+            "the edge press crosses back to Main"
+        );
     }
 
     #[test]
@@ -1509,6 +1833,69 @@ mod tests {
     }
 
     // --- resize / close / tree verbs while a dock is focused --------------
+
+    #[test]
+    fn resize_in_a_split_dock_moves_the_docks_own_divider_not_the_frame() {
+        // "Dividers, frame fallback" (dock-trees task), pinned: with a
+        // split inside the dock along the pressed axis, the press moves
+        // the dock tree's divider and leaves the frame size alone.
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down")); // vertical split inside
+        let frame_before = ws.active().docks().get(DockSide::Left).size();
+        let layout_before = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::resize_up")
+        ));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_ne!(
+            dock.tree().layout(Rect::UNIT),
+            layout_before,
+            "the divider inside the dock must move"
+        );
+        assert!(
+            approx(dock.size(), frame_before),
+            "the dock frame must not resize while a divider can move"
+        );
+    }
+
+    #[test]
+    fn resize_falls_back_to_the_frame_when_no_divider_can_move() {
+        // The same press, no split along that axis inside the dock (the
+        // dock's split is vertical; press Left/Right): no divider moves,
+        // so the frame resizes — and the along-axis frame no-op rule still
+        // holds for a lone tile.
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        let frame_before = ws.active().docks().get(DockSide::Left).size();
+        let layout_before = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::resize_right")
+        ));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(
+            dock.tree().layout(Rect::UNIT),
+            layout_before,
+            "no horizontal divider exists inside the vertical stack"
+        );
+        assert!(
+            approx(dock.size(), frame_before + RESIZE_STEP),
+            "the same press falls back to growing the left dock's frame"
+        );
+    }
 
     #[test]
     fn resize_grows_and_shrinks_the_focused_left_dock() {
@@ -1613,7 +2000,38 @@ mod tests {
     }
 
     #[test]
-    fn close_while_dock_focused_removes_the_tile_and_hides_the_dock() {
+    fn close_in_a_multi_tile_dock_refocuses_within_and_keeps_the_dock() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down")); // second dock tile
+        let closed = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .focused()
+            .unwrap();
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::close_tile")
+        ));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles().len(), 1);
+        assert!(!dock.tree().contains(closed));
+        assert!(
+            dock.tree().focused().is_some(),
+            "the dock tree refocused a neighbor, as Tree::close does"
+        );
+        assert!(dock.visible(), "a still-occupied dock must not hide");
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "focus stays in the dock while it has tiles"
+        );
+    }
+
+    #[test]
+    fn close_of_a_docks_last_tile_hides_it_and_falls_back() {
         let mut ws = two_tiles();
         let moved = ws.active().tree().focused().unwrap();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
@@ -1622,7 +2040,7 @@ mod tests {
             &act("workspace::close_tile")
         ));
         let dock = ws.active().docks().get(DockSide::Left);
-        assert_eq!(dock.tile(), None);
+        assert!(dock.tree().is_empty());
         assert!(!dock.visible());
         assert_eq!(ws.active().region(), FocusRegion::Main);
         assert!(
@@ -1632,45 +2050,124 @@ mod tests {
     }
 
     #[test]
-    fn tree_only_verbs_are_claimed_noops_while_a_dock_is_focused() {
+    fn splits_while_a_dock_is_focused_grow_the_docks_tree() {
+        // Dock-trees semantics: the old "splits are refused in a dock"
+        // rule is gone — ctrl+h/ctrl+v split within the focused dock's
+        // tree, allocating from the same app-wide id counter.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let tree_before = ws.active().tree().layout(Rect::UNIT);
-        let tiles_before = ws.active().tree().tiles();
-
-        for verb in [
-            "workspace::split_right",
-            "workspace::split_down",
-            "workspace::move_left",
-            "workspace::move_right",
-            "workspace::move_up",
-            "workspace::move_down",
-            "workspace::fullscreen_tile",
-            "workspace::toggle_split_orientation",
-        ] {
-            assert!(apply_workspace_action(&mut ws, &act(verb)), "{verb}");
-        }
-
-        assert_eq!(ws.active().tree().layout(Rect::UNIT), tree_before);
-        assert_eq!(ws.active().tree().tiles(), tiles_before);
-        assert_eq!(ws.active().tree().fullscreen(), None);
+        let main_before = ws.active().tree().layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::split_down")
+        ));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles().len(), 2);
+        assert_eq!(
+            dock.tree().focused(),
+            Some(TileId(3)),
+            "the new tile came from the single allocator (ids 1 and 2 exist)"
+        );
+        // Vertical split: the dock's two tiles stack.
+        let rects = dock.tree().layout(Rect::UNIT);
+        assert!(
+            rects
+                .iter()
+                .all(|(_, r)| approx(r.w, 1.0) && approx(r.h, 0.5)),
+            "{rects:?}"
+        );
+        assert_eq!(
+            ws.active().tree().layout(Rect::UNIT),
+            main_before,
+            "the main tree is untouched by a dock-focused split"
+        );
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
-    fn split_while_dock_focused_does_not_leak_a_tile_id() {
+    fn directional_move_within_a_dock_swaps_and_never_crosses_regions() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        // Back to Main and split for real: the id allocated must be the
-        // next consecutive one — the refused split must not have burned one.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down")); // dock: two stacked tiles
+        let dock_layout_before = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        // The focused (bottom) dock tile swaps upward within the dock.
+        assert!(apply_workspace_action(&mut ws, &act("workspace::move_up")));
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_ne!(dock.tree().layout(Rect::UNIT), dock_layout_before);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        // At the dock tree's edge, a directional move is a claimed no-op —
+        // it never crosses into Main, exactly like the main tree at its
+        // own edge.
+        let at_edge = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        let main_before = ws.active().tree().layout(Rect::UNIT);
+        assert!(apply_workspace_action(&mut ws, &act("workspace::move_up")));
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::move_right")
+        ));
         assert_eq!(
-            ws.active().tree().focused(),
-            Some(TileId(3)),
-            "ids 1 and 2 exist; the dock-focused split must not have consumed 3"
+            ws.active()
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .layout(Rect::UNIT),
+            at_edge
         );
+        assert_eq!(ws.active().tree().layout(Rect::UNIT), main_before);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+    }
+
+    #[test]
+    fn orientation_toggle_while_a_dock_is_focused_reorients_the_docks_split() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        let before = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::toggle_split_orientation")
+        ));
+        assert_ne!(
+            ws.active()
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .layout(Rect::UNIT),
+            before,
+            "the dock's stack should have become a row"
+        );
+    }
+
+    #[test]
+    fn fullscreen_stays_a_claimed_noop_while_a_dock_is_focused() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert!(apply_workspace_action(
+            &mut ws,
+            &act("workspace::fullscreen_tile")
+        ));
+        assert_eq!(ws.active().tree().fullscreen(), None);
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().fullscreen(),
+            None,
+            "dock trees never go fullscreen"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     }
 
     // --- workspace emptiness / focused_tile -------------------------------
@@ -1696,7 +2193,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("dock::move_bottom"));
         assert_eq!(
             ws.active().focused_tile(),
-            ws.active().docks().get(DockSide::Bottom).tile()
+            ws.active().docks().get(DockSide::Bottom).tree().focused()
         );
     }
 
@@ -1723,8 +2220,35 @@ mod tests {
         // Ties `Dock::default()` (used by `Workspace::default`) to the
         // documented defaults the session layer relies on when deciding
         // whether a dock table is worth writing at all.
-        assert_eq!(Dock::default().tile(), None);
+        assert!(Dock::default().tree().is_empty());
         assert!(!Dock::default().visible());
         assert!(approx(Dock::default().size(), DOCK_DEFAULT_SIZE));
+    }
+
+    #[test]
+    fn click_focus_on_a_dock_tile_focuses_it_within_the_docks_tree() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down")); // dock: two tiles
+        let tiles = ws.active().docks().get(DockSide::Left).tree().tiles();
+        let unfocused = tiles
+            .iter()
+            .copied()
+            .find(|id| Some(*id) != ws.active().docks().get(DockSide::Left).tree().focused())
+            .unwrap();
+        // Click from Main back onto the non-focused dock tile.
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert!(ws.active_mut().focus_dock_tile(DockSide::Left, unfocused));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().focused(),
+            Some(unfocused)
+        );
+        // A tile that isn't in the dock's tree is refused without moving
+        // the region.
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert!(!ws.active_mut().focus_dock_tile(DockSide::Left, TileId(99)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
     }
 }
