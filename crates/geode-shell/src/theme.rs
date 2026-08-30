@@ -24,9 +24,12 @@
 //! `assets/themes/` (22 files: `default.json` plus the 21 family files) and
 //! embedded here with `include_str!` — no runtime file I/O, binary stays
 //! self-contained. `bloomberg.json` sits alongside them as the 23rd file:
-//! Geode's own theme rather than a vendored one — a dark-only Bloomberg
-//! Terminal palette (black ground, amber text, blue column heads), written
-//! against the same `ThemeSet` schema so it needs no special handling.
+//! Geode's own theme rather than a vendored one. It ships two dark variants
+//! under one family, the Tokyo Night arrangement — `"Bloomberg"`, the
+//! classic Terminal palette (black ground, amber text, blue column heads),
+//! and `"Bloomberg Modern"`, the current Terminal look (near-black blue-grey
+//! ground, white text, orange as accent only). Both are written against the
+//! same `ThemeSet` schema, so neither needs special handling here.
 //!
 //! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
 //! `ThemeConfig` (`crates/ui/src/theme/schema.rs`) — a theme JSON file is a
@@ -571,6 +574,31 @@ mod tests {
             .expect("exact name matches regardless of the mode argument");
         assert_eq!(light.name.as_ref(), "Bloomberg");
         assert!(light.mode.is_dark());
+    }
+
+    #[test]
+    fn bloomberg_ships_a_second_dark_variant_for_the_modern_terminal() {
+        let (service, warnings) = load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Two dark variants in one family, the Tokyo Night arrangement
+        // (three darks under "Tokyo Night") — `entries` is deliberately not
+        // deduplicated per mode, so both stay reachable.
+        assert!(service.names().contains(&"Bloomberg Modern".to_string()));
+        let modern = service
+            .resolve("Bloomberg Modern", Mode::Dark)
+            .expect("the modern variant resolves by its fully qualified name");
+        assert!(modern.mode.is_dark());
+        // The bare family name keeps resolving the classic amber variant:
+        // `find_family` takes the first entry at the requested mode, and
+        // bloomberg.json lists the classic one first.
+        assert_eq!(
+            service
+                .resolve("Bloomberg", Mode::Dark)
+                .unwrap()
+                .name
+                .as_ref(),
+            "Bloomberg"
+        );
     }
 
     #[test]

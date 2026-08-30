@@ -226,7 +226,7 @@ fn bench_palette(c: &mut Criterion) {
 
     // The full per-edit filter pass (`set_query` -> recompute_filtered:
     // match every item, sort, cache) at palette scale. Today's real size is
-    // 79 (40 registry actions + 39 bundled themes); the 66 case below is
+    // 80 (40 registry actions + 40 bundled themes); the 66 case below is
     // kept at its original value as a stable baseline rather than retuned
     // every time an action or theme is added, since what the bench measures
     // is the shape of the curve, not one exact count.

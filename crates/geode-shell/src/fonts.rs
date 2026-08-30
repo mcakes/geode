@@ -40,7 +40,7 @@
 //!   Option<SharedString>` / `mono_font_family: Option<SharedString>`
 //!   (schema.rs:51,57); `apply_to` only overwrites `Theme::font_family` /
 //!   `mono_font_family` when the config's field is `Some`
-//!   (schema.rs:1084-1089). None of this repo's 39 bundled `assets/
+//!   (schema.rs:1084-1089). None of this repo's 40 bundled `assets/
 //!   themes/*.json` themes set either key (`grep -l font_family
 //!   assets/themes/*.json` → zero matches, checked at implementation
 //!   time), so switching theme family/mode via `theme::Registry::
