@@ -3120,11 +3120,11 @@ mod tests {
         );
     }
 
-    /// End-to-end: `ctrl+shift+right` (`workspace::move_right`, a direct
+    /// End-to-end: `ctrl+alt+right` (`workspace::move_right`, a direct
     /// binding) swaps the focused tile with
     /// its right neighbor, focus following the moved tile.
     #[gpui::test]
-    fn ctrl_shift_right_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
+    fn ctrl_alt_right_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -3164,7 +3164,7 @@ mod tests {
             shell.services.workspaces.active().tree().layout(Rect::UNIT)
         });
 
-        cx.simulate_keystrokes("ctrl-shift-right");
+        cx.simulate_keystrokes("ctrl-alt-right");
 
         let after_focused = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().focused()
@@ -3178,7 +3178,7 @@ mod tests {
         );
         assert_ne!(
             before, after,
-            "ctrl+shift+right should have swapped the two tiles' positions"
+            "ctrl+alt+right should have swapped the two tiles' positions"
         );
     }
 
@@ -5179,7 +5179,7 @@ mod tests {
     /// keymap (spec §3.4: sequence bindings), so the status bar's
     /// pending-keystroke display (Task 4) has something real to show. The
     /// builtin keymap has no sequence bindings anymore (move-tile went
-    /// direct to `ctrl+shift+arrows`), so this isolated binding is the way
+    /// direct to `ctrl+alt+arrows`), so this isolated binding is the way
     /// tests exercise a pending keystroke at all.
     fn test_services_with_gg_binding() -> ShellServices {
         let config = Config::load(&ConfigSources::default());
