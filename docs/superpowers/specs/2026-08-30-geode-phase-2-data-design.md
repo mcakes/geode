@@ -116,10 +116,20 @@ Instruments carry contractual detail (strike, expiry). Instruments can
 be reused across positions; positions can appear in multiple LHUs; a
 position in one LHU can face multiple counterparties.
 
-The most atomic risk grain is therefore:
+Single-underlying greeks are therefore keyed:
 
 ```
 (book, lhu, position_ref, instrument_ref, underlying_ref, counterparty)
+```
+
+Cross-gamma is finer still: it is a property of an underlying *pair*,
+not of an underlying. On a worst-of over SPX/RUT/NDX, SPX-RUT cross
+gamma and SPX-NDX cross gamma are distinct numbers that only the pair
+distinguishes. The most atomic risk grain is thus:
+
+```
+(book, lhu, position_ref, instrument_ref, underlying_ref,
+ underlying2_ref, counterparty)
 ```
 
 ### 3.2 Grain is the organizing principle
@@ -143,10 +153,11 @@ Two alternatives were rejected:
 
 Instead, ingestion **splits each source file by grain**, one target
 table per distinct grain, deduplicating coarser measures. Every
-measure declares its grain in config; adding a fourth grain later is a
-config change, not a schema migration. The three grains present today
-were arrived at by successive correction during design, which is the
-strongest argument for keeping the assignment declarative.
+measure declares its grain in config; adding a grain later is a config
+change, not a schema migration. The four grains present today were
+arrived at by successive correction during design — each correction
+moving a measure or splitting a table — which is the strongest
+argument for keeping the assignment declarative.
 
 The cost is joins, and it is smaller than it looks: the compiler
 aggregates each grain to the grouping key in its own subquery and
@@ -155,19 +166,27 @@ joins the *aggregates* — one row per group — never the raw tables
 
 ### 3.3 Tables
 
-Six tables, named by grain rather than by measure family:
+Seven tables, named by grain rather than by measure family. `K` below
+abbreviates the common leading key `(book, lhu, position_ref,
+counterparty)`:
 
 | Table | Grain |
 |---|---|
-| `measures_underlying` | `(book, lhu, position_ref, instrument_ref, underlying_ref, counterparty)` |
-| `measures_instrument` | `(book, lhu, position_ref, instrument_ref, counterparty)` |
-| `measures_position` | `(book, lhu, position_ref, counterparty)` |
+| `measures_underlying_pair` | `K + (instrument_ref, underlying_ref, underlying2_ref)` |
+| `measures_underlying` | `K + (instrument_ref, underlying_ref)` |
+| `measures_instrument` | `K + (instrument_ref)` |
+| `measures_position` | `K` |
 | `instrument_ref` | `(instrument_ref)` |
 | `implied_vol_surface` | `(underlying_ref, as_of, expiry, strike_or_moneyness)` |
 | `implied_vol_summary` | `(underlying_ref, as_of)` |
 
-`measures_underlying` additionally carries `underlying2_ref`, naming
-the other leg of the pair so the `CrossGamma` columns have meaning.
+**Pair canonicalization.** Cross gamma is symmetric — SPX-RUT and
+RUT-SPX are the same second derivative — so if the source emits both
+orderings, summing cross gamma over a book would double-count. Ingest
+canonicalizes each pair to a sorted `(underlying_ref,
+underlying2_ref)` and deduplicates, with a disagreement between the
+two orderings' values reported through the §3.5 conflict detector
+rather than silently averaged or dropped.
 
 ### 3.4 Measure assignment
 
@@ -183,10 +202,14 @@ NPV and PnL columns appeared without `_USD` twins in the supplied
 column list; that asymmetry is assumed real and is one of the things
 §10's real-header check should confirm.
 
+**`measures_underlying_pair`** — `CrossGamma02`, `CrossGamma05`.
+
+Cross gamma is the mixed second derivative across two underlyings, so
+the pair is what identifies it (§3.1).
+
 **`measures_underlying`** — `Delta01`, `Delta02`, `Delta05`,
-`Gamma01`, `Gamma02`, `Gamma05`, `CrossGamma02`, `CrossGamma05`,
-`Vega01`, `NormalizedVega01`, `Skew01`, `Rho010`, `RhoRFR010`,
-`RhoOIS010`.
+`Gamma01`, `Gamma02`, `Gamma05`, `Vega01`, `NormalizedVega01`,
+`Skew01`, `Rho010`, `RhoRFR010`, `RhoOIS010`.
 
 Rho sits at underlying grain because rho's underlying *is* the
 currency. RFR and OIS are curve variants of the same measure.
@@ -561,6 +584,15 @@ attributed and the compiler marks the column non-attributable for that
 grouping rather than inventing an allocation. Rendering that marker is
 Phase 3's job; producing it is Phase 2's.
 
+**Pair measures aggregated to a coarser grouping need a declared
+rule.** Rolling cross gamma up by `underlying_ref` is ambiguous:
+canonicalization (§3.3) means an SPX-RUT pair would otherwise land
+only under whichever name sorts first, which is arbitrary. Cross gamma
+is therefore non-attributable to an underlying-level grouping unless
+the view definition declares a rule — attribute to both sides, or to
+neither. It aggregates without ceremony to groupings at or coarser
+than instrument, which is the common case.
+
 A scope predicate on a dimension finer than a measure's grain has the
 same ambiguity — filtering to one underlying and asking for a
 position's trading PnL. The design makes it visible rather than
@@ -663,6 +695,9 @@ seed and capable of 1M rows:
 - Per-book CSVs at the real atomic grain, with the measure families
   of §3.4 — some files carrying several books, one book split across
   two files.
+- Multi-underlying instruments including at least one three-underlying
+  worst-of, so pair rows, pair canonicalization, and the
+  underlying/pair grain split are exercised rather than assumed.
 - Optional greek columns absent from some files, so §3.6's tolerance
   is exercised by fixtures rather than only by unit tests.
 - A `.done` sentinel per CSV, plus at least one CSV with no sentinel
@@ -700,7 +735,7 @@ No checked-in fixture files (§7.4).
 Criterion, over the generated data, CI-gated on regression (§7.4):
 
 - Ingest throughput per file size, and full cold-start wall time.
-- Requery at 1M rows: grouped, joined across three grains, scoped —
+- Requery at 1M rows: grouped, joined across four grains, scoped —
   the shape the app actually runs. Budget < 50ms end-to-end (§7.1).
 - Snapshot handoff cost.
 - As-of query against archive versus the same query against live.
@@ -725,14 +760,21 @@ Blocking implementation, not the spec:
    plus corrections. The schema is config-declared, so corrections are
    cheap, but the initial declaration should be written against a real
    header.
+3. **How the file lays out pair rows.** Either the source emits one
+   row per underlying with `underlying2_ref` populated only on cross
+   rows, or one row per pair with the single-underlying greeks
+   repeated across an instrument's pairs. The target tables are the
+   same either way; the ingest deduplication differs, and a sample
+   settles it. Whether both pair orderings appear is part of the same
+   question (§3.3).
 
 Non-blocking, resolvable in config:
 
-3. `Rho010_USD` was absent from the supplied column list while
+4. `Rho010_USD` was absent from the supplied column list while
    `RhoRFR010_USD` appeared twice; assumed a slip and the family
    assumed symmetric.
-4. The desk-to-book mapping has no source — `Desk` is not a CSV
+5. The desk-to-book mapping has no source — `Desk` is not a CSV
    column. Config-declared for now.
-5. `implied_vol_surface`'s columns and source are unspecified (§3.7).
-6. Whether concurrent writer connections improve ingest throughput
+6. `implied_vol_surface`'s columns and source are unspecified (§3.7).
+7. Whether concurrent writer connections improve ingest throughput
    (§5.6) — a benchmark question.
