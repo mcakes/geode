@@ -24,7 +24,7 @@ pub use docks::{
 };
 pub use dropzones::{
     DROP_EDGE_BAND, DropTarget, DropZone, classify_drop_zone, drop_highlight_rect, hit_tile,
-    locate_drop_target,
+    locate_drop_target, rect_contains,
 };
 pub use tree::{Direction, DividerAddress, Node, Orientation, Rect, TileId, Tree};
 pub use workspaces::{RESIZE_STEP, Workspace, Workspaces, apply_workspace_action};

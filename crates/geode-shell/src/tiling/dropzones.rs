@@ -58,7 +58,12 @@ pub enum DropTarget {
     DockBackground { side: super::docks::DockSide },
 }
 
-fn contains(r: &Rect, x: f32, y: f32) -> bool {
+/// Point-in-rect with the half-open convention every hit test here uses
+/// (inclusive left/top edge, exclusive right/bottom — adjacent rects from
+/// one layout never both claim a boundary point). Public so the render
+/// pass can test a cursor against dock frame rects it already has without
+/// restating the convention.
+pub fn rect_contains(r: &Rect, x: f32, y: f32) -> bool {
     x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h
 }
 
@@ -68,7 +73,7 @@ fn contains(r: &Rect, x: f32, y: f32) -> bool {
 pub fn hit_tile(rects: &[(TileId, Rect)], x: f32, y: f32) -> Option<(TileId, Rect)> {
     rects
         .iter()
-        .find(|(_, r)| contains(r, x, y))
+        .find(|(_, r)| rect_contains(r, x, y))
         .map(|&(id, r)| (id, r))
 }
 
@@ -153,7 +158,7 @@ pub fn locate_drop_target(workspace: &Workspace, area: Rect, x: f32, y: f32) -> 
     }
     let (tree_area, dock_rects) = dock_layout(workspace.docks(), area);
     for &(side, r) in &dock_rects {
-        if contains(&r, x, y) {
+        if rect_contains(&r, x, y) {
             let tiles = workspace.docks().get(side).tree().layout(r);
             return Some(match hit_tile(&tiles, x, y) {
                 Some((id, tr)) => DropTarget::Tile {
