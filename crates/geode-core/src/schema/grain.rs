@@ -37,6 +37,11 @@ const K_PAIR: [&str; 7] = [
     "underlying2_ref",
 ];
 
+const ID_POSITION: [&str; 1] = ["position_ref"];
+const ID_INSTRUMENT: [&str; 1] = ["instrument_ref"];
+const ID_UNDERLYING: [&str; 2] = ["instrument_ref", "underlying_ref"];
+const ID_PAIR: [&str; 3] = ["instrument_ref", "underlying_ref", "underlying2_ref"];
+
 impl Grain {
     pub const ALL: [Grain; 4] = [
         Grain::Position,
@@ -51,6 +56,19 @@ impl Grain {
             Grain::Instrument => &K_INSTRUMENT,
             Grain::Underlying => &K_UNDERLYING,
             Grain::UnderlyingPair => &K_PAIR,
+        }
+    }
+
+    /// The columns naming the entity a measure belongs to — a subset of
+    /// the key. `book` and `lhu` are containers, and `counterparty`
+    /// subdivides a position rather than naming it, so none of them
+    /// identify. This is what decides `DeterminedNonAdditive` (spec §6.3).
+    pub fn identity_columns(self) -> &'static [&'static str] {
+        match self {
+            Grain::Position => &ID_POSITION,
+            Grain::Instrument => &ID_INSTRUMENT,
+            Grain::Underlying => &ID_UNDERLYING,
+            Grain::UnderlyingPair => &ID_PAIR,
         }
     }
 
@@ -104,6 +122,29 @@ mod tests {
         ] {
             assert!(fine.key_columns().starts_with(coarse.key_columns()));
             assert!(coarse < fine, "Ord must read coarse < fine");
+        }
+    }
+
+    #[test]
+    fn identity_columns_name_the_entity_not_the_whole_key() {
+        // The entity a measure belongs to. `book`/`lhu` are containers and
+        // `counterparty` subdivides a position, so none of them identify.
+        assert_eq!(Grain::Position.identity_columns(), &["position_ref"]);
+        assert_eq!(Grain::Instrument.identity_columns(), &["instrument_ref"]);
+        assert_eq!(
+            Grain::Underlying.identity_columns(),
+            &["instrument_ref", "underlying_ref"]
+        );
+        assert_eq!(
+            Grain::UnderlyingPair.identity_columns(),
+            &["instrument_ref", "underlying_ref", "underlying2_ref"]
+        );
+
+        // Identity is always a subset of the key.
+        for g in Grain::ALL {
+            for c in g.identity_columns() {
+                assert!(g.key_columns().contains(c), "{g:?} / {c}");
+            }
         }
     }
 
