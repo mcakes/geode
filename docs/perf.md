@@ -166,19 +166,25 @@ table above.
 
 | View | Result rows | 100k ingested | 1M ingested |
 |---|---|---|---|
-| `tree`, scoped to 3 books | 7.7k / 74.7k | 6.8 ms | **22.7 ms** |
-| `tree`, scoped, bounded to depth 2 | 121 | 5.2 ms | **10.4 ms** |
-| `shallow` (book only), scoped | 4 | 4.0 ms | **6.0 ms** |
-| `tree`, all 20 books | 40.4k / 398k | 15.2 ms | **66.5 ms** |
-| `tree`, unscoped | 40.4k / 398k | 14.1 ms | **63.1 ms** |
-| `tree`, unscoped, bounded to depth 2 | 121 | 7.2 ms | **10.0 ms** |
+| `tree`, scoped to 3 books | 7.7k / 74.7k | 8.2 ms | **23.9 ms** |
+| `tree`, scoped, bounded to depth 2 | 121 | 5.7 ms | **10.8 ms** |
+| `shallow` (book only), scoped | 4 | 4.3 ms | **6.0 ms** |
+| `tree`, all 20 books | 40.4k / 398k | 16.6 ms | **69.9 ms** |
+| `tree`, unscoped | 40.4k / 398k | 15.2 ms | **66.1 ms** |
+| `tree`, unscoped, bounded to depth 2 | 121 | 7.5 ms | **10.3 ms** |
+
+Re-measured after the correctness fixes in `a7a1cb0`, which cost a few
+percent: each per-grain aggregate now carries its own level and the join
+matches on it, so a NULL in a grouping column cannot fan the tree out.
+Result-row counts are unchanged, which is the invariant that matters —
+the fixes changed which rows are correct, not how many there are.
 
 `tree` is `lhu > underlying_ref > position_ref` across three measure
 grains — the shape a blotter actually runs, not a bare `select`.
 
 **The §7.1 <50ms contract holds for every shape the blotter actually
 submits.** Latency tracks *result* size, not input size: 398k rows in
-63 ms is roughly 6M rows/sec across the Arrow boundary, so neither the
+66 ms is roughly 6M rows/sec across the Arrow boundary, so neither the
 engine nor the grain-split join is the constraint. The two rows that miss
 the budget are the unbounded ones, and they miss it for exactly that
 reason.
@@ -195,7 +201,7 @@ pure UI within the bound (§6.3), which was the point of the single
 statement in the first place.
 
 The unscoped million-row tree is the case that shows what it buys:
-**63.1 ms → 10.0 ms, and 398,085 result rows → 121.** The scan is
+**66.1 ms → 10.3 ms, and 398,085 result rows → 121.** The scan is
 identical; only the result changed. That second number matters as much as
 the first, because gpui-component's `DataTable` virtualizes by *index* —
 its `TableDelegate` is asked for row `i` — so the blotter has to flatten
