@@ -18,9 +18,15 @@ rebuilt to emit a realistic source *directory* so every ingest behaviour is
 exercised by fixtures rather than mocks.
 
 **Tech Stack:** Rust 2024 edition, stable toolchain. `duckdb` 1.10505 with
-the `bundled` feature (compiles DuckDB from C++ source). `serde`/`serde_json`
-for sentinels. `criterion` 0.8.2 for benchmarks. No async runtime — ingest is
-OS threads and channels.
+the `bundled` and `chrono` features (bundled compiles DuckDB from C++
+source). `serde`/`serde_json` for sentinels, `chrono` for timestamps, `glob`
+and `regex` for discovery, `criterion` 0.8.2 for benchmarks. No async
+runtime — ingest is OS threads and channels.
+
+**Timestamps are `chrono::DateTime<Utc>`, not `time::OffsetDateTime`.**
+duckdb-rs ships `src/types/chrono.rs` and no `time.rs`, so only chrono has
+`ToSql`/`FromSql` impls. Using `time` would mean hand-converting at every
+SQL boundary. Verified against the vendored 1.10505 source.
 
 **Spec:** `docs/superpowers/specs/2026-08-30-geode-phase-2-data-design.md`
 
@@ -1582,7 +1588,7 @@ disagreement for the conflict detector."
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `Sentinel { as_of: OffsetDateTime-like String, columns: Vec<String>,
+- Produces: `Sentinel { as_of: DateTime<Utc>, columns: Vec<String>,
   books: Vec<String>, row_count: Option<usize>, dataset: Option<String> }`,
   `SentinelError`, and `parse_sentinel(&str) -> Result<Sentinel, SentinelError>`.
   Task 9 (load) and Task 10 (discovery) both consume this.
@@ -1601,7 +1607,7 @@ In `crates/geode-data/Cargo.toml`:
 geode-core.workspace = true
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
-time = { version = "0.3.44", features = ["parsing", "formatting", "macros"] }
+chrono = "0.4.42"
 
 [dev-dependencies]
 geode-demo-data = { path = "../geode-demo-data" }
@@ -1633,7 +1639,7 @@ mod tests {
         assert_eq!(s.books, vec!["BK003", "BK011"]);
         assert_eq!(s.row_count, Some(184_203));
         assert_eq!(s.dataset.as_deref(), Some("risk_snapshot"));
-        assert_eq!(s.as_of.to_string(), "2026-08-30 14:32:05.0 +00:00:00");
+        assert_eq!(s.as_of.to_rfc3339(), "2026-08-30T14:32:05+00:00");
     }
 
     #[test]
@@ -1672,7 +1678,8 @@ mod tests {
     #[test]
     fn accepts_an_offset_other_than_utc() {
         let s = parse_sentinel(r#"{"as_of":"2026-08-30T14:32:05+02:00","columns":["A"]}"#).unwrap();
-        assert_eq!(s.as_of.offset().whole_hours(), 2);
+        // Normalized to UTC on parse: 14:32:05+02:00 is 12:32:05Z.
+        assert_eq!(s.as_of.to_rfc3339(), "2026-08-30T12:32:05+00:00");
     }
 }
 ```
@@ -1695,15 +1702,14 @@ Prepend to `crates/geode-data/src/source/sentinel.rs`:
 //! The production shape is an open question (spec §10.1); this parser is
 //! written so that only those two fields need to survive being wrong.
 
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sentinel {
     /// Authoritative source time: orders generations, drives as-of, and
     /// decides what is "most recent" (spec §4.4). Never file mtime.
-    pub as_of: OffsetDateTime,
+    pub as_of: DateTime<Utc>,
     /// Column spelling as it appears in the CSV header.
     pub columns: Vec<String>,
     pub books: Vec<String>,
@@ -1716,7 +1722,7 @@ pub struct Sentinel {
 pub enum SentinelError {
     Json(serde_json::Error),
     MissingField(&'static str),
-    BadTimestamp { value: String, source: time::error::Parse },
+    BadTimestamp { value: String, source: chrono::ParseError },
 }
 
 impl std::fmt::Display for SentinelError {
@@ -1750,7 +1756,8 @@ struct Raw {
 pub fn parse_sentinel(text: &str) -> Result<Sentinel, SentinelError> {
     let raw: Raw = serde_json::from_str(text).map_err(SentinelError::Json)?;
     let as_of_str = raw.as_of.ok_or(SentinelError::MissingField("as_of"))?;
-    let as_of = OffsetDateTime::parse(&as_of_str, &Rfc3339)
+    let as_of = DateTime::parse_from_rfc3339(&as_of_str)
+        .map(|t| t.with_timezone(&Utc))
         .map_err(|source| SentinelError::BadTimestamp { value: as_of_str, source })?;
     let columns = raw.columns.ok_or(SentinelError::MissingField("columns"))?;
     Ok(Sentinel {
@@ -1833,7 +1840,7 @@ database; the §4.3 publish transaction runs in ~3ms.
 In `crates/geode-data/Cargo.toml` `[dependencies]`:
 
 ```toml
-duckdb = { version = "1.10505.0", features = ["bundled"] }
+duckdb = { version = "1.10505.0", features = ["bundled", "chrono"] }
 ```
 
 Note for the implementer: the first build compiles DuckDB from C++ source
@@ -2384,7 +2391,12 @@ Create `crates/geode-data/src/store/catalog.rs` with only this test module:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use time::macros::datetime;
+    use chrono::{DateTime, Datelike, Timelike, Utc};
+
+    /// Terse RFC 3339 literal for tests.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
 
     fn store() -> (tempfile::TempDir, crate::store::Store) {
         let dir = tempfile::tempdir().unwrap();
@@ -2393,7 +2405,7 @@ mod tests {
         (dir, store)
     }
 
-    fn record(slot: &str, books: &[&str], source_time: time::OffsetDateTime) -> FileGeneration {
+    fn record(slot: &str, books: &[&str], source_time: DateTime<Utc>) -> FileGeneration {
         FileGeneration {
             file_id: 0,
             dataset: "risk_snapshot".into(),
@@ -2415,7 +2427,7 @@ mod tests {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
         assert_eq!(cat.next_gen_id().unwrap(), 1);
-        let mut r = record("BK000", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        let mut r = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
         r.gen_id = 1;
         cat.record(&r).unwrap();
         assert_eq!(cat.next_gen_id().unwrap(), 2);
@@ -2426,7 +2438,7 @@ mod tests {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
         for (gen, hour) in [(1, 7), (2, 9)] {
-            let mut r = record("BK000", &["BK000"], datetime!(2026-08-30 00:00 UTC).replace_hour(hour).unwrap());
+            let mut r = record("BK000", &["BK000"], ts(&format!("2026-08-30T{hour:02}:00:00Z")));
             r.gen_id = gen;
             cat.record(&r).unwrap();
         }
@@ -2443,7 +2455,7 @@ mod tests {
         for (gen, day) in [(1, 29u8), (2, 30u8)] {
             let mut r = FileGeneration {
                 path: format!("/src/risk_2026-08-{day}_BK000.csv").into(),
-                ..record("BK000", &["BK000"], datetime!(2026-08-01 07:00 UTC).replace_day(day).unwrap())
+                ..record("BK000", &["BK000"], ts(&format!("2026-08-{day:02}T07:00:00Z")))
             };
             r.gen_id = gen;
             cat.record(&r).unwrap();
@@ -2457,10 +2469,10 @@ mod tests {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
         // BK000 is split across two slots with different source times.
-        let mut a = record("BK000_part1", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        let mut a = record("BK000_part1", &["BK000"], ts("2026-08-30T07:00:00Z"));
         a.gen_id = 1;
         cat.record(&a).unwrap();
-        let mut b = record("BK000_part2", &["BK000"], datetime!(2026-08-30 14:00 UTC));
+        let mut b = record("BK000_part2", &["BK000"], ts("2026-08-30T14:00:00Z"));
         b.gen_id = 2;
         cat.record(&b).unwrap();
 
@@ -2473,10 +2485,10 @@ mod tests {
     fn dataset_as_of_is_the_oldest_book_in_scope() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        let mut a = record("BK000", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        let mut a = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
         a.gen_id = 1;
         cat.record(&a).unwrap();
-        let mut b = record("BK001", &["BK001"], datetime!(2026-08-30 14:00 UTC));
+        let mut b = record("BK001", &["BK001"], ts("2026-08-30T14:00:00Z"));
         b.gen_id = 2;
         cat.record(&b).unwrap();
 
@@ -2493,7 +2505,7 @@ mod tests {
     fn a_multi_book_file_contributes_to_every_book_it_covers() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        let mut r = record("BK001_BK002", &["BK001", "BK002"], datetime!(2026-08-30 09:00 UTC));
+        let mut r = record("BK001_BK002", &["BK001", "BK002"], ts("2026-08-30T09:00:00Z"));
         r.gen_id = 1;
         cat.record(&r).unwrap();
         let fresh = cat.book_freshness("risk_snapshot").unwrap();
@@ -2524,7 +2536,7 @@ use crate::health::Health;
 use crate::store::StoreError;
 use duckdb::Connection;
 use std::path::{Path, PathBuf};
-use time::OffsetDateTime;
+use chrono::{DateTime, Utc};
 
 pub type FileId = i64;
 
@@ -2537,11 +2549,11 @@ pub struct FileGeneration {
     pub slot: String,
     pub path: PathBuf,
     pub size: u64,
-    pub mtime: OffsetDateTime,
+    pub mtime: DateTime<Utc>,
     /// From the sentinel. Orders generations and drives as-of.
-    pub source_time: OffsetDateTime,
+    pub source_time: DateTime<Utc>,
     pub gen_id: i64,
-    pub loaded_at: OffsetDateTime,
+    pub loaded_at: DateTime<Utc>,
     pub row_count: usize,
     pub books: Vec<String>,
     pub health: Health,
@@ -2687,7 +2699,7 @@ impl<'a> Catalog<'a> {
         &self,
         slot: &str,
         book: &str,
-    ) -> Result<Option<OffsetDateTime>, StoreError> {
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
         let sql = "select max(fg.source_time) from file_generations fg
                    join file_books fb on fb.file_id = fg.file_id
                    where fg.slot = ? and fb.book = ?";
@@ -2700,7 +2712,7 @@ impl<'a> Catalog<'a> {
     pub fn book_freshness(
         &self,
         dataset: &str,
-    ) -> Result<Vec<(String, OffsetDateTime)>, StoreError> {
+    ) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
         let sql = "select fb.book, min(newest.t)
                    from (select fg.slot, fb.book, max(fg.source_time) as t
                          from file_generations fg
@@ -2715,7 +2727,7 @@ impl<'a> Catalog<'a> {
             .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
         let rows = stmt
             .query_map(duckdb::params![dataset], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, OffsetDateTime>(1)?))
+                Ok((r.get::<_, String>(0)?, r.get::<_, DateTime<Utc>>(1)?))
             })
             .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -2727,7 +2739,7 @@ impl<'a> Catalog<'a> {
         &self,
         dataset: &str,
         books: &[String],
-    ) -> Result<Option<OffsetDateTime>, StoreError> {
+    ) -> Result<Option<DateTime<Utc>>, StoreError> {
         let fresh = self.book_freshness(dataset)?;
         Ok(fresh
             .into_iter()
@@ -2800,7 +2812,12 @@ Create `crates/geode-data/src/store/publish.rs` with only this test module:
 mod tests {
     use super::*;
     use crate::store::Store;
-    use time::macros::datetime;
+    use chrono::{DateTime, Utc};
+
+    /// Terse RFC 3339 literal for tests.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
 
     /// Minimal two-column live/archive pair so the test exercises the
     /// transaction, not DDL generation.
@@ -2835,7 +2852,7 @@ mod tests {
             .unwrap();
     }
 
-    fn request(slot: &str, book: &str, gen: i64, t: time::OffsetDateTime) -> PublishRequest {
+    fn request(slot: &str, book: &str, gen: i64, t: DateTime<Utc>) -> PublishRequest {
         PublishRequest {
             grain: geode_core::schema::Grain::Position,
             staging_table: "staging_position".into(),
@@ -2861,7 +2878,7 @@ mod tests {
     fn first_publish_inserts_into_live_and_leaves_archive_empty() {
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
-        let out = publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        let out = publish_file(store.writer(), &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z"))).unwrap();
         assert!(matches!(out, PublishOutcome::Published { rows: 1 }));
         assert_eq!(live_rows(&store), vec![("BK000".to_string(), 10.0)]);
         let n: i64 = store.writer().query_row("select count(*) from measures_position_archive", [], |r| r.get(0)).unwrap();
@@ -2872,12 +2889,12 @@ mod tests {
     fn republishing_a_partition_replaces_it_and_archives_the_old_rows() {
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
-        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-29 07:00 UTC))).unwrap();
+        publish_file(store.writer(), &request("BK000", "BK000", 1, ts("2026-08-29T07:00:00Z"))).unwrap();
         store.writer().execute_batch("delete from staging_position").unwrap();
         stage(&store, "BK000", 99.0, "BK000", 2);
 
-        let mut req = request("BK000", "BK000", 2, datetime!(2026-08-30 07:00 UTC));
-        req.live_source_time = Some(datetime!(2026-08-29 07:00 UTC));
+        let mut req = request("BK000", "BK000", 2, ts("2026-08-30T07:00:00Z"));
+        req.live_source_time = Some(ts("2026-08-29T07:00:00Z"));
         publish_file(store.writer(), &req).unwrap();
 
         assert_eq!(live_rows(&store), vec![("BK000".to_string(), 99.0)], "live holds one generation");
@@ -2892,13 +2909,13 @@ mod tests {
     fn a_backfilled_older_file_never_reaches_live() {
         let (_d, store) = fixture();
         stage(&store, "BK000", 99.0, "BK000", 1);
-        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        publish_file(store.writer(), &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z"))).unwrap();
         store.writer().execute_batch("delete from staging_position").unwrap();
 
         // Last Tuesday's file, loaded after this morning's.
         stage(&store, "BK000", 10.0, "BK000", 2);
-        let mut req = request("BK000", "BK000", 2, datetime!(2026-08-25 07:00 UTC));
-        req.live_source_time = Some(datetime!(2026-08-30 07:00 UTC));
+        let mut req = request("BK000", "BK000", 2, ts("2026-08-25T07:00:00Z"));
+        req.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
         let out = publish_file(store.writer(), &req).unwrap();
 
         assert!(matches!(out, PublishOutcome::ArchivedOnly { .. }), "{out:?}");
@@ -2915,12 +2932,12 @@ mod tests {
     fn publishing_one_partition_leaves_its_siblings_alone() {
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000_part1", 1);
-        publish_file(store.writer(), &request("BK000_part1", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        publish_file(store.writer(), &request("BK000_part1", "BK000", 1, ts("2026-08-30T07:00:00Z"))).unwrap();
         store.writer().execute_batch("delete from staging_position").unwrap();
 
         // Same book, different slot: the split file's other half.
         stage(&store, "BK000", 20.0, "BK000_part2", 2);
-        publish_file(store.writer(), &request("BK000_part2", "BK000", 2, datetime!(2026-08-30 08:00 UTC))).unwrap();
+        publish_file(store.writer(), &request("BK000_part2", "BK000", 2, ts("2026-08-30T08:00:00Z"))).unwrap();
 
         let rows = live_rows(&store);
         assert_eq!(rows.len(), 2, "a split book keeps both halves live: {rows:?}");
@@ -2931,7 +2948,7 @@ mod tests {
         let (_d, store) = fixture();
         stage(&store, "BK001", 1.0, "BK001_BK002", 1);
         stage(&store, "BK002", 2.0, "BK001_BK002", 1);
-        let mut req = request("BK001_BK002", "BK001", 1, datetime!(2026-08-30 07:00 UTC));
+        let mut req = request("BK001_BK002", "BK001", 1, ts("2026-08-30T07:00:00Z"));
         req.partitions.push(Partition { slot: "BK001_BK002".into(), book: "BK002".into() });
         publish_file(store.writer(), &req).unwrap();
         assert_eq!(live_rows(&store).len(), 2);
@@ -2941,11 +2958,11 @@ mod tests {
     fn a_failed_publish_leaves_live_untouched() {
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
-        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        publish_file(store.writer(), &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z"))).unwrap();
 
-        let mut bad = request("BK000", "BK000", 2, datetime!(2026-08-31 07:00 UTC));
+        let mut bad = request("BK000", "BK000", 2, ts("2026-08-31T07:00:00Z"));
         bad.staging_table = "no_such_table".into();
-        bad.live_source_time = Some(datetime!(2026-08-30 07:00 UTC));
+        bad.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
         assert!(publish_file(store.writer(), &bad).is_err());
 
         assert_eq!(
@@ -2979,7 +2996,7 @@ use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
 use duckdb::Connection;
 use geode_core::schema::Grain;
-use time::OffsetDateTime;
+use chrono::{DateTime, Utc};
 
 /// The unit of replacement: a slot within a book (spec §4.3). Not the file
 /// — filenames carry dates, so file identity is not partition identity.
@@ -2995,10 +3012,10 @@ pub struct PublishRequest {
     pub staging_table: String,
     pub partitions: Vec<Partition>,
     pub gen_id: i64,
-    pub source_time: OffsetDateTime,
+    pub source_time: DateTime<Utc>,
     /// The newest source time already live for these partitions, from
     /// `Catalog::live_source_time`. `None` means nothing is live yet.
-    pub live_source_time: Option<OffsetDateTime>,
+    pub live_source_time: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -3912,7 +3929,7 @@ use crate::store::publish::{Partition, PublishOutcome, PublishRequest, publish_f
 use crate::store::{Store, StoreError};
 use geode_core::schema::DatasetSpec;
 use std::path::Path;
-use time::OffsetDateTime;
+use chrono::{DateTime, Utc};
 
 pub struct LoadRequest<'a> {
     pub dataset: &'a DatasetSpec,
@@ -4069,11 +4086,11 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         mtime: meta
             .modified()
             .ok()
-            .and_then(|t| OffsetDateTime::from(t).into())
+            .map(DateTime::<Utc>::from)
             .unwrap_or(req.sentinel.as_of),
         source_time: req.sentinel.as_of,
         gen_id,
-        loaded_at: OffsetDateTime::now_utc(),
+        loaded_at: Utc::now(),
         row_count: rows as usize,
         books,
         health: health.clone(),
@@ -4179,7 +4196,13 @@ module:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
     use std::time::{Duration, SystemTime};
+
+    /// Terse RFC 3339 literal for tests.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
 
     fn spec(root: &std::path::Path) -> SourceSpec {
         SourceSpec {
@@ -4306,10 +4329,10 @@ mod tests {
             slot: "BK000".into(),
             path: csv.clone(),
             size: meta.len(),
-            mtime: time::OffsetDateTime::now_utc(),
-            source_time: time::macros::datetime!(2026-08-30 07:00 UTC),
+            mtime: Utc::now(),
+            source_time: ts("2026-08-30T07:00:00Z"),
             gen_id: 1,
-            loaded_at: time::OffsetDateTime::now_utc(),
+            loaded_at: Utc::now(),
             row_count: 1,
             books: vec!["BK000".into()],
             health: crate::health::Health::Ok,
@@ -4333,10 +4356,10 @@ mod tests {
             slot: "BK000".into(),
             path: csv.clone(),
             size: 999_999, // different size => changed
-            mtime: time::OffsetDateTime::now_utc(),
-            source_time: time::macros::datetime!(2026-08-30 07:00 UTC),
+            mtime: Utc::now(),
+            source_time: ts("2026-08-30T07:00:00Z"),
             gen_id: 1,
-            loaded_at: time::OffsetDateTime::now_utc(),
+            loaded_at: Utc::now(),
             row_count: 1,
             books: vec!["BK000".into()],
             health: crate::health::Health::Ok,
@@ -4587,7 +4610,7 @@ share a partition (spec §4.3)."
 **Interfaces:**
 - Consumes: `Candidate`, `CandidateState`, `Priority`, `SourceSpec`.
 - Produces: `WorkItem { source: String, dataset: String, candidate: Candidate,
-  slot: String, priority: Priority, source_time: OffsetDateTime }`,
+  slot: String, priority: Priority, source_time: DateTime<Utc> }`,
   `WorkPlan { items: Vec<WorkItem> }`, and `build_plan(&[(SourceSpec, Vec<Candidate>)])
   -> WorkPlan`. Task 12's runner works the plan.
 
@@ -4605,8 +4628,13 @@ Create `crates/geode-data/src/ingest/plan.rs` with only this test module:
 mod tests {
     use super::*;
     use crate::source::{Candidate, CandidateState, Priority, Readiness, SourceSpec};
+    use chrono::{DateTime, Datelike, Utc};
     use std::time::{Duration, SystemTime};
-    use time::OffsetDateTime;
+
+    /// Terse RFC 3339 literal for tests.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
 
     fn spec(name: &str, priority: Priority) -> SourceSpec {
         SourceSpec {
@@ -4622,7 +4650,7 @@ mod tests {
     }
 
     fn candidate(slot: &str, day: u8, state_ready: bool) -> Candidate {
-        let as_of = time::macros::datetime!(2026-08-01 07:00 UTC).replace_day(day).unwrap();
+        let as_of = ts(&format!("2026-08-{day:02}T07:00:00Z"));
         Candidate {
             csv_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv").into(),
             sentinel_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv.done").into(),
@@ -4729,7 +4757,7 @@ Prepend to `crates/geode-data/src/ingest/plan.rs`:
 
 use crate::source::{Candidate, CandidateState, Priority, SourceSpec};
 use std::collections::HashMap;
-use time::OffsetDateTime;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone)]
 pub struct WorkItem {
@@ -4738,7 +4766,7 @@ pub struct WorkItem {
     pub slot: String,
     pub candidate: Candidate,
     pub priority: Priority,
-    pub source_time: OffsetDateTime,
+    pub source_time: DateTime<Utc>,
 }
 
 #[derive(Debug, Default)]
@@ -4754,7 +4782,7 @@ pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
         // Only the newest file per slot is "current"; the rest are history,
         // however recent the source. This is what puts today's risk on
         // screen before yesterday's finishes loading.
-        let mut newest_per_slot: HashMap<&str, OffsetDateTime> = HashMap::new();
+        let mut newest_per_slot: HashMap<&str, DateTime<Utc>> = HashMap::new();
         for c in candidates {
             if let CandidateState::Ready(s) = &c.state {
                 let e = newest_per_slot.entry(c.slot.as_str()).or_insert(s.as_of);
@@ -4975,34 +5003,49 @@ mod tests {
 }
 ```
 
-Add a shared fixture builder to `crates/geode-data/src/ingest/load.rs` so the
-runner tests reuse it — move the body of the existing `fixture()` and
-`schema()` test helpers into:
+Promote the Task 9 fixture so the runner tests reuse it instead of
+duplicating it. In `crates/geode-data/src/ingest/load.rs`, add:
 
 ```rust
 #[cfg(test)]
 pub(crate) mod tests_support {
-    /// (db dir, source dir, store, dataset) — the same fixture the load
-    /// tests use, exposed so the runner tests build on it rather than
-    /// duplicating it.
+    use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
+
+    /// The same fixture the load tests use: a populated store with the
+    /// schema applied and catalog tables created, plus a generated source
+    /// directory. Both TempDirs are returned so the caller keeps them alive.
     pub(crate) fn fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
         crate::store::Store,
         geode_core::schema::DatasetSpec,
     ) {
-        // ... body moved from the private `fixture()` above, returning the
-        // source TempDir instead of holding it, and calling
-        // `Catalog::ensure_tables` before returning.
-        unimplemented!("move the Task 9 fixture body here verbatim")
+        let db_dir = tempfile::tempdir().unwrap();
+        let src_dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(db_dir.path().join("geode.duckdb")).unwrap();
+        let ds = super::tests::schema();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer()).ensure_tables().unwrap();
+        let batch = generate(&GeneratorConfig { rows: 3_000, seed: 42, business_dates: 1 });
+        emit_directory(&batch, &EmitOptions::new(src_dir.path())).unwrap();
+        (db_dir, src_dir, store, ds)
     }
 }
 ```
 
-> **Implementer note:** replace the `unimplemented!` with the Task 9
-> `fixture()` body verbatim, changing its return type to the tuple above.
-> The `unimplemented!` is a move marker, not a design placeholder — the code
-> to move is fully written in Task 9.
+and change Task 9's own `fixture()` to delegate to it:
+
+```rust
+    fn fixture() -> Fixture {
+        let (db_dir, src_dir, store, ds) = super::tests_support::fixture();
+        let batch = generate(&GeneratorConfig { rows: 3_000, seed: 42, business_dates: 1 });
+        let emitted = emit_directory(&batch, &EmitOptions::new(src_dir.path())).unwrap();
+        Fixture { _dir: db_dir, _src: src_dir, store, emitted, ds }
+    }
+```
+
+Task 9's `schema()` helper must become `pub(crate) fn schema()` so
+`tests_support` can call it.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -5233,7 +5276,596 @@ benchmark question spec §5.6 declines to assume."
 
 ---
 
-**Remaining tasks (13–14) continue below.** Task 13 adds the retention
-sweeper and checkpoint scheduling; Task 14 the ingest benchmarks, the
-parse-parallelism measurement spec §5.6 defers to, and the CI caching change
-for the bundled DuckDB build.
+### Task 13: The retention sweeper and checkpoint scheduling
+
+**Files:**
+- Create: `crates/geode-data/src/store/retention.rs`
+- Modify: `crates/geode-data/src/store/mod.rs`
+
+**Interfaces:**
+- Consumes: `Store`, `Grain`, `ddl::{table_name, TableKind}`.
+- Produces: `RetentionPolicy { keep_generations, keep_age }`,
+  `SweepReport { evicted_rows, evicted_generations, oldest_remaining }`,
+  `sweep(&Connection, &[Grain], &RetentionPolicy, DateTime<Utc>) ->
+  Result<SweepReport, StoreError>`, and `checkpoint(&Connection)`.
+
+**Retention is per partition, not per dataset.** "Keep 50 generations" means
+each `(slot, book)` keeps its own 50 — otherwise a busy book would evict a
+quiet one's history. `oldest_remaining` is published so the time-travel UI
+can show how far back a user may go (spec §4.6).
+
+**Checkpointing belongs here** because a checkpoint can stall the writer and
+must not land mid-refresh; the sweeper already runs between loads.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/store/retention.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use geode_core::schema::Grain;
+    use chrono::{DateTime, Duration, Timelike, Utc};
+
+    /// Terse RFC 3339 literal for tests.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    fn fixture() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table measures_position_archive(
+                     book varchar, slot varchar, gen_id bigint,
+                     source_time timestamp with time zone);",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    /// `gens` generations for each of two partitions, one hour apart.
+    fn fill(store: &Store, gens: i64) {
+        for slot in ["BK000", "BK001"] {
+            for g in 1..=gens {
+                store
+                    .writer()
+                    .execute(
+                        "insert into measures_position_archive values (?, ?, ?, ?)",
+                        duckdb::params![
+                            slot,
+                            slot,
+                            g,
+                            ts("2026-08-30T00:00:00Z") + Duration::hours(g)
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    fn remaining(store: &Store) -> i64 {
+        store
+            .writer()
+            .query_row("select count(*) from measures_position_archive", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn keep_by_count_is_per_partition() {
+        let (_d, store) = fixture();
+        fill(&store, 10);
+        let policy = RetentionPolicy { keep_generations: Some(3), keep_age: None };
+        let report = sweep(
+            store.writer(),
+            &[Grain::Position],
+            &policy,
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert_eq!(remaining(&store), 6, "3 generations for each of 2 partitions");
+        assert_eq!(report.evicted_rows, 14);
+    }
+
+    #[test]
+    fn keep_by_age_evicts_on_source_time() {
+        let (_d, store) = fixture();
+        fill(&store, 10);
+        let policy = RetentionPolicy {
+            keep_generations: None,
+            keep_age: Some(Duration::hours(5)),
+        };
+        sweep(
+            store.writer(),
+            &[Grain::Position],
+            &policy,
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        // Keeps source_time >= 05:00, i.e. generations 5..=10.
+        assert_eq!(remaining(&store), 12);
+    }
+
+    #[test]
+    fn both_policies_apply_together() {
+        let (_d, store) = fixture();
+        fill(&store, 10);
+        let policy = RetentionPolicy {
+            keep_generations: Some(8),
+            keep_age: Some(Duration::hours(3)),
+        };
+        sweep(
+            store.writer(),
+            &[Grain::Position],
+            &policy,
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        // Age keeps 7..=10 (4 per partition); count would keep 8. The
+        // stricter rule wins.
+        assert_eq!(remaining(&store), 8);
+    }
+
+    #[test]
+    fn oldest_remaining_is_published_for_the_time_travel_ui() {
+        let (_d, store) = fixture();
+        fill(&store, 10);
+        let policy = RetentionPolicy { keep_generations: Some(3), keep_age: None };
+        let report = sweep(
+            store.writer(),
+            &[Grain::Position],
+            &policy,
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(report.oldest_remaining.unwrap().hour(), 8);
+    }
+
+    #[test]
+    fn an_empty_policy_evicts_nothing() {
+        let (_d, store) = fixture();
+        fill(&store, 5);
+        let report = sweep(
+            store.writer(),
+            &[Grain::Position],
+            &RetentionPolicy::default(),
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(report.evicted_rows, 0);
+        assert_eq!(remaining(&store), 10);
+    }
+
+    #[test]
+    fn sweeping_an_empty_archive_is_not_an_error() {
+        let (_d, store) = fixture();
+        let report = sweep(
+            store.writer(),
+            &[Grain::Position],
+            &RetentionPolicy { keep_generations: Some(3), keep_age: None },
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(report.evicted_rows, 0);
+        assert!(report.oldest_remaining.is_none());
+    }
+
+    #[test]
+    fn checkpoint_succeeds_on_a_live_database() {
+        let (_d, store) = fixture();
+        fill(&store, 2);
+        checkpoint(store.writer()).unwrap();
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data retention`
+Expected: FAIL — `cannot find struct RetentionPolicy`.
+
+- [ ] **Step 3: Implement retention**
+
+Prepend to `crates/geode-data/src/store/retention.rs`:
+
+```rust
+//! Retention (spec §4.6). Bounded by disk rather than RAM now that storage
+//! is persistent, so defaults are generous — but unbounded history would
+//! still grow the database file without limit.
+//!
+//! Retention is per partition: "keep 50 generations" means each (slot, book)
+//! keeps its own 50, so a busy book cannot evict a quiet one's history.
+
+use crate::store::StoreError;
+use crate::store::ddl::{TableKind, table_name};
+use duckdb::Connection;
+use geode_core::schema::Grain;
+use chrono::{DateTime, Duration, Utc};
+
+#[derive(Debug, Clone, Default)]
+pub struct RetentionPolicy {
+    /// Keep this many generations per partition.
+    pub keep_generations: Option<usize>,
+    /// Keep generations whose source time is within this window.
+    pub keep_age: Option<Duration>,
+}
+
+impl RetentionPolicy {
+    pub fn is_empty(&self) -> bool {
+        self.keep_generations.is_none() && self.keep_age.is_none()
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    pub evicted_rows: usize,
+    pub evicted_generations: Vec<i64>,
+    /// How far back time travel can go (spec §4.6).
+    pub oldest_remaining: Option<DateTime<Utc>>,
+}
+
+fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
+    move |source| StoreError::Sql { statement: statement.to_string(), source }
+}
+
+pub fn sweep(
+    conn: &Connection,
+    grains: &[Grain],
+    policy: &RetentionPolicy,
+    now: DateTime<Utc>,
+) -> Result<SweepReport, StoreError> {
+    let mut report = SweepReport::default();
+
+    for grain in grains {
+        let archive = table_name(*grain, TableKind::Archive);
+
+        if !policy.is_empty() {
+            let before: i64 = {
+                let sql = format!("select count(*) from {archive}");
+                conn.query_row(&sql, [], |r| r.get(0)).map_err(sql_err(&sql))?
+            };
+
+            // A generation survives only if it satisfies every configured
+            // rule; the stricter one therefore wins.
+            let mut keep: Vec<String> = Vec::new();
+            if let Some(n) = policy.keep_generations {
+                keep.push(format!("rn <= {n}"));
+            }
+            if let Some(age) = policy.keep_age {
+                keep.push(format!("source_time >= '{}'::timestamptz", now - age));
+            }
+
+            let sql = format!(
+                "delete from {archive} where (slot, book, gen_id) not in (
+                     select slot, book, gen_id from (
+                         select slot, book, gen_id, source_time,
+                                row_number() over (
+                                    partition by slot, book order by source_time desc
+                                ) as rn
+                         from (select distinct slot, book, gen_id, source_time from {archive})
+                     ) where {keep}
+                 )",
+                keep = keep.join(" and "),
+            );
+            conn.execute_batch(&sql).map_err(sql_err(&sql))?;
+
+            let after: i64 = {
+                let sql = format!("select count(*) from {archive}");
+                conn.query_row(&sql, [], |r| r.get(0)).map_err(sql_err(&sql))?
+            };
+            report.evicted_rows += (before - after).max(0) as usize;
+        }
+
+        let sql = format!("select min(source_time) from {archive}");
+        let oldest: Option<DateTime<Utc>> =
+            conn.query_row(&sql, [], |r| r.get(0)).map_err(sql_err(&sql))?;
+        report.oldest_remaining = match (report.oldest_remaining, oldest) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+    }
+
+    Ok(report)
+}
+
+/// Force a checkpoint. Owned by the sweeper because a checkpoint can stall
+/// the writer and must not land mid-refresh (spec §4.6).
+pub fn checkpoint(conn: &Connection) -> Result<(), StoreError> {
+    let sql = "checkpoint";
+    conn.execute_batch(sql).map_err(sql_err(sql))
+}
+```
+
+Add to `crates/geode-data/src/store/mod.rs`:
+
+```rust
+pub mod retention;
+
+pub use retention::{RetentionPolicy, SweepReport, checkpoint, sweep};
+```
+
+- [ ] **Step 4: Run to verify tests pass**
+
+Run: `cargo test -p geode-data retention`
+Expected: PASS (7 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): retention sweeper and checkpoint scheduling
+
+Per-partition retention by generation count and/or age, so a busy book
+cannot evict a quiet one's history. Where both rules are configured the
+stricter wins. Publishes oldest_remaining so the time-travel UI can show
+how far back a user may go (spec §4.6).
+
+The sweeper owns checkpointing because a checkpoint can stall the writer
+and must not land mid-refresh."
+```
+
+---
+
+### Task 14: Benchmarks and CI
+
+**Files:**
+- Create: `crates/geode-data/benches/ingest.rs`
+- Modify: `crates/geode-data/Cargo.toml`
+- Modify: `.github/workflows/ci.yml`
+- Modify: `docs/perf.md`
+
+**Interfaces:**
+- Consumes: everything above.
+- Produces: no library API — the measurements that answer spec §5.6's
+  deferred question and establish the ingest baseline the query phase is
+  measured against.
+
+**What these benchmarks are for.** Two of them establish budgets; one
+answers a design question the spec deliberately left open. If sequential
+staging is within noise of parallel, the runner stays one thread and the
+`ingest.workers` knob is never built — that decision should come from a
+number, not a preference.
+
+- [ ] **Step 1: Register the bench target**
+
+In `crates/geode-data/Cargo.toml`:
+
+```toml
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "ingest"
+harness = false
+```
+
+(`[lib] bench = false` is already present — workspace invariant.)
+
+- [ ] **Step 2: Write the benchmarks**
+
+Create `crates/geode-data/benches/ingest.rs`:
+
+```rust
+//! Ingest benchmarks (spec §9.3). Establishes the cold-start and
+//! throughput baselines, and answers the parse-parallelism question spec
+//! §5.6 declines to assume.
+//!
+//! Uses the generated source directory, never checked-in fixtures (§7.4).
+
+use criterion::{Criterion, criterion_group, criterion_main};
+use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
+use std::hint::black_box;
+
+/// Emit a source directory of `rows` rows once, reused across samples.
+fn source_dir(rows: usize) -> (tempfile::TempDir, geode_demo_data::EmittedDirectory) {
+    let dir = tempfile::tempdir().unwrap();
+    let batch = generate(&GeneratorConfig { rows, seed: 42, business_dates: 1 });
+    let emitted = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+    (dir, emitted)
+}
+
+fn bench_cold_start(c: &mut Criterion) {
+    let mut group = c.benchmark_group("ingest_cold_start");
+    group.sample_size(10);
+    for rows in [100_000usize, 1_000_000] {
+        let (_src, emitted) = source_dir(rows);
+        group.bench_function(format!("{}_rows", rows), |b| {
+            b.iter_batched(
+                || tempfile::tempdir().unwrap(),
+                |db_dir| {
+                    // Fresh database each iteration: this is the cold path.
+                    black_box(run_full_ingest(db_dir.path(), &emitted));
+                },
+                criterion::BatchSize::PerIteration,
+            )
+        });
+    }
+    group.finish();
+}
+
+fn bench_warm_start(c: &mut Criterion) {
+    // Reopening a populated database must be milliseconds: live tables are
+    // queryable the moment it opens, which is what keeps the <1s startup
+    // budget reachable without reading a CSV (spec §5.4, §7.1).
+    let (_src, emitted) = source_dir(100_000);
+    let db_dir = tempfile::tempdir().unwrap();
+    run_full_ingest(db_dir.path(), &emitted);
+
+    let mut group = c.benchmark_group("ingest_warm_start");
+    group.sample_size(50);
+    group.bench_function("reopen_populated_db", |b| {
+        b.iter(|| {
+            let store =
+                geode_data::store::Store::open(db_dir.path().join("geode.duckdb")).unwrap();
+            let n: i64 = store
+                .writer()
+                .query_row("select count(*) from measures_position_live", [], |r| r.get(0))
+                .unwrap();
+            black_box(n)
+        })
+    });
+    group.finish();
+}
+
+fn bench_single_file_load(c: &mut Criterion) {
+    let (_src, emitted) = source_dir(200_000);
+    let file = emitted.files.iter().find(|f| f.sentinel_path.is_some()).unwrap();
+
+    let mut group = c.benchmark_group("ingest_single_file");
+    group.sample_size(10);
+    group.throughput(criterion::Throughput::Elements(file.rows as u64));
+    group.bench_function("load_one_file", |b| {
+        b.iter_batched(
+            || tempfile::tempdir().unwrap(),
+            |db_dir| black_box(load_one(db_dir.path(), file)),
+            criterion::BatchSize::PerIteration,
+        )
+    });
+    group.finish();
+}
+
+/// Spec §5.6's open question: does staging on separate connections beat
+/// staging sequentially through the writer? DuckDB's own CSV reader is
+/// already multi-threaded, so the honest expectation is "no" — but the
+/// runner's shape should follow the measurement, not the expectation.
+fn bench_parse_parallelism(c: &mut Criterion) {
+    let (_src, emitted) = source_dir(400_000);
+    let mut group = c.benchmark_group("ingest_parallelism");
+    group.sample_size(10);
+    group.bench_function("sequential_staging", |b| {
+        b.iter_batched(
+            || tempfile::tempdir().unwrap(),
+            |db_dir| black_box(stage_all_sequential(db_dir.path(), &emitted)),
+            criterion::BatchSize::PerIteration,
+        )
+    });
+    group.bench_function("parallel_staging_2_connections", |b| {
+        b.iter_batched(
+            || tempfile::tempdir().unwrap(),
+            |db_dir| black_box(stage_all_parallel(db_dir.path(), &emitted, 2)),
+            criterion::BatchSize::PerIteration,
+        )
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_cold_start,
+    bench_warm_start,
+    bench_single_file_load,
+    bench_parse_parallelism
+);
+criterion_main!(benches);
+```
+
+> **Implementer note:** `run_full_ingest`, `load_one`,
+> `stage_all_sequential` and `stage_all_parallel` are small helpers over the
+> public API built in Tasks 5–12 (`Store::open`, `apply_schema`,
+> `Catalog::ensure_tables`, `discover`, `build_plan`, `load_file`). Write
+> them at the bottom of this file; `stage_all_parallel` spawns N threads,
+> each with its own `store.reader()`-derived connection, doing only the
+> `read_csv` staging step so the comparison isolates parsing from publish.
+
+- [ ] **Step 3: Verify the benches compile and run**
+
+Run: `cargo bench -p geode-data --no-run`
+Expected: compiles clean.
+
+Run: `cargo bench -p geode-data -- ingest_warm_start`
+Expected: reopening a populated database is single-digit milliseconds.
+
+- [ ] **Step 4: Record the numbers**
+
+Add a section to `docs/perf.md` under "Benchmarks" giving the measured
+cold-start time at 100k and 1M rows, single-file throughput, warm-start
+time, and the parallelism verdict. State the machine. If parallel staging
+is within noise of sequential, write that down explicitly — it is the
+answer to spec §5.6 and closes open question §10.7.
+
+- [ ] **Step 5: Confirm CI caching covers the bundled build**
+
+`.github/workflows/ci.yml` already uses `Swatinem/rust-cache@v2`, which
+caches `~/.cargo` and `target/` keyed on `Cargo.lock` — so the compiled
+`libduckdb-sys` artifacts are cached after the first run on each OS. Two
+changes:
+
+```yaml
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+```
+
+and confirm the first post-merge run on each platform completes. The
+measured clean build is 127s wall / 1382s CPU on an M-series Mac; a
+two-core runner will take substantially longer, and 45 minutes gives
+headroom for a cold cache on both `cargo test` and `cargo bench --no-run`.
+
+- [ ] **Step 6: Full verification**
+
+Run: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo bench --workspace --no-run`
+Expected: all four green — the same four checks CI runs.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/geode-data docs/perf.md .github/workflows/ci.yml
+git commit -m "perf(data): ingest benchmarks and CI headroom for the bundled build
+
+Cold start at 100k and 1M rows, warm start (reopening a populated
+database must be milliseconds — that is what keeps the <1s startup budget
+reachable without reading a CSV), and single-file throughput.
+
+Also measures sequential against parallel staging to answer the question
+spec §5.6 deliberately left open. DuckDB's CSV reader is already
+multi-threaded so the honest expectation is that parallelism does not
+help, but the runner's shape should follow the number rather than the
+expectation.
+
+CI gets a 45-minute timeout: rust-cache already covers libduckdb-sys, but
+a cold cache on a two-core runner needs the headroom."
+```
+
+---
+
+## Self-Review
+
+Run against the spec after completing the plan, before execution.
+
+**Spec coverage.** Every §3–§5 requirement maps to a task: the data model
+and grain vocabulary to Tasks 1–2, the source directory and schema tolerance
+to Tasks 3 and 9, storage and the live/archive split to Task 5, generations
+and the backfill guard to Tasks 6–7, the grain split and conflict detection
+to Task 8, readiness and discovery to Task 10, the priority ladder to
+Task 11, failure handling and the panic boundary to Task 12, retention and
+checkpoints to Task 13, and §9.1/§9.3 to Tasks 2–3 and 14.
+
+**Deliberately deferred to Phase 2b** (the query-path plan), not gaps here:
+§6 in full — view definitions, the scope compiler and its expression parser,
+grain-aware aggregation with `ROLLUP`, `Attribution` and `ScopeSemantics`,
+as-of routing, snapshots, and the query pool with cancellation — plus §7's
+vertical slice. Task 6 builds `dataset_as_of`, which as-of routing will
+consume, but nothing here routes a query at the archive.
+
+**Known incompleteness, by design.** Cross-*file* attribute disagreement
+(the same instrument arriving with different values from two books' files)
+is detected within a file by Task 8 but not across files; Task 9's test says
+so explicitly. That belongs with `instrument_ref` derivation, which has no
+upstream source yet (spec §3.5) and is the first thing Phase 2b should pick
+up.
+
+**Blocked on real data, not on code** (spec §10): a real `.done` sample and
+a real CSV header. Tasks 3–4 are written so that being wrong about either
+costs a config edit and a fixture change, not a redesign — the sentinel
+parser requires only two fields, and every column's grain, type and
+requiredness is declared rather than compiled in.
+
+## Execution Handoff
+
+Plan saved to `docs/superpowers/plans/2026-08-30-phase-2a-storage-and-ingest.md`.
+Phase 2b (the query path, the vertical slice, and the §7.1 requery
+benchmarks) gets its own plan against the same spec.
