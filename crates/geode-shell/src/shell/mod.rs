@@ -40,8 +40,8 @@ use crate::theme;
 use crate::theme::ThemeService;
 use crate::tiling::{
     DIVIDER_HIT_WIDTH, DividerAddress, DockSide, DropTarget, DropZone, Orientation, Rect, TileId,
-    Workspaces, apply_workspace_action, classify_drop_zone, divider_strips, dock_edge_strips,
-    drop_highlight_rect, hit_tile, locate_drop_target, rect_contains,
+    Workspaces, apply_workspace_action, divider_strips, dock_edge_strips, drop_highlight_rect,
+    locate_drop_target,
 };
 use geode_core::config::{Config, LayerDoc};
 
@@ -1852,18 +1852,25 @@ impl Render for ShellView {
             )
         };
 
-        // The active drop target's zone highlight (tile-drag task): pure
-        // classification over the rects the single layout pass above just
-        // produced — no second layout, no I/O, per the render-discipline
+        // The active drop target's zone highlight (tile-drag task): the
+        // SAME resolution core the drop itself uses
+        // (`tiling::resolve_drop_target` — post-merge review cleanup 8:
+        // the first cut restated the dock-frame → dock-tile →
+        // dock-background → tree-tile order here by hand, and two copies
+        // of a targeting rule is how a highlight drifts from the drop it
+        // promises), fed the rects the single layout pass above just
+        // produced — no second layout, no I/O, and no allocation (the
+        // core takes a borrowed iterator), per the render-discipline
         // constraint. An edge zone highlights the half of the target tile
         // the insert would occupy, center the whole tile, a dock
-        // background the dock's frame. Targets whose drop the verbs would
-        // refuse as no-ops paint nothing — highlighting them would
-        // promise a rearrangement that won't happen: the dragged tile
-        // itself (self-drops are recorded no-ops for every zone), and the
-        // background of the dock the tile already lives in (defensive —
-        // an occupied dock's tiles cover its whole frame, so this is
-        // unreachable in practice).
+        // background the dock's frame. What stays HERE, on top of the
+        // core, is the Workspace-side no-op filtering — targets whose
+        // drop the verbs would refuse paint nothing, because
+        // highlighting them would promise a rearrangement that won't
+        // happen: the dragged tile itself (self-drops are recorded
+        // no-ops for every zone), and the background of the dock the
+        // tile already lives in (defensive — an occupied dock's tiles
+        // cover its whole frame, so this is unreachable in practice).
         let drop_highlight: Option<Rect> = self
             .tile_drag
             .as_ref()
@@ -1872,32 +1879,28 @@ impl Render for ShellView {
                 let sx = drag.cursor.0 - sidebar::WIDTH;
                 let sy = drag.cursor.1 - toolbar_height;
                 let dragged = drag.tile;
-                for (side, r, tiles, _) in &dock_cells {
-                    if rect_contains(r, sx, sy) {
-                        return match hit_tile(tiles, sx, sy) {
-                            Some((id, _)) if id == dragged => None,
-                            Some((_, tr)) => {
-                                Some(drop_highlight_rect(tr, classify_drop_zone(tr, sx, sy)))
-                            }
-                            None => {
-                                let already_here = self
-                                    .services
-                                    .workspaces
-                                    .active()
-                                    .docks()
-                                    .get(*side)
-                                    .tree()
-                                    .contains(dragged);
-                                (!already_here).then_some(*r)
-                            }
-                        };
+                let target = crate::tiling::resolve_drop_target(
+                    dock_cells
+                        .iter()
+                        .map(|(side, r, tiles, _)| (*side, *r, tiles.as_slice())),
+                    &rects,
+                    sx,
+                    sy,
+                )?;
+                match target {
+                    (DropTarget::Tile { id, .. }, _) if id == dragged => None,
+                    (DropTarget::Tile { id: _, zone }, tr) => Some(drop_highlight_rect(tr, zone)),
+                    (DropTarget::DockBackground { side }, frame) => {
+                        let already_here = self
+                            .services
+                            .workspaces
+                            .active()
+                            .docks()
+                            .get(side)
+                            .tree()
+                            .contains(dragged);
+                        (!already_here).then_some(frame)
                     }
-                }
-                match hit_tile(&rects, sx, sy) {
-                    Some((id, tr)) if id != dragged => {
-                        Some(drop_highlight_rect(tr, classify_drop_zone(tr, sx, sy)))
-                    }
-                    _ => None,
                 }
             });
 
