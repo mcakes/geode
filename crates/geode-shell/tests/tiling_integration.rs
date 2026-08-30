@@ -38,33 +38,34 @@ fn keystrokes_drive_the_tiling_tree() {
     // ctrl+v twice: two tiles side by side (workspace::split_right).
     press(&mut matcher, &mut ws, "ctrl+v");
     press(&mut matcher, &mut ws, "ctrl+v");
-    assert_eq!(ws.active().tiles().len(), 2);
+    assert_eq!(ws.active().tree().tiles().len(), 2);
 
     // mod+h: focus left tile (direct binding);
     // ctrl+h: split it stacked (workspace::split_down).
     press(&mut matcher, &mut ws, "mod+h");
     press(&mut matcher, &mut ws, "ctrl+h");
-    assert_eq!(ws.active().tiles().len(), 3);
-    let rects = ws.active().layout(Rect::UNIT);
+    assert_eq!(ws.active().tree().tiles().len(), 3);
+    let rects = ws.active().tree().layout(Rect::UNIT);
     assert_eq!(rects.len(), 3);
 
     // mod+f: fullscreen the focused tile — only one visible.
     press(&mut matcher, &mut ws, "mod+f");
-    assert_eq!(ws.active().layout(Rect::UNIT).len(), 1);
+    assert_eq!(ws.active().tree().layout(Rect::UNIT).len(), 1);
     press(&mut matcher, &mut ws, "mod+f");
 
     // mod+2: switch to an empty workspace; mod+1: back with tiles intact.
     press(&mut matcher, &mut ws, "mod+2");
     assert!(ws.active().is_empty());
     press(&mut matcher, &mut ws, "mod+1");
-    assert_eq!(ws.active().tiles().len(), 3);
+    assert_eq!(ws.active().tree().tiles().len(), 3);
 
     // Directional focus works through the same pipeline (mod+l).
-    let before = ws.active().focused();
+    let before = ws.active().tree().focused();
     press(&mut matcher, &mut ws, "mod+l");
-    assert_ne!(ws.active().focused(), before);
+    assert_ne!(ws.active().tree().focused(), before);
     assert!(
         ws.active()
+            .tree()
             .neighbor(geode_shell::tiling::Direction::Left)
             .is_some()
     );
@@ -73,14 +74,14 @@ fn keystrokes_drive_the_tiling_tree() {
     // (ctrl+shift+left = workspace::move_left), same pipeline. (The builtin
     // keymap has no sequence bindings anymore; sequence matching itself is
     // covered by keymap_integration's desk-layer "g g" binding.)
-    let layout_before = ws.active().layout(Rect::UNIT);
+    let layout_before = ws.active().tree().layout(Rect::UNIT);
     press(&mut matcher, &mut ws, "ctrl+shift+left");
-    assert_ne!(ws.active().layout(Rect::UNIT), layout_before);
+    assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
 
     // mod+e: toggle the focused tile's parent split orientation — geometry
     // changes, tile count doesn't.
-    let layout_before = ws.active().layout(Rect::UNIT);
+    let layout_before = ws.active().tree().layout(Rect::UNIT);
     press(&mut matcher, &mut ws, "mod+e");
-    assert_ne!(ws.active().layout(Rect::UNIT), layout_before);
-    assert_eq!(ws.active().layout(Rect::UNIT).len(), layout_before.len());
+    assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
+    assert_eq!(ws.active().tree().layout(Rect::UNIT).len(), layout_before.len());
 }

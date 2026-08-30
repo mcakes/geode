@@ -45,6 +45,21 @@
 //! id = 2
 //! ```
 //!
+//! Dock-regions task adds two optional per-workspace shapes (absent in
+//! every pre-dock file, which therefore loads unchanged — no
+//! `config_version` bump; `from_toml` tolerates unknown keys in both
+//! directions): a `region` string (`"left"`/`"right"`/`"bottom"`; absent
+//! or `"main"` = focus in the main tree — only written when focus lives in
+//! a dock) and `[workspaces.N.docks.left/right/bottom]` tables carrying
+//! `tile` (int, optional), `visible` (bool), `size` (float 0.10..=0.50) —
+//! only written for docks that differ from the default (hidden, empty,
+//! default size). Dock corruption heals with a warning instead of failing
+//! the workspace: a duplicate `tile` claim (already in a tree or another
+//! dock, this workspace or any other) is dropped, a `region` pointing at a
+//! hidden/empty dock falls back to `Main`, and an out-of-range/NaN `size`
+//! resets to the default — see `Workspace::from_parts` /
+//! `Workspaces::from_parts` for the healing seams themselves.
+//!
 //! Old session files written before this removal may still carry an
 //! `[extra]` table with a `theme_mode` key; `from_toml` never reads
 //! `extra` at all now, so it is simply ignored like any other unknown
@@ -61,7 +76,10 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::tiling::{Node, Orientation, TileId, Tree, Workspaces};
+use crate::tiling::{
+    DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
+    Tree, Workspace, Workspaces,
+};
 
 /// Schema version written into every session file, and enforced on load
 /// exactly like `geode_core::config::load_layer` enforces `config_version`
@@ -87,7 +105,8 @@ pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
     );
 
     let mut spaces_table = toml::Table::new();
-    for (ix, tree) in workspaces.spaces() {
+    for (ix, workspace) in workspaces.spaces() {
+        let tree = workspace.tree();
         let mut ws_table = toml::Table::new();
         if let Some(node) = tree.root() {
             ws_table.insert("node".to_string(), node_to_toml(node));
@@ -103,6 +122,43 @@ pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
                 "fullscreen".to_string(),
                 toml::Value::Integer(tile_id_to_i64(fullscreen)),
             );
+        }
+        // Dock-regions task. `region` is written only when focus actually
+        // lives in a dock (mirrors `focused`/`fullscreen`'s present-only-
+        // when-meaningful style; absent = "main"), and a dock table only
+        // when the dock differs from its default (hidden, empty, default
+        // size) — so a pre-dock-shaped session keeps writing byte-for-byte
+        // the same file it always did.
+        if let FocusRegion::Dock(side) = workspace.region() {
+            ws_table.insert(
+                "region".to_string(),
+                toml::Value::String(region_side_name(side).to_string()),
+            );
+        }
+        let mut docks_table = toml::Table::new();
+        for (side, dock) in workspace.docks().iter() {
+            if *dock == Dock::default() {
+                continue;
+            }
+            let mut dock_table = toml::Table::new();
+            if let Some(tile) = dock.tile() {
+                dock_table.insert(
+                    "tile".to_string(),
+                    toml::Value::Integer(tile_id_to_i64(tile)),
+                );
+            }
+            dock_table.insert("visible".to_string(), toml::Value::Boolean(dock.visible()));
+            dock_table.insert(
+                "size".to_string(),
+                toml::Value::Float(f64::from(dock.size())),
+            );
+            docks_table.insert(
+                region_side_name(side).to_string(),
+                toml::Value::Table(dock_table),
+            );
+        }
+        if !docks_table.is_empty() {
+            ws_table.insert("docks".to_string(), toml::Value::Table(docks_table));
         }
         spaces_table.insert(ix.to_string(), toml::Value::Table(ws_table));
     }
@@ -163,9 +219,9 @@ pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<S
         match workspaces_value.as_table() {
             Some(workspaces_table) => {
                 for (key, value) in workspaces_table {
-                    match parse_workspace(key, value) {
-                        Ok((ix, tree)) => {
-                            spaces.insert(ix, tree);
+                    match parse_workspace(key, value, &mut warnings) {
+                        Ok((ix, workspace)) => {
+                            spaces.insert(ix, workspace);
                         }
                         Err(e) => errors.push(e),
                     }
@@ -179,12 +235,18 @@ pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<S
         return Err(errors);
     }
 
-    let workspaces = Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
+    let (workspaces, heal_warnings) =
+        Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
+    warnings.extend(heal_warnings);
 
     Ok((workspaces, warnings))
 }
 
-fn parse_workspace(key: &str, value: &toml::Value) -> Result<(u8, Tree), String> {
+fn parse_workspace(
+    key: &str,
+    value: &toml::Value,
+    warnings: &mut Vec<String>,
+) -> Result<(u8, Workspace), String> {
     let ix: u8 = key
         .parse()
         .map_err(|_| format!("workspace key '{key}' is not a valid index"))?;
@@ -212,7 +274,126 @@ fn parse_workspace(key: &str, value: &toml::Value) -> Result<(u8, Tree), String>
 
     let tree =
         Tree::from_parts(root, focused, fullscreen).map_err(|e| format!("workspace {ix}: {e}"))?;
-    Ok((ix, tree))
+
+    // Dock-regions task: docks and region are strictly optional — absent
+    // means "no docks, focus in Main", which is exactly what every pre-dock
+    // session file deserializes to. Everything hostile inside them heals
+    // with a warning rather than failing the workspace: the docks are an
+    // adornment on the layout, never worth discarding the tree over.
+    let docks = parse_docks(ix, ws_table.get("docks"), warnings);
+    let region = parse_region(ix, ws_table.get("region"), warnings);
+
+    // Per-workspace healing (duplicate claims against this tree, an
+    // unfocusable region) lives in `Workspace::from_parts`; the
+    // cross-workspace pass runs later in `Workspaces::from_parts`.
+    let (workspace, heal_warnings) = Workspace::from_parts(tree, docks, region);
+    warnings.extend(
+        heal_warnings
+            .into_iter()
+            .map(|w| format!("workspace {ix}: {w}")),
+    );
+    Ok((ix, workspace))
+}
+
+fn region_side_name(side: DockSide) -> &'static str {
+    match side {
+        DockSide::Left => "left",
+        DockSide::Right => "right",
+        DockSide::Bottom => "bottom",
+    }
+}
+
+fn parse_region(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) -> FocusRegion {
+    match value.map(|v| (v, v.as_str())) {
+        None => FocusRegion::Main,
+        Some((_, Some("main"))) => FocusRegion::Main,
+        Some((_, Some("left"))) => FocusRegion::Dock(DockSide::Left),
+        Some((_, Some("right"))) => FocusRegion::Dock(DockSide::Right),
+        Some((_, Some("bottom"))) => FocusRegion::Dock(DockSide::Bottom),
+        Some((other, _)) => {
+            warnings.push(format!(
+                "workspace {ix}: unknown region {other}; assuming main"
+            ));
+            FocusRegion::Main
+        }
+    }
+}
+
+fn parse_docks(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) -> Docks {
+    let Some(value) = value else {
+        return Docks::default();
+    };
+    let Some(table) = value.as_table() else {
+        warnings.push(format!("workspace {ix}: docks is not a table; ignoring"));
+        return Docks::default();
+    };
+    let mut parse_side = |side: DockSide| -> Dock {
+        let Some(dock_value) = table.get(region_side_name(side)) else {
+            return Dock::default();
+        };
+        let Some(dock_table) = dock_value.as_table() else {
+            warnings.push(format!(
+                "workspace {ix}: {} dock is not a table; ignoring",
+                region_side_name(side)
+            ));
+            return Dock::default();
+        };
+        let tile = match dock_table.get("tile") {
+            None => None,
+            Some(v) => match v.as_integer() {
+                Some(n) if n >= 0 => Some(TileId(n as u64)),
+                _ => {
+                    warnings.push(format!(
+                        "workspace {ix}: {} dock tile {v} is not a non-negative integer; \
+                         dropping it",
+                        region_side_name(side)
+                    ));
+                    None
+                }
+            },
+        };
+        let visible = match dock_table.get("visible") {
+            None => false,
+            Some(v) => match v.as_bool() {
+                Some(b) => b,
+                None => {
+                    warnings.push(format!(
+                        "workspace {ix}: {} dock visible {v} is not a boolean; assuming hidden",
+                        region_side_name(side)
+                    ));
+                    false
+                }
+            },
+        };
+        let size = match dock_table.get("size") {
+            None => crate::tiling::DOCK_DEFAULT_SIZE,
+            Some(v) => {
+                let n = v.as_float().or_else(|| v.as_integer().map(|i| i as f64));
+                match n {
+                    Some(n)
+                        if n.is_finite()
+                            && (f64::from(DOCK_MIN_SIZE)..=f64::from(DOCK_MAX_SIZE))
+                                .contains(&n) =>
+                    {
+                        n as f32
+                    }
+                    _ => {
+                        warnings.push(format!(
+                            "workspace {ix}: {} dock size {v} is out of range \
+                             {DOCK_MIN_SIZE}..={DOCK_MAX_SIZE}; using the default",
+                            region_side_name(side)
+                        ));
+                        crate::tiling::DOCK_DEFAULT_SIZE
+                    }
+                }
+            }
+        };
+        Dock::from_parts(tile, visible, size)
+    };
+    let left = parse_side(DockSide::Left);
+    let right = parse_side(DockSide::Right);
+    let bottom = parse_side(DockSide::Bottom);
+    Docks::from_parts(left, right, bottom)
 }
 
 fn tile_id_to_i64(id: TileId) -> i64 {
@@ -484,19 +665,25 @@ mod tests {
 
         let before: BTreeMap<u8, _> = ws
             .spaces()
-            .map(|(ix, tree)| {
+            .map(|(ix, ws)| {
                 (
                     ix,
-                    (tree.layout(crate::tiling::Rect::UNIT), tree.fullscreen()),
+                    (
+                        ws.tree().layout(crate::tiling::Rect::UNIT),
+                        ws.tree().fullscreen(),
+                    ),
                 )
             })
             .collect();
         let after: BTreeMap<u8, _> = restored
             .spaces()
-            .map(|(ix, tree)| {
+            .map(|(ix, ws)| {
                 (
                     ix,
-                    (tree.layout(crate::tiling::Rect::UNIT), tree.fullscreen()),
+                    (
+                        ws.tree().layout(crate::tiling::Rect::UNIT),
+                        ws.tree().fullscreen(),
+                    ),
                 )
             })
             .collect();
@@ -651,8 +838,8 @@ mod tests {
             vec!["missing config_version (assuming 1)".to_string()],
             "a dangling focused reference must not itself add a warning"
         );
-        assert_eq!(ws.active().focused(), None);
-        assert_eq!(ws.active().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.active().tree().focused(), None);
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
     }
 
     // --- config_version (fix round 1, Finding 2) ------------------------
@@ -810,8 +997,8 @@ mod tests {
         let (restored, warnings) = load(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
-            restored.active().layout(crate::tiling::Rect::UNIT),
-            ws.active().layout(crate::tiling::Rect::UNIT)
+            restored.active().tree().layout(crate::tiling::Rect::UNIT),
+            ws.active().tree().layout(crate::tiling::Rect::UNIT)
         );
     }
 
@@ -844,10 +1031,10 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let before_ids: std::collections::HashSet<_> =
-            restored.active().tiles().into_iter().collect();
+            restored.active().tree().tiles().into_iter().collect();
 
         apply_workspace_action(&mut restored, &act("workspace::split_right"));
-        let after_ids: Vec<_> = restored.active().tiles();
+        let after_ids: Vec<_> = restored.active().tree().tiles();
         let new_id = after_ids
             .iter()
             .find(|id| !before_ids.contains(id))
@@ -858,6 +1045,240 @@ mod tests {
         );
 
         apply_workspace_action(&mut restored, &act("workspace::focus_left"));
-        let _ = restored.active().neighbor(Direction::Right);
+        let _ = restored.active().tree().neighbor(Direction::Right);
+    }
+
+    // --- docks (dock-regions task) ---------------------------------------
+
+    use crate::tiling::{DOCK_DEFAULT_SIZE, DockSide, FocusRegion};
+
+    /// One tile in the tree, one parked in a visible left dock (resized),
+    /// focus on the dock.
+    fn docked_workspaces() -> Workspaces {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::resize_right"));
+        ws
+    }
+
+    #[test]
+    fn round_trips_docks_and_region() {
+        let ws = docked_workspaces();
+        let table = to_toml(&ws);
+        let (restored, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let before = ws.active();
+        let after = restored.active();
+        assert_eq!(after.region(), before.region());
+        assert_eq!(after.region(), FocusRegion::Dock(DockSide::Left));
+        for side in DockSide::ALL {
+            let b = before.docks().get(side);
+            let a = after.docks().get(side);
+            assert_eq!(a.tile(), b.tile(), "{side:?}");
+            assert_eq!(a.visible(), b.visible(), "{side:?}");
+            assert!(
+                (a.size() - b.size()).abs() < 1e-4,
+                "{side:?}: {} vs {}",
+                a.size(),
+                b.size()
+            );
+        }
+        assert_eq!(
+            after.tree().layout(crate::tiling::Rect::UNIT),
+            before.tree().layout(crate::tiling::Rect::UNIT)
+        );
+    }
+
+    #[test]
+    fn a_default_dock_session_writes_no_dock_keys() {
+        // Pre-dock-shaped state must keep producing pre-dock-shaped files.
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        let text = to_string_pretty(&ws).unwrap();
+        assert!(!text.contains("docks"), "{text}");
+        assert!(!text.contains("region"), "{text}");
+    }
+
+    #[test]
+    fn restored_docked_tile_ids_do_not_collide_with_new_allocations() {
+        let ws = docked_workspaces();
+        let table = to_toml(&ws);
+        let (mut restored, _) = from_toml(&table).unwrap();
+        let known: Vec<_> = restored
+            .active()
+            .tree()
+            .tiles()
+            .into_iter()
+            .chain(restored.active().docks().tiles())
+            .collect();
+        // Focus is restored into the left dock; splits are tree-only, so
+        // step back to Main first.
+        apply_workspace_action(&mut restored, &act("workspace::focus_right"));
+        apply_workspace_action(&mut restored, &act("workspace::split_right"));
+        let new_id = restored
+            .active()
+            .tree()
+            .tiles()
+            .into_iter()
+            .find(|id| !known.contains(id))
+            .expect("split created a tile");
+        assert!(
+            !known.contains(&new_id),
+            "next_tile rescan must cover dock tiles"
+        );
+    }
+
+    #[test]
+    fn from_toml_drops_a_dock_tile_also_present_in_the_tree() {
+        let mut table = to_toml(&Workspaces::new());
+        let ws1_text = r#"
+            focused = 1
+            region = "left"
+            [node]
+            kind = "leaf"
+            id = 1
+            [docks.left]
+            tile = 1
+            visible = true
+            size = 0.25
+        "#;
+        let ws1: toml::Table = ws1_text.parse().unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).expect("a duplicate dock claim heals, not fails");
+        assert!(
+            warnings.iter().any(|w| w.contains("dropping")),
+            "{warnings:?}"
+        );
+        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Main,
+            "the region pointing at the dropped claim must heal to Main"
+        );
+    }
+
+    #[test]
+    fn from_toml_heals_a_region_pointing_at_a_hidden_or_absent_dock() {
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            focused = 1
+            region = "bottom"
+            [node]
+            kind = "leaf"
+            id = 1
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert!(!warnings.is_empty(), "{warnings:?}");
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn from_toml_heals_an_out_of_range_or_nan_dock_size_to_default() {
+        for bad in ["size = 0.9", "size = -3.0", "size = nan"] {
+            let mut table = to_toml(&Workspaces::new());
+            let ws1: toml::Table = format!(
+                r#"
+                    [docks.right]
+                    visible = true
+                    {bad}
+                "#
+            )
+            .parse()
+            .unwrap();
+            if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+                ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+            }
+            let (ws, warnings) = from_toml(&table).expect(bad);
+            assert!(
+                warnings.iter().any(|w| w.contains("size")),
+                "{bad}: {warnings:?}"
+            );
+            let dock = ws.active().docks().get(DockSide::Right);
+            assert!(
+                (dock.size() - DOCK_DEFAULT_SIZE).abs() < 1e-4,
+                "{bad}: {}",
+                dock.size()
+            );
+            assert!(dock.visible(), "{bad}: healing size must not clear visible");
+        }
+    }
+
+    #[test]
+    fn from_toml_heals_an_unknown_region_string_to_main() {
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("region")),
+            "{warnings:?}"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn from_toml_tolerates_hostile_dock_shapes_without_failing() {
+        // docks not a table; a side not a table; tile negative/non-integer;
+        // visible non-bool — every one heals with a warning, none fails.
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            [node]
+            kind = "leaf"
+            id = 1
+            [docks.left]
+            tile = -5
+            visible = "yes"
+            [docks.right]
+            tile = 2
+            visible = true
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert!(warnings.len() >= 2, "{warnings:?}");
+        let left = ws.active().docks().get(DockSide::Left);
+        assert_eq!(left.tile(), None, "negative tile id dropped");
+        assert!(!left.visible(), "non-bool visible heals to hidden");
+        assert_eq!(
+            ws.active().docks().get(DockSide::Right).tile(),
+            Some(TileId(2))
+        );
+    }
+
+    #[test]
+    fn a_pre_dock_session_file_loads_with_default_docks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            "config_version = 1\nactive = 1\n\n[workspaces.1]\nfocused = 1\n\n\
+             [workspaces.1.node]\nkind = \"leaf\"\nid = 1\n",
+        )
+        .unwrap();
+        let (ws, warnings) = load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        for side in DockSide::ALL {
+            let dock = ws.active().docks().get(side);
+            assert_eq!(dock.tile(), None);
+            assert!(!dock.visible());
+        }
     }
 }

@@ -25,6 +25,22 @@ use geode_core::config::Config;
 /// `RESIZE_STEP` (the key names the divider's direction, not
 /// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
 /// consequence when the focused tile has no divider on that side).
+///
+/// Docks (dock-regions task): `ctrl+[` / `ctrl+]` / `ctrl+/` toggle the
+/// left/right/bottom dock; the *move*-to-dock verbs are the same physical
+/// keys with shift held — which the user thinks of as `ctrl+shift+[` etc.,
+/// but which are deliberately bound as `ctrl+{` / `ctrl+}` / `ctrl+?`
+/// (shifted character, NO shift modifier). Verified against the pinned
+/// platform sources, not assumed: both macOS (`gpui_macos/src/events.rs`,
+/// the `else if shift { shift = false; chars_with_shift }` arm) and Windows
+/// (`gpui_windows/src/keyboard.rs`, `get_keystroke_key`'s
+/// `need_to_convert_to_shifted_key` OEM-key list) deliver shift+punctuation
+/// as the shifted character with the shift modifier *cleared* — a real
+/// `KeyDownEvent` for shift+[ arrives as key `{`, `shift: false`, so a
+/// `"ctrl+shift+["` binding would never match anything. (Letters are the
+/// opposite: shift+w stays `w` + shift, which is why `ctrl+shift+w` above
+/// is bound with the modifier.) The e2e dock tests dispatch `ctrl-{`
+/// through gpui's real pipeline to pin this shape.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
@@ -46,6 +62,12 @@ context = "workspace"
 "mod+e" = "workspace::toggle_split_orientation"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+shift+w" = "workspace::close_tile"
+"ctrl+[" = "dock::toggle_left"
+"ctrl+]" = "dock::toggle_right"
+"ctrl+/" = "dock::toggle_bottom"
+"ctrl+{" = "dock::move_left"
+"ctrl+}" = "dock::move_right"
+"ctrl+?" = "dock::move_bottom"
 "mod+1" = "workspace::switch_1"
 "mod+2" = "workspace::switch_2"
 "mod+3" = "workspace::switch_3"
@@ -124,6 +146,22 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Workspace",
     );
     action(reg, "workspace::close_tile", "Close tile", "Workspace");
+    // Dock regions (dock-regions task): toggle shows/hides a dock (a
+    // hidden dock keeps its tile); move sends the focused tile there —
+    // or back into the tree when it's already the focused dock. See
+    // `tiling::Workspace` for the full verb semantics and BUILTIN_KEYMAP's
+    // doc comment for why the move bindings are spelled `ctrl+{` etc.
+    action(reg, "dock::toggle_left", "Toggle left dock", "Dock");
+    action(reg, "dock::toggle_right", "Toggle right dock", "Dock");
+    action(reg, "dock::toggle_bottom", "Toggle bottom dock", "Dock");
+    action(reg, "dock::move_left", "Move tile to left dock", "Dock");
+    action(reg, "dock::move_right", "Move tile to right dock", "Dock");
+    action(
+        reg,
+        "dock::move_bottom",
+        "Move tile to bottom dock",
+        "Dock",
+    );
     for i in 1..=9 {
         action(
             reg,
@@ -186,9 +224,30 @@ mod tests {
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
         // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
-        // fullscreen + close + 9 workspace switches + 2 palette::toggle
-        // bindings + theme toggle + settings::open (Task 5).
-        assert!(keymap.bindings().len() >= 30);
+        // fullscreen + close + 3 dock toggles + 3 dock moves + 9 workspace
+        // switches + 2 palette::toggle bindings + theme toggle +
+        // settings::open (Task 5).
+        assert!(keymap.bindings().len() >= 36);
+    }
+
+    #[test]
+    fn dock_actions_are_registered_with_the_dock_category() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        for id in [
+            "dock::toggle_left",
+            "dock::toggle_right",
+            "dock::toggle_bottom",
+            "dock::move_left",
+            "dock::move_right",
+            "dock::move_bottom",
+        ] {
+            let def = reg
+                .get(&ActionId(id.to_string()))
+                .unwrap_or_else(|| panic!("{id} not registered"));
+            assert_eq!(def.category, "Dock", "{id}");
+        }
     }
 
     #[test]

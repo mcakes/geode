@@ -177,7 +177,20 @@ impl Tree {
     /// or the previous one if the last leaf was closed. If no tiles remain,
     /// focus becomes None.
     pub fn close(&mut self) {
-        let Some(focused) = self.focused else { return };
+        self.remove_focused();
+    }
+
+    /// Remove the focused tile from the tree and return its id (dock-regions
+    /// task: `dock::move_*` needs the removed id back so it can park it in a
+    /// dock — this is `close` exactly, refocus rule and fullscreen-clearing
+    /// included, except the id is handed to the caller instead of being
+    /// forgotten; `close` is now a thin wrapper over this). Returns `None`
+    /// on an empty tree. The focused-is-Some-whenever-root-is-Some
+    /// invariant is preserved the same way `close` always preserved it:
+    /// focus moves to the pre-removal tree-order neighbor, or `None` only
+    /// when the tree emptied.
+    pub fn remove_focused(&mut self) -> Option<TileId> {
+        let focused = self.focused?;
         if self.fullscreen == Some(focused) {
             self.fullscreen = None;
         }
@@ -197,6 +210,48 @@ impl Tree {
         let post_close_tiles = self.tiles();
         let focus_index = std::cmp::min(k, post_close_tiles.len().saturating_sub(1));
         self.focused = post_close_tiles.get(focus_index).copied();
+        Some(focused)
+    }
+
+    /// Replace the leaf holding `old` with `new`, in place — the exact
+    /// position, split structure, and ratios are untouched (dock-regions
+    /// task: the swap half of `dock::move_*`, where the dock's previous
+    /// occupant takes the moved tile's slot in the tree as a
+    /// leaf-replacement, deliberately NOT a remove-then-split which would
+    /// re-equalize ratios and change the layout). `focused`/`fullscreen`
+    /// references to `old` follow to `new` (a reference to a tile no longer
+    /// in the tree would break the focused-membership invariant
+    /// `from_parts` validates). Returns false (tree untouched) when `old`
+    /// isn't a leaf or `new` is already one — a duplicate leaf would break
+    /// the one-place-per-TileId invariant.
+    pub fn replace_leaf(&mut self, old: TileId, new: TileId) -> bool {
+        if !self.contains(old) || self.contains(new) {
+            return false;
+        }
+        fn replace(node: &mut Node, old: TileId, new: TileId) {
+            match node {
+                Node::Leaf(id) => {
+                    if *id == old {
+                        *id = new;
+                    }
+                }
+                Node::Split { children, .. } => {
+                    for child in children {
+                        replace(child, old, new);
+                    }
+                }
+            }
+        }
+        if let Some(root) = &mut self.root {
+            replace(root, old, new);
+        }
+        if self.focused == Some(old) {
+            self.focused = Some(new);
+        }
+        if self.fullscreen == Some(old) {
+            self.fullscreen = Some(new);
+        }
+        true
     }
 
     /// Compute every visible tile's rectangle within `bounds`. When a tile
@@ -366,6 +421,18 @@ impl Tree {
             return true;
         }
         false
+    }
+
+    /// Clear any fullscreen state without touching focus (dock-regions
+    /// task). Exists for `Workspace::move_to_dock`: moving a fullscreen
+    /// tile into a dock must exit fullscreen first — otherwise the swap
+    /// case's leaf-replacement would hand fullscreen to the swapped-in
+    /// tile, whose fullscreen layout then covers the whole surface and
+    /// hides the dock the moved tile just landed in. Mirrors `split`'s own
+    /// "splitting a non-empty tree exits fullscreen" rule: an explicit
+    /// layout operation trumps a stale fullscreen.
+    pub fn exit_fullscreen(&mut self) {
+        self.fullscreen = None;
     }
 
     /// Toggle fullscreen on the focused tile. Returns false on an empty tree.
@@ -1240,6 +1307,80 @@ mod tests {
             Some(TileId(2)),
             "closing last nested tile should focus the previous tile"
         );
+    }
+
+    // --- remove_focused / replace_leaf (dock-regions task) --------------
+
+    #[test]
+    fn remove_focused_returns_the_removed_id_and_refocuses_like_close() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        tree.focus(TileId(2));
+        assert_eq!(tree.remove_focused(), Some(TileId(2)));
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(3)]);
+        assert_eq!(
+            tree.focused(),
+            Some(TileId(3)),
+            "same refocus rule as close: the next tree-order leaf"
+        );
+    }
+
+    #[test]
+    fn remove_focused_on_empty_tree_is_none() {
+        let mut tree = Tree::default();
+        assert_eq!(tree.remove_focused(), None);
+    }
+
+    #[test]
+    fn remove_focused_last_tile_empties_the_tree() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        assert_eq!(tree.remove_focused(), Some(TileId(1)));
+        assert!(tree.is_empty());
+        assert_eq!(tree.focused(), None);
+    }
+
+    #[test]
+    fn remove_focused_clears_fullscreen_on_the_removed_tile() {
+        let mut tree = grid();
+        tree.toggle_fullscreen();
+        assert_eq!(tree.remove_focused(), Some(TileId(1)));
+        assert_eq!(tree.fullscreen(), None);
+    }
+
+    #[test]
+    fn replace_leaf_keeps_the_exact_position_and_ratios() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.move_divider(Direction::Right, 0.2); // ratios [0.3, 0.7]-ish
+        let before = rect_of(&tree, 2);
+        assert!(tree.replace_leaf(TileId(2), TileId(9)));
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(9)]);
+        let after = rect_of(&tree, 9);
+        assert_eq!(before, after, "replacement must not disturb geometry");
+    }
+
+    #[test]
+    fn replace_leaf_moves_focus_and_fullscreen_references_along() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.toggle_fullscreen();
+        assert!(tree.replace_leaf(TileId(1), TileId(2)));
+        assert_eq!(tree.focused(), Some(TileId(2)));
+        assert_eq!(tree.fullscreen(), Some(TileId(2)));
+    }
+
+    #[test]
+    fn replace_leaf_rejects_a_missing_old_or_duplicate_new() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert!(!tree.replace_leaf(TileId(99), TileId(3)), "old not a leaf");
+        assert!(!tree.replace_leaf(TileId(1), TileId(2)), "new already a leaf");
+        assert_eq!(tree.tiles(), vec![TileId(1), TileId(2)]);
     }
 
     // --- Tree::from_parts (Task 3: session restore reconstruction) -----

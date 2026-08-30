@@ -1119,17 +1119,75 @@ impl Render for ShellView {
         let content_height =
             (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
 
-        let (focused, rects) = {
-            let tree = self.services.workspaces.active();
+        // One layout pass for the whole surface (dock-regions task): the
+        // pure `tiling::dock_layout` carves the visible docks' pixel rects
+        // out of the content area, and `Tree::layout` — still called
+        // exactly once — partitions what's left. While a tree tile is
+        // fullscreen it covers the entire surface and the docks are not
+        // painted at all (the docks keep their state; they're just not
+        // part of the fullscreen picture).
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: tile_width,
+            h: content_height,
+        };
+        let (region, focused, tree_area, rects, dock_cells) = {
+            let workspace = self.services.workspaces.active();
+            let tree = workspace.tree();
+            let (tree_area, dock_rects) = if tree.fullscreen().is_some() {
+                (area, Vec::new())
+            } else {
+                crate::tiling::dock_layout(workspace.docks(), area)
+            };
+            let dock_cells: Vec<(crate::tiling::DockSide, Rect, Option<crate::tiling::TileId>)> =
+                dock_rects
+                    .into_iter()
+                    .map(|(side, r)| (side, r, workspace.docks().get(side).tile()))
+                    .collect();
             (
+                workspace.region(),
                 tree.focused(),
-                tree.layout(Rect {
-                    x: 0.0,
-                    y: 0.0,
-                    w: tile_width,
-                    h: content_height,
-                }),
+                tree_area,
+                tree.layout(tree_area),
+                dock_cells,
             )
+        };
+
+        // The shared tile chrome — identical for tree tiles and docked
+        // tiles (a docked tile is the same kind of tile, just parked): 1px
+        // inset, themed background, `primary` 2px ring on the one focused
+        // tile, mono placeholder label. At most one tile per workspace
+        // shows the focused ring: the tree's focused tile only counts as
+        // focused while `region == Main`, a dock's tile only while focus
+        // actually lives in that dock.
+        let tile_cell = |id: crate::tiling::TileId, r: Rect, is_focused: bool, cx: &App| {
+            div()
+                .absolute()
+                .left(px(r.x + 1.0))
+                .top(px(r.y + 1.0))
+                .w(px((r.w - 2.0).max(0.0)))
+                .h(px((r.h - 2.0).max(0.0)))
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(cx.theme().background)
+                .border_color(if is_focused {
+                    cx.theme().primary
+                } else {
+                    cx.theme().border
+                })
+                .when(is_focused, |el| el.border_2())
+                .when(!is_focused, |el| el.border_1())
+                // `fonts::MONO` (Task 10): this placeholder label
+                // stands in for real tile content until modules
+                // land — the phase-3 blotter is what will actually
+                // fill these tiles, and it'll use `fonts::MONO` for
+                // its cells too, so the placeholder previews that
+                // face rather than the default UI one.
+                .font_family(fonts::MONO)
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("tile {}", id.0))
         };
 
         // Fixed-size (not `size_full`) so it never competes with the
@@ -1141,59 +1199,113 @@ impl Render for ShellView {
             .h(px(content_height))
             .flex_none();
         if rects.is_empty() {
-            surface = surface.flex().items_center().justify_center().child(
+            // The empty hint fills the *tree's* remaining area (not the
+            // whole surface — visible docks keep their columns), so it is
+            // its own absolutely-positioned, internally-centered child
+            // rather than turning the surface itself into a flex row.
+            surface = surface.child(
                 div()
-                    // Test-only hook (no-op outside test/test-support
-                    // builds): lets a `#[gpui::test]` confirm this branch
-                    // actually painted via `VisualTestContext::debug_bounds`
-                    // — gpui's test API has no way to inspect painted text
-                    // content itself, so this is the closest honest check
-                    // available for "the hint painted".
-                    .debug_selector(|| "empty-hint".to_string())
-                    .text_color(cx.theme().muted_foreground)
-                    .child("ctrl+h / ctrl+v to open a tile"),
+                    .absolute()
+                    .left(px(tree_area.x))
+                    .top(px(tree_area.y))
+                    .w(px(tree_area.w))
+                    .h(px(tree_area.h))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            // Test-only hook (no-op outside test/test-support
+                            // builds): lets a `#[gpui::test]` confirm this branch
+                            // actually painted via `VisualTestContext::debug_bounds`
+                            // — gpui's test API has no way to inspect painted text
+                            // content itself, so this is the closest honest check
+                            // available for "the hint painted".
+                            .debug_selector(|| "empty-hint".to_string())
+                            .text_color(cx.theme().muted_foreground)
+                            .child("ctrl+h / ctrl+v to open a tile"),
+                    ),
             );
         } else {
             for (id, r) in rects {
-                let is_focused = focused == Some(id);
+                let is_focused =
+                    region == crate::tiling::FocusRegion::Main && focused == Some(id);
                 surface = surface.child(
-                    div()
-                        .absolute()
-                        .left(px(r.x + 1.0))
-                        .top(px(r.y + 1.0))
-                        .w(px((r.w - 2.0).max(0.0)))
-                        .h(px((r.h - 2.0).max(0.0)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(cx.theme().background)
-                        .border_color(if is_focused {
-                            cx.theme().primary
-                        } else {
-                            cx.theme().border
-                        })
-                        .when(is_focused, |el| el.border_2())
-                        .when(!is_focused, |el| el.border_1())
-                        // `fonts::MONO` (Task 10): this placeholder label
-                        // stands in for real tile content until modules
-                        // land — the phase-3 blotter is what will actually
-                        // fill these tiles, and it'll use `fonts::MONO` for
-                        // its cells too, so the placeholder previews that
-                        // face rather than the default UI one.
-                        .font_family(fonts::MONO)
-                        .text_color(cx.theme().muted_foreground)
+                    tile_cell(id, r, is_focused, cx)
                         // Click-to-focus is a convenience: keyboard (hjkl)
                         // remains the primary path through the same
-                        // `Tree::focus` verb `apply_workspace_action` uses.
+                        // `Workspace::focus_main_tile` seam — a click on a
+                        // tree tile also returns the region to Main, and
+                        // both region and focus persist, so the session
+                        // goes dirty like any workspace-mutating dispatch.
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, _event, _window, cx| {
-                                view.services.workspaces.active_mut().focus(id);
+                                if view.services.workspaces.active_mut().focus_main_tile(id) {
+                                    view.session_dirty = true;
+                                }
                                 cx.notify();
                             }),
-                        )
-                        .child(format!("tile {}", id.0)),
+                        ),
                 );
+            }
+        }
+
+        // The docks, painted with the identical chrome. An occupied dock
+        // is a tile like any other (click-to-focus included); a visible
+        // but empty dock renders a centered muted hint naming the
+        // *physical* keys that would move a tile into it (the user presses
+        // ctrl+shift+[ even though the binding is spelled `ctrl+{` — see
+        // BUILTIN_KEYMAP's doc comment).
+        for (side, r, tile) in dock_cells {
+            match tile {
+                Some(id) => {
+                    let is_focused = region == crate::tiling::FocusRegion::Dock(side);
+                    surface = surface.child(
+                        tile_cell(id, r, is_focused, cx).on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, _event, _window, cx| {
+                                if view.services.workspaces.active_mut().focus_dock(side) {
+                                    view.session_dirty = true;
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                    );
+                }
+                None => {
+                    let (hint, selector) = match side {
+                        crate::tiling::DockSide::Left => {
+                            ("ctrl+shift+[ moves a tile here", "dock-empty-hint-left")
+                        }
+                        crate::tiling::DockSide::Right => {
+                            ("ctrl+shift+] moves a tile here", "dock-empty-hint-right")
+                        }
+                        crate::tiling::DockSide::Bottom => {
+                            ("ctrl+shift+/ moves a tile here", "dock-empty-hint-bottom")
+                        }
+                    };
+                    surface = surface.child(
+                        div()
+                            .absolute()
+                            .left(px(r.x + 1.0))
+                            .top(px(r.y + 1.0))
+                            .w(px((r.w - 2.0).max(0.0)))
+                            .h(px((r.h - 2.0).max(0.0)))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                div()
+                                    .debug_selector(|| selector.to_string())
+                                    .child(hint),
+                            ),
+                    );
+                }
             }
         }
 
@@ -1429,6 +1541,7 @@ mod tests {
                 .services
                 .workspaces
                 .active()
+                .tree()
                 .tiles()
                 .len()
         });
@@ -1487,7 +1600,7 @@ mod tests {
         });
 
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 1,
@@ -1545,11 +1658,11 @@ mod tests {
         cx.simulate_keystrokes("ctrl-v");
 
         let right_tile =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
 
         cx.simulate_keystrokes("alt-h");
         let after_left =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         assert_ne!(
             after_left, right_tile,
             "mod+h (workspace::focus_left) should have moved focus off the right \
@@ -1558,7 +1671,7 @@ mod tests {
 
         cx.simulate_keystrokes("alt-l");
         let after_right =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         assert_eq!(
             after_right, right_tile,
             "mod+l (workspace::focus_right) should have moved focus back to the \
@@ -1607,7 +1720,7 @@ mod tests {
         cx.simulate_keystrokes("shift-left");
 
         let focused_width = shell.read_with(&cx, |shell, _| {
-            let tree = shell.services.workspaces.active();
+            let tree = shell.services.workspaces.active().tree();
             let rects = tree.layout(Rect::UNIT);
             rects
                 .into_iter()
@@ -1666,7 +1779,7 @@ mod tests {
         cx.simulate_keystrokes("alt-h");
 
         let before_focus =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
 
         // Same layout math as `Render for ShellView`: the tile area is the
         // viewport minus the toolbar, sidebar, and status bar.
@@ -1677,7 +1790,7 @@ mod tests {
             let content_height =
                 (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
 
-            let rects = shell.read(cx).services.workspaces.active().layout(Rect {
+            let rects = shell.read(cx).services.workspaces.active().tree().layout(Rect {
                 x: 0.0,
                 y: 0.0,
                 w: tile_width,
@@ -1697,7 +1810,7 @@ mod tests {
         cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
 
         let after_focus =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         assert_eq!(
             after_focus,
             Some(target_id),
@@ -1747,17 +1860,17 @@ mod tests {
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("alt-h");
 
-        let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+        let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         let before = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().layout(Rect::UNIT)
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
         });
 
         cx.simulate_keystrokes("ctrl-shift-right");
 
         let after_focused =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         let after = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().layout(Rect::UNIT)
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
         });
         assert_eq!(
             after_focused, focused,
@@ -1804,6 +1917,7 @@ mod tests {
                 .services
                 .workspaces
                 .active()
+                .tree()
                 .tiles()
                 .len()),
             2
@@ -1812,7 +1926,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-shift-w");
 
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 1,
@@ -2127,7 +2241,7 @@ mod tests {
             "enter should close the palette"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 1,
@@ -2374,7 +2488,7 @@ mod tests {
             "escape should close the palette"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 0,
@@ -2455,7 +2569,7 @@ mod tests {
             "the palette should still be open — arrows are caret movement, not close"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 0,
@@ -2607,7 +2721,7 @@ mod tests {
             "a row click must not dispatch — the palette stays open"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 0,
@@ -2761,7 +2875,7 @@ mod tests {
         // something for a leaked ctrl+shift+w to actually close.
         cx.simulate_keystrokes("ctrl-v");
         let tile_count_before = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count_before, 1,
@@ -2781,7 +2895,7 @@ mod tests {
             "ctrl+shift+w must not close the palette either"
         );
         let tile_count_after = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count_after, 1,
@@ -2945,7 +3059,7 @@ mod tests {
              builtin binding — the palette must not open"
         );
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 1,
@@ -3687,7 +3801,7 @@ mod tests {
                     .services
                     .workspaces
                     .spaces()
-                    .map(|(ix, tree)| (ix, tree.layout(Rect::UNIT)))
+                    .map(|(ix, ws)| (ix, ws.tree().layout(Rect::UNIT)))
                     .collect()
             });
 
@@ -3696,7 +3810,7 @@ mod tests {
 
         let restored_layout: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> = restored
             .spaces()
-            .map(|(ix, tree)| (ix, tree.layout(Rect::UNIT)))
+            .map(|(ix, ws)| (ix, ws.tree().layout(Rect::UNIT)))
             .collect();
         assert_eq!(
             live, restored_layout,
@@ -3704,7 +3818,7 @@ mod tests {
         );
 
         let before_ids: std::collections::HashSet<_> =
-            restored.spaces().flat_map(|(_, t)| t.tiles()).collect();
+            restored.spaces().flat_map(|(_, t)| t.tree().tiles()).collect();
         let new_id = restored.alloc_tile();
         assert!(
             !before_ids.contains(&new_id),
@@ -3994,7 +4108,7 @@ mod tests {
         cx.simulate_keystrokes("ctrl-h");
 
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 0,
@@ -4060,7 +4174,7 @@ mod tests {
         // The workspace itself must stay untouched — settings::open is not
         // a workspace verb and must not be mistaken for one.
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(tile_count, 0);
 
@@ -4178,7 +4292,7 @@ mod tests {
 
         cx.simulate_keystrokes("ctrl-v");
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 0,
@@ -4911,13 +5025,13 @@ mod tests {
 
         // Verify we have three tiles.
         let tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(tile_count, 3, "should have created three tiles");
 
         // Record the tile ids in tree order before focusing the middle one.
         let tiles_before =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tiles());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().tiles());
         assert_eq!(tiles_before.len(), 3);
 
         // After three splits, the focused tile is the last one (tiles_before[2]).
@@ -4925,7 +5039,7 @@ mod tests {
         cx.simulate_keystrokes("alt-h");
 
         let focused_tile =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
         assert_eq!(
             focused_tile,
             Some(tiles_before[1]),
@@ -4937,18 +5051,18 @@ mod tests {
 
         // Verify we have two tiles left.
         let remaining_tile_count = shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tiles().len()
+            shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(remaining_tile_count, 2, "should have two tiles after close");
 
         let tiles_after =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tiles());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().tiles());
         // tiles_after should be [tiles_before[0], tiles_before[2]]
         assert_eq!(tiles_after, vec![tiles_before[0], tiles_before[2]]);
 
         // Assert that the focused tile is tiles_before[2] (the adjacent sibling in tree order).
         let focused_after_close =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().focused());
+            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
 
         assert_eq!(
             focused_after_close,
