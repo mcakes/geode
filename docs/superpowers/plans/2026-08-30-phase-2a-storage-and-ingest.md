@@ -1899,9 +1899,15 @@ grain = "position"
     }
 
     #[test]
-    fn live_carries_source_file_id_as_the_replacement_key() {
+    fn live_carries_slot_for_replacement_and_file_id_for_provenance() {
         let sql = create_table_sql(&dataset(), Grain::Underlying, TableKind::Live);
+        // `slot` is what the publish transaction matches on: filenames carry
+        // dates, so file identity is not partition identity (spec §4.3).
+        assert!(sql.contains("\"slot\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"source_file_id\" BIGINT"), "{sql}");
+        // `book` is part of the grain key at every grain, completing the
+        // partition key (dataset, slot, book).
+        assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
     }
 
     #[test]
@@ -1976,6 +1982,10 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         }
     }
 
+    // Partition key completion: `book` is already in the grain key, `slot`
+    // is what replacement matches on, `source_file_id` is provenance only
+    // (spec §4.3 — filenames carry dates, so file id is not partition id).
+    cols.push("  \"slot\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
     if kind == TableKind::Archive {
         cols.push("  \"gen_id\" BIGINT".to_string());
@@ -2238,9 +2248,888 @@ is what keeps its size independent of retention (spec §4.2)."
 
 ---
 
-**Remaining tasks (6–14) continue below.** Task 6 adds the `file_generations`
-catalog and freshness rollup; Task 7 the publish transaction and backfill
-guard; Task 8 the grain split and conflict detection; Task 9 the per-file
-load pipeline. Tasks 10–12 add discovery, the priority ladder, and the
-ingest runner with its panic boundary. Tasks 13–14 add the retention sweeper
-and the ingest benchmarks.
+### Task 6: The catalog — file generations and freshness
+
+**Files:**
+- Create: `crates/geode-data/src/store/catalog.rs`
+- Create: `crates/geode-data/src/health.rs`
+- Modify: `crates/geode-data/src/store/mod.rs`
+- Modify: `crates/geode-data/src/lib.rs`
+
+**Interfaces:**
+- Consumes: `Store` from Task 5.
+- Produces: `Health`, `FileId = i64`, `FileGeneration`, `Catalog<'a>` with
+  `ensure_tables`, `lookup_by_path`, `next_gen_id`, `record`,
+  `live_source_time(slot, book)`, `book_freshness(dataset)`, and
+  `dataset_as_of(dataset, books)`. Task 7 uses `live_source_time` for the
+  backfill guard; Task 10 uses `lookup_by_path` for change detection.
+
+**Why a side table for books.** A file covers a *set* of books, and freshness
+rolls up per book (spec §4.5). Storing that set as a `file_books(file_id,
+book)` side table rather than a list column keeps the rollup a plain
+aggregate join, which is what the query path will want too.
+
+- [ ] **Step 1: Write the failing health test**
+
+Create `crates/geode-data/src/health.rs`:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn health_orders_by_severity_so_rollups_take_the_worst() {
+        let mut states = vec![
+            Health::Ok,
+            Health::Failed { reason: "torn read".into() },
+            Health::Pending,
+            Health::Degraded { reason: "column missing".into() },
+        ];
+        states.sort();
+        assert_eq!(states.first().unwrap().label(), "ok");
+        assert_eq!(states.last().unwrap().label(), "failed");
+    }
+
+    #[test]
+    fn round_trips_through_its_stored_label() {
+        for h in [
+            Health::Ok,
+            Health::Pending,
+            Health::PendingTooLong,
+            Health::Degraded { reason: "r".into() },
+            Health::Failed { reason: "r".into() },
+        ] {
+            let (label, reason) = h.to_parts();
+            assert_eq!(Health::from_parts(&label, reason.as_deref()), h);
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data health`
+Expected: FAIL — `cannot find enum Health`.
+
+- [ ] **Step 3: Implement `Health`**
+
+Prepend to `crates/geode-data/src/health.rs`:
+
+```rust
+//! Degradation vocabulary (spec §5.7). Data problems are never modal and
+//! never fatal: a failed load leaves live untouched and degrades this
+//! file's health. Ord is severity order so a rollup can take the worst.
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Health {
+    Ok,
+    /// A CSV whose sentinel has not landed yet. Expected, not broken.
+    Pending,
+    /// Pending past the source's configured timeout.
+    PendingTooLong,
+    /// Loaded, but something was wrong — a required column was missing.
+    Degraded { reason: String },
+    /// The load failed. Last good generation stays live.
+    Failed { reason: String },
+}
+
+impl Health {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Health::Ok => "ok",
+            Health::Pending => "pending",
+            Health::PendingTooLong => "pending_too_long",
+            Health::Degraded { .. } => "degraded",
+            Health::Failed { .. } => "failed",
+        }
+    }
+
+    pub fn to_parts(&self) -> (String, Option<String>) {
+        let reason = match self {
+            Health::Degraded { reason } | Health::Failed { reason } => Some(reason.clone()),
+            _ => None,
+        };
+        (self.label().to_string(), reason)
+    }
+
+    pub fn from_parts(label: &str, reason: Option<&str>) -> Health {
+        match label {
+            "pending" => Health::Pending,
+            "pending_too_long" => Health::PendingTooLong,
+            "degraded" => Health::Degraded { reason: reason.unwrap_or_default().to_string() },
+            "failed" => Health::Failed { reason: reason.unwrap_or_default().to_string() },
+            _ => Health::Ok,
+        }
+    }
+
+    pub fn is_ok(&self) -> bool {
+        matches!(self, Health::Ok)
+    }
+}
+```
+
+Add `pub mod health;` to `crates/geode-data/src/lib.rs`.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-data health`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Write the failing catalog tests**
+
+Create `crates/geode-data/src/store/catalog.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use time::macros::datetime;
+
+    fn store() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("geode.duckdb")).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store)
+    }
+
+    fn record(slot: &str, books: &[&str], source_time: time::OffsetDateTime) -> FileGeneration {
+        FileGeneration {
+            file_id: 0,
+            dataset: "risk_snapshot".into(),
+            slot: slot.into(),
+            path: format!("/src/{slot}.csv").into(),
+            size: 1234,
+            mtime: source_time,
+            source_time,
+            gen_id: 0,
+            loaded_at: source_time,
+            row_count: 10,
+            books: books.iter().map(|b| b.to_string()).collect(),
+            health: Health::Ok,
+        }
+    }
+
+    #[test]
+    fn gen_ids_are_monotonic() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        assert_eq!(cat.next_gen_id().unwrap(), 1);
+        let mut r = record("BK000", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        r.gen_id = 1;
+        cat.record(&r).unwrap();
+        assert_eq!(cat.next_gen_id().unwrap(), 2);
+    }
+
+    #[test]
+    fn lookup_by_path_returns_the_latest_generation_for_that_file() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        for (gen, hour) in [(1, 7), (2, 9)] {
+            let mut r = record("BK000", &["BK000"], datetime!(2026-08-30 00:00 UTC).replace_hour(hour).unwrap());
+            r.gen_id = gen;
+            cat.record(&r).unwrap();
+        }
+        let found = cat.lookup_by_path(std::path::Path::new("/src/BK000.csv")).unwrap().unwrap();
+        assert_eq!(found.gen_id, 2);
+        assert_eq!(found.source_time.hour(), 9);
+    }
+
+    #[test]
+    fn live_source_time_is_per_partition_not_per_file() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        // Two business dates share a slot: same partition, different files.
+        for (gen, day) in [(1, 29u8), (2, 30u8)] {
+            let mut r = FileGeneration {
+                path: format!("/src/risk_2026-08-{day}_BK000.csv").into(),
+                ..record("BK000", &["BK000"], datetime!(2026-08-01 07:00 UTC).replace_day(day).unwrap())
+            };
+            r.gen_id = gen;
+            cat.record(&r).unwrap();
+        }
+        let t = cat.live_source_time("BK000", "BK000").unwrap().unwrap();
+        assert_eq!(t.day(), 30, "the partition's live time is the newest across its files");
+    }
+
+    #[test]
+    fn book_freshness_is_the_oldest_contributing_file() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        // BK000 is split across two slots with different source times.
+        let mut a = record("BK000_part1", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        a.gen_id = 1;
+        cat.record(&a).unwrap();
+        let mut b = record("BK000_part2", &["BK000"], datetime!(2026-08-30 14:00 UTC));
+        b.gen_id = 2;
+        cat.record(&b).unwrap();
+
+        let fresh = cat.book_freshness("risk_snapshot").unwrap();
+        let bk000 = fresh.iter().find(|(b, _)| b == "BK000").unwrap();
+        assert_eq!(bk000.1.hour(), 7, "a book is as fresh as its stalest file");
+    }
+
+    #[test]
+    fn dataset_as_of_is_the_oldest_book_in_scope() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        let mut a = record("BK000", &["BK000"], datetime!(2026-08-30 07:00 UTC));
+        a.gen_id = 1;
+        cat.record(&a).unwrap();
+        let mut b = record("BK001", &["BK001"], datetime!(2026-08-30 14:00 UTC));
+        b.gen_id = 2;
+        cat.record(&b).unwrap();
+
+        let all = cat.dataset_as_of("risk_snapshot", &[]).unwrap().unwrap();
+        assert_eq!(all.hour(), 7, "unscoped as-of is the oldest book");
+        let scoped = cat
+            .dataset_as_of("risk_snapshot", &["BK001".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(scoped.hour(), 14, "scoping to a fresh book must not inherit a stale one");
+    }
+
+    #[test]
+    fn a_multi_book_file_contributes_to_every_book_it_covers() {
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        let mut r = record("BK001_BK002", &["BK001", "BK002"], datetime!(2026-08-30 09:00 UTC));
+        r.gen_id = 1;
+        cat.record(&r).unwrap();
+        let fresh = cat.book_freshness("risk_snapshot").unwrap();
+        assert_eq!(fresh.len(), 2);
+    }
+}
+```
+
+- [ ] **Step 6: Run to verify it fails**
+
+Run: `cargo test -p geode-data catalog`
+Expected: FAIL — `cannot find struct Catalog`.
+
+- [ ] **Step 7: Implement the catalog**
+
+Prepend to `crates/geode-data/src/store/catalog.rs`:
+
+```rust
+//! Freshness bookkeeping (spec §4.5). Records what was loaded from where
+//! and when, in *source* time — never mtime, which any copy or restore
+//! corrupts (spec §4.4).
+//!
+//! Freshness rolls up: a book is as fresh as its stalest contributing file,
+//! and a dataset's headline as-of is the oldest book in the effective
+//! scope. That is the same stalest-input rule joins use (spec §5.4).
+
+use crate::health::Health;
+use crate::store::StoreError;
+use duckdb::Connection;
+use std::path::{Path, PathBuf};
+use time::OffsetDateTime;
+
+pub type FileId = i64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileGeneration {
+    pub file_id: FileId,
+    pub dataset: String,
+    /// Filename with its date component removed: the partition's identity
+    /// across business dates (spec §4.3).
+    pub slot: String,
+    pub path: PathBuf,
+    pub size: u64,
+    pub mtime: OffsetDateTime,
+    /// From the sentinel. Orders generations and drives as-of.
+    pub source_time: OffsetDateTime,
+    pub gen_id: i64,
+    pub loaded_at: OffsetDateTime,
+    pub row_count: usize,
+    pub books: Vec<String>,
+    pub health: Health,
+}
+
+pub struct Catalog<'a> {
+    conn: &'a Connection,
+}
+
+const DDL: &str = "
+CREATE TABLE IF NOT EXISTS file_generations (
+  file_id BIGINT PRIMARY KEY,
+  dataset VARCHAR,
+  slot VARCHAR,
+  path VARCHAR,
+  size BIGINT,
+  mtime TIMESTAMP WITH TIME ZONE,
+  source_time TIMESTAMP WITH TIME ZONE,
+  gen_id BIGINT,
+  loaded_at TIMESTAMP WITH TIME ZONE,
+  row_count BIGINT,
+  health VARCHAR,
+  health_reason VARCHAR
+);
+CREATE SEQUENCE IF NOT EXISTS file_generations_id START 1;
+CREATE SEQUENCE IF NOT EXISTS generation_id START 1;
+CREATE TABLE IF NOT EXISTS file_books (
+  file_id BIGINT,
+  book VARCHAR
+);
+";
+
+impl<'a> Catalog<'a> {
+    pub fn new(conn: &'a Connection) -> Catalog<'a> {
+        Catalog { conn }
+    }
+
+    fn sql(&self, statement: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute_batch(statement)
+            .map_err(|source| StoreError::Sql { statement: statement.to_string(), source })
+    }
+
+    pub fn ensure_tables(&self) -> Result<(), StoreError> {
+        self.sql(DDL)
+    }
+
+    /// Peek at the next generation id without consuming it.
+    pub fn next_gen_id(&self) -> Result<i64, StoreError> {
+        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";
+        self.conn
+            .query_row(sql, [], |r| r.get(0))
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })
+    }
+
+    pub fn record(&self, rec: &FileGeneration) -> Result<FileId, StoreError> {
+        let (health, reason) = rec.health.to_parts();
+        let sql = "insert into file_generations
+                   select nextval('file_generations_id'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   returning file_id";
+        let file_id: i64 = self
+            .conn
+            .query_row(
+                sql,
+                duckdb::params![
+                    rec.dataset,
+                    rec.slot,
+                    rec.path.to_string_lossy().to_string(),
+                    rec.size as i64,
+                    rec.mtime,
+                    rec.source_time,
+                    rec.gen_id,
+                    rec.loaded_at,
+                    rec.row_count as i64,
+                    health,
+                    reason,
+                ],
+                |r| r.get(0),
+            )
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+
+        for book in &rec.books {
+            let sql = "insert into file_books values (?, ?)";
+            self.conn
+                .execute(sql, duckdb::params![file_id, book])
+                .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        }
+        Ok(file_id)
+    }
+
+    pub fn lookup_by_path(&self, path: &Path) -> Result<Option<FileGeneration>, StoreError> {
+        let sql = "select file_id, dataset, slot, path, size, mtime, source_time, gen_id,
+                          loaded_at, row_count, health, health_reason
+                   from file_generations where path = ? order by gen_id desc limit 1";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        let mut rows = stmt
+            .query(duckdb::params![path.to_string_lossy().to_string()])
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        let Some(row) = rows
+            .next()
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?
+        else {
+            return Ok(None);
+        };
+        let file_id: i64 = row.get(0).unwrap();
+        let health_label: String = row.get(10).unwrap();
+        let health_reason: Option<String> = row.get(11).unwrap();
+        Ok(Some(FileGeneration {
+            file_id,
+            dataset: row.get(1).unwrap(),
+            slot: row.get(2).unwrap(),
+            path: PathBuf::from(row.get::<_, String>(3).unwrap()),
+            size: row.get::<_, i64>(4).unwrap() as u64,
+            mtime: row.get(5).unwrap(),
+            source_time: row.get(6).unwrap(),
+            gen_id: row.get(7).unwrap(),
+            loaded_at: row.get(8).unwrap(),
+            row_count: row.get::<_, i64>(9).unwrap() as usize,
+            books: self.books_of(file_id)?,
+            health: Health::from_parts(&health_label, health_reason.as_deref()),
+        }))
+    }
+
+    fn books_of(&self, file_id: FileId) -> Result<Vec<String>, StoreError> {
+        let sql = "select book from file_books where file_id = ? order by book";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        let rows = stmt
+            .query_map(duckdb::params![file_id], |r| r.get::<_, String>(0))
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// The newest source time published for a partition (spec §4.3). This is
+    /// what the backfill guard compares against: an older file shares the
+    /// slot, so it must not overwrite what is already live.
+    pub fn live_source_time(
+        &self,
+        slot: &str,
+        book: &str,
+    ) -> Result<Option<OffsetDateTime>, StoreError> {
+        let sql = "select max(fg.source_time) from file_generations fg
+                   join file_books fb on fb.file_id = fg.file_id
+                   where fg.slot = ? and fb.book = ?";
+        self.conn
+            .query_row(sql, duckdb::params![slot, book], |r| r.get(0))
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })
+    }
+
+    /// Per-book freshness: a book is as fresh as its *stalest* file.
+    pub fn book_freshness(
+        &self,
+        dataset: &str,
+    ) -> Result<Vec<(String, OffsetDateTime)>, StoreError> {
+        let sql = "select fb.book, min(newest.t)
+                   from (select fg.slot, fb.book, max(fg.source_time) as t
+                         from file_generations fg
+                         join file_books fb on fb.file_id = fg.file_id
+                         where fg.dataset = ?
+                         group by fg.slot, fb.book) newest
+                   join file_books fb on fb.book = newest.book
+                   group by fb.book order by fb.book";
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        let rows = stmt
+            .query_map(duckdb::params![dataset], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, OffsetDateTime>(1)?))
+            })
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    }
+
+    /// A dataset's headline as-of: the oldest book in scope. An empty scope
+    /// means every book.
+    pub fn dataset_as_of(
+        &self,
+        dataset: &str,
+        books: &[String],
+    ) -> Result<Option<OffsetDateTime>, StoreError> {
+        let fresh = self.book_freshness(dataset)?;
+        Ok(fresh
+            .into_iter()
+            .filter(|(b, _)| books.is_empty() || books.contains(b))
+            .map(|(_, t)| t)
+            .min())
+    }
+}
+```
+
+Add to `crates/geode-data/src/store/mod.rs`, next to `pub mod ddl;`:
+
+```rust
+pub mod catalog;
+
+pub use catalog::{Catalog, FileGeneration, FileId};
+```
+
+- [ ] **Step 8: Run to verify tests pass**
+
+Run: `cargo test -p geode-data catalog`
+Expected: PASS (6 tests).
+
+- [ ] **Step 9: Lint and commit**
+
+Run: `cargo clippy -p geode-data --all-targets -- -D warnings`
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): file generation catalog and freshness rollup
+
+Records what was loaded from where and when in source time, never mtime.
+Books live in a file_books side table because a file covers a set of
+them, which keeps the rollup a plain aggregate join.
+
+Freshness rolls up the way spec §4.5 requires: a book is as fresh as its
+stalest contributing file, and a dataset's as-of is the oldest book in
+scope — so scoping to a fresh book does not inherit a stale one's
+timestamp. live_source_time is per partition, not per file, which is what
+the backfill guard needs."
+```
+
+---
+
+### Task 7: The publish transaction and the backfill guard
+
+**Files:**
+- Create: `crates/geode-data/src/store/publish.rs`
+- Modify: `crates/geode-data/src/store/mod.rs`
+
+**Interfaces:**
+- Consumes: `Store`, `Catalog`, `ddl::{table_name, TableKind}`, `Grain`.
+- Produces: `Partition { slot: String, book: String }`, `PublishRequest`,
+  `PublishOutcome { Published { rows }, ArchivedOnly { rows, reason } }`, and
+  `publish_file(&Connection, &PublishRequest) -> Result<PublishOutcome, StoreError>`.
+  Task 9 calls this as the last step of the load pipeline.
+
+**The property that matters.** Live must hold exactly one generation per
+partition after any sequence of publishes, in any order. That is what makes
+live's size independent of retention and the §7.1 requery budget reachable
+by construction — so it is asserted directly, including for out-of-order
+backfill.
+
+- [ ] **Step 1: Write the failing publish tests**
+
+Create `crates/geode-data/src/store/publish.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+    use time::macros::datetime;
+
+    /// Minimal two-column live/archive pair so the test exercises the
+    /// transaction, not DDL generation.
+    fn fixture() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table measures_position_live(
+                     book varchar, position_ref varchar, daily_trading_pnl double,
+                     slot varchar, source_file_id bigint);
+                 create table measures_position_archive(
+                     book varchar, position_ref varchar, daily_trading_pnl double,
+                     slot varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 create table staging_position(
+                     book varchar, position_ref varchar, daily_trading_pnl double,
+                     slot varchar, source_file_id bigint);",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    fn stage(store: &Store, book: &str, pnl: f64, slot: &str, file_id: i64) {
+        store
+            .writer()
+            .execute(
+                "insert into staging_position values (?, 'POS1', ?, ?, ?)",
+                duckdb::params![book, pnl, slot, file_id],
+            )
+            .unwrap();
+    }
+
+    fn request(slot: &str, book: &str, gen: i64, t: time::OffsetDateTime) -> PublishRequest {
+        PublishRequest {
+            grain: geode_core::schema::Grain::Position,
+            staging_table: "staging_position".into(),
+            partitions: vec![Partition { slot: slot.into(), book: book.into() }],
+            gen_id: gen,
+            source_time: t,
+            live_source_time: None,
+        }
+    }
+
+    fn live_rows(store: &Store) -> Vec<(String, f64)> {
+        let conn = store.writer();
+        let mut stmt = conn
+            .prepare("select book, daily_trading_pnl from measures_position_live order by book")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    #[test]
+    fn first_publish_inserts_into_live_and_leaves_archive_empty() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        let out = publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        assert!(matches!(out, PublishOutcome::Published { rows: 1 }));
+        assert_eq!(live_rows(&store), vec![("BK000".to_string(), 10.0)]);
+        let n: i64 = store.writer().query_row("select count(*) from measures_position_archive", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn republishing_a_partition_replaces_it_and_archives_the_old_rows() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-29 07:00 UTC))).unwrap();
+        store.writer().execute_batch("delete from staging_position").unwrap();
+        stage(&store, "BK000", 99.0, "BK000", 2);
+
+        let mut req = request("BK000", "BK000", 2, datetime!(2026-08-30 07:00 UTC));
+        req.live_source_time = Some(datetime!(2026-08-29 07:00 UTC));
+        publish_file(store.writer(), &req).unwrap();
+
+        assert_eq!(live_rows(&store), vec![("BK000".to_string(), 99.0)], "live holds one generation");
+        let archived: f64 = store
+            .writer()
+            .query_row("select daily_trading_pnl from measures_position_archive", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(archived, 10.0, "the superseded rows moved to archive");
+    }
+
+    #[test]
+    fn a_backfilled_older_file_never_reaches_live() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 99.0, "BK000", 1);
+        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        store.writer().execute_batch("delete from staging_position").unwrap();
+
+        // Last Tuesday's file, loaded after this morning's.
+        stage(&store, "BK000", 10.0, "BK000", 2);
+        let mut req = request("BK000", "BK000", 2, datetime!(2026-08-25 07:00 UTC));
+        req.live_source_time = Some(datetime!(2026-08-30 07:00 UTC));
+        let out = publish_file(store.writer(), &req).unwrap();
+
+        assert!(matches!(out, PublishOutcome::ArchivedOnly { .. }), "{out:?}");
+        assert_eq!(
+            live_rows(&store),
+            vec![("BK000".to_string(), 99.0)],
+            "this morning's risk must survive a backfill"
+        );
+        let n: i64 = store.writer().query_row("select count(*) from measures_position_archive", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "the old generation is history, not live");
+    }
+
+    #[test]
+    fn publishing_one_partition_leaves_its_siblings_alone() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000_part1", 1);
+        publish_file(store.writer(), &request("BK000_part1", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+        store.writer().execute_batch("delete from staging_position").unwrap();
+
+        // Same book, different slot: the split file's other half.
+        stage(&store, "BK000", 20.0, "BK000_part2", 2);
+        publish_file(store.writer(), &request("BK000_part2", "BK000", 2, datetime!(2026-08-30 08:00 UTC))).unwrap();
+
+        let rows = live_rows(&store);
+        assert_eq!(rows.len(), 2, "a split book keeps both halves live: {rows:?}");
+    }
+
+    #[test]
+    fn a_multi_book_file_replaces_every_partition_it_covers() {
+        let (_d, store) = fixture();
+        stage(&store, "BK001", 1.0, "BK001_BK002", 1);
+        stage(&store, "BK002", 2.0, "BK001_BK002", 1);
+        let mut req = request("BK001_BK002", "BK001", 1, datetime!(2026-08-30 07:00 UTC));
+        req.partitions.push(Partition { slot: "BK001_BK002".into(), book: "BK002".into() });
+        publish_file(store.writer(), &req).unwrap();
+        assert_eq!(live_rows(&store).len(), 2);
+    }
+
+    #[test]
+    fn a_failed_publish_leaves_live_untouched() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(store.writer(), &request("BK000", "BK000", 1, datetime!(2026-08-30 07:00 UTC))).unwrap();
+
+        let mut bad = request("BK000", "BK000", 2, datetime!(2026-08-31 07:00 UTC));
+        bad.staging_table = "no_such_table".into();
+        bad.live_source_time = Some(datetime!(2026-08-30 07:00 UTC));
+        assert!(publish_file(store.writer(), &bad).is_err());
+
+        assert_eq!(
+            live_rows(&store),
+            vec![("BK000".to_string(), 10.0)],
+            "a failed load never clobbers the last good generation (spec §5.7)"
+        );
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data publish`
+Expected: FAIL — `cannot find function publish_file`.
+
+- [ ] **Step 3: Implement publish**
+
+Prepend to `crates/geode-data/src/store/publish.rs`:
+
+```rust
+//! The per-file publish transaction (spec §4.3) and the backfill guard
+//! (spec §4.4).
+//!
+//! Live holds exactly one generation per partition after any sequence of
+//! publishes in any order. That invariant is what makes live's size
+//! independent of retention, which is what keeps the §7.1 requery budget
+//! reachable by construction rather than by tuning.
+
+use crate::store::StoreError;
+use crate::store::ddl::{TableKind, table_name};
+use duckdb::Connection;
+use geode_core::schema::Grain;
+use time::OffsetDateTime;
+
+/// The unit of replacement: a slot within a book (spec §4.3). Not the file
+/// — filenames carry dates, so file identity is not partition identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Partition {
+    pub slot: String,
+    pub book: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublishRequest {
+    pub grain: Grain,
+    pub staging_table: String,
+    pub partitions: Vec<Partition>,
+    pub gen_id: i64,
+    pub source_time: OffsetDateTime,
+    /// The newest source time already live for these partitions, from
+    /// `Catalog::live_source_time`. `None` means nothing is live yet.
+    pub live_source_time: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum PublishOutcome {
+    Published { rows: usize },
+    /// The file was older than what is live, so it became history without
+    /// ever being current.
+    ArchivedOnly { rows: usize, reason: String },
+}
+
+fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
+    move |source| StoreError::Sql { statement: statement.to_string(), source }
+}
+
+/// A `(slot, book) IN (…)` predicate with the values inlined as quoted
+/// literals. Safe because both come from the catalog and the sentinel, not
+/// from user input; scope predicates, which do take user input, bind
+/// instead (spec §6.2).
+fn partition_predicate(partitions: &[Partition]) -> String {
+    let terms: Vec<String> = partitions
+        .iter()
+        .map(|p| {
+            format!(
+                "(slot = '{}' and book = '{}')",
+                p.slot.replace('\'', "''"),
+                p.book.replace('\'', "''")
+            )
+        })
+        .collect();
+    if terms.is_empty() {
+        "false".to_string()
+    } else {
+        terms.join(" or ")
+    }
+}
+
+pub fn publish_file(
+    conn: &Connection,
+    req: &PublishRequest,
+) -> Result<PublishOutcome, StoreError> {
+    let live = table_name(req.grain, TableKind::Live);
+    let archive = table_name(req.grain, TableKind::Archive);
+    let predicate = partition_predicate(&req.partitions);
+
+    // The backfill guard: a file older than what is already live becomes
+    // history directly. Without this a backfill would overwrite this
+    // morning's risk with last Tuesday's.
+    let superseded = req
+        .live_source_time
+        .is_some_and(|live_t| req.source_time <= live_t);
+
+    let staged_rows: i64 = {
+        let sql = format!("select count(*) from {}", req.staging_table);
+        conn.query_row(&sql, [], |r| r.get(0)).map_err(sql_err(&sql))?
+    };
+
+    if superseded {
+        let sql = format!(
+            "insert into {archive} select *, {}, '{}'::timestamptz from {}",
+            req.gen_id,
+            req.source_time,
+            req.staging_table
+        );
+        conn.execute_batch(&sql).map_err(sql_err(&sql))?;
+        return Ok(PublishOutcome::ArchivedOnly {
+            rows: staged_rows as usize,
+            reason: format!(
+                "source time {} is not newer than the live generation",
+                req.source_time
+            ),
+        });
+    }
+
+    // One transaction: archive the outgoing rows, drop them from live,
+    // insert the new ones. Any failure rolls the whole thing back, so a
+    // failed load leaves live untouched (spec §5.7).
+    let sql = format!(
+        "begin;
+         insert into {archive}
+             select l.*, {gen}, '{time}'::timestamptz from {live} l where {predicate};
+         delete from {live} where {predicate};
+         insert into {live} select * from {staging};
+         commit;",
+        gen = req.gen_id,
+        time = req.source_time,
+        staging = req.staging_table,
+    );
+    if let Err(source) = conn.execute_batch(&sql) {
+        let _ = conn.execute_batch("rollback;");
+        return Err(StoreError::Sql { statement: sql, source });
+    }
+
+    Ok(PublishOutcome::Published { rows: staged_rows as usize })
+}
+```
+
+Add to `crates/geode-data/src/store/mod.rs`:
+
+```rust
+pub mod publish;
+
+pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
+```
+
+- [ ] **Step 4: Run to verify tests pass**
+
+Run: `cargo test -p geode-data publish`
+Expected: PASS (6 tests).
+
+- [ ] **Step 5: Lint and commit**
+
+Run: `cargo clippy -p geode-data --all-targets -- -D warnings && cargo test -p geode-data`
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): per-partition publish transaction with backfill guard
+
+One transaction archives the outgoing rows, deletes them from live, and
+inserts the new ones, so live holds exactly one generation per partition
+after any sequence of publishes in any order — the invariant that keeps
+live's size independent of retention.
+
+The backfill guard routes a file older than what is live straight to
+archive. Tested directly: a last-Tuesday file loaded after this morning's
+must not become live, and a failed publish must leave live untouched."
+```
+
+---
+
+**Remaining tasks (8–14) continue below.** Task 8 adds the grain split and
+conflict detection; Task 9 the per-file load pipeline that ties Tasks 4–8
+together. Tasks 10–12 add discovery, the priority ladder, and the ingest
+runner with its panic boundary. Tasks 13–14 add the retention sweeper and
+the ingest benchmarks.
