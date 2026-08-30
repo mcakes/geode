@@ -4,5 +4,6 @@
 
 pub mod health;
 pub mod ingest;
+pub mod query;
 pub mod source;
 pub mod store;
