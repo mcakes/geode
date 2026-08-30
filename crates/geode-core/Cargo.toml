@@ -7,6 +7,14 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# Fixture builders for downstream crates' tests (`Snapshot::for_tests`).
+# Exists so that Arrow stays an implementation detail of `snapshot.rs`:
+# without it, every crate that wants a `Snapshot` fixture would have to
+# name Arrow types, which is exactly what that module promises nobody
+# outside it does.
+test-support = []
+
 [dependencies]
 toml = "1.1.4"
 # Must match the version duckdb-rs re-exports, or `RecordBatch` here and

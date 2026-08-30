@@ -2563,6 +2563,7 @@ name = "geode-app"
 version = "0.1.0"
 dependencies = [
  "geode-core",
+ "geode-data",
  "geode-shell",
  "gpui",
  "gpui-component",

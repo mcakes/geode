@@ -2,6 +2,8 @@
 //! registry, keymap, and starting workspace state, then opens the window on
 //! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
 
+mod probe;
+
 use std::path::PathBuf;
 
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
@@ -71,6 +73,12 @@ fn main() {
             })
             .detach();
 
+            // The throwaway data probe (spec §7) reads the same layered
+            // config as everything else, so its inputs are resolved here,
+            // before `services` moves into the spawn. `None` unless
+            // GEODE_PROBE_DIR is set — see `probe`.
+            let prepared_probe = probe::prepare(&services.config);
+
             cx.spawn(async move |cx| {
                 // Task 4: the toolbar IS the native title bar
                 // (`geode_shell::shell::toolbar`), so the window itself
@@ -78,11 +86,25 @@ fn main() {
                 // options (window controls, drag/double-click ownership) —
                 // see the doc comment on `TitleBar::window_options` and the
                 // `window_title` example at the pinned checkout.
-                cx.open_window(TitleBar::window_options(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-                .expect("failed to open window");
+                let window = cx
+                    .open_window(TitleBar::window_options(), |window, cx| {
+                        let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
+                        cx.new(|cx| Root::new(view, window, cx))
+                    })
+                    .expect("failed to open window");
+
+                // Start the probe against the shell that just opened.
+                if let Some(prepared) = prepared_probe {
+                    cx.update(|cx| {
+                        let shell = window
+                            .read(cx)
+                            .ok()
+                            .and_then(|root| root.view().clone().downcast::<ShellView>().ok());
+                        if let Some(shell) = shell {
+                            probe::start(prepared, shell, cx);
+                        }
+                    });
+                }
             })
             .detach();
         });

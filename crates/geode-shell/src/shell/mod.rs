@@ -466,6 +466,14 @@ pub struct ShellView {
     /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
     /// changes nothing about recording, which always runs.
     perf_overlay: bool,
+    /// Whether the throwaway data probe is painted (`data::toggle_probe`,
+    /// bound `mod+shift+d`). Deleted with the probe when the blotter
+    /// lands — see [`crate::dataprobe`].
+    data_probe: bool,
+    /// The latest reading pushed in by the binary. The shell cannot query
+    /// for itself: it does not depend on `geode-data` (CLAUDE.md), so
+    /// `geode-app` owns the service and calls [`ShellView::set_probe`].
+    probe: crate::dataprobe::ProbeState,
 }
 
 /// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
@@ -680,6 +688,8 @@ impl ShellView {
             perf: FrameHistogram::new(),
             last_render_started: None,
             perf_overlay: false,
+            data_probe: false,
+            probe: crate::dataprobe::ProbeState::default(),
         }
     }
 
@@ -968,6 +978,11 @@ impl ShellView {
             // toggle is just a bool flip plus a repaint.
             self.perf_overlay = !self.perf_overlay;
             cx.notify();
+        } else if action.0 == "data::toggle_probe" {
+            // Display-only, like the perf overlay: the binary keeps
+            // pushing readings whether or not anyone is looking.
+            self.data_probe = !self.data_probe;
+            cx.notify();
         } else if action.0 == "perf::reset" {
             // Zero the frame-time counters so a measurement can start
             // from a known point (e.g. right before an interaction worth
@@ -1133,6 +1148,23 @@ impl ShellView {
         if let Err(e) = session::save(path, &self.services.workspaces) {
             eprintln!("[session] warning: failed to save session: {e}");
         }
+    }
+
+    /// Hand the probe a new reading (spec §7's vertical slice).
+    ///
+    /// The shell cannot query for itself — it does not depend on
+    /// `geode-data` — so `geode-app` polls the `DataService` result
+    /// channel and pushes what arrives here. Notifies unconditionally:
+    /// the §7.1 budget is measured to the painted frame, so a reading that
+    /// did not repaint would not have been measured.
+    pub fn set_probe(&mut self, probe: crate::dataprobe::ProbeState, cx: &mut Context<Self>) {
+        self.probe = probe;
+        cx.notify();
+    }
+
+    /// Whether the probe is currently painted.
+    pub fn data_probe_visible(&self) -> bool {
+        self.data_probe
     }
 
     /// Dispatch one selected palette row: an `Action` item goes through the
@@ -2750,6 +2782,12 @@ impl Render for ShellView {
             // `perf_overlay`'s module doc for why that's deliberate).
             .when(self.perf_overlay, |el| {
                 el.child(perf_overlay::render(&self.perf, toolbar_height, cx))
+            })
+            // The throwaway data probe (spec §7), painted on the same
+            // overlay layer and under the same rules: no timer, no forced
+            // frames, repaints when a new snapshot notifies.
+            .when(self.data_probe, |el| {
+                el.child(crate::dataprobe::render(&self.probe, toolbar_height, cx))
             })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
@@ -9467,6 +9505,92 @@ mod tests {
         assert!(
             cx.debug_bounds("perf-overlay").is_none(),
             "a second toggle should remove the overlay"
+        );
+    }
+
+    /// Spec §7's vertical slice, end to end through the real key pipeline:
+    /// `mod+shift+d` dispatches `data::toggle_probe`, a snapshot pushed in
+    /// by the binary paints, and the attribution rules are visible in what
+    /// painted. This is the only place the §7.1 budget's *painted frame*
+    /// half is exercised at all — the benchmarks stop at the snapshot.
+    #[gpui::test]
+    fn the_data_probe_paints_a_pushed_snapshot(cx: &mut gpui::TestAppContext) {
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+
+        let (mut cx, shell) = open_shell(cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("data-probe").is_none(),
+            "the probe must start hidden"
+        );
+
+        // The §6.3 example: an additive measure and a coarse one, the
+        // latter non-attributable at the depth below its own grain.
+        let meta = |name: &str, by_depth: Vec<Attribution>| ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: by_depth,
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let snapshot = Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", vec![Attribution::Additive; 2]),
+                    TestColumn::Str(vec![None, Some("LHU1")]),
+                ),
+                (
+                    meta("row_depth", vec![Attribution::Additive; 2]),
+                    TestColumn::I64(vec![0, 1]),
+                ),
+                (
+                    meta("delta01", vec![Attribution::Additive; 2]),
+                    TestColumn::F64(vec![Some(30.0), Some(30.0)]),
+                ),
+                (
+                    meta(
+                        "daily_trading_pnl",
+                        vec![Attribution::Additive, Attribution::NonAttributable],
+                    ),
+                    TestColumn::F64(vec![Some(7.0), Some(7.0)]),
+                ),
+            ],
+            1,
+        );
+        shell.update(&mut cx, |shell, cx| {
+            shell.set_probe(
+                crate::dataprobe::ProbeState {
+                    snapshot: Some(std::sync::Arc::new(snapshot)),
+                    freshness: vec![("BK000".into(), "2026-08-30T14:32:00Z".into(), 47)],
+                    query_micros: 22_700,
+                    error: None,
+                },
+                cx,
+            );
+        });
+
+        cx.simulate_keystrokes("alt-shift-d");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.data_probe_visible()),
+            "alt+shift+d should dispatch data::toggle_probe"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = cx.debug_bounds("data-probe");
+        assert!(
+            bounds.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the probe should paint with non-zero bounds, got {bounds:?}"
+        );
+
+        cx.simulate_keystrokes("alt-shift-d");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("data-probe").is_none(),
+            "a second toggle should remove the probe"
         );
     }
 

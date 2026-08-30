@@ -196,6 +196,26 @@ impl Snapshot {
         Some((arr.keys().values(), values))
     }
 
+    /// One string cell, or `None` when the column is absent, the value is
+    /// NULL, or the row is past the end.
+    ///
+    /// A renderer walks rows, and [`Self::str_column`] hands back the Arrow
+    /// array — which would make every caller name an Arrow type and bring
+    /// its traits into scope, exactly what this module exists to prevent.
+    pub fn str_value(&self, name: &str, row: usize) -> Option<&str> {
+        let values = self.str_column(name)?;
+        (row < values.len() && !values.is_null(row)).then(|| values.value(row))
+    }
+
+    /// One dictionary-encoded cell, resolved to its string. The codes are
+    /// what comparisons and grouping should use (spec §7.2); this is for
+    /// display.
+    pub fn dict_value(&self, name: &str, row: usize) -> Option<&str> {
+        let (codes, dict) = self.dict_column(name)?;
+        let code = *codes.get(row)? as usize;
+        (code < dict.len() && !dict.is_null(code)).then(|| dict.value(code))
+    }
+
     /// How many grouping columns are present on this row — 0 is the grand
     /// total, `grouping_len` a leaf. The compiler emits it directly rather
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
@@ -205,6 +225,56 @@ impl Snapshot {
         usize::try_from(depth)
             .ok()
             .filter(|d| *d <= self.grouping_len)
+    }
+}
+
+/// One column of fixture data, in the shapes [`Snapshot`] hands back.
+#[cfg(any(test, feature = "test-support"))]
+pub enum TestColumn {
+    F64(Vec<Option<f64>>),
+    I64(Vec<i64>),
+    Str(Vec<Option<&'static str>>),
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Snapshot {
+    /// Build a snapshot from plain Rust values.
+    ///
+    /// Downstream crates need `Snapshot` fixtures, and this module's whole
+    /// premise is that nothing outside it names an Arrow type — so the
+    /// fixture builder lives here rather than making every test crate
+    /// reach for `arrow` and pin its version to match duckdb's.
+    pub fn for_tests(columns: Vec<(ColumnMeta, TestColumn)>, grouping_len: usize) -> Snapshot {
+        use arrow::array::{ArrayRef, Float64Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let fields: Vec<Field> = columns
+            .iter()
+            .map(|(meta, values)| {
+                let ty = match values {
+                    TestColumn::F64(_) => DataType::Float64,
+                    TestColumn::I64(_) => DataType::Int64,
+                    TestColumn::Str(_) => DataType::Utf8,
+                };
+                Field::new(&meta.name, ty, true)
+            })
+            .collect();
+        let arrays: Vec<ArrayRef> = columns
+            .iter()
+            .map(|(_, values)| -> ArrayRef {
+                match values {
+                    TestColumn::F64(v) => Arc::new(Float64Array::from(v.clone())),
+                    TestColumn::I64(v) => Arc::new(Int64Array::from(v.clone())),
+                    TestColumn::Str(v) => Arc::new(StringArray::from(v.clone())),
+                }
+            })
+            .collect();
+        let meta = columns.into_iter().map(|(m, _)| m).collect();
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .expect("fixture columns must be the same length");
+        Snapshot::from_batches(vec![batch], meta, grouping_len, Provenance::default())
+            .expect("fixture snapshot")
     }
 }
 
