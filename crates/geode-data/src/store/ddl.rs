@@ -56,10 +56,18 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
     // (spec §4.3 — filenames carry dates, so file id is not partition id).
     cols.push("  \"batch\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
-    if kind == TableKind::Archive {
-        cols.push("  \"gen_id\" BIGINT".to_string());
-        cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
-    }
+    // Live and archive carry identical columns, including the generation
+    // that produced the row. Live still holds exactly one generation per
+    // partition, so no query ever filters on `gen_id` — the §4.2 property
+    // that keeps live's size independent of retention is about the absence
+    // of a *history predicate*, not the absence of the column.
+    //
+    // Carrying it is what lets archived rows keep their own identity: the
+    // publish transaction moves rows out of live with their stamps intact,
+    // so as-of to a time when an older generation was live still finds it.
+    let _ = kind;
+    cols.push("  \"gen_id\" BIGINT".to_string());
+    cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
 
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
@@ -126,8 +134,30 @@ mod tests {
         assert!(!sql.contains("underlying_ref"), "{sql}");
         // Nor a measure declared at another grain.
         assert!(!sql.contains("delta01"), "{sql}");
-        // Live carries no generation column (spec §4.2).
-        assert!(!sql.contains("gen_id"), "{sql}");
+    }
+
+    #[test]
+    fn live_and_archive_have_identical_columns() {
+        // The publish transaction moves rows between them with `select *`,
+        // so any divergence would silently mis-map columns — and archived
+        // rows must keep the generation stamps they had while live.
+        let ds = sample_dataset();
+        for grain in [Grain::Position, Grain::Underlying] {
+            let live = create_table_sql(&ds, grain, TableKind::Live);
+            let archive = create_table_sql(&ds, grain, TableKind::Archive);
+            let cols = |sql: &str| {
+                sql.lines()
+                    .filter(|l| l.trim_start().starts_with('"'))
+                    .map(|l| l.trim().trim_end_matches(',').to_string())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(cols(&live), cols(&archive), "grain {grain:?}");
+            assert!(live.contains("\"gen_id\" BIGINT"), "{live}");
+            assert!(
+                live.contains("\"source_time\" TIMESTAMP WITH TIME ZONE"),
+                "{live}"
+            );
+        }
     }
 
     #[test]

@@ -21,14 +21,11 @@ impl DatasetSpec {
         self.columns.iter().find(|c| c.name == name)
     }
 
-    /// Distinct measure grains present, coarse first.
+    /// Distinct grains present, coarse first — from measures *and*
+    /// attributes. A grain carrying only attributes still needs its table:
+    /// omitting it would silently drop those columns at ingest.
     pub fn grains(&self) -> Vec<Grain> {
-        let mut out: Vec<Grain> = self
-            .columns
-            .iter()
-            .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))
-            .filter_map(|c| c.grain())
-            .collect();
+        let mut out: Vec<Grain> = self.columns.iter().filter_map(|c| c.grain()).collect();
         out.sort_unstable();
         out.dedup();
         out
@@ -80,10 +77,52 @@ impl SchemaSpec {
                     Err(d) => diags.push(d),
                 }
             }
+            diags.extend(validate_dataset(&dataset));
             out.datasets.push(dataset);
         }
         (out, diags)
     }
+}
+
+/// Column names the storage layer adds to every table (spec §4.2, §4.3).
+/// A dataset declaring one of these would generate DDL with a duplicate
+/// column and fail at table creation with a raw engine error.
+pub const RESERVED_COLUMNS: &[&str] = &["batch", "source_file_id", "gen_id", "source_time"];
+
+/// Checks that can only be made once every column is parsed. Each failure
+/// is a Diagnostic, never a panic — bad config degrades (spec §5.7).
+fn validate_dataset(ds: &DatasetSpec) -> Vec<Diagnostic> {
+    let mut diags = Vec::new();
+
+    for c in &ds.columns {
+        if RESERVED_COLUMNS.contains(&c.name.as_str()) {
+            diags.push(note(format!(
+                "dataset '{}' column '{}': name is reserved by the storage \
+                 layer ({})",
+                ds.name,
+                c.name,
+                RESERVED_COLUMNS.join(", ")
+            )));
+        }
+    }
+
+    // Every grain in use groups by its key columns, so each must be
+    // declared. Undeclared, the generated SQL references a column the
+    // staging table does not have and the whole load fails on a binder
+    // error rather than a readable diagnostic.
+    for grain in ds.grains() {
+        for key in grain.key_columns() {
+            if ds.column(key).is_none() {
+                diags.push(note(format!(
+                    "dataset '{}': grain {:?} requires key column '{}', which \
+                     is not declared",
+                    ds.name, grain, key
+                )));
+            }
+        }
+    }
+
+    diags
 }
 
 fn note(message: String) -> Diagnostic {
@@ -173,6 +212,30 @@ type = "utf8"
 role = "dimension"
 textual = true
 
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+
+[risk_snapshot.columns.underlying2_ref]
+type = "utf8"
+role = "dimension"
+
 [risk_snapshot.columns.delta01]
 type = "f64"
 role = "measure"
@@ -224,6 +287,44 @@ required = false
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(at_underlying, vec!["delta01"]);
+    }
+
+    #[test]
+    fn a_reserved_column_name_is_a_diagnostic() {
+        let (_schema, diags) = SchemaSpec::from_doc(&doc(
+            "[risk.columns.batch]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        ));
+        assert!(
+            diags.iter().any(|d| d.message.contains("reserved")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn an_undeclared_grain_key_column_is_a_diagnostic() {
+        // `counterparty` is part of every grain key but is not declared, so
+        // the generated GROUP BY would reference a column that does not
+        // exist and fail with a raw engine error at load time.
+        let (_schema, diags) = SchemaSpec::from_doc(&doc(
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+        ));
+        assert!(
+            diags.iter().any(|d| d.message.contains("counterparty")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_grain_carrying_only_attributes_still_gets_a_table() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(
+            "[risk.columns.strike]\ntype = \"f64\"\nrole = \"attribute\"\ngrain = \"instrument\"\n",
+        ));
+        assert_eq!(
+            schema.dataset("risk").unwrap().grains(),
+            vec![Grain::Instrument],
+            "attribute-only grains must not be silently dropped at ingest"
+        );
     }
 
     #[test]

@@ -117,6 +117,11 @@ fn run(
     queue: Arc<(Mutex<Queue>, Condvar)>,
     tx: Sender<IngestEvent>,
 ) {
+    // PlanComplete is announced once per drain, on the transition from
+    // working to idle — not on every wakeup. An idle runner would otherwise
+    // push an event every poll interval, forever, into an unbounded channel.
+    let mut announced_idle = false;
+
     loop {
         let item = {
             let (lock, cvar) = &*queue;
@@ -126,10 +131,14 @@ fn run(
                     return;
                 }
                 if !q.items.is_empty() {
+                    announced_idle = false;
                     break q.items.remove(0);
                 }
-                if tx.send(IngestEvent::PlanComplete).is_err() {
-                    return;
+                if !announced_idle {
+                    announced_idle = true;
+                    if tx.send(IngestEvent::PlanComplete).is_err() {
+                        return;
+                    }
                 }
                 let (guard, _) = cvar
                     .wait_timeout(q, std::time::Duration::from_millis(50))
@@ -334,6 +343,25 @@ mod tests {
         assert_eq!(
             published, good,
             "one bad file must not stop the run (spec §5.7)"
+        );
+    }
+
+    #[test]
+    fn an_idle_runner_announces_completion_once_not_per_wakeup() {
+        let (_db, _src, store, ds, _plan) = harness();
+        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+
+        // No work submitted: the runner idles. Give it many poll intervals.
+        std::thread::sleep(Duration::from_millis(600));
+        handle.shutdown();
+
+        let completes = rx
+            .try_iter()
+            .filter(|e| matches!(e, IngestEvent::PlanComplete))
+            .count();
+        assert_eq!(
+            completes, 1,
+            "an idle runner must not flood an unbounded channel"
         );
     }
 

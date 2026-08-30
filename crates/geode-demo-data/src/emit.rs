@@ -116,16 +116,32 @@ pub struct EmittedDirectory {
 
 /// Group row indices into files: most books get one file, `BK000` is split
 /// across two, and `BK001`+`BK002` share one.
+///
+/// **The split breaks on position boundaries, never mid-position.** A
+/// position's rows must all land in one file, because the two halves of a
+/// split book occupy different partitions (spec §4.3) and the grain split
+/// deduplicates only within a file. Splitting mid-position would put the
+/// same position key in two partitions, and `sum(daily_trading_pnl)` over
+/// that book would double-count — exactly what the grain split exists to
+/// make impossible. Real upstream splits are per-position for the same
+/// reason; this fixture must not model something the design cannot serve.
 fn file_assignments(batch: &RiskBatch) -> BTreeMap<String, Vec<usize>> {
     let mut by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut split_toggle = false;
+    let mut part_of_position: BTreeMap<&str, u8> = BTreeMap::new();
+    let mut next_part: u8 = 1;
     for i in 0..batch.len() {
         let book = &batch.book[i];
         let date = &batch.business_date[i];
         let key = match book.as_str() {
             "BK000" => {
-                split_toggle = !split_toggle;
-                format!("risk_{date}_BK000_part{}", if split_toggle { 1 } else { 2 })
+                let part = *part_of_position
+                    .entry(batch.position_ref[i].as_str())
+                    .or_insert_with(|| {
+                        let p = next_part;
+                        next_part = if next_part == 1 { 2 } else { 1 };
+                        p
+                    });
+                format!("risk_{date}_BK000_part{part}")
             }
             "BK001" | "BK002" => format!("risk_{date}_BK001_BK002"),
             other => format!("risk_{date}_{other}"),
@@ -150,21 +166,38 @@ pub fn emit_directory(batch: &RiskBatch, opts: &EmitOptions) -> std::io::Result<
         };
         let columns = header_columns(omit);
 
-        // Plant an attribute disagreement in the second file: the same
-        // instrument gets a different model code than elsewhere.
-        let plant_conflict = idx == 1;
+        // Plant an attribute disagreement in the second file, on *one*
+        // instrument and only *some* of its rows. Rewriting every row would
+        // leave the file internally consistent, and the §3.5 detector
+        // compares repeated values within a grain group — so a whole-file
+        // rewrite is invisible to it. The disagreement has to be inside the
+        // group to be the signal the detector is for.
+        let conflict_instrument: Option<&str> = if idx == 1 {
+            rows.first().map(|&i| batch.instrument_ref[i].as_str())
+        } else {
+            None
+        };
 
         let csv_path = opts.root.join(format!("{stem}.csv"));
         let mut out = std::io::BufWriter::new(std::fs::File::create(&csv_path)?);
         writeln!(out, "{}", columns.join(","))?;
 
         let canonical = canonical_columns(omit);
+        let mut conflict_row = 0usize;
         for &i in rows {
+            // Alternate rows of the chosen instrument carry a wrong model
+            // code, so min != max within its instrument-grain group.
+            let plant = conflict_instrument.is_some_and(|target| {
+                batch.instrument_ref[i] == target && {
+                    conflict_row += 1;
+                    conflict_row.is_multiple_of(2)
+                }
+            });
             let mut fields: Vec<String> = Vec::with_capacity(canonical.len());
             for name in &canonical {
-                fields.push(field_value(batch, i, name, plant_conflict));
+                fields.push(field_value(batch, i, name, plant));
             }
-            if plant_conflict && !conflicting_instruments.contains(&batch.instrument_ref[i]) {
+            if plant && !conflicting_instruments.contains(&batch.instrument_ref[i]) {
                 conflicting_instruments.push(batch.instrument_ref[i].clone());
             }
             writeln!(out, "{}", fields.join(","))?;

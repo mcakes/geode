@@ -233,6 +233,37 @@ mod tests {
     }
 
     #[test]
+    fn a_split_book_never_splits_a_position_across_files() {
+        // The two halves of a split book are different partitions, and the
+        // grain split dedups only within a file. A position spanning both
+        // would land in live twice and double its trading PnL — the exact
+        // failure the grain split exists to prevent.
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+
+        let mut file_of_position: std::collections::HashMap<&str, &std::path::Path> =
+            Default::default();
+        for f in &out.files {
+            let text = std::fs::read_to_string(&f.csv_path).unwrap();
+            let mut lines = text.lines();
+            let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+            let pos_col = header.iter().position(|h| *h == "PositionRef").unwrap();
+            for line in lines {
+                let position = line.split(',').nth(pos_col).unwrap();
+                let seen = file_of_position
+                    .entry(Box::leak(position.to_string().into_boxed_str()))
+                    .or_insert(f.csv_path.as_path());
+                assert_eq!(
+                    *seen,
+                    f.csv_path.as_path(),
+                    "position {position} appears in two files"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn conflicting_instrument_attributes_are_planted() {
         let dir = tempfile::tempdir().unwrap();
         let batch = generate(&cfg(20_000));

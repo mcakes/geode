@@ -153,11 +153,28 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     )?;
 
     // 4. Publish each grain, guarded against backfill.
-    let books = if req.sentinel.books.is_empty() {
-        distinct_books(conn)?
-    } else {
-        req.sentinel.books.clone()
-    };
+    //
+    // The books come from the staged rows, not the sentinel: the sentinel's
+    // list is advisory, and a row whose book is absent from it would enter
+    // a partition no future publish replaces. Any mismatch is degradation,
+    // not a silent drop.
+    let (staged_books, unattributed_rows) = distinct_books(conn)?;
+    let undeclared: Vec<String> = staged_books
+        .iter()
+        .filter(|b| !req.sentinel.books.is_empty() && !req.sentinel.books.contains(b))
+        .cloned()
+        .collect();
+    let books = staged_books;
+    if books.is_empty() {
+        return Err(LoadError::Store(StoreError::Sql {
+            statement: format!("publish {}", req.csv_path.display()),
+            source: duckdb::Error::InvalidParameterName(
+                "no book values in the staged rows; every row would land in a \
+                 partition that replacement can never match"
+                    .into(),
+            ),
+        }));
+    }
     let partitions: Vec<Partition> = books
         .iter()
         .map(|book| Partition {
@@ -166,10 +183,15 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         })
         .collect();
 
-    let live_source_time = books
-        .iter()
-        .filter_map(|b| catalog.live_source_time(req.batch, b).ok().flatten())
-        .max();
+    // A failed lookup must not collapse into "nothing is live yet" — that
+    // would silently disable the backfill guard and let an old file
+    // overwrite current risk, the exact outcome the guard exists to prevent.
+    let mut live_source_time = None;
+    for book in &books {
+        if let Some(t) = catalog.live_source_time(req.batch, book)? {
+            live_source_time = Some(live_source_time.map_or(t, |cur: DateTime<Utc>| cur.max(t)));
+        }
+    }
 
     let mut published = Vec::new();
     for (grain, staging_table) in &split.staged {
@@ -187,11 +209,27 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     }
 
     // 5. Record the generation.
-    let health = if missing_required.is_empty() {
+    let mut degradations: Vec<String> = Vec::new();
+    if !missing_required.is_empty() {
+        degradations.push(format!(
+            "required columns missing: {}",
+            missing_required.join(", ")
+        ));
+    }
+    if unattributed_rows > 0 {
+        degradations.push(format!("{unattributed_rows} rows have no book"));
+    }
+    if !undeclared.is_empty() {
+        degradations.push(format!(
+            "books present in the data but absent from the sentinel: {}",
+            undeclared.join(", ")
+        ));
+    }
+    let health = if degradations.is_empty() {
         Health::Ok
     } else {
         Health::Degraded {
-            reason: format!("required columns missing: {}", missing_required.join(", ")),
+            reason: degradations.join("; "),
         }
     };
     let meta = std::fs::metadata(req.csv_path).map_err(|source| LoadError::Io {
@@ -230,15 +268,27 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     })
 }
 
-fn distinct_books(conn: &duckdb::Connection) -> Result<Vec<String>, StoreError> {
-    let sql = format!("select distinct book from {RAW_TABLE} order by book");
+/// Books present in the staged rows, plus a count of rows whose `book` is
+/// NULL. Those are reported rather than dropped: a NULL book produces a
+/// partition no publish can ever match, so its rows would sit in live
+/// forever, invisible to replacement.
+fn distinct_books(conn: &duckdb::Connection) -> Result<(Vec<String>, usize), StoreError> {
+    let sql = format!("select book, count(*) from {RAW_TABLE} group by book order by book");
     let err = |source| StoreError::Sql {
         statement: sql.clone(),
         source,
     };
     let mut stmt = conn.prepare(&sql).map_err(err)?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(err)?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    let mut rows = stmt.query([]).map_err(err)?;
+    let mut books = Vec::new();
+    let mut unattributed = 0usize;
+    while let Some(row) = rows.next().map_err(err)? {
+        match row.get::<_, Option<String>>(0).map_err(err)? {
+            Some(b) => books.push(b),
+            None => unattributed += row.get::<_, i64>(1).map_err(err)? as usize,
+        }
+    }
+    Ok((books, unattributed))
 }
 
 #[cfg(test)]
@@ -495,6 +545,29 @@ source_name = "ModelCode"
     }
 
     #[test]
+    fn the_planted_attribute_disagreement_is_detected() {
+        // The fixture plants a wrong model_code on alternate rows of one
+        // instrument, so its instrument-grain group disagrees with itself.
+        // §3.5 wants that surfaced, not averaged away.
+        let f = fixture();
+        let mut found = Vec::new();
+        for file in f.emitted.files.iter().filter(|x| x.sentinel_path.is_some()) {
+            found.extend(load(&f, file).conflicts);
+        }
+        assert!(
+            !f.emitted.conflicting_instruments.is_empty(),
+            "fixture precondition: a conflict must have been planted"
+        );
+        assert!(
+            found
+                .iter()
+                .any(|c| c.column == "model_code"
+                    && c.grain == geode_core::schema::Grain::Instrument),
+            "the detector must report the planted model_code disagreement: {found:?}"
+        );
+    }
+
+    #[test]
     fn reloading_the_same_batch_replaces_rather_than_accumulates() {
         let f = fixture();
         let file = ready_file(&f);
@@ -504,6 +577,22 @@ source_name = "ModelCode"
         let after = count(&f, "measures_underlying_live");
         assert_eq!(before, after, "live must not accumulate across reloads");
         assert!(second.gen_id > first.gen_id);
+
+        // Equal counts alone prove nothing — they also hold if the second
+        // load never touched live. Assert the replacement path actually ran.
+        assert!(
+            second
+                .published
+                .iter()
+                .all(|p| matches!(p, crate::store::PublishOutcome::Published { .. })),
+            "the reload must replace live, not be filed as history: {:?}",
+            second.published
+        );
+        let archived = count(&f, "measures_underlying_archive");
+        assert_eq!(
+            archived, before,
+            "the superseded generation must have moved to archive"
+        );
     }
 
     #[test]

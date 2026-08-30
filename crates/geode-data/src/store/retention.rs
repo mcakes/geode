@@ -70,15 +70,23 @@ pub fn sweep(
                 ));
             }
 
+            // NOT EXISTS, not NOT IN: a single NULL in the subquery makes
+            // `NOT IN` evaluate to UNKNOWN for every row, so one archived
+            // row with a NULL book would silently disable retention
+            // forever. `is not distinct from` keeps NULL keys matchable.
             let sql = format!(
-                "delete from {archive} where (batch, book, gen_id) not in (
-                     select batch, book, gen_id from (
+                "delete from {archive} a where not exists (
+                     select 1 from (
                          select batch, book, gen_id, source_time,
                                 row_number() over (
                                     partition by batch, book order by source_time desc
                                 ) as rn
                          from (select distinct batch, book, gen_id, source_time from {archive})
-                     ) where {keep}
+                     ) k
+                     where k.batch is not distinct from a.batch
+                       and k.book is not distinct from a.book
+                       and k.gen_id is not distinct from a.gen_id
+                       and {keep}
                  )",
                 keep = keep.join(" and "),
             );
@@ -278,6 +286,42 @@ mod tests {
         .unwrap();
         assert_eq!(report.evicted_rows, 0);
         assert!(report.oldest_remaining.is_none());
+    }
+
+    #[test]
+    fn a_null_book_does_not_disable_the_whole_sweep() {
+        // With `NOT IN`, one NULL key makes the predicate UNKNOWN for every
+        // row and retention silently stops working forever.
+        let (_d, store) = fixture();
+        fill(&store, 10);
+        store
+            .writer()
+            .execute(
+                "insert into measures_position_archive values (NULL, NULL, 99, ?)",
+                duckdb::params![ts("2026-08-30T01:00:00Z")],
+            )
+            .unwrap();
+
+        let report = sweep(
+            store.writer(),
+            &[Grain::Position],
+            &RetentionPolicy {
+                keep_generations: Some(3),
+                keep_age: None,
+            },
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert!(
+            report.evicted_rows > 0,
+            "a NULL key must not poison the predicate"
+        );
+        assert_eq!(
+            remaining(&store),
+            7,
+            "3 generations per real partition, plus the NULL partition's own"
+        );
     }
 
     #[test]

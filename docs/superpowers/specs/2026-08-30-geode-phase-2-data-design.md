@@ -306,9 +306,18 @@ serves view queries and one dedicated writer connection serves ingest.
 Per dataset, two tables:
 
 - **`<dataset>_live`** — exactly the current rows for every file
-  partition. No generation column, no history predicate, size
-  independent of retention. This is the property §6 was buying, and it
-  is what keeps §7.1's requery budget reachable by construction.
+  partition. No history predicate, size independent of retention. This
+  is the property §6 was buying, and it is what keeps §7.1's requery
+  budget reachable by construction.
+
+  Live *does* carry `gen_id` and `source_time`, unlike an earlier draft
+  of this section. Live holds one generation per partition, so no query
+  ever filters on them — the property that matters is the absence of a
+  history *predicate*, not of the columns. Carrying them is what lets
+  the publish transaction move rows into the archive with their own
+  stamps intact; without that, archived rows inherit their successor's
+  timestamp and as-of to any moment when the older generation was live
+  returns nothing (§4.4).
 - **`<dataset>_archive`** — append-only, every row stamped with its
   `gen_id`. Touched only by as-of queries and the retention sweeper.
 
@@ -351,16 +360,26 @@ One transaction on the writer connection:
 One transaction per file, over the partitions `P` it covers:
 
 ```
-INSERT INTO <ds>_archive
-    SELECT *, <current_gen>, <current_source_time> FROM <ds>_live
-    WHERE (batch, book) IN P;
+INSERT INTO <ds>_archive SELECT * FROM <ds>_live WHERE (batch, book) IN P;
 DELETE FROM <ds>_live WHERE (batch, book) IN P;
-INSERT INTO <ds>_live SELECT * FROM <staging>;
+INSERT INTO <ds>_live
+    SELECT *, <gen>, <source_time> FROM <staging>;
 ```
+
+The outgoing rows move with `SELECT *`, keeping the generation stamps
+they carried while live — live and archive have identical columns for
+exactly this reason.
 
 Live therefore carries `batch` and `source_file_id` alongside the grain
 key: `batch` is what replacement matches on, `source_file_id` is what
 provenance and health report against.
+
+**Publishing with an empty partition set is an error**, not a no-op: the
+delete would match nothing while the insert still ran, so live would
+accumulate a duplicate copy on every republish. Partitions come from the
+*staged rows*, not from the sentinel's advisory book list, so a row whose
+book the sentinel omits cannot land in a partition replacement will never
+match; the mismatch degrades health instead.
 
 Publishes serialize; one at a time through the single writer.
 
@@ -376,9 +395,13 @@ Two consequences:
 
 - As-of resolution orders by source time throughout: the newest
   generation at or before T, per file partition.
-- **The publish rule is guarded.** A file's rows enter `live` only if
-  its source time is newer than what live currently holds for that
-  partition (§4.3). Otherwise they are written straight to `archive`.
+- **The publish rule is guarded.** A file's rows enter `live` unless its
+  source time is *strictly older* than what live currently holds for that
+  partition (§4.3); otherwise they are written straight to `archive`.
+  Strictly older matters: discovery only queues a file whose size or
+  source time differs from what was loaded, so a file arriving at the
+  same source time is a *corrected republish* of that generation and must
+  replace it rather than being filed away as history.
   Without this guard a backfill would silently overwrite this morning's
   risk with last Tuesday's — and since a backfilled file shares its
   batch with the current one, it targets exactly the partition that must

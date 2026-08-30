@@ -140,10 +140,19 @@ fn classify(
     mtime: SystemTime,
     now: SystemTime,
 ) -> Result<CandidateState, StoreError> {
-    if spec.readiness != Readiness::Sentinel {
-        // The stable-mtime fallback needs poll history the runner keeps; a
-        // single discovery pass can only report it as pending.
-        return Ok(CandidateState::Pending);
+    if let Readiness::StableMtime { polls } = spec.readiness {
+        // Not implemented: the fallback needs poll history nothing keeps
+        // yet. Reporting `Pending` would make such a source ingest nothing,
+        // forever, with no diagnostic — silence is the one failure mode
+        // spec §5.7 forbids. Surface it instead.
+        return Ok(CandidateState::Orphaned {
+            reason: format!(
+                "source '{}' uses the stable-mtime readiness strategy \
+                 ({polls} polls), which is not implemented; configure a \
+                 sentinel convention or the source will never load",
+                spec.name
+            ),
+        });
     }
 
     let Ok(sentinel_meta) = std::fs::metadata(sentinel_path) else {

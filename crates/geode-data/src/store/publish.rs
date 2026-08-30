@@ -79,12 +79,31 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     let archive = table_name(req.grain, TableKind::Archive);
     let predicate = partition_predicate(&req.partitions);
 
-    // The backfill guard: a file older than what is already live becomes
+    // Publishing with no partitions would delete nothing and insert
+    // everything, so live would accumulate a duplicate copy on every
+    // republish. That is a caller bug, not a degradation.
+    if req.partitions.is_empty() {
+        return Err(StoreError::Sql {
+            statement: format!("publish into {live}"),
+            source: duckdb::Error::InvalidParameterName(
+                "publish requires at least one partition; an empty set would \
+                 append to live without replacing anything"
+                    .into(),
+            ),
+        });
+    }
+
+    // The backfill guard: a file *older* than what is already live becomes
     // history directly. Without this a backfill would overwrite this
     // morning's risk with last Tuesday's.
+    //
+    // Strictly older, deliberately. Discovery only queues a file whose
+    // (size, source_time) differs from what was loaded, so a file arriving
+    // with a source time equal to the live one is a *corrected* republish
+    // of the same generation — it must replace, not be filed as history.
     let superseded = req
         .live_source_time
-        .is_some_and(|live_t| req.source_time <= live_t);
+        .is_some_and(|live_t| req.source_time < live_t);
 
     let staged_rows: i64 = {
         let sql = format!("select count(*) from {}", req.staging_table);
@@ -112,12 +131,17 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     // One transaction: archive the outgoing rows, drop them from live,
     // insert the new ones. Any failure rolls the whole thing back, so a
     // failed load leaves live untouched (spec §5.7).
+    //
+    // The outgoing rows move with `select *` — keeping the `gen_id` and
+    // `source_time` they carried while live. Stamping them with the
+    // incoming generation instead would make as-of to any moment when the
+    // older generation was live return nothing (spec §4.4).
     let sql = format!(
         "begin;
-         insert into {archive}
-             select l.*, {gen}, '{time}'::timestamptz from {live} l where {predicate};
+         insert into {archive} select * from {live} where {predicate};
          delete from {live} where {predicate};
-         insert into {live} select * from {staging};
+         insert into {live}
+             select *, {gen}, '{time}'::timestamptz from {staging};
          commit;",
         gen = req.gen_id,
         time = req.source_time.to_rfc3339(),
@@ -157,7 +181,8 @@ mod tests {
             .execute_batch(
                 "create table measures_position_live(
                      book varchar, position_ref varchar, daily_trading_pnl double,
-                     batch varchar, source_file_id bigint);
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
                  create table measures_position_archive(
                      book varchar, position_ref varchar, daily_trading_pnl double,
                      batch varchar, source_file_id bigint,
@@ -250,15 +275,67 @@ mod tests {
             vec![("BK000".to_string(), 99.0)],
             "live holds one generation"
         );
-        let archived: f64 = store
+        let (archived, gen_id, stamp): (f64, i64, DateTime<Utc>) = store
             .writer()
             .query_row(
-                "select daily_trading_pnl from measures_position_archive",
+                "select daily_trading_pnl, gen_id, source_time
+                 from measures_position_archive",
                 [],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         assert_eq!(archived, 10.0, "the superseded rows moved to archive");
+        // The archived rows must keep the generation they had while live.
+        // Stamping them with the incoming generation would make as-of to a
+        // time when they *were* live return nothing (spec §4.4).
+        assert_eq!(gen_id, 1, "archived rows keep their own gen_id");
+        assert_eq!(
+            stamp,
+            ts("2026-08-29T07:00:00Z"),
+            "archived rows keep their own source_time, not the successor's"
+        );
+    }
+
+    #[test]
+    fn a_corrected_republish_at_the_same_source_time_replaces_live() {
+        // Discovery only queues a file whose (size, source_time) differs
+        // from what was loaded, so a file arriving with the *same* source
+        // time is a correction of that generation and must replace it.
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        store
+            .writer()
+            .execute_batch("delete from staging_position")
+            .unwrap();
+        stage(&store, "BK000", 42.0, "BK000", 2);
+
+        let mut req = request("BK000", "BK000", 2, ts("2026-08-30T07:00:00Z"));
+        req.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
+        let out = publish_file(store.writer(), &req).unwrap();
+
+        assert!(matches!(out, PublishOutcome::Published { .. }), "{out:?}");
+        assert_eq!(
+            live_rows(&store),
+            vec![("BK000".to_string(), 42.0)],
+            "the correction must reach live, not be filed as history"
+        );
+    }
+
+    #[test]
+    fn publishing_with_no_partitions_is_rejected() {
+        // An empty partition set deletes nothing and inserts everything, so
+        // live would accumulate a duplicate copy on every republish.
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        let mut req = request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z"));
+        req.partitions.clear();
+        assert!(publish_file(store.writer(), &req).is_err());
+        assert!(live_rows(&store).is_empty(), "nothing may reach live");
     }
 
     #[test]
