@@ -571,6 +571,32 @@ Phase 2a ships the runner single-threaded — correct, and simplest to get
 right — with the worker pool as the measured next optimization rather
 than a speculative one.
 
+**Scheduled: after Phase 2b, and it is not optional.** Cold-start time
+is a stated priority, not a nice-to-have, even though §7.1 sets no
+contract for it. It is deferred behind the query path only because
+§7.1's <50ms requery *is* a contract and is still unproven, and because
+parallelising the one component that must never corrupt data deserves
+its own change and its own review rather than being appended to another.
+
+Two conditions on doing it properly:
+
+1. **Measure against a real network share.** The 1.87× was local-SSD
+   reads of generated files. Production reads come off an SMB share
+   whose pathology §11 already flags. If ingest turns out to be
+   network-bound rather than CPU-bound, four connections might hide
+   latency and do better — or saturate the share and do worse. The
+   local number does not settle it.
+2. **Publishes stay serialized** through the single writer (§5.3).
+   Only staging parallelises.
+
+Attack per-file fixed cost alongside it. Measured, a load costs roughly
+`111 ms + 10.3 µs × rows` (`docs/perf.md`), so the fixed component is
+~65% of the time on small files and ~15% on 59k-row files. Batching the
+publish across grains into one transaction attacks the 111 ms and pays
+most on a multi-day backfill, where file count dominates; parallel
+staging pays most on a normal day's larger files. The two are
+independent, and cold start wants both.
+
 §7.1's contract stands: a background refresh of any size may never
 drop a foreground frame. Ingest is off-thread, publish transactions
 are short, and readers hold their own connections.

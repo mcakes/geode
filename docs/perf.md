@@ -129,11 +129,29 @@ single-writer constraint for *publishes*); moving staging onto a worker
 pool while keeping publishes serialized is the measured next
 optimization.
 
-**Per-file fixed cost dominates small files.** A load runs `read_csv`,
-one grouped split per grain, and one publish transaction per grain — so
-a ~6k-row file costs 237 ms, most of it fixed. This is why cold start
-scales closer to file count than to row count, and it is the second
-reason parallel staging helps so much.
+**Scheduled after Phase 2b, and treated as required work.** Cold-start
+time is a stated priority even though §7.1 sets no contract for it. Two
+independent levers, and cold start wants both: parallelise staging
+(publishes stay serialized), and cut the ~111 ms per-file fixed cost by
+batching the publish across grains into one transaction. See the
+decomposition below for which pays where. Re-measure against a real
+network share before trusting the 1.87×; these numbers are local SSD.
+
+**Per-file fixed cost, decomposed.** A load runs `read_csv`, one grouped
+split per grain, and one publish transaction per grain. Solving the two
+cold-start points (17 files at 5.9k rows/file = 172 ms/file; 17 files at
+59k rows/file = 718 ms/file) gives roughly:
+
+```
+per-file cost ≈ 111 ms + 10.3 µs × rows
+```
+
+So the fixed component is ~65% of the time on small files and ~15% on
+59k-row files. That decides which lever applies where: **batching the
+publish across grains** attacks the 111 ms and pays most on many small
+files — a multi-day backfill, where file count dominates — while
+**parallel staging** pays most on the large-file case that a normal day
+produces. They are independent, and cold start wants both.
 
 Not yet gated in CI. The §7.4 regression gate wants a stored criterion
 baseline and a generous threshold; these numbers are the first baseline
