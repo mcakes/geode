@@ -1190,20 +1190,20 @@ impl ShellView {
         // Task 9 instant-modal redesign (see `dialog`'s module doc): while
         // Geode's own modal (`self.modal`) OR a gpui-component `Dialog`
         // layer is open, the shell's own keymap `Matcher` must not see a
-        // single keystroke — otherwise e.g. `ctrl+v` typed while choosing a
-        // theme in the settings modal would *also* dispatch
-        // `workspace::split_right` behind it (the modal paints above the
-        // tile surface, but this on_key_down listener sits on the
-        // ShellView root and still receives every raw KeyDownEvent that
-        // bubbles up the dispatch tree, modal-focused or not — same
-        // "delivered regardless" behavior the filter-input guard below
-        // already relies on). `window.has_active_dialog` is kept alongside
+        // single keystroke — otherwise e.g. `ctrl+v` typed inside the
+        // settings dialog would *also* dispatch `workspace::split_right`
+        // behind it (the modal paints above the tile surface, but this
+        // on_key_down listener sits on the ShellView root and still
+        // receives every raw KeyDownEvent that bubbles up the dispatch
+        // tree, modal-focused or not — same "delivered regardless"
+        // behavior the filter-input guard below already relies on).
+        // `window.has_active_dialog` is kept alongside
         // `self.modal.is_some()`, not replaced by it: gpui-component's own
-        // popovers (e.g. a `Select` dropdown's overlay, reachable from
-        // inside the settings modal's content) still open through that
-        // crate's dialog-layer machinery, so this guard still has to
-        // account for it even though nothing in this crate opens a
-        // gpui-component `Dialog` directly anymore.
+        // popovers still open through that crate's dialog-layer machinery,
+        // so this guard still accounts for it even though nothing in this
+        // crate opens a gpui-component `Dialog` — or, since the settings
+        // row-list rewrite retired the theme dropdown, any of its popover
+        // controls — anymore.
         //
         // Escape is the one key this branch still acts on itself — closing
         // our own modal, same as a backdrop click (`dialog::render_modal`).
@@ -1211,12 +1211,9 @@ impl ShellView {
         // (that was gpui-component's own `Cancel`/`Confirm` action binding,
         // scoped to its dialog's focused root): our modal is plain chrome,
         // not an action-dispatch layer, so this is the only place Escape
-        // gets handled for it. Note the same "an Escape inside a focused
-        // gpui-component `Input` propagates and reaches our root handler"
-        // behavior the filter-input guard below documents applies here too
-        // — e.g. Esc typed into the settings modal's search field still
-        // reaches this branch and closes the modal, matching the old
-        // dialog's UX close enough (Task 9 design note).
+        // gets handled for it — after the modal's own `on_key` handler
+        // (below) has had first refusal, which is how both dialogs' find
+        // sessions swallow an Escape as "cancel" without closing.
         if self.modal.is_some() || window.has_active_dialog(cx) {
             if self.modal.is_some() {
                 // Part B: offer the modal's own key handler (if any) first
@@ -6859,7 +6856,13 @@ mod tests {
     /// proves the arrow alias — asserting `ShellView::font_size` itself,
     /// so what's proven is the wiring from key dispatch through
     /// `settings_view`'s `step` to shell state (the pure stepping
-    /// semantics, wrap included, are `settings_view::tests`').
+    /// semantics, wrap included, are `settings_view::tests`'). The tail
+    /// then walks the other rows — `k` up to Dark mode (`enter` cycles =
+    /// a toggle, asserted against the theme service's live mode), `k`
+    /// again to Theme (`l` steps to a different family), and `shift+g` to
+    /// the bottom Find style row (`l` flips vim → fzf) — so every one of
+    /// `apply_setting`'s four arms is exercised through the real dialog
+    /// path, not just the setter-core test wrappers.
     #[gpui::test]
     fn h_and_l_step_a_settings_row_and_apply_the_setter(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
@@ -6928,6 +6931,45 @@ mod tests {
             shell.read_with(&cx, |shell, _| shell.font_size),
             crate::fontsize::FontSize::Medium,
             "right should alias l and step forward again"
+        );
+
+        // k: up to Dark mode (1); enter cycles a two-value row, i.e.
+        // toggles — asserted relative to whatever mode the shell started
+        // in rather than assuming a bundled default.
+        let dark_before =
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+        cx.simulate_keystrokes("k enter");
+        let dark_after =
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+        assert_ne!(
+            dark_after, dark_before,
+            "enter on the Dark mode row should toggle the live theme mode"
+        );
+
+        // k: up to Theme (0); l steps to a neighboring family, live.
+        let name_before = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+        cx.simulate_keystrokes("k l");
+        let name_after = shell.read_with(&cx, |shell, _| {
+            shell.services.theme.active_name().to_string()
+        });
+        assert_ne!(
+            name_after, name_before,
+            "l on the Theme row should step to a different theme family"
+        );
+
+        // shift+g: bottom row is Find style (3); l flips vim → fzf.
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            crate::vimfind::FindStyle::Vim,
+            "sanity: find style defaults to vim"
+        );
+        cx.simulate_keystrokes("shift-g l");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            crate::vimfind::FindStyle::Fzf,
+            "l on the Find style row should flip the live find style"
         );
     }
 
@@ -7629,8 +7671,9 @@ mod tests {
             "sanity: the which-key overlay should paint while g is pending"
         );
 
-        // Open the settings modal through the real dispatch path — since
-        // Task 9, `settings_view::open` routes through `open_shell_dialog`.
+        // Open the settings modal through the real dispatch path —
+        // `settings_view::open` routes through `open_shell_dialog_with_key`
+        // (the one standard dialog door, keyed since the row-list rewrite).
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
                 shell.dispatch(&ActionId("settings::open".to_string()), window, cx);

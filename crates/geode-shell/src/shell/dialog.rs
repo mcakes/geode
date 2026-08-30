@@ -146,10 +146,10 @@ pub struct ShellModal {
     /// second parameter alongside it.
     pub build: ModalBuilder,
     /// This modal's optional key-handling seam (Part B) — see
-    /// [`ModalKeyHandler`]'s own doc comment. `None` for every modal that
-    /// predates Part B (the settings modal): `open_shell_dialog` still sets
-    /// this to `None` unconditionally, so those call sites see no behavior
-    /// change at all.
+    /// [`ModalKeyHandler`]'s own doc comment. Both shipped dialogs (the
+    /// keybinding dialog, and the settings dialog since its row-list
+    /// rewrite) now pass a handler; `open_shell_dialog` still sets this to
+    /// `None` unconditionally for any future modal without key needs.
     pub on_key: Option<ModalKeyHandler>,
 }
 
@@ -178,10 +178,12 @@ pub fn open_shell_dialog<F>(
 /// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
 /// keybinding dialog needs first refusal on every keystroke while it's
 /// open, to drive vim navigation and rebind-capture — see that type's own
-/// doc comment). `open_shell_dialog` is simply this with `on_key: None`, so
-/// every pre-Part-B call site (the settings modal) is unaffected. Still the
-/// same one door, same open-time hygiene — this is the one place that
-/// constructs a [`ShellModal`], `open_shell_dialog` included.
+/// doc comment; the settings dialog joined it with the row-list rewrite,
+/// for vim nav/find/stepping). `open_shell_dialog` is simply this with
+/// `on_key: None` — no production modal uses it today, but it stays as the
+/// door for any future handler-less modal. Still the same one door, same
+/// open-time hygiene — this is the one place that constructs a
+/// [`ShellModal`], `open_shell_dialog` included.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
