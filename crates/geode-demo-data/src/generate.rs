@@ -36,19 +36,36 @@ const COUNTERPARTIES: &[&str] = &["CPTY_A", "CPTY_B", "CPTY_C", "CPTY_D"];
 const BOOK_COUNT: usize = 20;
 const LHUS_PER_BOOK: usize = 4;
 
+/// Rows a single position contributes, on average: ~2 legs, each emitting
+/// the ordered pairs of its 2-or-3 underlyings (2 rows, or 6 one time in
+/// ten) — so ~4.8 in practice.
+///
+/// This must **underestimate**. It sizes the position loop, and generation
+/// stops exactly on the requested row count; overshooting the estimate
+/// means running out of positions and returning short.
+const AVG_ROWS_PER_POSITION: usize = 4;
+
 pub fn generate(config: &GeneratorConfig) -> RiskBatch {
     let mut rng = StdRng::seed_from_u64(config.seed);
     let mut b = RiskBatch::default();
     let mut position_seq: u64 = 0;
 
-    'outer: for date_idx in 0..config.business_dates.max(1) {
+    // Book and LHU cardinality is a property of the desk and stays fixed;
+    // position count is what scales with the requested row count. Without
+    // this the generator caps out around 3k rows per business date and the
+    // §7.4 million-row benchmarks silently measure the wrong thing.
+    let dates = config.business_dates.max(1);
+    let slots = dates * BOOK_COUNT * LHUS_PER_BOOK;
+    let positions_per_lhu = config.rows.div_ceil(slots * AVG_ROWS_PER_POSITION).max(1);
+
+    'outer: for date_idx in 0..dates {
         let business_date = format!("2026-08-{:02}", 24 + date_idx);
         for book_idx in 0..BOOK_COUNT {
             let book = format!("BK{book_idx:03}");
             for lhu_idx in 0..LHUS_PER_BOOK {
                 let lhu = format!("{book}_LHU{lhu_idx}");
-                // A handful of positions per LHU, each with 1-3 legs.
-                for _ in 0..8 {
+                // Positions per LHU, each with 1-3 legs.
+                for _ in 0..positions_per_lhu {
                     position_seq += 1;
                     let position_ref = format!("POS{position_seq:07}");
                     let counterparty =

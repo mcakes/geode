@@ -33,6 +33,22 @@ mod tests {
     }
 
     #[test]
+    fn reaches_the_requested_row_count() {
+        // Book and LHU cardinality is fixed, so position count is what must
+        // scale. Before this was enforced the generator capped near 3k rows
+        // per business date and the §7.4 million-row benchmarks would have
+        // silently measured a few thousand.
+        for target in [1_000usize, 20_000, 250_000] {
+            let b = generate(&GeneratorConfig {
+                rows: target,
+                seed: 42,
+                business_dates: 1,
+            });
+            assert_eq!(b.len(), target, "target {target}");
+        }
+    }
+
+    #[test]
     fn emits_ordered_pairs_per_instrument() {
         let b = generate(&cfg(5_000));
         // Every row names two distinct underlyings.

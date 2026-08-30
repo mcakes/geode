@@ -532,8 +532,21 @@ the same discipline as §7.3's query coalescing.
 
 A bounded worker pool (`ingest.workers`) parses and stages in
 parallel; publish transactions serialize through the single writer per
-§5.3. Whether additional concurrent writer connections buy anything is
-a benchmark question and is deliberately not assumed here.
+§5.3.
+
+**Measured, not assumed: parallel staging is 1.87× faster at realistic
+file sizes** — 5.75s sequential against 3.07s across four connections,
+over 17 files of ~118k rows each (`docs/perf.md`). The expectation had
+been that it would not help, since DuckDB's CSV reader is already
+multi-threaded and should saturate the cores by itself. That is
+directionally right but incomplete: the advantage shrinks as files grow
+(2.69× at 24k rows per file, 1.87× at 118k) without disappearing at the
+sizes the desk's files actually reach. Per-file fixed cost is paid
+regardless of file size, and parallelism hides it.
+
+Phase 2a ships the runner single-threaded — correct, and simplest to get
+right — with the worker pool as the measured next optimization rather
+than a speculative one.
 
 §7.1's contract stands: a background refresh of any size may never
 drop a foreground frame. Ingest is off-thread, publish transactions
@@ -949,5 +962,8 @@ Non-blocking, resolvable in config:
 5. The desk-to-book mapping has no source — `Desk` is not a CSV
    column. Config-declared for now.
 6. `implied_vol_surface`'s columns and source are unspecified (§3.7).
-7. Whether concurrent writer connections improve ingest throughput
-   (§5.6) — a benchmark question.
+7. ~~Whether concurrent staging improves ingest throughput (§5.6).~~
+   **Answered: yes, 1.87× at ~118k rows per file, narrowing as files
+   grow.** See §5.6 and `docs/perf.md`. Where the advantage finally
+   disappears is unmeasured — it needs files larger than the generator
+   can hold in memory.

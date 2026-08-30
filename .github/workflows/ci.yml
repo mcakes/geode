@@ -15,6 +15,11 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    # geode-data builds DuckDB from C++ source (duckdb's `bundled` feature):
+    # measured 127s wall / 1382s CPU on an M-series Mac, so a cold cache on
+    # a smaller runner needs real headroom. Swatinem/rust-cache below keeps
+    # the libduckdb-sys artifacts between runs; this covers the cold case.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

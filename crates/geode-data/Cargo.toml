@@ -20,5 +20,10 @@ glob = "0.3.3"
 regex = "1.11.1"
 
 [dev-dependencies]
+criterion = "0.8.2"
 geode-demo-data = { path = "../geode-demo-data" }
 tempfile = "3.27.0"
+
+[[bench]]
+name = "ingest"
+harness = false
