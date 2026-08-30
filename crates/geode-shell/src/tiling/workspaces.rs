@@ -62,10 +62,7 @@ impl Workspace {
     /// tree's focused tile otherwise. `None` only on a workspace with
     /// nothing focusable.
     pub fn focused_tile(&self) -> Option<TileId> {
-        match self.region {
-            FocusRegion::Main => self.tree.focused(),
-            FocusRegion::Dock(side) => self.docks.get(side).tree().focused(),
-        }
+        self.tree_for(self.region).focused()
     }
 
     /// Where focus should land when it can no longer stay where it is
@@ -82,6 +79,41 @@ impl Workspace {
             .find(|(_, dock)| dock.focusable())
             .map(|(side, _)| FocusRegion::Dock(side))
             .unwrap_or(FocusRegion::Main)
+    }
+
+    /// The tree a region names: the main tree for `Main`, a dock's own
+    /// tree for `Dock(side)` (post-merge review cleanup 9 — the drop
+    /// verbs each restated this two-arm match per use; one accessor pair
+    /// keeps them saying *what* tree they mean, not how to reach it).
+    fn tree_for(&self, region: FocusRegion) -> &Tree {
+        match region {
+            FocusRegion::Main => &self.tree,
+            FocusRegion::Dock(side) => self.docks.get(side).tree(),
+        }
+    }
+
+    /// [`Workspace::tree_for`], mutably.
+    fn tree_for_mut(&mut self, region: FocusRegion) -> &mut Tree {
+        match region {
+            FocusRegion::Main => &mut self.tree,
+            FocusRegion::Dock(side) => self.docks.get_mut(side).tree_mut(),
+        }
+    }
+
+    /// Move focus into `region`, upholding the invariant every verb that
+    /// sends focus into a dock must pair with the assignment (post-merge
+    /// review cleanup 9 — previously each verb hand-paired `region = ...`
+    /// with its own `set_visible(true)`): the region field may only name
+    /// a dock while that dock is visible, so entering one auto-shows it.
+    /// Entering `Main` changes no visibility — hiding an emptied source
+    /// dock stays the leaving verb's own job (`remove_tile_anywhere`,
+    /// `move_to_dock`'s arms), because whether the source empties is
+    /// knowledge only the verb has.
+    fn enter_region(&mut self, region: FocusRegion) {
+        if let FocusRegion::Dock(side) = region {
+            self.docks.get_mut(side).set_visible(true);
+        }
+        self.region = region;
     }
 
     /// Click-to-focus on a tree tile: focus it and return focus to the
@@ -447,11 +479,11 @@ impl Workspace {
                 // decoupled focus from fullscreen) would cover the whole
                 // surface and hide the dock the tile just landed in.
                 self.tree.exit_fullscreen();
-                let dock = self.docks.get_mut(side);
-                dock.tree_mut()
+                self.docks
+                    .get_mut(side)
+                    .tree_mut()
                     .split(moved, Self::dock_insert_orientation(side));
-                dock.set_visible(true);
-                self.region = FocusRegion::Dock(side);
+                self.enter_region(FocusRegion::Dock(side));
             }
             FocusRegion::Dock(from) if from == side => {
                 let Some(moved) = self.docks.get_mut(side).tree_mut().remove_focused() else {
@@ -476,12 +508,11 @@ impl Workspace {
                 if self.docks.get(from).tree().is_empty() {
                     self.docks.get_mut(from).set_visible(false);
                 }
-                let target = self.docks.get_mut(side);
-                target
+                self.docks
+                    .get_mut(side)
                     .tree_mut()
                     .split(moved, Self::dock_insert_orientation(side));
-                target.set_visible(true);
-                self.region = FocusRegion::Dock(side);
+                self.enter_region(FocusRegion::Dock(side));
             }
         }
     }
@@ -572,20 +603,14 @@ impl Workspace {
         // unreachable through live verbs and healed restores, so the
         // debug_assert makes a future regression loud while release
         // builds get an honest untouched no-op.
-        if destination != source {
-            let destination_tree = match destination {
-                FocusRegion::Main => &self.tree,
-                FocusRegion::Dock(side) => self.docks.get(side).tree(),
-            };
-            if destination_tree.contains(dragged) {
-                debug_assert!(
-                    false,
-                    "one-place-per-TileId invariant pre-broken \
-                     (dragged {dragged:?} duplicated into the destination tree); \
-                     refusing the edge drop untouched"
-                );
-                return false;
-            }
+        if destination != source && self.tree_for(destination).contains(dragged) {
+            debug_assert!(
+                false,
+                "one-place-per-TileId invariant pre-broken \
+                 (dragged {dragged:?} duplicated into the destination tree); \
+                 refusing the edge drop untouched"
+            );
+            return false;
         }
         self.remove_tile_anywhere(dragged);
         let after = match edge {
@@ -593,34 +618,24 @@ impl Workspace {
             Direction::Right | Direction::Down => true,
         };
         let orientation = edge.orientation();
-        match destination {
-            FocusRegion::Main => {
-                // A stale fullscreen would cover the tile that just moved
-                // (same reasoning as `move_to_dock`'s unconditional exit);
-                // `insert_at_leaf` also clears it, but only on success.
-                self.tree.exit_fullscreen();
-                if !self
-                    .tree
-                    .insert_at_leaf(target, dragged, orientation, after)
-                {
-                    // Unreachable given the pre-checks — but the
-                    // never-lose-a-tile invariant outranks trusting them:
-                    // fall back to a plain focused-leaf split.
-                    self.tree.split(dragged, orientation);
-                }
-            }
-            FocusRegion::Dock(side) => {
-                let dock = self.docks.get_mut(side);
-                if !dock
-                    .tree_mut()
-                    .insert_at_leaf(target, dragged, orientation, after)
-                {
-                    dock.tree_mut().split(dragged, orientation);
-                }
-                dock.set_visible(true);
-            }
+        if destination == FocusRegion::Main {
+            // A stale fullscreen would cover the tile that just moved
+            // (same reasoning as `move_to_dock`'s unconditional exit);
+            // `insert_at_leaf` also clears it, but only on success.
+            self.tree.exit_fullscreen();
         }
-        self.region = destination;
+        let tree = self.tree_for_mut(destination);
+        if !tree.insert_at_leaf(target, dragged, orientation, after) {
+            // Unreachable given the pre-checks — but the
+            // never-lose-a-tile invariant outranks trusting them:
+            // fall back to a plain focused-leaf split.
+            tree.split(dragged, orientation);
+        }
+        // Focus/region follow the moved tile; a destination dock
+        // auto-shows (`enter_region` — drop targets only come from
+        // visible layout, but the verb enforces the region invariant on
+        // its own rather than trusting the caller).
+        self.enter_region(destination);
         true
     }
 
@@ -647,22 +662,9 @@ impl Workspace {
             return false;
         };
         if source == destination {
-            match source {
-                FocusRegion::Main => {
-                    self.tree.swap_tiles(dragged, target);
-                    self.tree.focus(dragged);
-                }
-                FocusRegion::Dock(side) => {
-                    let dock = self.docks.get_mut(side);
-                    dock.tree_mut().swap_tiles(dragged, target);
-                    dock.tree_mut().focus(dragged);
-                    // Same region-invariant enforcement as the cross-tree
-                    // arm below: unreachable from the visible-layout drop
-                    // path (a hidden dock's tiles are never targets), but
-                    // the verb keeps `Dock(side)` focusable on its own.
-                    dock.set_visible(true);
-                }
-            }
+            let tree = self.tree_for_mut(source);
+            tree.swap_tiles(dragged, target);
+            tree.focus(dragged);
         } else {
             // Cross-tree: rename each end in place. With the one-place-
             // per-TileId invariant intact both renames are infallible and
@@ -679,15 +681,9 @@ impl Workspace {
             // Unreachable through live verbs and healed restores; the
             // debug_assert makes a future regression loud while release
             // builds get an honest untouched no-op.
-            let source_tree = match source {
-                FocusRegion::Main => &self.tree,
-                FocusRegion::Dock(side) => self.docks.get(side).tree(),
-            };
-            let destination_tree = match destination {
-                FocusRegion::Main => &self.tree,
-                FocusRegion::Dock(side) => self.docks.get(side).tree(),
-            };
-            if source_tree.contains(target) || destination_tree.contains(dragged) {
+            if self.tree_for(source).contains(target)
+                || self.tree_for(destination).contains(dragged)
+            {
                 debug_assert!(
                     false,
                     "one-place-per-TileId invariant pre-broken \
@@ -696,32 +692,18 @@ impl Workspace {
                 );
                 return false;
             }
-            match source {
-                FocusRegion::Main => self.tree.replace_tile(dragged, target),
-                FocusRegion::Dock(side) => self
-                    .docks
-                    .get_mut(side)
-                    .tree_mut()
-                    .replace_tile(dragged, target),
-            };
-            match destination {
-                FocusRegion::Main => {
-                    self.tree.replace_tile(target, dragged);
-                    self.tree.focus(dragged);
-                }
-                FocusRegion::Dock(side) => {
-                    let dock = self.docks.get_mut(side);
-                    dock.tree_mut().replace_tile(target, dragged);
-                    dock.tree_mut().focus(dragged);
-                    // Both trees stay occupied, so no auto-hide can apply;
-                    // auto-show enforces the region invariant if a caller
-                    // ever aims at a hidden dock's tile (not reachable
-                    // from the visible-layout drop path).
-                    dock.set_visible(true);
-                }
-            }
+            self.tree_for_mut(source).replace_tile(dragged, target);
+            let destination_tree = self.tree_for_mut(destination);
+            destination_tree.replace_tile(target, dragged);
+            destination_tree.focus(dragged);
         }
-        self.region = destination;
+        // Focus/region follow the dragged tile; a destination dock
+        // auto-shows (`enter_region`) — both trees stay occupied in the
+        // cross-tree arm so no auto-hide can apply, and the auto-show
+        // enforces the region invariant if a caller ever aims at a
+        // hidden dock's tile (not reachable from the visible-layout drop
+        // path).
+        self.enter_region(destination);
         true
     }
 
@@ -768,11 +750,13 @@ impl Workspace {
             // fullscreen would cover the dock the tile just landed in.
             self.tree.exit_fullscreen();
         }
-        let dock = self.docks.get_mut(side);
-        dock.tree_mut()
+        self.docks
+            .get_mut(side)
+            .tree_mut()
             .split(dragged, Self::dock_insert_orientation(side));
-        dock.set_visible(true);
-        self.region = FocusRegion::Dock(side);
+        // The target dock auto-shows and takes focus+region
+        // (`enter_region`; focus followed the moved tile via `split`).
+        self.enter_region(FocusRegion::Dock(side));
         true
     }
 
