@@ -200,8 +200,8 @@ fn service(rows: usize) -> (tempfile::TempDir, tempfile::TempDir, DataService, u
 
 /// Submit and block until the snapshot arrives — the end-to-end path the
 /// §7.1 budget is written against, minus the paint.
-fn requery(svc: &DataService, view: &str, scope: &Scope) -> usize {
-    svc.query(view, scope, AsOf::Live).unwrap();
+fn requery(svc: &DataService, view: &str, scope: &Scope, max_depth: usize) -> usize {
+    svc.query(view, scope, AsOf::Live, max_depth).unwrap();
     let r = svc
         .query_results()
         .recv_timeout(Duration::from_secs(120))
@@ -232,9 +232,12 @@ fn bench_requery(c: &mut Criterion) {
         // boundary to produce it.
         eprintln!(
             "\n[{rows} rows ingested {loaded}] result rows — \
+             tree/scoped/d1 {} · tree/scoped/d2 {} · \
              tree/scoped {} · shallow/scoped {} · tree/wide {} · tree/unscoped {}",
-            requery(&svc, "tree", &book_scope()),
-            requery(&svc, "shallow", &book_scope()),
+            requery(&svc, "tree", &book_scope(), 1),
+            requery(&svc, "tree", &book_scope(), 2),
+            requery(&svc, "tree", &book_scope(), usize::MAX),
+            requery(&svc, "shallow", &book_scope(), usize::MAX),
             requery(
                 &svc,
                 "tree",
@@ -244,20 +247,29 @@ fn bench_requery(c: &mut Criterion) {
                         values: (0..20).map(|i| format!("BK{i:03}")).collect(),
                     }],
                     ..Scope::default()
-                }
+                },
+                usize::MAX,
             ),
-            requery(&svc, "tree", &Scope::default()),
+            requery(&svc, "tree", &Scope::default(), usize::MAX),
         );
 
         // The §7.1 contract: three levels, two measure grains, scoped.
         group.bench_function(format!("{rows}_rows_grouped_scoped"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &book_scope())))
+            b.iter(|| black_box(requery(&svc, "tree", &book_scope(), usize::MAX)))
+        });
+
+        // The same view bounded to what a collapsed tree actually shows:
+        // one level open, so one more is materialized. This is the shape
+        // the blotter opens with, and the one the §7.1 budget has to hold
+        // for on every keystroke.
+        group.bench_function(format!("{rows}_rows_grouped_scoped_depth_2"), |b| {
+            b.iter(|| black_box(requery(&svc, "tree", &book_scope(), 2)))
         });
 
         // A regroup is a different grouping over the same data — what
         // Ctrl+1..9 does.
         group.bench_function(format!("{rows}_rows_regroup"), |b| {
-            b.iter(|| black_box(requery(&svc, "shallow", &book_scope())))
+            b.iter(|| black_box(requery(&svc, "shallow", &book_scope(), usize::MAX)))
         });
 
         // A rescope is the same grouping with a different selection.
@@ -269,12 +281,20 @@ fn bench_requery(c: &mut Criterion) {
             ..Scope::default()
         };
         group.bench_function(format!("{rows}_rows_rescope"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &wide)))
+            b.iter(|| black_box(requery(&svc, "tree", &wide, usize::MAX)))
         });
 
         // Unscoped, so the scope predicate is not doing the work.
         group.bench_function(format!("{rows}_rows_unscoped"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &Scope::default())))
+            b.iter(|| black_box(requery(&svc, "tree", &Scope::default(), usize::MAX)))
+        });
+
+        // The unscoped tree is the one shape that misses the §7.1 budget
+        // unbounded — it materializes every leaf. Bounded to what a
+        // collapsed tree shows, the scan is unchanged but the result is
+        // not, which is the whole claim depth bounding makes.
+        group.bench_function(format!("{rows}_rows_unscoped_depth_2"), |b| {
+            b.iter(|| black_box(requery(&svc, "tree", &Scope::default(), 2)))
         });
 
         svc.shutdown();

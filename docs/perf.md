@@ -166,29 +166,42 @@ table above.
 
 | View | Result rows | 100k ingested | 1M ingested |
 |---|---|---|---|
-| `tree`, scoped to 3 books | 7.7k / 74.7k | 6.8 ms | **23.0 ms** |
-| `shallow` (book only), scoped | 4 | 3.9 ms | **5.6 ms** |
-| `tree`, all 20 books | 40.4k / 398k | 16.6 ms | **67.4 ms** |
-| `tree`, unscoped | 40.4k / 398k | 14.8 ms | **63.8 ms** |
+| `tree`, scoped to 3 books | 7.7k / 74.7k | 6.8 ms | **22.7 ms** |
+| `tree`, scoped, bounded to depth 2 | 121 | 5.2 ms | **10.4 ms** |
+| `shallow` (book only), scoped | 4 | 4.0 ms | **6.0 ms** |
+| `tree`, all 20 books | 40.4k / 398k | 15.2 ms | **66.5 ms** |
+| `tree`, unscoped | 40.4k / 398k | 14.1 ms | **63.1 ms** |
+| `tree`, unscoped, bounded to depth 2 | 121 | 7.2 ms | **10.0 ms** |
 
 `tree` is `lhu > underlying_ref > position_ref` across three measure
 grains — the shape a blotter actually runs, not a bare `select`.
 
-**The §7.1 <50ms contract holds for every view a person can look at, and
-is exceeded only where the result is too large to be one.** Latency
-tracks *result* size, not input size: 398k rows in 64 ms is roughly 6M
-rows/sec across the Arrow boundary, so the engine and the grain-split
-join are not the constraint. A scoped three-level tree over a million
-rows requeries in 23 ms.
+**The §7.1 <50ms contract holds for every shape the blotter actually
+submits.** Latency tracks *result* size, not input size: 398k rows in
+63 ms is roughly 6M rows/sec across the Arrow boundary, so neither the
+engine nor the grain-split join is the constraint. The two rows that miss
+the budget are the unbounded ones, and they miss it for exactly that
+reason.
 
-**The real finding is that result size is unbounded.** The compiler emits
-one `ROLLUP` covering *every* level, so a fully collapsed tree still
-materializes its leaves — a trader looking at 80 LHU rows pays for
-398,085. That is the cost of making expand and collapse pure UI (§6.3).
-Bounding materialization to the deepest expanded level, via `GROUPING
-SETS` over `0..=max_depth` instead of a full `ROLLUP`, would keep
-collapse free within the materialized depth and charge one requery for
-expanding past it. Not yet done — see the phase 2b plan.
+### Why the depth bound exists
+
+The compiler originally emitted one `ROLLUP` covering *every* level, so a
+fully collapsed tree still materialized its leaves: a trader looking at
+80 LHU rows paid for 398,085. `compile_view` now takes a `max_depth` and
+emits `GROUPING SETS` over `0..=max_depth` instead. The caller passes one
+more level than is expanded, so a single-step expand is already in the
+snapshot and only a deeper one costs a requery — expand and collapse stay
+pure UI within the bound (§6.3), which was the point of the single
+statement in the first place.
+
+The unscoped million-row tree is the case that shows what it buys:
+**63.1 ms → 10.0 ms, and 398,085 result rows → 121.** The scan is
+identical; only the result changed. That second number matters as much as
+the first, because gpui-component's `DataTable` virtualizes by *index* —
+its `TableDelegate` is asked for row `i` — so the blotter has to flatten
+the tree into a visible-row list itself, and that walk is proportional to
+what was materialized, not to what is on screen. An unbounded query would
+put a 398k-row walk on the frame budget to paint 80 rows.
 
 Not gated in CI yet; these are the first stored baselines for the query
 path.

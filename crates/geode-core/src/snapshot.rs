@@ -110,7 +110,7 @@ fn concat_preserving_dictionaries(
 pub struct Snapshot {
     batch: Option<RecordBatch>,
     meta: Vec<ColumnMeta>,
-    /// Number of grouping columns, for decoding the depth bitmask.
+    /// Number of grouping columns — the deepest level a row can carry.
     grouping_len: usize,
     provenance: Provenance,
 }
@@ -196,12 +196,15 @@ impl Snapshot {
         Some((arr.keys().values(), values))
     }
 
-    /// How many grouping columns are present on this row. The compiler
-    /// emits `grouping(...)` as `depth_mask`; under ROLLUP a level with
-    /// `d` of `n` columns present has mask `2^(n-d) - 1`.
+    /// How many grouping columns are present on this row — 0 is the grand
+    /// total, `grouping_len` a leaf. The compiler emits it directly rather
+    /// than as a `GROUPING()` bitmask, whose width would otherwise change
+    /// with how deep the query was told to materialize.
     pub fn depth_of_row(&self, row: usize) -> Option<usize> {
-        let mask = *self.i64_column("depth_mask")?.get(row)?;
-        (0..=self.grouping_len).find(|d| ((1i64 << (self.grouping_len - d)) - 1).max(0) == mask)
+        let depth = *self.i64_column("row_depth")?.get(row)?;
+        usize::try_from(depth)
+            .ok()
+            .filter(|d| *d <= self.grouping_len)
     }
 }
 
@@ -219,14 +222,15 @@ mod tests {
     fn batches() -> Vec<RecordBatch> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("book", DataType::Utf8, true),
-            Field::new("depth_mask", DataType::Int64, true),
+            Field::new("row_depth", DataType::Int64, true),
             Field::new("delta01", DataType::Float64, true),
         ]));
         let one = RecordBatch::try_new(
             schema.clone(),
             vec![
+                // A leaf carries its book; the grand total does not.
                 Arc::new(StringArray::from(vec![Some("BK000"), None])),
-                Arc::new(Int64Array::from(vec![0, 1])),
+                Arc::new(Int64Array::from(vec![1, 0])),
                 Arc::new(Float64Array::from(vec![Some(10.0), Some(30.0)])),
             ],
         )
@@ -235,7 +239,7 @@ mod tests {
             schema,
             vec![
                 Arc::new(StringArray::from(vec![Some("BK001")])),
-                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Int64Array::from(vec![1])),
                 Arc::new(Float64Array::from(vec![Some(20.0)])),
             ],
         )
@@ -244,7 +248,7 @@ mod tests {
     }
 
     fn meta() -> Vec<ColumnMeta> {
-        ["book", "depth_mask", "delta01"]
+        ["book", "row_depth", "delta01"]
             .into_iter()
             .map(|name| ColumnMeta {
                 name: name.into(),
@@ -280,11 +284,12 @@ mod tests {
     }
 
     #[test]
-    fn depth_is_decoded_from_the_grouping_bitmask() {
-        // n = 1: mask 0 is the leaf, mask 1 the grand total.
+    fn depth_is_read_off_the_row() {
+        // n = 1: row 0 is a leaf, row 1 the grand total.
         let s = snapshot();
         assert_eq!(s.depth_of_row(0), Some(1));
         assert_eq!(s.depth_of_row(1), Some(0));
+        assert_eq!(s.depth_of_row(99), None, "past the end is not a panic");
     }
 
     #[test]

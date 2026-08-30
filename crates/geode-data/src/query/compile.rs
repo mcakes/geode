@@ -17,19 +17,6 @@ use geode_core::schema::{Aggregate, ColumnRole, ColumnSpec, Grain, SchemaSpec};
 use geode_core::scope::Scope;
 use geode_core::view::{ViewColumn, ViewSpec};
 
-/// `GROUPING(a, b, c)` returns a bitmask: a bit is set for each column the
-/// row is *not* grouped by. Under ROLLUP, a level with `depth` of `n`
-/// columns present has the top `n - depth` bits set.
-pub fn mask_for_depth(n: usize, depth: usize) -> i64 {
-    ((1i64 << (n - depth)) - 1).max(0)
-}
-
-/// Inverse of [`mask_for_depth`], or `None` when the mask is not one
-/// ROLLUP can produce.
-pub fn depth_for_mask(n: usize, mask: i64) -> Option<usize> {
-    (0..=n).find(|d| mask_for_depth(n, *d) == mask)
-}
-
 #[derive(Debug, Clone)]
 pub struct CompiledColumn {
     pub name: String,
@@ -74,6 +61,27 @@ fn spine_grain_for(
     })
 }
 
+/// `GROUPING SETS` covering depths `0..=max_depth` — the prefixes of the
+/// grouping tuple, and nothing deeper.
+///
+/// A full `ROLLUP` materializes every level including the leaves, so a
+/// collapsed tree still pays for rows nobody is looking at: at 1M rows
+/// that is 398k rows produced to display 80 (`docs/perf.md`). It also
+/// makes the blotter's flatten walk — grouping snapshot rows by parent to
+/// build the visible row list gpui-component's `TableDelegate` indexes
+/// into — proportional to what was materialized rather than to what is on
+/// screen.
+///
+/// The caller materializes one level deeper than what is open, so a
+/// single-step expand is already in hand and only a deeper one requeries.
+fn grouping_sets(group_cols: &[String], max_depth: usize) -> String {
+    let depth = max_depth.min(group_cols.len());
+    let sets: Vec<String> = (0..=depth)
+        .map(|d| format!("({})", group_cols[..d].join(", ")))
+        .collect();
+    format!("grouping sets ({})", sets.join(", "))
+}
+
 /// Derived ENUM type names currently present for a dataset.
 fn existing_enum_types(conn: &Connection, dataset: &str) -> Result<Vec<String>, StoreError> {
     let sql = "select type_name from duckdb_types() where type_name like ?";
@@ -97,6 +105,9 @@ pub fn compile_view(
     scope: &Scope,
     dims: &DerivedDimensions,
     as_of: &crate::query::as_of::AsOf,
+    // Deepest grouping level to materialize. The caller passes one more
+    // than what is expanded, so a single-step expand needs no requery.
+    max_depth: usize,
 ) -> Result<CompiledQuery, StoreError> {
     let ds = schema
         .dataset(&view.dataset)
@@ -109,6 +120,7 @@ pub fn compile_view(
         })?;
 
     let n = view.grouping.len();
+    let depth = max_depth.min(n);
     let group_cols = quoted(&view.grouping);
     let mut params: Vec<Value> = Vec::new();
     let mut ctes: Vec<String> = Vec::new();
@@ -153,17 +165,34 @@ pub fn compile_view(
         // spine selects it without a table at all — reading the table
         // without a GROUP BY would emit one spine row per *input* row, and
         // the scope is applied inside each measure subquery anyway.
-        ctes.push("spine as (select 0 as depth_mask)".to_string());
+        ctes.push("spine as (select 0 as row_depth)".to_string());
         // The spine's own scope params are unused in this shape.
         params.clear();
-    } else {
+    } else if depth == 0 {
+        // Bounded to the grand total: one row, depth zero. The aggregate
+        // is what makes it exactly one row.
         ctes.push(format!(
-            "spine as (select {select}, grouping({group}) as depth_mask \
-             from {table} where {pred} group by rollup({group}))",
-            select = group_cols.join(", "),
-            group = group_cols.join(", "),
+            "spine as (select 0 as row_depth, count(*) as _rows \
+             from {table} where {pred})",
             table = table_name(&view.dataset, spine_grain, kind_for_joins),
             pred = and_gen(&spine_scope.predicate),
+        ));
+    } else {
+        // `grouping()` may only name columns some set groups by, and its
+        // width would then change with the bound — so the spine emits an
+        // explicit depth instead of a bitmask. Under prefix sets a level
+        // with `p` of `depth` columns present sets the top `depth - p`
+        // bits, so popcount recovers the depth directly.
+        let materialized = &group_cols[..depth];
+        ctes.push(format!(
+            "spine as (select {select}, \
+             ({depth} - bit_count(grouping({group}))) as row_depth \
+             from {table} where {pred} group by {sets})",
+            select = materialized.join(", "),
+            group = materialized.join(", "),
+            table = table_name(&view.dataset, spine_grain, kind_for_joins),
+            pred = and_gen(&spine_scope.predicate),
+            sets = grouping_sets(&group_cols, depth),
         ));
     }
 
@@ -178,17 +207,23 @@ pub fn compile_view(
             .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
             .collect()
     };
-    for g in &view.grouping {
+    for (i, g) in view.grouping.iter().enumerate() {
         // Dimension columns are cast to their derived ENUM so the result
         // comes back dictionary-encoded rather than as strings (spec
         // §6.6, §7.2) — the renderer then compares on integer codes.
-        if interned.contains(&g.as_str()) {
-            selects.push(format!(
-                "s.\"{g}\"::{} as \"{g}\"",
-                crate::store::ddl::enum_type_name(&view.dataset, g)
-            ));
+        //
+        // Below the materialized bound the column is not in the spine at
+        // all. It is still selected, as the NULL a rolled-up level would
+        // carry, so the snapshot's shape does not depend on the bound.
+        let ty = if interned.contains(&g.as_str()) {
+            crate::store::ddl::enum_type_name(&view.dataset, g)
         } else {
-            selects.push(format!("s.\"{g}\""));
+            "varchar".to_string()
+        };
+        if i >= depth {
+            selects.push(format!("NULL::{ty} as \"{g}\""));
+        } else {
+            selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
         }
         columns.push(CompiledColumn {
             name: g.clone(),
@@ -197,9 +232,9 @@ pub fn compile_view(
             scope_semantics: ScopeSemantics::Direct,
         });
     }
-    selects.push("s.depth_mask".to_string());
+    selects.push("s.row_depth".to_string());
     columns.push(CompiledColumn {
-        name: "depth_mask".to_string(),
+        name: "row_depth".to_string(),
         grain: None,
         attribution_by_depth: vec![Attribution::Additive; n + 1],
         scope_semantics: ScopeSemantics::Direct,
@@ -210,9 +245,10 @@ pub fn compile_view(
         let alias = format!("agg_{}", grain.table());
         let grain_scope = compile_scope(conn, scope, ds, grain, dims, spine_grain)?;
 
-        // Only the grouping columns this grain actually has.
-        let own: Vec<String> = view
-            .grouping
+        // Only the grouping columns this grain has, and only within the
+        // materialized depth — selecting a key the spine no longer groups
+        // by would leave it outside every aggregate.
+        let own: Vec<String> = view.grouping[..depth]
             .iter()
             .filter(|g| grain.key_columns().contains(&dims.base_column(g)))
             .cloned()
@@ -243,10 +279,22 @@ pub fn compile_view(
             })
             .collect();
 
+        // The same depths, projected onto the columns this grain has.
         let sub_group = if own.is_empty() {
             String::new()
         } else {
-            format!(" group by rollup({})", own_q.join(", "))
+            let mut sets: Vec<String> = (0..=depth)
+                .map(|d| {
+                    let kept: Vec<String> = own
+                        .iter()
+                        .filter(|c| view.grouping[..d].contains(c))
+                        .map(|c| format!("\"{c}\""))
+                        .collect();
+                    format!("({})", kept.join(", "))
+                })
+                .collect();
+            sets.dedup();
+            format!(" group by grouping sets ({})", sets.join(", "))
         };
         ctes.push(format!(
             "{alias} as (select {keys}{comma}{aggs} from {table} where {pred}{sub_group})",
@@ -276,7 +324,7 @@ pub fn compile_view(
                 .collect();
             let blank: Vec<String> = (0..=n)
                 .filter(|d| by_depth[*d] == Attribution::NonAttributable)
-                .map(|d| mask_for_depth(n, d).to_string())
+                .map(|d| d.to_string())
                 .collect();
 
             let expr = if blank.is_empty() {
@@ -284,7 +332,7 @@ pub fn compile_view(
             } else {
                 // The value would belong to an ancestor row, not this one.
                 format!(
-                    "case when s.depth_mask in ({}) then null else {alias}.\"{}\" end",
+                    "case when s.row_depth in ({}) then null else {alias}.\"{}\" end",
                     blank.join(", "),
                     m.name
                 )
@@ -387,7 +435,8 @@ pub fn compile_view(
                 )
             })
             .collect();
-        format!(" order by s.depth_mask desc, {}", keys.join(", "))
+        // Shallowest first, so a parent precedes its children.
+        format!(" order by s.row_depth asc, {}", keys.join(", "))
     };
 
     let sql = format!(
@@ -499,6 +548,7 @@ kind = "measure"
             &Scope::default(),
             &DerivedDimensions::default(),
             &crate::query::as_of::AsOf::Live,
+            usize::MAX,
         )
         .unwrap()
     }
@@ -576,6 +626,7 @@ kind = "dimension"
             &Scope::default(),
             &DerivedDimensions::default(),
             &crate::query::as_of::AsOf::Live,
+            usize::MAX,
         )
         .unwrap();
 
@@ -614,6 +665,7 @@ kind = "dimension"
             &Scope::default(),
             &DerivedDimensions::default(),
             &crate::query::as_of::AsOf::Live,
+            usize::MAX,
         )
         .unwrap();
         let mut inputs = q.stalest_input.clone();
@@ -622,17 +674,72 @@ kind = "dimension"
     }
 
     #[test]
-    fn depth_and_mask_convert_both_ways() {
-        // n = 3: leaf is 0, then 1, 3, and the grand total 7.
-        assert_eq!(mask_for_depth(3, 3), 0);
-        assert_eq!(mask_for_depth(3, 2), 1);
-        assert_eq!(mask_for_depth(3, 1), 3);
-        assert_eq!(mask_for_depth(3, 0), 7);
-        for n in 0..=4 {
-            for d in 0..=n {
-                assert_eq!(depth_for_mask(n, mask_for_depth(n, d)), Some(d));
-            }
+    fn bounding_the_depth_omits_the_levels_below_it() {
+        // A collapsed tree must not pay for its leaves: at 1M rows the
+        // full tree is 398k rows to display 80 (docs/perf.md), and the
+        // blotter's flatten walk is proportional to what was materialized.
+        let (_d, store) = fixture();
+        let rows_at = |depth: usize| -> Vec<i64> {
+            let q = compile_view(
+                store.writer(),
+                &view(),
+                &schema(),
+                &Scope::default(),
+                &DerivedDimensions::default(),
+                &crate::query::as_of::AsOf::Live,
+                depth,
+            )
+            .unwrap();
+            let conn = store.writer();
+            let mut stmt = conn.prepare(&q.sql).unwrap();
+            let depths: Vec<i64> = stmt
+                .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                    r.get("row_depth")
+                })
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            depths
+        };
+
+        // Depth 0 is the grand total alone.
+        assert_eq!(rows_at(0), vec![0]);
+
+        // Depth 1 adds the LHU level and nothing deeper.
+        let one = rows_at(1);
+        assert!(one.contains(&1), "{one:?}");
+        assert!(
+            !one.contains(&2) && !one.contains(&3),
+            "levels below the bound must not be materialized: {one:?}"
+        );
+
+        // The full depth still returns every level, unchanged.
+        let all = rows_at(3);
+        for d in 0..=3 {
+            assert!(all.contains(&d), "depth {d}: {all:?}");
         }
+        assert!(all.len() > one.len());
+    }
+
+    #[test]
+    fn a_bound_past_the_grouping_is_the_whole_tree() {
+        // The service passes expanded-depth + 1, which routinely exceeds
+        // the grouping — it must not become an out-of-range slice.
+        let (_d, store) = fixture();
+        let sql = |depth: usize| {
+            compile_view(
+                store.writer(),
+                &view(),
+                &schema(),
+                &Scope::default(),
+                &DerivedDimensions::default(),
+                &crate::query::as_of::AsOf::Live,
+                depth,
+            )
+            .unwrap()
+            .sql
+        };
+        assert_eq!(sql(3), sql(usize::MAX));
     }
 
     #[test]
@@ -671,7 +778,7 @@ kind = "dimension"
         let rows: Vec<(i64, Option<f64>, Option<f64>)> = stmt
             .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
                 Ok((
-                    r.get("depth_mask")?,
+                    r.get("row_depth")?,
                     r.get("delta01")?,
                     r.get("daily_trading_pnl")?,
                 ))
@@ -682,7 +789,7 @@ kind = "dimension"
 
         // Grand total, lhu, lhu+underlying (x2), lhu+underlying+position (x2)
         assert_eq!(rows.len(), 6, "{rows:?}");
-        assert!(rows.iter().any(|(m, ..)| *m == 7), "grand total missing");
+        assert!(rows.iter().any(|(d, ..)| *d == 0), "grand total missing");
     }
 
     #[test]
@@ -695,16 +802,15 @@ kind = "dimension"
         let mut stmt = conn.prepare(&q.sql).unwrap();
         let rows: Vec<(i64, Option<f64>)> = stmt
             .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
-                Ok((r.get("depth_mask")?, r.get("daily_trading_pnl")?))
+                Ok((r.get("row_depth")?, r.get("daily_trading_pnl")?))
             })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
 
-        let at = |depth: usize| -> Vec<Option<f64>> {
-            let m = mask_for_depth(3, depth);
+        let at = |depth: i64| -> Vec<Option<f64>> {
             rows.iter()
-                .filter(|(mask, _)| *mask == m)
+                .filter(|(d, _)| *d == depth)
                 .map(|(_, v)| *v)
                 .collect()
         };
@@ -730,16 +836,12 @@ kind = "dimension"
         let mut stmt = conn.prepare(&q.sql).unwrap();
         let rows: Vec<(i64, Option<f64>)> = stmt
             .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
-                Ok((r.get("depth_mask")?, r.get("delta01")?))
+                Ok((r.get("row_depth")?, r.get("delta01")?))
             })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        let total: Option<f64> = rows
-            .iter()
-            .find(|(m, _)| *m == mask_for_depth(3, 0))
-            .map(|(_, v)| *v)
-            .unwrap();
+        let total: Option<f64> = rows.iter().find(|(d, _)| *d == 0).map(|(_, v)| *v).unwrap();
         assert_eq!(total, Some(30.0), "10 + 20 across the two underlyings");
     }
 
@@ -762,6 +864,7 @@ kind = "dimension"
             &Scope::default(),
             &DerivedDimensions::default(),
             &crate::query::as_of::AsOf::Live,
+            usize::MAX,
         )
         .unwrap();
         let conn = store.writer();

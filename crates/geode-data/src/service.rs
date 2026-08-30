@@ -57,7 +57,18 @@ impl DataService {
 
     /// Compile and submit. Results arrive on [`Self::query_results`];
     /// a newer query for the same view supersedes an older one.
-    pub fn query(&self, view: &str, scope: &Scope, as_of: AsOf) -> Result<QueryId, StoreError> {
+    /// `max_depth` is the deepest grouping level to materialize. Pass one
+    /// more than what the tree has expanded: a single-step expand is then
+    /// already in the snapshot, and only a deeper one costs a requery.
+    /// Materializing everything makes the caller.s flatten walk
+    /// proportional to the whole tree rather than to what is on screen.
+    pub fn query(
+        &self,
+        view: &str,
+        scope: &Scope,
+        as_of: AsOf,
+        max_depth: usize,
+    ) -> Result<QueryId, StoreError> {
         let spec = self
             .config
             .views
@@ -75,6 +86,7 @@ impl DataService {
             scope,
             &self.config.dimensions,
             &as_of,
+            max_depth,
         )?;
 
         // Freshness travels with the result, so §5.4's stalest-input rule
@@ -198,7 +210,8 @@ mod tests {
     #[test]
     fn a_query_by_view_name_returns_a_snapshot() {
         let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live).unwrap();
+        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
+            .unwrap();
         let r = next(&svc);
         let snap = r.snapshot.expect("query failed");
         assert!(snap.rows() > 0);
@@ -209,7 +222,7 @@ mod tests {
     fn an_unknown_view_is_an_error_not_a_panic() {
         let (_db, _src, svc) = service();
         assert!(
-            svc.query("nonesuch", &Scope::default(), AsOf::Live)
+            svc.query("nonesuch", &Scope::default(), AsOf::Live, usize::MAX)
                 .is_err()
         );
         svc.shutdown();
@@ -218,7 +231,8 @@ mod tests {
     #[test]
     fn a_scope_narrows_the_result() {
         let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live).unwrap();
+        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
+            .unwrap();
         let all = next(&svc).snapshot.unwrap().rows();
 
         let scoped = Scope {
@@ -228,7 +242,7 @@ mod tests {
             }],
             ..Scope::default()
         };
-        svc.query("tree", &scoped, AsOf::Live).unwrap();
+        svc.query("tree", &scoped, AsOf::Live, usize::MAX).unwrap();
         let narrowed = next(&svc).snapshot.unwrap().rows();
         assert!(narrowed < all, "{narrowed} should be fewer than {all}");
         svc.shutdown();
@@ -237,7 +251,8 @@ mod tests {
     #[test]
     fn the_snapshot_carries_per_dataset_freshness() {
         let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live).unwrap();
+        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
+            .unwrap();
         let snap = next(&svc).snapshot.unwrap();
         let p = snap.provenance();
         assert!(!p.datasets.is_empty(), "freshness must reach the snapshot");
