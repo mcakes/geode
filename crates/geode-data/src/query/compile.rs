@@ -72,6 +72,22 @@ fn spine_grain_for(
     })
 }
 
+/// Derived ENUM type names currently present for a dataset.
+fn existing_enum_types(conn: &Connection, dataset: &str) -> Result<Vec<String>, StoreError> {
+    let sql = "select type_name from duckdb_types() where type_name like ?";
+    let err = |source| StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    let mut stmt = conn.prepare(sql).map_err(err)?;
+    let rows = stmt
+        .query_map(duckdb::params![format!("{dataset}_%_enum")], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(err)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 pub fn compile_view(
     conn: &Connection,
     view: &ViewSpec,
@@ -134,8 +150,29 @@ pub fn compile_view(
         ));
     }
 
+    // Cast only to types that actually exist: the derived ENUMs are built
+    // by ingest, so before the first load there are none and the cast
+    // would be a hard error. Degrading to plain strings is correct — the
+    // interning is an optimization, not a semantic.
+    let interned: Vec<&str> = {
+        let existing = existing_enum_types(conn, &view.dataset)?;
+        crate::store::ddl::dimension_columns(ds)
+            .into_iter()
+            .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
+            .collect()
+    };
     for g in &view.grouping {
-        selects.push(format!("s.\"{g}\""));
+        // Dimension columns are cast to their derived ENUM so the result
+        // comes back dictionary-encoded rather than as strings (spec
+        // §6.6, §7.2) — the renderer then compares on integer codes.
+        if interned.contains(&g.as_str()) {
+            selects.push(format!(
+                "s.\"{g}\"::{} as \"{g}\"",
+                crate::store::ddl::enum_type_name(&view.dataset, g)
+            ));
+        } else {
+            selects.push(format!("s.\"{g}\""));
+        }
         columns.push(CompiledColumn {
             name: g.clone(),
             grain: None,

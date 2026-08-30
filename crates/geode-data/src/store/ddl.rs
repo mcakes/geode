@@ -39,6 +39,65 @@ pub fn table_name(dataset: &str, grain: Grain, kind: TableKind) -> String {
     format!("{dataset}_{}{}", grain.short(), kind.suffix())
 }
 
+/// The ENUM type name for a dimension column of a dataset.
+pub fn enum_type_name(dataset: &str, column: &str) -> String {
+    format!("{dataset}_{column}_enum")
+}
+
+/// Dimension columns whose values are worth interning (spec §3.6). Keys
+/// like `position_ref` are high-cardinality and would make a useless
+/// dictionary, so only `Dimension` columns qualify.
+pub fn dimension_columns(ds: &DatasetSpec) -> Vec<&str> {
+    ds.columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Dimension))
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// Rebuild a dimension's ENUM type from the values currently live.
+///
+/// **Storage stays `VARCHAR`; the ENUM is derived and used only for a
+/// query-time cast.** DuckDB 1.10505 has no `ALTER TYPE ... ADD VALUE`,
+/// so an ENUM *column* could only be widened by dropping and recreating
+/// the type — which means rewriting every table that uses it, the first
+/// time a new book appears. Deriving the type instead keeps the
+/// dictionary encoding §7.2 wants (the cast makes `query_arrow` return
+/// `Dictionary(UInt8, Utf8)`) at the cost of one cheap rebuild per
+/// ingest, and no table ever moves.
+///
+/// Returns the number of distinct values the type now carries.
+pub fn refresh_enum(
+    conn: &duckdb::Connection,
+    dataset: &str,
+    column: &str,
+    live_table: &str,
+) -> Result<usize, crate::store::StoreError> {
+    let name = enum_type_name(dataset, column);
+    // Nothing references the type — columns are VARCHAR — so dropping is
+    // free and never touches stored data.
+    let sql = format!(
+        "drop type if exists {name};
+         create type {name} as enum (
+             select distinct \"{column}\"::varchar from {live_table}
+             where \"{column}\" is not null
+         );"
+    );
+    conn.execute_batch(&sql)
+        .map_err(|source| crate::store::StoreError::Sql {
+            statement: sql,
+            source,
+        })?;
+
+    let count = format!("select count(*) from (select unnest(enum_range(NULL::{name})))");
+    conn.query_row(&count, [], |r| r.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(|source| crate::store::StoreError::Sql {
+            statement: count,
+            source,
+        })
+}
+
 pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
     let mut cols: Vec<String> = Vec::new();
 

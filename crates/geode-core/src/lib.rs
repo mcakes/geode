@@ -6,4 +6,5 @@ pub mod config;
 pub mod dimensions;
 pub mod schema;
 pub mod scope;
+pub mod snapshot;
 pub mod view;

@@ -209,7 +209,31 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         )?);
     }
 
-    // 5. Record the generation.
+    // 5. Rebuild the dimension ENUM types from what is now live, so the
+    // query path can cast to them and get dictionary-encoded columns
+    // (spec §3.6). Storage stays VARCHAR — see `refresh_enum` for why.
+    for col in crate::store::ddl::dimension_columns(req.dataset) {
+        // Refresh from the coarsest table carrying the column, which is
+        // the smallest scan that sees every value.
+        let Some(grain) = geode_core::schema::Grain::ALL
+            .iter()
+            .find(|g| g.key_columns().contains(&col) && split.staged.iter().any(|(s, _)| s == *g))
+        else {
+            continue;
+        };
+        crate::store::ddl::refresh_enum(
+            conn,
+            req.dataset_name,
+            col,
+            &crate::store::ddl::table_name(
+                req.dataset_name,
+                *grain,
+                crate::store::ddl::TableKind::Live,
+            ),
+        )?;
+    }
+
+    // 6. Record the generation.
     let mut degradations: Vec<String> = Vec::new();
     if !missing_required.is_empty() {
         degradations.push(format!(
@@ -566,6 +590,65 @@ source_name = "ModelCode"
                     && c.grain == geode_core::schema::Grain::Instrument),
             "the detector must report the planted model_code disagreement: {found:?}"
         );
+    }
+
+    #[test]
+    fn dimension_columns_come_back_dictionary_encoded() {
+        // This is what §7.2's "interned at ingest" actually requires: a
+        // plain VARCHAR returns StringArray, and the renderer would have
+        // to compare strings per cell.
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let conn = f.store.writer();
+        let mut stmt = conn
+            .prepare(
+                "select book::risk_snapshot_book_enum
+                 from risk_snapshot_position_live limit 10",
+            )
+            .unwrap();
+        let batches: Vec<duckdb::arrow::record_batch::RecordBatch> =
+            stmt.query_arrow([]).unwrap().collect();
+        assert!(
+            matches!(
+                batches[0].schema().field(0).data_type(),
+                duckdb::arrow::datatypes::DataType::Dictionary(_, _)
+            ),
+            "got {:?}",
+            batches[0].schema().field(0).data_type()
+        );
+    }
+
+    #[test]
+    fn a_new_dimension_value_does_not_need_a_table_rewrite() {
+        // DuckDB has no ALTER TYPE ADD VALUE, so an ENUM *column* could
+        // only grow by rewriting every table. The type is derived instead:
+        // refreshing it after a load is a metadata operation.
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let before = crate::store::ddl::refresh_enum(
+            f.store.writer(),
+            "risk_snapshot",
+            "book",
+            "risk_snapshot_position_live",
+        )
+        .unwrap();
+        f.store
+            .writer()
+            .execute_batch(
+                "create temp table one as
+                     select * from risk_snapshot_position_live limit 1;
+                 update one set book = 'BK999';
+                 insert into risk_snapshot_position_live select * from one;",
+            )
+            .unwrap();
+        let after = crate::store::ddl::refresh_enum(
+            f.store.writer(),
+            "risk_snapshot",
+            "book",
+            "risk_snapshot_position_live",
+        )
+        .unwrap();
+        assert_eq!(after, before + 1, "the new book joined the type");
     }
 
     #[test]
