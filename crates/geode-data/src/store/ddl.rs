@@ -29,8 +29,14 @@ impl TableKind {
     }
 }
 
-pub fn table_name(grain: Grain, kind: TableKind) -> String {
-    format!("{}{}", grain.table(), kind.suffix())
+/// Table names carry the dataset, not just the grain.
+///
+/// Two datasets can declare columns at the same grain — `risk_snapshot`
+/// and `instrument_ref` both have instrument-grain columns — and a
+/// grain-only name would make `CREATE TABLE IF NOT EXISTS` silently give
+/// the second dataset the first one's table, with the wrong columns.
+pub fn table_name(dataset: &str, grain: Grain, kind: TableKind) -> String {
+    format!("{dataset}_{}{}", grain.short(), kind.suffix())
 }
 
 pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
@@ -71,7 +77,7 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
-        table_name(grain, kind),
+        table_name(&ds.name, grain, kind),
         cols.join(",\n")
     )
 }
@@ -127,13 +133,33 @@ mod tests {
     #[test]
     fn live_table_carries_the_grain_key_and_its_measures_only() {
         let sql = create_table_sql(&sample_dataset(), Grain::Position, TableKind::Live);
-        assert!(sql.contains("measures_position_live"), "{sql}");
+        assert!(sql.contains("risk_snapshot_position_live"), "{sql}");
         assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"daily_trading_pnl\" DOUBLE"), "{sql}");
         // A finer grain's key column must not appear at position grain.
         assert!(!sql.contains("underlying_ref"), "{sql}");
         // Nor a measure declared at another grain.
         assert!(!sql.contains("delta01"), "{sql}");
+    }
+
+    #[test]
+    fn two_datasets_sharing_a_grain_get_separate_tables() {
+        // risk_snapshot and instrument_ref both have instrument-grain
+        // columns. A grain-only table name would make CREATE TABLE IF NOT
+        // EXISTS silently give the second one the first's table, with the
+        // wrong columns — a data bug with no symptom until a query.
+        assert_eq!(
+            table_name("risk_snapshot", Grain::Instrument, TableKind::Live),
+            "risk_snapshot_instrument_live"
+        );
+        assert_eq!(
+            table_name("instrument_ref", Grain::Instrument, TableKind::Live),
+            "instrument_ref_instrument_live"
+        );
+        assert_ne!(
+            table_name("risk_snapshot", Grain::Instrument, TableKind::Live),
+            table_name("instrument_ref", Grain::Instrument, TableKind::Live)
+        );
     }
 
     #[test]
@@ -175,7 +201,7 @@ mod tests {
     #[test]
     fn archive_adds_gen_id_and_source_time() {
         let sql = create_table_sql(&sample_dataset(), Grain::Underlying, TableKind::Archive);
-        assert!(sql.contains("measures_underlying_archive"), "{sql}");
+        assert!(sql.contains("risk_snapshot_underlying_archive"), "{sql}");
         assert!(sql.contains("\"gen_id\" BIGINT"), "{sql}");
         assert!(
             sql.contains("\"source_time\" TIMESTAMP WITH TIME ZONE"),

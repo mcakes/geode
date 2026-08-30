@@ -22,6 +22,9 @@ pub struct Partition {
 
 #[derive(Debug, Clone)]
 pub struct PublishRequest {
+    /// Table names carry the dataset (spec §4.2), so the request must
+    /// name it: two datasets can share a grain.
+    pub dataset: String,
     pub grain: Grain,
     pub staging_table: String,
     pub partitions: Vec<Partition>,
@@ -75,8 +78,8 @@ fn partition_predicate(partitions: &[Partition]) -> String {
 }
 
 pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOutcome, StoreError> {
-    let live = table_name(req.grain, TableKind::Live);
-    let archive = table_name(req.grain, TableKind::Archive);
+    let live = table_name(&req.dataset, req.grain, TableKind::Live);
+    let archive = table_name(&req.dataset, req.grain, TableKind::Archive);
     let predicate = partition_predicate(&req.partitions);
 
     // Publishing with no partitions would delete nothing and insert
@@ -179,11 +182,11 @@ mod tests {
         store
             .writer()
             .execute_batch(
-                "create table measures_position_live(
+                "create table risk_snapshot_position_live(
                      book varchar, position_ref varchar, daily_trading_pnl double,
                      batch varchar, source_file_id bigint,
                      gen_id bigint, source_time timestamp with time zone);
-                 create table measures_position_archive(
+                 create table risk_snapshot_position_archive(
                      book varchar, position_ref varchar, daily_trading_pnl double,
                      batch varchar, source_file_id bigint,
                      gen_id bigint, source_time timestamp with time zone);
@@ -207,6 +210,7 @@ mod tests {
 
     fn request(batch: &str, book: &str, generation: i64, t: DateTime<Utc>) -> PublishRequest {
         PublishRequest {
+            dataset: "risk_snapshot".into(),
             grain: Grain::Position,
             staging_table: "staging_position".into(),
             partitions: vec![Partition {
@@ -222,7 +226,9 @@ mod tests {
     fn live_rows(store: &Store) -> Vec<(String, f64)> {
         let conn = store.writer();
         let mut stmt = conn
-            .prepare("select book, daily_trading_pnl from measures_position_live order by book")
+            .prepare(
+                "select book, daily_trading_pnl from risk_snapshot_position_live order by book",
+            )
             .unwrap();
         let rows = stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
@@ -248,7 +254,7 @@ mod tests {
         .unwrap();
         assert!(matches!(out, PublishOutcome::Published { rows: 1 }));
         assert_eq!(live_rows(&store), vec![("BK000".to_string(), 10.0)]);
-        assert_eq!(count(&store, "measures_position_archive"), 0);
+        assert_eq!(count(&store, "risk_snapshot_position_archive"), 0);
     }
 
     #[test]
@@ -279,7 +285,7 @@ mod tests {
             .writer()
             .query_row(
                 "select daily_trading_pnl, gen_id, source_time
-                 from measures_position_archive",
+                 from risk_snapshot_position_archive",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -368,7 +374,7 @@ mod tests {
             "this morning's risk must survive a backfill"
         );
         assert_eq!(
-            count(&store, "measures_position_archive"),
+            count(&store, "risk_snapshot_position_archive"),
             1,
             "the old generation is history, not live"
         );

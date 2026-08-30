@@ -41,6 +41,7 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 
 pub fn sweep(
     conn: &Connection,
+    dataset: &str,
     grains: &[Grain],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
@@ -48,7 +49,7 @@ pub fn sweep(
     let mut report = SweepReport::default();
 
     for grain in grains {
-        let archive = table_name(*grain, TableKind::Archive);
+        let archive = table_name(dataset, *grain, TableKind::Archive);
 
         if !policy.is_empty() {
             let before: i64 = {
@@ -138,7 +139,7 @@ mod tests {
         store
             .writer()
             .execute_batch(
-                "create table measures_position_archive(
+                "create table risk_snapshot_position_archive(
                      book varchar, batch varchar, gen_id bigint,
                      source_time timestamp with time zone);",
             )
@@ -153,7 +154,7 @@ mod tests {
                 store
                     .writer()
                     .execute(
-                        "insert into measures_position_archive values (?, ?, ?, ?)",
+                        "insert into risk_snapshot_position_archive values (?, ?, ?, ?)",
                         duckdb::params![
                             batch,
                             batch,
@@ -169,9 +170,11 @@ mod tests {
     fn remaining(store: &Store) -> i64 {
         store
             .writer()
-            .query_row("select count(*) from measures_position_archive", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select count(*) from risk_snapshot_position_archive",
+                [],
+                |r| r.get(0),
+            )
             .unwrap()
     }
 
@@ -185,6 +188,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -209,6 +213,7 @@ mod tests {
         };
         sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -228,6 +233,7 @@ mod tests {
         };
         sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -248,6 +254,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -262,6 +269,7 @@ mod tests {
         fill(&store, 5);
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
@@ -276,6 +284,7 @@ mod tests {
         let (_d, store) = fixture();
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),
@@ -297,13 +306,14 @@ mod tests {
         store
             .writer()
             .execute(
-                "insert into measures_position_archive values (NULL, NULL, 99, ?)",
+                "insert into risk_snapshot_position_archive values (NULL, NULL, 99, ?)",
                 duckdb::params![ts("2026-08-30T01:00:00Z")],
             )
             .unwrap();
 
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),

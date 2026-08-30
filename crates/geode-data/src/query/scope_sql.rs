@@ -143,7 +143,7 @@ pub fn compile_scope(
             .join(" and ");
         direct.push(format!(
             "exists (select 1 from {} probe where {join} and {})",
-            table_name(probe, TableKind::Live),
+            table_name(&ds.name, probe, TableKind::Live),
             finer.join(" and ")
         ));
     }
@@ -438,13 +438,13 @@ grain = "position"
         store
             .writer()
             .execute_batch(
-                "create table measures_underlying_live(
+                "create table risk_snapshot_underlying_live(
                      book varchar, lhu varchar, position_ref varchar,
                      counterparty varchar, instrument_ref varchar,
                      underlying_ref varchar, delta01 double,
                      batch varchar, source_file_id bigint,
                      gen_id bigint, source_time timestamp with time zone);
-                 insert into measures_underlying_live values
+                 insert into risk_snapshot_underlying_live values
                    ('BK000','L','P1','C','I1','SPX', 10, 'b', 1, 1, now()),
                    ('BK001','L','P2','C','I2','RUT', 20, 'b', 1, 1, now());",
             )
@@ -470,7 +470,7 @@ grain = "position"
             .writer()
             .query_row(
                 &format!(
-                    "select sum(delta01) from measures_underlying_live where {}",
+                    "select sum(delta01) from risk_snapshot_underlying_live where {}",
                     sql.predicate
                 ),
                 duckdb::params_from_iter(sql.params.iter()),

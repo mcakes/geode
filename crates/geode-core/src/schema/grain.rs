@@ -72,6 +72,18 @@ impl Grain {
         }
     }
 
+    /// Short name used to build per-dataset table names. Table names must
+    /// carry the dataset too: two datasets can declare columns at the same
+    /// grain, and a grain-only name would silently make them share a table.
+    pub fn short(self) -> &'static str {
+        match self {
+            Grain::Position => "position",
+            Grain::Instrument => "instrument",
+            Grain::Underlying => "underlying",
+            Grain::UnderlyingPair => "underlying_pair",
+        }
+    }
+
     pub fn table(self) -> &'static str {
         match self {
             Grain::Position => "measures_position",

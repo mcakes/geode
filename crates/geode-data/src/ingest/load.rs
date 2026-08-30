@@ -198,6 +198,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         published.push(publish_file(
             conn,
             &PublishRequest {
+                dataset: req.dataset_name.to_string(),
                 grain: *grain,
                 staging_table: staging_table.clone(),
                 partitions: partitions.clone(),
@@ -472,7 +473,7 @@ source_name = "ModelCode"
         assert_eq!(out.rows, file.rows);
         assert_eq!(out.health, Health::Ok);
 
-        let live = count(&f, "measures_position_live");
+        let live = count(&f, "risk_snapshot_position_live");
         assert!(
             live > 0 && live < file.rows as i64,
             "position grain must collapse rows: {live} from {}",
@@ -496,7 +497,7 @@ source_name = "ModelCode"
             "optional absence is expected, not a warning"
         );
         assert_eq!(out.missing_optional, vec!["skew01".to_string()]);
-        let nulls = count(&f, "measures_underlying_live where skew01 is null");
+        let nulls = count(&f, "risk_snapshot_underlying_live where skew01 is null");
         assert!(nulls > 0);
     }
 
@@ -572,9 +573,9 @@ source_name = "ModelCode"
         let f = fixture();
         let file = ready_file(&f);
         let first = load(&f, file);
-        let before = count(&f, "measures_underlying_live");
+        let before = count(&f, "risk_snapshot_underlying_live");
         let second = load(&f, file);
-        let after = count(&f, "measures_underlying_live");
+        let after = count(&f, "risk_snapshot_underlying_live");
         assert_eq!(before, after, "live must not accumulate across reloads");
         assert!(second.gen_id > first.gen_id);
 
@@ -588,7 +589,7 @@ source_name = "ModelCode"
             "the reload must replace live, not be filed as history: {:?}",
             second.published
         );
-        let archived = count(&f, "measures_underlying_archive");
+        let archived = count(&f, "risk_snapshot_underlying_archive");
         assert_eq!(
             archived, before,
             "the superseded generation must have moved to archive"
@@ -600,7 +601,7 @@ source_name = "ModelCode"
         let f = fixture();
         let file = ready_file(&f);
         load(&f, file);
-        let before = count(&f, "measures_underlying_live");
+        let before = count(&f, "risk_snapshot_underlying_live");
 
         let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
         let sentinel = crate::source::parse_sentinel(&text).unwrap();
@@ -616,7 +617,7 @@ source_name = "ModelCode"
             },
         );
         assert!(err.is_err());
-        let after = count(&f, "measures_underlying_live");
+        let after = count(&f, "risk_snapshot_underlying_live");
         assert_eq!(before, after, "spec §5.7: a failed load never clobbers");
     }
 

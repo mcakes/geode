@@ -129,7 +129,7 @@ pub fn compile_view(
              from {table} where {pred} group by rollup({group}))",
             select = group_cols.join(", "),
             group = group_cols.join(", "),
-            table = table_name(spine_grain, TableKind::Live),
+            table = table_name(&view.dataset, spine_grain, TableKind::Live),
             pred = spine_scope.predicate,
         ));
     }
@@ -200,7 +200,7 @@ pub fn compile_view(
             keys = own_q.join(", "),
             comma = if own.is_empty() { "" } else { ", " },
             aggs = aggs.join(", "),
-            table = table_name(grain, TableKind::Live),
+            table = table_name(&view.dataset, grain, TableKind::Live),
             pred = grain_scope.predicate,
         ));
         // The grain subquery's params follow the spine's, in CTE order.
@@ -367,9 +367,9 @@ kind = "measure"
         store
             .writer()
             .execute_batch(
-                "insert into measures_position_live values
+                "insert into risk_snapshot_position_live values
                    ('BK0','L0','P1','C', 7, 'b', 1, 1, now());
-                 insert into measures_underlying_live values
+                 insert into risk_snapshot_underlying_live values
                    ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, now()),
                    ('BK0','L0','P1','C','I1','RUT', 20, 'b', 1, 1, now());",
             )
