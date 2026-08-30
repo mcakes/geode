@@ -39,6 +39,13 @@ use super::workspaces::Workspace;
 /// 25% per side, leaving the middle 50%×50% as the center zone).
 pub const DROP_EDGE_BAND: f32 = 0.25;
 
+/// One visible dock's drop geometry, owned: its side, frame rect, and
+/// laid-out tiles — what [`locate_drop_target`] (and the tests) build
+/// eagerly before borrowing slices of it into [`resolve_drop_target`].
+/// (The core itself takes borrows, not this owned shape, so the render
+/// pass can feed it per-frame without allocating.)
+type OwnedDockCells = Vec<(super::docks::DockSide, Rect, Vec<(TileId, Rect)>)>;
+
 /// What part of a tile the cursor is over: the center, or one of the four
 /// edge bands. Edge directions use the same [`Direction`] vocabulary as
 /// navigation (`Up` = the top band, `Down` = the bottom band).
@@ -131,17 +138,78 @@ pub fn drop_highlight_rect(rect: Rect, zone: DropZone) -> Rect {
     }
 }
 
+/// The one shared answer to "what would dropping here mean", over
+/// caller-supplied rects (post-merge review cleanup 8 — before this
+/// extraction the render pass's highlight closure and
+/// [`locate_drop_target`] each restated the dock-frame → dock-tile →
+/// dock-background → tree-tile resolution order, and two hand-kept
+/// copies of a targeting rule is exactly how a highlight ends up
+/// promising a drop the release won't perform). Both call sites now
+/// feed this core:
+///
+/// - [`locate_drop_target`] wraps it with geometry re-derived from the
+///   live layout authorities, once per drop;
+/// - the render pass (`ShellView::render`'s drop-highlight closure)
+///   feeds it the dock cells and tree rects its single layout pass
+///   already computed — the core takes borrowed slices through a plain
+///   iterator precisely so that per-frame call allocates nothing
+///   (PHILOSOPHY.md: per-frame heap churn is a defect).
+///
+/// Returns the resolved target plus the rect it resolved in — the hit
+/// tile's rect, or the dock's frame rect for a background hit — because
+/// the render caller needs that rect to paint the zone highlight
+/// ([`drop_highlight_rect`] over it) and re-deriving it would mean a
+/// second hit test. Resolution order is part of the contract: dock
+/// frames are checked before the main tree's tiles (dock rects are
+/// carved OUT of the tree area so they never overlap it, but a dock
+/// frame containing the point must claim it even when no dock tile
+/// does), and within a dock a tile hit beats the background. A
+/// non-finite cursor falls out naturally — `rect_contains` is false for
+/// NaN/inf against every rect.
+pub fn resolve_drop_target<'a>(
+    docks: impl IntoIterator<Item = (super::docks::DockSide, Rect, &'a [(TileId, Rect)])>,
+    tree_tiles: &[(TileId, Rect)],
+    x: f32,
+    y: f32,
+) -> Option<(DropTarget, Rect)> {
+    for (side, frame, tiles) in docks {
+        if rect_contains(&frame, x, y) {
+            return Some(match hit_tile(tiles, x, y) {
+                Some((id, tr)) => (
+                    DropTarget::Tile {
+                        id,
+                        zone: classify_drop_zone(tr, x, y),
+                    },
+                    tr,
+                ),
+                None => (DropTarget::DockBackground { side }, frame),
+            });
+        }
+    }
+    hit_tile(tree_tiles, x, y).map(|(id, tr)| {
+        (
+            DropTarget::Tile {
+                id,
+                zone: classify_drop_zone(tr, x, y),
+            },
+            tr,
+        )
+    })
+}
+
 /// Resolve the drop target under an absolute cursor position, re-deriving
 /// the frame's geometry from the same pure authorities the render pass
 /// uses (`dock_layout` carves the dock frames, each tree's own
-/// `Tree::layout` places its tiles). Called once per *drop* (mouse-up) —
-/// not per frame: the render pass paints its highlight from the rects its
-/// own single layout pass already computed, via [`hit_tile`] /
-/// [`classify_drop_zone`] directly, so this composition never runs
-/// per-frame. Deriving from live state at drop time (rather than a
-/// snapshot captured at mouse-down) is deliberate: the keyboard stays hot
-/// during a drag, so a `ctrl+v` split mid-drag changes the layout — the
-/// drop must land on the layout the user *sees* at release.
+/// `Tree::layout` places its tiles) and handing it to the shared
+/// [`resolve_drop_target`] core. Called once per *drop* (mouse-up) — not
+/// per frame: the render pass calls the core directly with the rects its
+/// own single layout pass already computed, so this composition never
+/// runs per-frame (and the eager per-dock layouts built here are a
+/// per-drop cost, not a per-frame one). Deriving from live state at drop
+/// time (rather than a snapshot captured at mouse-down) is deliberate:
+/// the keyboard stays hot during a drag, so a `ctrl+v` split mid-drag
+/// changes the layout — the drop must land on the layout the user *sees*
+/// at release.
 ///
 /// `None` — no target, drop is a no-op — for a cursor outside every tile
 /// and dock, a non-finite cursor, or a fullscreen layout (no tile drag
@@ -157,23 +225,19 @@ pub fn locate_drop_target(workspace: &Workspace, area: Rect, x: f32, y: f32) -> 
         return None;
     }
     let (tree_area, dock_rects) = dock_layout(workspace.docks(), area);
-    for &(side, r) in &dock_rects {
-        if rect_contains(&r, x, y) {
-            let tiles = workspace.docks().get(side).tree().layout(r);
-            return Some(match hit_tile(&tiles, x, y) {
-                Some((id, tr)) => DropTarget::Tile {
-                    id,
-                    zone: classify_drop_zone(tr, x, y),
-                },
-                None => DropTarget::DockBackground { side },
-            });
-        }
-    }
-    let tiles = tree.layout(tree_area);
-    hit_tile(&tiles, x, y).map(|(id, tr)| DropTarget::Tile {
-        id,
-        zone: classify_drop_zone(tr, x, y),
-    })
+    let dock_cells: OwnedDockCells = dock_rects
+        .into_iter()
+        .map(|(side, r)| (side, r, workspace.docks().get(side).tree().layout(r)))
+        .collect();
+    resolve_drop_target(
+        dock_cells
+            .iter()
+            .map(|(side, r, tiles)| (*side, *r, tiles.as_slice())),
+        &tree.layout(tree_area),
+        x,
+        y,
+    )
+    .map(|(target, _)| target)
 }
 
 #[cfg(test)]
@@ -417,6 +481,117 @@ mod tests {
         // Empty main tree, no docks: nothing anywhere.
         let empty = Workspaces::new();
         assert_eq!(locate_drop_target(empty.active(), AREA, 500.0, 400.0), None);
+    }
+
+    /// Post-merge review cleanup 8 parity pin: `locate_drop_target` (the
+    /// drop path) and the shared `resolve_drop_target` core fed with
+    /// render-style rects (dock frames + per-dock tile layouts + main
+    /// tree layout, exactly what `ShellView::render`'s single layout
+    /// pass computes) must agree at every cursor position — the two call
+    /// sites share one answer to "what would dropping here mean" by
+    /// construction now, and this grid sweep keeps any future divergence
+    /// loud. Swept at a 10px step over the whole area plus a margin
+    /// outside it, crossing every dock frame, tile boundary, and zone
+    /// band in the fixture.
+    #[test]
+    fn render_path_resolution_agrees_with_locate_drop_target_everywhere() {
+        let ws = workspace_with_dock();
+        let workspace = ws.active();
+        // The render pass's own geometry: dock frames carved out of the
+        // area, each visible dock's tiles laid into its frame, the main
+        // tree laid into what's left.
+        let (tree_area, dock_rects) = dock_layout(workspace.docks(), AREA);
+        let dock_cells: super::OwnedDockCells = dock_rects
+            .into_iter()
+            .map(|(side, r)| (side, r, workspace.docks().get(side).tree().layout(r)))
+            .collect();
+        let tree_tiles = workspace.tree().layout(tree_area);
+
+        let mut checked = 0u32;
+        let mut y = -20.0f32;
+        while y <= AREA.h + 20.0 {
+            let mut x = -20.0f32;
+            while x <= AREA.w + 20.0 {
+                let from_core = resolve_drop_target(
+                    dock_cells
+                        .iter()
+                        .map(|(side, r, tiles)| (*side, *r, tiles.as_slice())),
+                    &tree_tiles,
+                    x,
+                    y,
+                )
+                .map(|(target, _)| target);
+                let from_locate = locate_drop_target(workspace, AREA, x, y);
+                assert_eq!(
+                    from_core, from_locate,
+                    "core and locate_drop_target disagree at ({x}, {y})"
+                );
+                checked += 1;
+                x += 10.0;
+            }
+            y += 10.0;
+        }
+        assert!(
+            checked > 8000,
+            "sanity: the sweep actually covered the grid"
+        );
+    }
+
+    /// The rect the core hands back is the one the highlight paints over:
+    /// the hit tile's rect for a tile target, the dock's frame for a
+    /// background target.
+    #[test]
+    fn resolve_drop_target_returns_the_rect_it_resolved_in() {
+        let mut ws = Workspaces::new();
+        ws.split_active(Orientation::Horizontal);
+        ws.active_mut().toggle_dock(DockSide::Right); // visible, empty
+        let workspace = ws.active();
+        let (tree_area, dock_rects) = dock_layout(workspace.docks(), AREA);
+        let dock_cells: super::OwnedDockCells = dock_rects
+            .into_iter()
+            .map(|(side, r)| (side, r, workspace.docks().get(side).tree().layout(r)))
+            .collect();
+        let tree_tiles = workspace.tree().layout(tree_area);
+        let docks = || {
+            dock_cells
+                .iter()
+                .map(|(side, r, tiles)| (*side, *r, tiles.as_slice()))
+        };
+
+        // Center of the lone main tile: the tile target carries its rect.
+        let (id, tile_rect) = tree_tiles[0];
+        let (target, rect) = resolve_drop_target(
+            docks(),
+            &tree_tiles,
+            tile_rect.x + tile_rect.w / 2.0,
+            tile_rect.y + tile_rect.h / 2.0,
+        )
+        .unwrap();
+        assert_eq!(
+            target,
+            DropTarget::Tile {
+                id,
+                zone: DropZone::Center
+            }
+        );
+        assert_eq!(rect, tile_rect);
+
+        // Inside the empty dock: the background target carries the frame.
+        let frame = dock_cells[0].1;
+        let (target, rect) = resolve_drop_target(
+            docks(),
+            &tree_tiles,
+            frame.x + frame.w / 2.0,
+            frame.y + frame.h / 2.0,
+        )
+        .unwrap();
+        assert_eq!(
+            target,
+            DropTarget::DockBackground {
+                side: DockSide::Right
+            }
+        );
+        assert_eq!(rect, frame);
     }
 
     #[test]

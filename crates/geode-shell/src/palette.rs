@@ -100,18 +100,29 @@ impl PaletteItem {
 /// see [`PaletteState::filtered`] for why that specific score value
 /// matters.
 pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
+    fuzzy_match_lowered(&query.to_lowercase(), &candidate.to_lowercase())
+}
+
+/// [`fuzzy_match`]'s core over ALREADY-lowercased inputs (post-merge
+/// review perf 11): [`PaletteState`] stores each item's lowered match
+/// text once at construction and lowercases the query once per edit, so
+/// the per-item work in a filter pass is just this subsequence walk —
+/// no per-item `title()` clone, no per-item `to_lowercase`. The public
+/// wrapper above keeps the original lowercase-both contract for callers
+/// (and tests) holding raw strings.
+fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
     if query.is_empty() {
         return Some((0, Vec::new()));
     }
 
-    let cand: Vec<char> = candidate.to_lowercase().chars().collect();
+    let cand: Vec<char> = candidate.chars().collect();
     let mut cand_idx = 0usize;
     let mut prev_matched: Option<usize> = None;
     let mut consecutive_run: u32 = 0;
     let mut score: u32 = 0;
     let mut indices: Vec<usize> = Vec::new();
 
-    for qc in query.to_lowercase().chars() {
+    for qc in query.chars() {
         let offset = cand[cand_idx..].iter().position(|&c| c == qc)?;
         let idx = cand_idx + offset;
 
@@ -148,6 +159,20 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
 ///
 /// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
 /// runs at all.
+///
+/// **Out-of-range guard** (fix-round nit): the indices are positions in
+/// the *lowered* match text while `boundaries` comes from the
+/// original-case `title`, and `str::to_lowercase` is not always
+/// char-count-preserving — 'İ' (U+0130, dotted capital I) lowercases to
+/// the two chars `"i\u{307}"`, so a title containing it produces match
+/// indices past its own last char. Every title this palette renders
+/// today is plain ASCII (action titles and `"Theme: {name}"` rows over
+/// the bundled theme names), so this is unreachable in practice — but
+/// this function runs on the render path, where an out-of-bounds
+/// `boundaries[..]` would be a panic mid-frame rather than a wrong
+/// highlight, and free-form theme names would be all it takes. Indices
+/// that fall outside the title are therefore skipped (the in-range
+/// characters still highlight normally) instead of indexing.
 fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
     if indices.is_empty() {
         return Vec::new();
@@ -161,39 +186,117 @@ fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>>
         .map(|(b, _)| b)
         .chain(std::iter::once(title.len()))
         .collect();
+    // `boundaries` holds one entry per char plus the sentinel, so this is
+    // the title's char count — the exclusive upper bound on a usable
+    // index (see the guard note above).
+    let char_count = boundaries.len() - 1;
 
     let mut runs = Vec::new();
-    let mut run_start = indices[0];
-    let mut run_end = indices[0];
-    for &idx in &indices[1..] {
-        if idx == run_end + 1 {
-            run_end = idx;
+    let mut run: Option<(usize, usize)> = None;
+    for &idx in indices {
+        if idx >= char_count {
             continue;
         }
-        runs.push(boundaries[run_start]..boundaries[run_end + 1]);
-        run_start = idx;
-        run_end = idx;
+        run = match run {
+            Some((start, end)) if idx == end + 1 => Some((start, idx)),
+            Some((start, end)) => {
+                runs.push(boundaries[start]..boundaries[end + 1]);
+                Some((idx, idx))
+            }
+            None => Some((idx, idx)),
+        };
     }
-    runs.push(boundaries[run_start]..boundaries[run_end + 1]);
+    if let Some((start, end)) = run {
+        runs.push(boundaries[start]..boundaries[end + 1]);
+    }
     runs
 }
 
 /// Fuzzy-filtered, keyboard-navigable palette state. Pure: no `gpui`, no
 /// I/O. `ShellView` builds one fresh (via [`build_items`]) each time the
 /// palette opens and drops it on close — nothing here is per-frame state.
+///
+/// **Filter caching** (post-merge review perf 11): the filter result is
+/// computed once per query edit (`recompute_filtered`, from `new` and
+/// `set_query`) and cached in `filtered`; [`PaletteState::filtered`] and
+/// every selection accessor read the cache without re-matching — before
+/// this, each call re-fuzzy-matched the whole list, so a single Enter
+/// press computed the same filter three times (`selected_item`, then the
+/// close, then the next render). `items` cannot change while a
+/// `PaletteState` lives, so the query is the ONLY invalidation key —
+/// verified, not assumed: the sole construction site is
+/// `ShellView::toggle_palette` (fresh from the post-init-fixed
+/// `ActionRegistry` and the fixed bundled-theme list), and the one
+/// reload path that could change palette inputs (`apply_reload`'s
+/// keymap-docs-changed branch) CLOSES the palette (`self.palette =
+/// None`) rather than mutating an open one.
 pub struct PaletteState {
     items: Vec<PaletteItem>,
+    /// Each item's lowercased match text, built once at construction so
+    /// a filter pass does no per-item `title()` clone or `to_lowercase`
+    /// (perf 11 — see [`fuzzy_match_lowered`]).
+    lowered: Vec<String>,
     query: String,
     selected: usize,
+    /// The cached filter result: index into `items` plus the matched
+    /// char indices, best match first (ties in `items` order — the sort
+    /// is stable). Indices, not `&PaletteItem` borrows, so the cache can
+    /// live beside the items it points into.
+    filtered: Vec<(usize, Vec<usize>)>,
+    /// Test-only honesty counter for the no-re-match guarantee: bumped
+    /// at the real `fuzzy_match_lowered` call site in
+    /// `recompute_filtered`, per instance (a `Cell` field, not a global
+    /// static, so parallel tests can't race it).
+    #[cfg(test)]
+    match_calls: std::cell::Cell<usize>,
 }
 
 impl PaletteState {
     pub fn new(items: Vec<PaletteItem>) -> Self {
-        PaletteState {
+        let lowered = items
+            .iter()
+            .map(|item| item.title().to_lowercase())
+            .collect();
+        let mut state = PaletteState {
             items,
+            lowered,
             query: String::new(),
             selected: 0,
+            filtered: Vec::new(),
+            #[cfg(test)]
+            match_calls: std::cell::Cell::new(0),
+        };
+        state.recompute_filtered();
+        state
+    }
+
+    /// Recompute the cached filter result for the current query — the
+    /// one place matching happens (called from `new` and `set_query`
+    /// only; see the struct doc for why those are the only two
+    /// invalidation points).
+    fn recompute_filtered(&mut self) {
+        let query = self.query.to_lowercase();
+        let mut scored: Vec<(usize, u32, Vec<usize>)> = Vec::new();
+        for (i, lowered) in self.lowered.iter().enumerate() {
+            #[cfg(test)]
+            self.match_calls.set(self.match_calls.get() + 1);
+            if let Some((score, indices)) = fuzzy_match_lowered(&query, lowered) {
+                scored.push((i, score, indices));
+            }
         }
+        // Stable sort: ties — including an empty query, where every item
+        // scores the same 0 — keep their original `items` order (the
+        // brief's "empty query returns all in registry order").
+        scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
+        self.filtered = scored
+            .into_iter()
+            .map(|(i, _, indices)| (i, indices))
+            .collect();
+    }
+
+    #[cfg(test)]
+    fn match_call_count(&self) -> usize {
+        self.match_calls.get()
     }
 
     pub fn query(&self) -> &str {
@@ -218,6 +321,7 @@ impl PaletteState {
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.query = query.into();
         self.selected = 0;
+        self.recompute_filtered();
     }
 
     /// Set the selection to an absolute row index — a mouse click on a
@@ -230,7 +334,7 @@ impl PaletteState {
     /// frame that painted the row and the click landing) clamps to the last
     /// row rather than panicking or silently going out of range.
     pub fn set_selected(&mut self, index: usize) {
-        let len = self.filtered().len();
+        let len = self.filtered.len();
         if len == 0 {
             self.selected = 0;
             return;
@@ -238,25 +342,20 @@ impl PaletteState {
         self.selected = index.min(len - 1);
     }
 
-    /// Every item whose title fuzzy-matches the current query
-    /// ([`fuzzy_match`]), best match first, paired with the matched char
-    /// indices `render` highlights. Ties — including an empty query, where
-    /// every item scores the same `Some(0)` — keep their original `items`
-    /// order, because `sort_by_key` is a stable sort: this is exactly the
-    /// brief's "empty query returns all in registry order".
+    /// Every item whose title fuzzy-matches the current query, best match
+    /// first, paired with the matched char indices `render` highlights.
+    /// Ties — including an empty query, where every item scores the same
+    /// 0 — keep their original `items` order (see `recompute_filtered`).
+    /// A cache read (perf 11 — see the struct doc): no matching happens
+    /// here, only a walk of the stored result. The signature still
+    /// returns owned index `Vec`s (a handful of small clones) rather
+    /// than borrows purely to keep the pre-cache API shape; the cost
+    /// this existed to kill — the full fuzzy re-match per call — is
+    /// gone.
     pub fn filtered(&self) -> Vec<(&PaletteItem, Vec<usize>)> {
-        let mut scored: Vec<(&PaletteItem, u32, Vec<usize>)> = self
-            .items
+        self.filtered
             .iter()
-            .filter_map(|item| {
-                fuzzy_match(&self.query, &item.title())
-                    .map(|(score, indices)| (item, score, indices))
-            })
-            .collect();
-        scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
-        scored
-            .into_iter()
-            .map(|(item, _, indices)| (item, indices))
+            .map(|(i, indices)| (&self.items[*i], indices.clone()))
             .collect()
     }
 
@@ -272,7 +371,7 @@ impl PaletteState {
     /// selection-change path; scroll-follow handles any index, including
     /// wrap-around jumps.
     pub fn move_selection(&mut self, delta: i32) {
-        let len = self.filtered().len();
+        let len = self.filtered.len();
         if len == 0 {
             self.selected = 0;
             return;
@@ -289,9 +388,9 @@ impl PaletteState {
     /// panicking). Returns an owned clone so callers can dispatch it after
     /// dropping the palette state (e.g. closing the palette first).
     pub fn selected_item(&self) -> Option<PaletteItem> {
-        self.filtered()
+        self.filtered
             .get(self.selected)
-            .map(|(item, _)| (*item).clone())
+            .map(|(i, _)| self.items[*i].clone())
     }
 }
 
@@ -773,6 +872,33 @@ mod tests {
         assert!(highlight_runs("anything", &[]).is_empty());
     }
 
+    /// Fix-round nit guard: 'İ' (U+0130) lowercases to "i\u{307}" — TWO
+    /// chars — so match indices (positions in the LOWERED text, per
+    /// `fuzzy_match`'s contract) can exceed the original title's char
+    /// count. Unreachable with today's all-ASCII titles, but it was a
+    /// panic-on-the-render-path landmine (`boundaries[run_end + 1]` out
+    /// of bounds) if theme names ever go free-form. The guard skips the
+    /// expansion-only indices instead of panicking; the in-range chars
+    /// still highlight.
+    #[test]
+    fn highlight_runs_survives_lowercase_char_expansion() {
+        let title = "İstanbul"; // 8 chars; lowered "i\u{307}stanbul" is 9
+        let (_, indices) = fuzzy_match(title, title).unwrap();
+        assert_eq!(
+            indices.len(),
+            9,
+            "sanity: the self-match produces one index per LOWERED char, \
+             one more than the title has"
+        );
+        let runs = highlight_runs(title, &indices);
+        assert_eq!(
+            runs,
+            vec![0..title.len()],
+            "the whole title highlights; the expansion-only index is skipped, \
+             not a panic"
+        );
+    }
+
     #[test]
     fn highlight_runs_uses_byte_offsets_past_a_multibyte_prefix() {
         // A non-ASCII char earlier in the string shifts later byte offsets
@@ -1012,6 +1138,57 @@ mod tests {
         let mut state = PaletteState::new(vec![action("a", "Focus left", "Workspace", None)]);
         state.set_query("nomatch");
         assert_eq!(state.selected_item(), None);
+    }
+
+    /// Post-merge review perf 11: the filter runs once per query edit,
+    /// never per `filtered()` call — before the cache, every call
+    /// re-fuzzy-matched the whole item list (an Enter press computed it
+    /// three times: `selected_item`, the close-path bookkeeping, and the
+    /// next render). Observed honestly through the test-only per-instance
+    /// match-call counter incremented at the real `fuzzy_match_lowered`
+    /// invocation site — not a stand-in assertion.
+    #[test]
+    fn filtered_matches_once_per_query_edit_not_per_call() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Apple", "Test", None),
+            action("b", "Banana", "Test", None),
+            action("c", "Cherry", "Test", None),
+        ]);
+        // Construction itself filters once (the empty query's full list).
+        assert_eq!(state.match_call_count(), 3);
+
+        state.set_query("an");
+        assert_eq!(
+            state.match_call_count(),
+            6,
+            "a query edit re-matches every item exactly once"
+        );
+
+        let first = state.filtered();
+        let titles: Vec<String> = first.iter().map(|(item, _)| item.title()).collect();
+        assert_eq!(titles, vec!["Banana".to_string()]);
+        assert_eq!(
+            first[0].1,
+            vec![1, 2],
+            "the cached result carries the matched char indices"
+        );
+
+        // Repeat reads — the per-Enter triple-compute shape and more —
+        // must do no matching at all.
+        let _ = state.filtered();
+        let _ = state.filtered();
+        let _ = state.selected_item();
+        state.move_selection(1);
+        state.set_selected(0);
+        assert_eq!(
+            state.match_call_count(),
+            6,
+            "repeated filtered()/selection reads must not re-match"
+        );
+
+        // And the next edit matches exactly once more per item.
+        state.set_query("a");
+        assert_eq!(state.match_call_count(), 9);
     }
 
     // -- PaletteItem ------------------------------------------------------
