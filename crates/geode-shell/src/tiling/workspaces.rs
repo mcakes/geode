@@ -486,6 +486,257 @@ impl Workspace {
         }
     }
 
+    /// Which region's tree currently holds `id` as a leaf, if any
+    /// (tile-drag task). The drop verbs locate both ends of a drop this
+    /// way — by id, never by where keyboard focus happens to live — so a
+    /// stale gesture can only no-op, never apply to the wrong tree.
+    pub fn region_of(&self, id: TileId) -> Option<FocusRegion> {
+        if self.tree.contains(id) {
+            return Some(FocusRegion::Main);
+        }
+        self.docks
+            .iter()
+            .find(|(_, dock)| dock.tree().contains(id))
+            .map(|(side, _)| FocusRegion::Dock(side))
+    }
+
+    /// Remove `id` from whichever tree holds it (tile-drag task — the
+    /// shared "pick the tile up" half of every drop verb). The owning
+    /// tree's own removal rules apply ([`Tree::remove`]: collapse,
+    /// renormalize, neighbor-refocus if the removed tile was focused); a
+    /// dock tree emptied by the removal auto-hides (the existing rule).
+    /// `self.region` is deliberately NOT re-derived here even if it
+    /// pointed at the emptied dock — every caller ends by setting the
+    /// region to the drop's destination, so an intermediate fixup would be
+    /// dead work. Returns the region the tile was removed from, or `None`
+    /// (nothing touched) when no tree holds it.
+    fn remove_tile_anywhere(&mut self, id: TileId) -> Option<FocusRegion> {
+        let region = self.region_of(id)?;
+        match region {
+            FocusRegion::Main => {
+                self.tree.remove(id);
+            }
+            FocusRegion::Dock(side) => {
+                let dock = self.docks.get_mut(side);
+                dock.tree_mut().remove(id);
+                if dock.tree().is_empty() {
+                    dock.set_visible(false);
+                }
+            }
+        }
+        Some(region)
+    }
+
+    /// Edge-zone drop (tile-drag task): move `dragged` out of whichever
+    /// tree holds it and split-insert it beside `target`, on the side
+    /// `edge` names — Left/Right land as a Horizontal split before/after
+    /// the target, Up/Down as a Vertical split before/after — in whichever
+    /// region the *target* lives (every source×destination combination:
+    /// main→dock-tile inserts into that dock's tree, dock→main into the
+    /// main tree, dock→other-dock likewise; a within-tree edge drop is
+    /// just a move). Focus and region follow the moved tile
+    /// ([`Tree::insert_at_leaf`] focuses it; the region is set to the
+    /// destination here), an emptied source dock auto-hides, a
+    /// destination dock auto-shows (drop targets only come from visible
+    /// layout, but the verb enforces the region invariant on its own
+    /// rather than trusting the caller), and inserting into the main tree
+    /// clears any stale fullscreen (mirrors [`Workspace::move_to_dock`]).
+    ///
+    /// Returns `true` iff the layout changed — so the caller can key
+    /// session-dirty bookkeeping off it directly. `false`, nothing
+    /// touched, for a self-drop (recorded choice: an edge drop onto the
+    /// dragged tile itself is a no-op like the center self-drop, since
+    /// removing the tile would leave no target to insert beside) or when
+    /// either id is not a current leaf anywhere.
+    pub fn drop_split(&mut self, dragged: TileId, target: TileId, edge: Direction) -> bool {
+        if dragged == target || self.region_of(target).is_none() {
+            return false;
+        }
+        // Verify BOTH ends before removing anything: refusal must never
+        // strand the dragged tile outside every tree.
+        let Some(_source) = self.region_of(dragged) else {
+            return false;
+        };
+        // The destination is re-derived *after* the removal (not reused
+        // from before it) purely for clarity — removal of `dragged` can
+        // never move `target`, so this always matches the pre-check.
+        self.remove_tile_anywhere(dragged);
+        let destination = self
+            .region_of(target)
+            .expect("removal of dragged never removes target");
+        let after = match edge {
+            Direction::Left | Direction::Up => false,
+            Direction::Right | Direction::Down => true,
+        };
+        let orientation = edge.orientation();
+        match destination {
+            FocusRegion::Main => {
+                // A stale fullscreen would cover the tile that just moved
+                // (same reasoning as `move_to_dock`'s unconditional exit);
+                // `insert_at_leaf` also clears it, but only on success.
+                self.tree.exit_fullscreen();
+                if !self
+                    .tree
+                    .insert_at_leaf(target, dragged, orientation, after)
+                {
+                    // Unreachable given the pre-checks — but the
+                    // never-lose-a-tile invariant outranks trusting them:
+                    // fall back to a plain focused-leaf split.
+                    self.tree.split(dragged, orientation);
+                }
+            }
+            FocusRegion::Dock(side) => {
+                let dock = self.docks.get_mut(side);
+                if !dock
+                    .tree_mut()
+                    .insert_at_leaf(target, dragged, orientation, after)
+                {
+                    dock.tree_mut().split(dragged, orientation);
+                }
+                dock.set_visible(true);
+            }
+        }
+        self.region = destination;
+        true
+    }
+
+    /// Center-zone drop (tile-drag task): swap `dragged` and `target` in
+    /// place — including across regions (a leaf-for-leaf rename in each of
+    /// the two trees; both structures and every ratio stay untouched).
+    /// Focus and region follow the dragged tile to its new home; the tile
+    /// it displaced inherits the dragged tile's old slot (and, in the
+    /// source tree, its focus memory — see [`Tree::replace_tile`]).
+    ///
+    /// Today this is a swap for deliberate keyboard parity with the
+    /// `workspace::move_*` verbs; see `dropzones`' module doc for the
+    /// recorded plan to re-mean center-drop as "add to stack" when spec
+    /// §3.1's stacked containers land. Returns `true` iff the layout
+    /// changed: a self-drop or an unknown id is `false`, nothing touched.
+    pub fn drop_swap(&mut self, dragged: TileId, target: TileId) -> bool {
+        if dragged == target {
+            return false;
+        }
+        let Some(source) = self.region_of(dragged) else {
+            return false;
+        };
+        let Some(destination) = self.region_of(target) else {
+            return false;
+        };
+        if source == destination {
+            match source {
+                FocusRegion::Main => {
+                    self.tree.swap_tiles(dragged, target);
+                    self.tree.focus(dragged);
+                }
+                FocusRegion::Dock(side) => {
+                    let dock = self.docks.get_mut(side);
+                    dock.tree_mut().swap_tiles(dragged, target);
+                    dock.tree_mut().focus(dragged);
+                    // Same region-invariant enforcement as the cross-tree
+                    // arm below: unreachable from the visible-layout drop
+                    // path (a hidden dock's tiles are never targets), but
+                    // the verb keeps `Dock(side)` focusable on its own.
+                    dock.set_visible(true);
+                }
+            }
+        } else {
+            // Cross-tree: rename each end in place. With the one-place-
+            // per-TileId invariant intact both renames are infallible and
+            // order-free (the two trees are disjoint) — but the pair must
+            // be *atomic* even against an invariant already broken by a
+            // healing miss, so both preconditions are checked BEFORE the
+            // first rename mutates anything (review fix): `replace_tile`
+            // refuses when its `new` id is already a leaf of that tree,
+            // and checking only the first rename's *result* would not be
+            // enough — the source rename could succeed and the
+            // destination rename then refuse (a duplicate `dragged`
+            // already there), leaving `dragged` renamed away from every
+            // tree, the one outcome a drop verb must never produce.
+            // Unreachable through live verbs and healed restores; the
+            // debug_assert makes a future regression loud while release
+            // builds get an honest untouched no-op.
+            let source_tree = match source {
+                FocusRegion::Main => &self.tree,
+                FocusRegion::Dock(side) => self.docks.get(side).tree(),
+            };
+            let destination_tree = match destination {
+                FocusRegion::Main => &self.tree,
+                FocusRegion::Dock(side) => self.docks.get(side).tree(),
+            };
+            if source_tree.contains(target) || destination_tree.contains(dragged) {
+                debug_assert!(
+                    false,
+                    "one-place-per-TileId invariant pre-broken \
+                     (dragged {dragged:?} / target {target:?} duplicated across trees); \
+                     refusing the cross-tree swap untouched"
+                );
+                return false;
+            }
+            match source {
+                FocusRegion::Main => self.tree.replace_tile(dragged, target),
+                FocusRegion::Dock(side) => self
+                    .docks
+                    .get_mut(side)
+                    .tree_mut()
+                    .replace_tile(dragged, target),
+            };
+            match destination {
+                FocusRegion::Main => {
+                    self.tree.replace_tile(target, dragged);
+                    self.tree.focus(dragged);
+                }
+                FocusRegion::Dock(side) => {
+                    let dock = self.docks.get_mut(side);
+                    dock.tree_mut().replace_tile(target, dragged);
+                    dock.tree_mut().focus(dragged);
+                    // Both trees stay occupied, so no auto-hide can apply;
+                    // auto-show enforces the region invariant if a caller
+                    // ever aims at a hidden dock's tile (not reachable
+                    // from the visible-layout drop path).
+                    dock.set_visible(true);
+                }
+            }
+        }
+        self.region = destination;
+        true
+    }
+
+    /// Dock-background drop (tile-drag task): move `dragged` into dock
+    /// `side`'s tree at that tree's focused leaf, with the same
+    /// orientation convention as the keyboard's `dock::move_*`
+    /// ([`Workspace::dock_insert_orientation`]: Horizontal for left/right,
+    /// Vertical for bottom) — in practice the empty-dock hint area, since
+    /// an occupied dock's tiles cover its whole frame. Works from any
+    /// source region; an emptied source dock auto-hides; the target dock
+    /// auto-shows and takes focus+region (focus follows the moved tile,
+    /// via [`Tree::split`]).
+    ///
+    /// Returns `true` iff the layout changed. A tile dropped on the
+    /// background of the dock it already lives in is `false`, nothing
+    /// touched (recorded choice: it's already there — deliberately NOT
+    /// treated as the keyboard verb's "move back to main"), as is an
+    /// unknown id.
+    pub fn drop_to_dock(&mut self, dragged: TileId, side: DockSide) -> bool {
+        let Some(source) = self.region_of(dragged) else {
+            return false;
+        };
+        if source == FocusRegion::Dock(side) {
+            return false;
+        }
+        self.remove_tile_anywhere(dragged);
+        if source == FocusRegion::Main {
+            // Same unconditional clear as `move_to_dock`: a lingering
+            // fullscreen would cover the dock the tile just landed in.
+            self.tree.exit_fullscreen();
+        }
+        let dock = self.docks.get_mut(side);
+        dock.tree_mut()
+            .split(dragged, Self::dock_insert_orientation(side));
+        dock.set_visible(true);
+        self.region = FocusRegion::Dock(side);
+        true
+    }
+
     /// Heal duplicate tile claims across one workspace-or-app-wide set of
     /// dock trees against an already-`claimed` list (dock-trees task —
     /// shared by [`Workspace::from_parts`], which seeds `claimed` with its
@@ -2539,5 +2790,368 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::focus_right"));
         assert!(!ws.active_mut().focus_dock_tile(DockSide::Left, TileId(99)));
         assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    // --- drop verbs (tile-drag task) ------------------------------------
+
+    /// Assert the one-place-per-TileId invariant plus focused-iff-root
+    /// across all four trees of the active workspace.
+    fn assert_tile_invariants(ws: &Workspaces) {
+        let workspace = ws.active();
+        let mut seen: Vec<TileId> = workspace.tree().tiles();
+        assert_eq!(
+            workspace.tree().is_empty(),
+            workspace.tree().focused().is_none(),
+            "main tree: focused iff non-empty"
+        );
+        for (side, dock) in workspace.docks().iter() {
+            assert_eq!(
+                dock.tree().is_empty(),
+                dock.tree().focused().is_none(),
+                "{side:?} dock tree: focused iff non-empty"
+            );
+            for tile in dock.tree().tiles() {
+                assert!(!seen.contains(&tile), "tile {tile:?} lives in two trees");
+                seen.push(tile);
+            }
+        }
+        // The region invariant: a focused dock is focusable.
+        if let FocusRegion::Dock(side) = workspace.region() {
+            assert!(
+                workspace.docks().get(side).focusable(),
+                "region points at a non-focusable {side:?} dock"
+            );
+        }
+    }
+
+    /// [1 | 2 | 3] in the main tree, focus on 3.
+    fn three_row() -> Workspaces {
+        let mut ws = Workspaces::new();
+        for _ in 0..3 {
+            apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        }
+        ws
+    }
+
+    #[test]
+    fn drop_split_moves_a_main_tile_beside_another_main_tile() {
+        // Drag 3 onto tile 1's LEFT band: 3 leaves its slot and lands
+        // leftmost — [3 | 1 | 2], equalized.
+        let mut ws = three_row();
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(3), TileId(1), Direction::Left)
+        );
+        assert_eq!(
+            ws.active().tree().tiles(),
+            vec![TileId(3), TileId(1), TileId(2)]
+        );
+        assert_eq!(ws.active().tree().focused(), Some(TileId(3)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_top_edge_wraps_the_target_vertically() {
+        let mut ws = two_tiles();
+        // Drag 2 onto tile 1's TOP band: 1's slot becomes a stack with 2
+        // on top; the row collapses to just 1's old slot holding both.
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(2), TileId(1), Direction::Up)
+        );
+        let rects = ws.active().tree().layout(Rect::UNIT);
+        let r2 = rects.iter().find(|(id, _)| *id == TileId(2)).unwrap().1;
+        let r1 = rects.iter().find(|(id, _)| *id == TileId(1)).unwrap().1;
+        assert!(approx(r2.y, 0.0) && approx(r2.h, 0.5) && approx(r2.w, 1.0));
+        assert!(approx(r1.y, 0.5) && approx(r1.h, 0.5) && approx(r1.w, 1.0));
+        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_from_main_into_a_dock_tiles_edge() {
+        // Tile 3 docked left; drag main tile 2 onto the docked tile's
+        // BOTTOM band → 2 joins the dock's tree stacked below 3.
+        let mut ws = three_row();
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → dock
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(2), TileId(3), Direction::Down)
+        );
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
+        assert_eq!(dock_tree.focused(), Some(TileId(2)));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_from_a_dock_back_onto_a_main_tiles_edge_hides_the_emptied_dock() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_right")); // 2 → right dock
+        assert!(ws.active().docks().get(DockSide::Right).visible());
+        // Drag the docked 2 onto main tile 1's RIGHT band.
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(2), TileId(1), Direction::Right)
+        );
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1), TileId(2)]);
+        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert!(
+            !ws.active().docks().get(DockSide::Right).visible(),
+            "the emptied dock auto-hides"
+        );
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_between_two_docks() {
+        let mut ws = three_row();
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → left
+        // Move 2 to the right dock via the keyboard verb: focus main tile 2
+        // first (region currently Dock(Left)).
+        assert!(ws.active_mut().focus_main_tile(TileId(2)));
+        apply_workspace_action(&mut ws, &act("dock::move_right")); // 2 → right
+        // Drag the right dock's 2 onto the left dock's 3, left band.
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(2), TileId(3), Direction::Left)
+        );
+        let left_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(left_tree.tiles(), vec![TileId(2), TileId(3)]);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert!(
+            !ws.active().docks().get(DockSide::Right).visible(),
+            "the emptied source dock auto-hides"
+        );
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_self_and_unknown_ids_are_noops() {
+        let mut ws = two_tiles();
+        let before = ws.active().tree().clone();
+        assert!(
+            !ws.active_mut()
+                .drop_split(TileId(1), TileId(1), Direction::Left)
+        );
+        assert!(
+            !ws.active_mut()
+                .drop_split(TileId(9), TileId(1), Direction::Left)
+        );
+        assert!(
+            !ws.active_mut()
+                .drop_split(TileId(1), TileId(9), Direction::Left)
+        );
+        assert_eq!(ws.active().tree(), &before, "no-op drops change nothing");
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_swap_within_the_main_tree_swaps_slots_and_focuses_the_dragged_tile() {
+        let mut ws = three_row();
+        // Focus 1 so we can see focus *follow the dragged tile*, not stay.
+        assert!(ws.active_mut().focus_main_tile(TileId(1)));
+        assert!(ws.active_mut().drop_swap(TileId(3), TileId(1)));
+        assert_eq!(
+            ws.active().tree().tiles(),
+            vec![TileId(3), TileId(2), TileId(1)],
+            "the two tiles trade slots; the middle is untouched"
+        );
+        assert_eq!(ws.active().tree().focused(), Some(TileId(3)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_swap_across_regions_trades_leaves_without_reshaping_either_tree() {
+        let mut ws = three_row();
+        apply_workspace_action(&mut ws, &act("dock::move_bottom")); // 3 → bottom dock
+        let main_before: Vec<TileId> = ws.active().tree().tiles();
+        assert_eq!(main_before, vec![TileId(1), TileId(2)]);
+        // Drag main tile 1 onto the docked tile 3's center.
+        assert!(ws.active_mut().drop_swap(TileId(1), TileId(3)));
+        assert_eq!(
+            ws.active().tree().tiles(),
+            vec![TileId(3), TileId(2)],
+            "3 takes 1's old slot; the main tree keeps its shape"
+        );
+        let dock_tree = ws.active().docks().get(DockSide::Bottom).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(1)]);
+        assert_eq!(dock_tree.focused(), Some(TileId(1)));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+        assert_tile_invariants(&ws);
+
+        // And back: drag 1 (now docked) onto main tile 2's center.
+        assert!(ws.active_mut().drop_swap(TileId(1), TileId(2)));
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(3), TileId(1)]);
+        assert_eq!(ws.active().tree().focused(), Some(TileId(1)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(
+            ws.active().docks().get(DockSide::Bottom).tree().tiles(),
+            vec![TileId(2)]
+        );
+        assert!(
+            ws.active().docks().get(DockSide::Bottom).visible(),
+            "a swap never empties a dock, so it never hides one"
+        );
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_swap_within_one_dock_tree_swaps_and_focuses_the_dragged_tile() {
+        let mut ws = three_row();
+        // Park 3 and 2 in the left dock (two-tile dock tree [3 | 2]).
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert!(ws.active_mut().focus_main_tile(TileId(2)));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
+        assert!(ws.active_mut().drop_swap(TileId(3), TileId(2)));
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(2), TileId(3)]);
+        assert_eq!(dock_tree.focused(), Some(TileId(3)));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_swap_self_and_unknown_ids_are_noops() {
+        let mut ws = two_tiles();
+        let before = ws.active().tree().clone();
+        assert!(!ws.active_mut().drop_swap(TileId(2), TileId(2)));
+        assert!(!ws.active_mut().drop_swap(TileId(2), TileId(9)));
+        assert!(!ws.active_mut().drop_swap(TileId(9), TileId(2)));
+        assert_eq!(ws.active().tree(), &before);
+        assert_tile_invariants(&ws);
+    }
+
+    /// Review fix: the cross-tree swap must be atomic even against a
+    /// one-place-per-TileId invariant already broken by a healing miss —
+    /// refused loudly (debug_assert) BEFORE the first rename mutates
+    /// anything, because a source rename followed by a refused
+    /// destination rename would lose the dragged id from every tree.
+    /// The broken state is not constructible through any live verb or
+    /// healed restore, so it is built directly through the
+    /// module-private fields here.
+    #[test]
+    #[should_panic(expected = "one-place-per-TileId")]
+    fn drop_swap_refuses_a_pre_broken_duplicate_id_before_mutating() {
+        let mut w = Workspace::default();
+        w.tree.split(TileId(1), Orientation::Horizontal);
+        w.tree.split(TileId(2), Orientation::Horizontal);
+        let dock = w.docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(3), Orientation::Horizontal);
+        // The invariant break: tile 1 claimed by BOTH the main tree and
+        // the dock tree.
+        dock.tree_mut().split(TileId(1), Orientation::Horizontal);
+        dock.set_visible(true);
+        // dragged 1 resolves to Main (region_of checks the tree first);
+        // target 3 lives in the dock, whose tree also holds a duplicate
+        // of the dragged id — the pre-check must fire, not the renames.
+        w.drop_swap(TileId(1), TileId(3));
+    }
+
+    #[test]
+    fn drop_to_dock_inserts_at_the_dock_trees_focused_leaf_with_the_side_convention() {
+        let mut ws = three_row();
+        // 3 → left dock via the keyboard verb, then drag 2 onto the left
+        // dock's background: it must insert beside the dock tree's focused
+        // leaf (3) side by side (Horizontal, the left-dock convention).
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Left));
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
+        assert_eq!(dock_tree.focused(), Some(TileId(2)));
+        let rects = dock_tree.layout(Rect::UNIT);
+        assert!(
+            approx(rects[0].1.w, 0.5) && approx(rects[0].1.h, 1.0),
+            "left dock inserts side by side (Horizontal)"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_to_dock_on_an_empty_visible_dock_makes_the_tile_its_root() {
+        let mut ws = two_tiles();
+        ws.active_mut().toggle_dock(DockSide::Bottom); // visible, empty
+        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Bottom));
+        let dock = ws.active().docks().get(DockSide::Bottom);
+        assert_eq!(dock.tree().tiles(), vec![TileId(2)]);
+        assert!(dock.visible() && dock.focusable());
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_to_dock_from_another_dock_moves_and_hides_the_emptied_source() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // 2 → left
+        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Right));
+        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        assert_eq!(
+            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            vec![TileId(2)]
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_to_dock_onto_the_tiles_own_dock_is_a_noop_not_a_move_back() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // 2 → left
+        assert!(
+            !ws.active_mut().drop_to_dock(TileId(2), DockSide::Left),
+            "recorded choice: already there — NOT the keyboard verb's move-back"
+        );
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            vec![TileId(2)],
+            "nothing moved"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_verbs_from_a_single_tile_main_tree_empty_it_cleanly() {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right")); // lone tile 1
+        ws.active_mut().toggle_dock(DockSide::Left);
+        assert!(ws.active_mut().drop_to_dock(TileId(1), DockSide::Left));
+        assert!(ws.active().tree().is_empty());
+        assert_eq!(
+            ws.active().tree().focused(),
+            None,
+            "an emptied tree has no focus (focused-iff-root)"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_split_exits_a_stale_fullscreen_on_the_main_tree() {
+        let mut ws = three_row();
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → left dock
+        // Fullscreen a main tile, then edge-drop the docked tile beside it.
+        assert!(ws.active_mut().focus_main_tile(TileId(1)));
+        ws.active_mut().toggle_fullscreen();
+        assert!(ws.active().tree().fullscreen().is_some());
+        assert!(
+            ws.active_mut()
+                .drop_split(TileId(3), TileId(1), Direction::Right)
+        );
+        assert_eq!(
+            ws.active().tree().fullscreen(),
+            None,
+            "an explicit drop trumps a stale fullscreen"
+        );
+        assert_tile_invariants(&ws);
     }
 }

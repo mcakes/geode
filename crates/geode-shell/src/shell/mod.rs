@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, MouseMoveEvent,
-    ScrollHandle, Window, div, px,
+    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ScrollHandle, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
@@ -39,8 +39,9 @@ use crate::session;
 use crate::theme;
 use crate::theme::ThemeService;
 use crate::tiling::{
-    DIVIDER_HIT_WIDTH, DividerAddress, DockSide, Orientation, Rect, Workspaces,
-    apply_workspace_action, divider_strips, dock_edge_strips,
+    DIVIDER_HIT_WIDTH, DividerAddress, DockSide, DropTarget, DropZone, Orientation, Rect, TileId,
+    Workspaces, apply_workspace_action, classify_drop_zone, divider_strips, dock_edge_strips,
+    drop_highlight_rect, hit_tile, locate_drop_target, rect_contains,
 };
 use geode_core::config::{Config, LayerDoc};
 
@@ -138,6 +139,89 @@ struct StripSpec {
     axis: Orientation,
     target: DividerDragTarget,
     drag_bounds: Rect,
+}
+
+/// Movement (in px) a mod+mouse-down must travel before it becomes a real
+/// tile drag, measured per-axis (Chebyshev — `max(|dx|, |dy|)`, the
+/// cheapest metric and indistinguishable from Euclidean at this radius).
+/// Recorded choice from the approved design's 4–6px range: 5px, the
+/// middle — small enough that a deliberate drag never feels gated, large
+/// enough that the hand tremor of a sloppy mod+click can never rearrange
+/// the layout.
+const TILE_DRAG_THRESHOLD: f32 = 5.0;
+
+/// The drag ghost's fixed outline size and its offset from the cursor
+/// (recorded choice: a small fixed-size 96×64 outline rect — theme
+/// `primary` border, no fill — NOT a copy of the tile content and not
+/// scaled to the tile: the ghost only needs to say "a tile is in hand",
+/// and a fixed size keeps it legible whether the grabbed tile was a
+/// full-height column or a thin dock sliver). Offset down-right so the
+/// cursor tip — the thing doing the zone targeting — stays unobscured.
+const TILE_DRAG_GHOST_SIZE: (f32, f32) = (96.0, 64.0);
+const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
+
+/// An in-flight mod+drag of a tile (tile-drag task), recorded by a tile
+/// body's mod+mouse-down and consumed by its own full-window drag catcher
+/// (see `render` — the same capture mechanism as [`DividerDrag`]'s
+/// catcher). Nothing is applied until the drop: the drag holds only the
+/// grabbed tile's id, the workspace it belongs to (pinned at mouse-down
+/// for the same switch-mid-drag reason as `DividerDrag::workspace`), and
+/// cursor positions in window space. That makes cancel truly free —
+/// clearing this state undoes nothing and dirties nothing, unlike a
+/// divider drag whose cancel must preserve already-applied resizes.
+///
+/// `active` is the movement threshold latch: false from mouse-down until
+/// the cursor travels [`TILE_DRAG_THRESHOLD`] px from `origin`, so a
+/// sloppy mod+click can never rearrange the layout. Recorded decisions:
+/// - mod+down does NOT change focus at arm time — focus follows the moved
+///   tile only on a successful drop, and an abandoned below-threshold
+///   mod+click leaves everything untouched, focus included.
+/// - The mod key does NOT need to stay held once the drag is armed
+///   (standard WM behavior — releasing the modifier mid-drag continues
+///   the drag; only the mouse button's release ends it). Modifier state
+///   is read once, from the `MouseDownEvent`'s own `modifiers` field —
+///   verified against the pinned platform sources: macOS fills it from
+///   the native event's `modifierFlags` (`gpui_macos/src/events.rs`,
+///   `read_modifiers` — `NSAlternateKeyMask` is the Option/Alt key) and
+///   Windows samples the live key state (`gpui_windows/src/events.rs`,
+///   `current_modifiers` — `VK_MENU` is Alt), so a `mod+down` arrives
+///   with `alt: true` on both platforms.
+/// - A truly lost release — a move arriving with the button no longer
+///   pressed — *cancels* rather than drops: the actual release point is
+///   unknown, and applying the drop at wherever the cursor happens to be
+///   next would rearrange from a position the user never released at.
+///   (The divider catcher's missed release *finishes* instead — correct
+///   there because its effects were already applied live; here nothing
+///   is applied until an actual drop.) The catcher's `on_mouse_up_out`,
+///   by contrast, routes through the drop like `on_mouse_up` does
+///   (review blocker fix): gpui's keyboard-modality hover suppression
+///   makes `up_out` fire for an ordinary in-window release whenever a
+///   keystroke was the last input, and the keyboard is hot mid-drag —
+///   see the catcher's own comment in `render` for the full mechanism.
+///   An actually-outside-window release still applies nothing that way,
+///   because no drop target exists outside every tile and dock.
+#[derive(Debug, Clone, PartialEq)]
+struct TileDrag {
+    tile: TileId,
+    workspace: u8,
+    /// Window-space mouse-down position the threshold is measured from.
+    origin: (f32, f32),
+    /// Latest window-space cursor position — what the ghost follows and
+    /// the zone highlight classifies against each frame.
+    cursor: (f32, f32),
+    active: bool,
+}
+
+/// Whether the configured `mod` alias's key is held in a mouse event's
+/// modifier set. The alias is exactly one of `CTRL`/`ALT`/`CMD`
+/// (`defaults::mod_alias_from_config` — the same source of truth the
+/// keymap engine resolves `mod+` bindings through), mapped onto gpui's
+/// `control`/`alt`/`platform` the same way `convert_keystroke` maps
+/// keyboard modifiers. Extra held modifiers don't disqualify (matching
+/// how a chorded mouse gesture is usually read); only the aliased key
+/// matters.
+fn mod_alias_held(alias: Modifiers, mods: &gpui::Modifiers) -> bool {
+    (alias.ctrl && mods.control) || (alias.alt && mods.alt) || (alias.cmd && mods.platform)
 }
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
@@ -312,6 +396,19 @@ pub struct ShellView {
     /// fix — "stop tracking the mouse", never "undo", and never a visible
     /// resize the next restore would lose).
     divider_drag: Option<DividerDrag>,
+    /// The in-flight mod+drag of a tile, or `None` (tile-drag task). Armed
+    /// by a tile body's mouse-down with the configured mod key held (see
+    /// [`TileDrag`] for every recorded decision), advanced by its own
+    /// full-window catcher's mouse-moves, applied — through the pure
+    /// `Workspace` drop verbs — only by the mouse-up's drop, and cancelled
+    /// (top of `render`, `cancel_tile_drag`) by the same conditions that
+    /// cancel a divider drag plus a which-key hint appearing (the hint
+    /// paints over the tiles with no handlers of its own, so a drag
+    /// continuing under it would target tiles the user can't fully see).
+    /// Cancel applies nothing and dirties nothing — nothing has been
+    /// applied yet, so unlike `divider_drag` there is no `moved`
+    /// bookkeeping to preserve.
+    tile_drag: Option<TileDrag>,
     /// The toolbar's right-aligned filter field (Task 4). Deliberately
     /// inert — nothing reads its value; it becomes the global text filter
     /// (spec §4.1) in the data phase. Owned here (rather than built fresh
@@ -499,6 +596,7 @@ impl ShellView {
             session_dirty: false,
             pending_focus_restore: false,
             divider_drag: None,
+            tile_drag: None,
             filter_input,
         }
     }
@@ -1245,6 +1343,159 @@ impl ShellView {
             self.session_dirty = true;
         }
     }
+
+    /// Arm a pending tile drag from a tile body's mouse-down, if the
+    /// gesture and the shell's state allow it (tile-drag task). Returns
+    /// true when armed — the caller's plain click-to-focus branch must
+    /// then NOT run (recorded decision on [`TileDrag`]: mod+down changes
+    /// no focus at arm time). Refused — falling back to plain-click
+    /// behavior — when the configured mod key isn't held, or in any state
+    /// where a drag couldn't legitimately run: an overlay is up (the
+    /// palette/modal catchers normally occlude tiles anyway — defense in
+    /// depth), a keystroke sequence is pending (the which-key hint paints
+    /// over the tiles, same gate as `dividers_active`), a tree tile is
+    /// fullscreen (only one tile visible — nothing to rearrange; same
+    /// gate that suppresses the divider strips), or another drag of
+    /// either kind is already in flight (their catchers occlude tiles,
+    /// so this is unreachable — but checking costs nothing and makes the
+    /// exclusivity explicit).
+    fn try_arm_tile_drag(
+        &mut self,
+        id: TileId,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !mod_alias_held(self.services.mod_alias, &event.modifiers) {
+            return false;
+        }
+        if self.palette.is_some()
+            || self.modal.is_some()
+            || !self.matcher.pending().is_empty()
+            || self.divider_drag.is_some()
+            || self.tile_drag.is_some()
+            || self
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .fullscreen()
+                .is_some()
+        {
+            return false;
+        }
+        let position = (f32::from(event.position.x), f32::from(event.position.y));
+        self.tile_drag = Some(TileDrag {
+            tile: id,
+            workspace: self.services.workspaces.active_index(),
+            origin: position,
+            cursor: position,
+            active: false,
+        });
+        cx.stop_propagation();
+        cx.notify();
+        true
+    }
+
+    /// Advance the pending/active tile drag to a new cursor position
+    /// (mouse-move on the tile-drag catcher). Below the movement
+    /// threshold nothing visible exists yet, so no repaint is scheduled;
+    /// crossing [`TILE_DRAG_THRESHOLD`] latches `active` (one-way — a
+    /// drag that wanders back within 5px of its origin is still a drag),
+    /// and every active-drag move repaints so the ghost and zone
+    /// highlight track the cursor. Same per-move notify cost as the
+    /// divider catcher's live resize — accepted while a button is held.
+    fn update_tile_drag(&mut self, x: f32, y: f32, cx: &mut Context<Self>) {
+        let Some(drag) = self.tile_drag.as_mut() else {
+            return;
+        };
+        drag.cursor = (x, y);
+        if !drag.active {
+            if (x - drag.origin.0).abs().max((y - drag.origin.1).abs()) < TILE_DRAG_THRESHOLD {
+                return;
+            }
+            drag.active = true;
+        }
+        cx.notify();
+    }
+
+    /// Drop the in-flight tile drag with nothing applied (tile-drag task):
+    /// the render-top cancel guard, a mouse-up outside the window, and a
+    /// missed release all land here. Truly free — a tile drag applies
+    /// nothing until its drop, so unlike `cancel_divider_drag` there is
+    /// no already-applied state to keep and no session-dirty bookkeeping
+    /// to do. Notify-free for the same render-path reason as its divider
+    /// sibling; event-path callers notify themselves.
+    fn cancel_tile_drag(&mut self) {
+        self.tile_drag = None;
+    }
+
+    /// Apply the drop that ends a tile drag (mouse-up on the tile-drag
+    /// catcher). A below-threshold drag — a sloppy mod+click — applies
+    /// nothing at all, focus included (recorded decision on [`TileDrag`]).
+    /// The full set of render-top cancel conditions is re-checked at drop
+    /// time too — workspace mismatch, palette/modal open, pending
+    /// keystroke sequence (review should-fix: gpui dispatches multiple
+    /// input events between frames, so `ctrl+k` followed by the release
+    /// within one frame window would otherwise apply the drop underneath
+    /// the just-opened palette; the render-top guard normally cancels
+    /// first, but re-checking here keeps the guarantee independent of
+    /// event/render ordering, the same standard `apply_divider_drag`'s
+    /// workspace check sets). Fullscreen needs no shell-side re-check:
+    /// [`locate_drop_target`] itself resolves no target for a fullscreen
+    /// layout. Otherwise the
+    /// cursor resolves through the pure [`locate_drop_target`] against
+    /// *live* state — the same `dock_layout`/`Tree::layout` authorities
+    /// the render pass uses, re-derived once here rather than snapshotted
+    /// at mouse-down, so a keyboard split mid-drag can't make the drop
+    /// land beside a tile the user isn't seeing — and routes to the
+    /// matching pure `Workspace` drop verb: center → swap, edge → split-
+    /// insert, dock background → move-to-dock-convention insert. The
+    /// verbs own every focus/region/auto-hide rule and report whether the
+    /// layout changed; only a real change dirties the session (no-op
+    /// drops — self-drops, a release over nothing — don't).
+    fn finish_tile_drag(&mut self, x: f32, y: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(drag) = self.tile_drag.take() else {
+            return;
+        };
+        if drag.active
+            && drag.workspace == self.services.workspaces.active_index()
+            && self.palette.is_none()
+            && self.modal.is_none()
+            && self.matcher.pending().is_empty()
+        {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let area = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
+                h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            };
+            // Mouse events arrive in window coordinates; the tile surface
+            // starts below the toolbar, right of the sidebar (same
+            // conversion `render` bakes into its drag rects).
+            let sx = x - sidebar::WIDTH;
+            let sy = y - toolbar_height;
+            let target = locate_drop_target(self.services.workspaces.active(), area, sx, sy);
+            let ws = self.services.workspaces.active_mut();
+            let changed = match target {
+                Some(DropTarget::Tile {
+                    id,
+                    zone: DropZone::Center,
+                }) => ws.drop_swap(drag.tile, id),
+                Some(DropTarget::Tile {
+                    id,
+                    zone: DropZone::Edge(edge),
+                }) => ws.drop_split(drag.tile, id, edge),
+                Some(DropTarget::DockBackground { side }) => ws.drop_to_dock(drag.tile, side),
+                None => false,
+            };
+            if changed {
+                self.session_dirty = true;
+            }
+        }
+        cx.notify();
+    }
 }
 
 impl Render for ShellView {
@@ -1296,6 +1547,32 @@ impl Render for ShellView {
                     .is_some()
         }) {
             self.cancel_divider_drag();
+        }
+
+        // Cancel an in-flight tile drag on the same conditions (tile-drag
+        // task) — palette/modal opened, workspace switched, fullscreen
+        // toggled — PLUS a which-key hint appearing: unlike a divider
+        // drag (which keeps its already-applied resize live behind the
+        // handler-less hint), a tile drag is all about *choosing a drop
+        // target among the tiles*, and doing that under a panel that
+        // covers part of them would be blind targeting. All of these make
+        // cancelling truly free here: a tile drag applies nothing until
+        // its drop, so cancel undoes nothing, dirties nothing, and needs
+        // none of the divider guard's `moved` bookkeeping.
+        if self.tile_drag.as_ref().is_some_and(|drag| {
+            self.palette.is_some()
+                || self.modal.is_some()
+                || !self.matcher.pending().is_empty()
+                || drag.workspace != self.services.workspaces.active_index()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .fullscreen()
+                    .is_some()
+        }) {
+            self.cancel_tile_drag();
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
@@ -1445,6 +1722,55 @@ impl Render for ShellView {
             )
         };
 
+        // The active drop target's zone highlight (tile-drag task): pure
+        // classification over the rects the single layout pass above just
+        // produced — no second layout, no I/O, per the render-discipline
+        // constraint. An edge zone highlights the half of the target tile
+        // the insert would occupy, center the whole tile, a dock
+        // background the dock's frame. Targets whose drop the verbs would
+        // refuse as no-ops paint nothing — highlighting them would
+        // promise a rearrangement that won't happen: the dragged tile
+        // itself (self-drops are recorded no-ops for every zone), and the
+        // background of the dock the tile already lives in (defensive —
+        // an occupied dock's tiles cover its whole frame, so this is
+        // unreachable in practice).
+        let drop_highlight: Option<Rect> = self
+            .tile_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .and_then(|drag| {
+                let sx = drag.cursor.0 - sidebar::WIDTH;
+                let sy = drag.cursor.1 - toolbar_height;
+                let dragged = drag.tile;
+                for (side, r, tiles, _) in &dock_cells {
+                    if rect_contains(r, sx, sy) {
+                        return match hit_tile(tiles, sx, sy) {
+                            Some((id, _)) if id == dragged => None,
+                            Some((_, tr)) => {
+                                Some(drop_highlight_rect(tr, classify_drop_zone(tr, sx, sy)))
+                            }
+                            None => {
+                                let already_here = self
+                                    .services
+                                    .workspaces
+                                    .active()
+                                    .docks()
+                                    .get(*side)
+                                    .tree()
+                                    .contains(dragged);
+                                (!already_here).then_some(*r)
+                            }
+                        };
+                    }
+                }
+                match hit_tile(&rects, sx, sy) {
+                    Some((id, tr)) if id != dragged => {
+                        Some(drop_highlight_rect(tr, classify_drop_zone(tr, sx, sy)))
+                    }
+                    _ => None,
+                }
+            });
+
         // The shared tile chrome — identical for tree tiles and docked
         // tiles (a docked tile is the same kind of tile, just parked): 1px
         // inset, themed background, `primary` 2px ring on the one focused
@@ -1557,9 +1883,16 @@ impl Render for ShellView {
                         // tree tile also returns the region to Main, and
                         // both region and focus persist, so the session
                         // goes dirty like any workspace-mutating dispatch.
+                        // With the configured mod key held, the same
+                        // mouse-down instead arms a pending tile drag
+                        // (tile-drag task) — and deliberately does NOT
+                        // focus: see `try_arm_tile_drag` / `TileDrag`.
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |view, _event, _window, cx| {
+                            cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                                if view.try_arm_tile_drag(id, event, cx) {
+                                    return;
+                                }
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
                                     view.session_dirty = true;
                                 }
@@ -1583,9 +1916,15 @@ impl Render for ShellView {
                 for (id, tr) in dock_tiles {
                     let is_focused = region == crate::tiling::FocusRegion::Dock(side)
                         && dock_focused == Some(id);
+                    // Same mod+down drag-arming branch as the tree tiles
+                    // above — a docked tile is the same kind of tile, and
+                    // drags work from any source region.
                     surface = surface.child(tile_cell(id, tr, is_focused, cx).on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |view, _event, _window, cx| {
+                        cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                            if view.try_arm_tile_drag(id, event, cx) {
+                                return;
+                            }
                             if view
                                 .services
                                 .workspaces
@@ -1682,6 +2021,13 @@ impl Render for ShellView {
                     // lets a `#[gpui::test]` confirm strips painted (or
                     // didn't — fullscreen) via `debug_bounds`.
                     .debug_selector(|| format!("divider-strip-{i}"))
+                    // Recorded interaction with the tile-drag gesture: a
+                    // mod+mouse-down landing within the 8px strip starts a
+                    // divider RESIZE, never a tile drag — the strip
+                    // occludes the tile body it overlaps and this handler
+                    // checks no modifiers. Deterministic and accepted: a
+                    // mod+drag aimed within ~4px of a tile's edge grabs
+                    // the divider instead of the tile.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _event, _window, cx| {
@@ -1701,6 +2047,29 @@ impl Render for ShellView {
                         }),
                     )
                     .child(line),
+            );
+        }
+
+        // The zone highlight (tile-drag task), painted after — so above —
+        // every tile, dock cell, and divider strip: a translucent
+        // theme-primary wash over exactly the area the drop would occupy.
+        // Instant, no animation; no handlers and no `.occlude()`, so it
+        // never competes for the mouse events the tile-drag catcher below
+        // owns. `primary.opacity(0.2)` is the established translucent-
+        // accent pattern (sidebar workspace pill, keybindings match
+        // highlight), not a raw color.
+        if let Some(hr) = drop_highlight {
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(hr.x))
+                    .top(px(hr.y))
+                    .w(px(hr.w))
+                    .h(px(hr.h))
+                    .bg(cx.theme().primary.opacity(0.2))
+                    // Test hook, same honest-limitation story as the
+                    // divider strips': painted-or-not via `debug_bounds`.
+                    .debug_selector(|| "tile-drop-highlight".to_string()),
             );
         }
 
@@ -1757,6 +2126,16 @@ impl Render for ShellView {
         // `apply_divider_drag`, which re-reads `self.divider_drag` per
         // event.
         let drag_axis = self.divider_drag.as_ref().map(|drag| drag.axis);
+
+        // Extracted the same way for the tile-drag catcher and ghost: the
+        // catcher exists from arm (so it can see the threshold-crossing
+        // moves), the ghost only once the drag is active.
+        let tile_drag_armed = self.tile_drag.is_some();
+        let tile_drag_ghost = self
+            .tile_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .map(|drag| drag.cursor);
 
         v_flex()
             .size_full()
@@ -1830,6 +2209,103 @@ impl Render for ShellView {
                                 view.finish_divider_drag(cx);
                             }),
                         ),
+                )
+            })
+            // The tile-drag catcher (tile-drag task): the same full-window
+            // capture mechanism as the divider catcher above — while a
+            // drag is armed or active, a transparent occluding layer owns
+            // every mouse-move and the release, wherever the cursor goes.
+            // Its `.occlude()` is also what keeps the divider strips (and
+            // tile click-to-focus, and strip hover styling) from fighting
+            // an in-flight tile drag: the catcher is painted after the
+            // whole tile surface, so everything under it leaves the hover
+            // chain for the drag's duration. The two catchers can never
+            // coexist — each drag kind's mouse-down is unreachable while
+            // the other's catcher occludes the window (and
+            // `try_arm_tile_drag` checks anyway). A move arriving with
+            // the button no longer pressed cancels with nothing applied
+            // — see `TileDrag`'s doc for why that differs from the
+            // divider catcher's finish. `on_mouse_up_out` routes through
+            // the DROP, not a cancel (review blocker fix): gpui's
+            // input-modality hover suppression means it fires for a
+            // perfectly ordinary in-window release whenever a keystroke
+            // was the last input — a KeyDown sets the window's
+            // `last_input_modality` to Keyboard (pinned window.rs,
+            // `dispatch_event`), a MouseUp does NOT reset it, and
+            // `HitboxId::is_hovered` returns false under keyboard
+            // modality, which flips the hovered-gated `on_mouse_up` off
+            // and the `!is_hovered`-gated `on_mouse_up_out` on. The
+            // keyboard is documented hot mid-drag, so "press any key,
+            // release without moving" is a real user path and must drop,
+            // not silently cancel. A genuinely outside-window release
+            // still applies nothing through this route:
+            // `locate_drop_target` has no target at a position outside
+            // every tile and dock, and a no-target drop is a no-op.
+            .when(tile_drag_armed, |el| {
+                el.child(
+                    div()
+                        .id("tile-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .cursor_grabbing()
+                        .debug_selector(|| "tile-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                view.cancel_tile_drag();
+                                cx.notify();
+                                return;
+                            }
+                            view.update_tile_drag(
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                                cx,
+                            );
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ),
+                )
+            })
+            // The drag ghost (tile-drag task): a lightweight fixed-size
+            // outline following the cursor — deliberately NOT a copy of
+            // the tile content (see TILE_DRAG_GHOST_SIZE's recorded
+            // choice). Painted above the catcher; a plain div with no
+            // handlers and no `.occlude()`, so it can never swallow the
+            // catcher's events even when the cursor overlaps it.
+            .when_some(tile_drag_ghost, |el, (gx, gy)| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(gx + TILE_DRAG_GHOST_OFFSET))
+                        .top(px(gy + TILE_DRAG_GHOST_OFFSET))
+                        .w(px(TILE_DRAG_GHOST_SIZE.0))
+                        .h(px(TILE_DRAG_GHOST_SIZE.1))
+                        .border_2()
+                        .border_color(cx.theme().primary)
+                        .debug_selector(|| "tile-drag-ghost".to_string()),
                 )
             })
             // The palette overlay paints above the tiles/status bar (later
@@ -2811,6 +3287,565 @@ mod tests {
         assert!(
             shell.read_with(&cx, |shell, _| shell.session_dirty),
             "the applied resize must persist even though the drag was cancelled"
+        );
+    }
+
+    // --- mod+drag tile movement (tile-drag task) ------------------------
+
+    /// The default mod alias (Alt) held on a mouse event — matches the
+    /// `alt-h`-style keystrokes the e2e tests already use for `mod+`.
+    fn alt_held() -> gpui::Modifiers {
+        gpui::Modifiers {
+            alt: true,
+            ..gpui::Modifiers::none()
+        }
+    }
+
+    /// Window-space point at fractional coordinates within a main-tree
+    /// tile's laid-out rect — the same chrome-offset + dock-carve math
+    /// `Render for ShellView` uses, so the tests track real geometry
+    /// instead of duplicating guesses.
+    fn main_tile_point(
+        cx: &mut gpui::VisualTestContext,
+        shell: &Entity<ShellView>,
+        id: TileId,
+        fx: f32,
+        fy: f32,
+    ) -> gpui::Point<gpui::Pixels> {
+        cx.update(|window, app| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let area = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
+                h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            };
+            let shell = shell.read(app);
+            let workspace = shell.services.workspaces.active();
+            let (tree_area, _) = crate::tiling::dock_layout(workspace.docks(), area);
+            let r = workspace
+                .tree()
+                .layout(tree_area)
+                .into_iter()
+                .find(|(t, _)| *t == id)
+                .expect("tile present in the main layout")
+                .1;
+            gpui::point(
+                px(sidebar::WIDTH + r.x + r.w * fx),
+                px(toolbar_height + r.y + r.h * fy),
+            )
+        })
+    }
+
+    /// Window-space point at fractional coordinates within a visible
+    /// dock's frame rect (same math as [`main_tile_point`]).
+    fn dock_point(
+        cx: &mut gpui::VisualTestContext,
+        shell: &Entity<ShellView>,
+        side: DockSide,
+        fx: f32,
+        fy: f32,
+    ) -> gpui::Point<gpui::Pixels> {
+        cx.update(|window, app| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let area = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
+                h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+            };
+            let shell = shell.read(app);
+            let workspace = shell.services.workspaces.active();
+            let (_, dock_rects) = crate::tiling::dock_layout(workspace.docks(), area);
+            let r = dock_rects
+                .into_iter()
+                .find(|(s, _)| *s == side)
+                .expect("dock visible in the layout")
+                .1;
+            gpui::point(
+                px(sidebar::WIDTH + r.x + r.w * fx),
+                px(toolbar_height + r.y + r.h * fy),
+            )
+        })
+    }
+
+    /// Shared setup for the tile-drag e2e tests: two tiles side by side,
+    /// focus moved to the LEFT tile, session dirt reset. Returns
+    /// `(cx, shell, left, right)`.
+    fn two_tile_drag_shell(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::VisualTestContext, Entity<ShellView>, TileId, TileId) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("alt-h"); // focus the left tile
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+        let tiles: Vec<TileId> = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().tiles()
+        });
+        let (left, right) = (tiles[0], tiles[1]);
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(left),
+            "sanity: focus starts on the left tile"
+        );
+        (cx, shell, left, right)
+    }
+
+    /// End-to-end: a real mod+press on a tile body, dragged past the
+    /// movement threshold onto another tile's LEFT edge band and
+    /// released, split-inserts the dragged tile on that side — focus
+    /// follows the moved tile, the session goes dirty, and the drag is
+    /// over. Also pins three recorded decisions along the way: the
+    /// mod+down itself must NOT change focus at arm time; the mod key
+    /// does not need to stay held once armed (the move and release are
+    /// sent with no modifiers); and mid-drag the ghost + zone highlight
+    /// paint (via `debug_bounds`, the honest painted-or-not hook).
+    #[gpui::test]
+    fn mod_dragging_a_tile_onto_anothers_edge_moves_it_and_focus_follows(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(left),
+            "mod+down must not change focus at arm time"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_some()),
+            "mod+down on a tile body arms a pending drag"
+        );
+
+        // Deep in the left tile's LEFT band, far past the 5px threshold.
+        // Modifiers deliberately released: the mod key only gates arming.
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("tile-drag-ghost").is_some(),
+            "an active drag paints its cursor ghost"
+        );
+        assert!(
+            cx.debug_bounds("tile-drop-highlight").is_some(),
+            "an active drag over a target paints the zone highlight"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "nothing is applied (or persisted) until the drop"
+        );
+
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .tiles()),
+            vec![right, left],
+            "an edge drop on the left band inserts the dragged tile before the target"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(right),
+            "focus follows the moved tile"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "an applied drop dirties the session"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "the drag is over after the drop"
+        );
+    }
+
+    /// End-to-end: a sloppy mod+click — press, a 2px wiggle (below the
+    /// 5px threshold), release — changes nothing at all: layout, focus
+    /// (the recorded no-focus-at-arm decision), and session dirt are all
+    /// exactly as before, and no drag remains armed.
+    #[gpui::test]
+    fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let wiggle = gpui::point(grab.x + px(2.0), grab.y + px(2.0));
+        cx.simulate_mouse_move(wiggle, MouseButton::Left, alt_held());
+        cx.simulate_mouse_up(wiggle, MouseButton::Left, alt_held());
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "a below-threshold mod+click must never rearrange"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(left),
+            "focus is untouched — the abandoned gesture leaves everything alone"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "nothing changed, so nothing is persisted"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "the pending drag is cleared on release"
+        );
+    }
+
+    /// End-to-end: a center drop swaps the two tiles in place (today's
+    /// recorded keyboard-parity semantics), focus following the dragged
+    /// tile into its new slot.
+    #[gpui::test]
+    fn mod_dragging_onto_a_tiles_center_swaps_the_pair(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        let grab = main_tile_point(&mut cx, &shell, left, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .tiles()),
+            vec![right, left],
+            "a center drop swaps the two tiles"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(left),
+            "focus follows the dragged tile to its new slot"
+        );
+        assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    }
+
+    /// End-to-end: dropping a tile on a visible (empty) dock's background
+    /// inserts it into that dock's tree with the keyboard `dock::move_*`
+    /// convention, region and focus following it into the dock.
+    #[gpui::test]
+    fn mod_dragging_onto_a_dock_background_inserts_into_the_dock(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
+        cx.simulate_keystrokes("ctrl-["); // show the (empty) left dock
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = dock_point(&mut cx, &shell, DockSide::Left, 0.5, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        shell.read_with(&cx, |shell, _| {
+            let workspace = shell.services.workspaces.active();
+            assert_eq!(
+                workspace.docks().get(DockSide::Left).tree().tiles(),
+                vec![right],
+                "the dropped tile joins the dock's tree"
+            );
+            assert_eq!(
+                workspace.region(),
+                crate::tiling::FocusRegion::Dock(DockSide::Left),
+                "the region follows the moved tile into the dock"
+            );
+            assert!(
+                !workspace.tree().contains(right),
+                "the tile left the main tree"
+            );
+        });
+        assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    }
+
+    /// End-to-end cancel guard: `mod+2` switching workspaces mid-drag
+    /// cancels the drag cleanly — nothing applied, nothing persisted, the
+    /// original workspace's layout untouched when the (now targetless)
+    /// release lands.
+    #[gpui::test]
+    fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        cx.simulate_keystrokes("alt-2"); // keyboard stays live mid-drag
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "a workspace switch mid-drag cancels the tile drag"
+        );
+
+        cx.simulate_keystrokes("alt-1");
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "nothing was applied by the cancelled drag"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a cancelled tile drag persists nothing (cancel is truly free)"
+        );
+    }
+
+    /// End-to-end cancel guard: opening the palette mid-drag (`ctrl+k`)
+    /// cancels the tile drag with nothing applied — unlike the divider
+    /// drag's palette cancel, which keeps its already-applied live
+    /// resize, a tile drag has applied nothing to keep.
+    #[gpui::test]
+    fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "opening the palette mid-drag cancels the tile drag"
+        );
+
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release after the cancel applies nothing"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "nothing persisted"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "the palette itself stays open (the release is not a dismissing click)"
+        );
+    }
+
+    /// End-to-end: a plain (no-mod) click on a tile still focuses it and
+    /// never arms a drag — the tile-drag feature leaves click-to-focus
+    /// byte-for-byte in behavior.
+    #[gpui::test]
+    fn a_plain_click_still_focuses_and_never_arms_a_drag(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(left)
+        );
+        let click = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(click, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(right),
+            "plain click-to-focus is unchanged"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "no drag arms without the mod key"
+        );
+    }
+
+    /// Review blocker regression: a keystroke mid-drag flips gpui's
+    /// input modality to Keyboard, `MouseUp` does not flip it back, and
+    /// `HitboxId::is_hovered` is false under keyboard modality — so a
+    /// stationary release after ANY keypress reaches the catcher through
+    /// `on_mouse_up_out`, not `on_mouse_up`. The keyboard is documented
+    /// hot mid-drag, so that release must still DROP (the fix routes
+    /// `up_out` through `finish_tile_drag`); before the fix it silently
+    /// cancelled.
+    #[gpui::test]
+    fn a_keystroke_mid_drag_does_not_turn_a_stationary_release_into_a_cancel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        // An unbound key — hits the matcher, matches nothing, changes no
+        // shell state, but flips the window's input modality to Keyboard.
+        cx.simulate_keystrokes("x");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .tile_drag
+                .as_ref()
+                .is_some_and(|drag| drag.active)),
+            "an unbound keystroke mid-drag must not cancel the drag"
+        );
+
+        // Release without moving: under keyboard modality this dispatches
+        // through the catcher's `on_mouse_up_out` gate.
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .tiles()),
+            vec![right, left],
+            "the stationary release after a keystroke must still apply the edge drop"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(right),
+            "focus follows the moved tile"
+        );
+        assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+        assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
+    }
+
+    /// Review should-fix regression: in production, input events arrive
+    /// between frames — the palette-toggle keystroke and the release can
+    /// both land before any render runs the cancel guard (the test
+    /// harness draws at the end of every simulated event's update, so
+    /// the two events are dispatched inside ONE `cx.update` here, the
+    /// same one-frame window real platforms produce; the mid-update
+    /// asserts verify the guard genuinely hasn't run). The drop-time
+    /// re-check in `finish_tile_drag` must refuse to apply the drop
+    /// underneath the just-opened palette.
+    #[gpui::test]
+    fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("ctrl-k").unwrap(), cx);
+            assert!(
+                shell.read(cx).palette.is_some(),
+                "the keystroke opened the palette"
+            );
+            assert!(
+                shell.read(cx).tile_drag.is_some(),
+                "no render has run since the keystroke, so the render-top guard has \
+                 not cancelled the drag — the drop-time re-check is the only defense"
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: drop,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release must not apply the drop underneath the just-opened palette"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "nothing applied, nothing persisted"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "the drag is over either way"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "the palette stays open"
         );
     }
 
