@@ -911,7 +911,11 @@ mod tests {
             vec!["missing config_version (assuming 1)".to_string()],
             "a dangling focused reference must not itself add a warning"
         );
-        assert_eq!(ws.active().tree().focused(), None);
+        // Dock-trees review fix: the dangling reference heals to the first
+        // tile (via `Workspace::from_parts`), not to None — a non-empty
+        // restored tree must always have a focused tile, or the move-back
+        // verb could hand a tile to a focus-less `split`.
+        assert_eq!(ws.active().tree().focused(), Some(TileId(1)));
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
     }
 
@@ -1578,6 +1582,51 @@ mod tests {
             ws.active().docks().get(DockSide::Right).tree().tiles(),
             vec![TileId(2)]
         );
+    }
+
+    #[test]
+    fn an_intra_dock_tree_duplicate_id_keeps_one_leaf_with_one_warning() {
+        // Review fix: a dock tree carrying the SAME id twice (parseable —
+        // node_from_toml has no duplicate check). First claim wins: one
+        // copy of the tile survives in place, the other is removed, and
+        // exactly one warning is emitted for the one healed duplicate
+        // (the pre-fix all-copies prune deleted both leaves and, walking
+        // a pre-removal snapshot, warned twice).
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            [docks.left]
+            visible = true
+            focused = 5
+            [docks.left.node]
+            kind = "split"
+            orientation = "vertical"
+            ratios = [0.5, 0.5]
+            [[docks.left.node.children]]
+            kind = "leaf"
+            id = 5
+            [[docks.left.node.children]]
+            kind = "leaf"
+            id = 5
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert_eq!(
+            warnings.iter().filter(|w| w.contains("removing")).count(),
+            1,
+            "exactly one warning for the one healed duplicate: {warnings:?}"
+        );
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(
+            dock.tree().tiles(),
+            vec![TileId(5)],
+            "one copy of the tile must survive"
+        );
+        assert_eq!(dock.tree().focused(), Some(TileId(5)));
+        assert!(dock.focusable(), "the dock stays visible and occupied");
     }
 
     #[test]

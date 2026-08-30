@@ -156,6 +156,11 @@ impl Tree {
     /// tile"). Sibling ratios equalize on insert (documented v1
     /// simplification). Focus moves to the new tile. Splitting a non-empty
     /// tree exits fullscreen.
+    ///
+    /// Invariant (dock-trees review fix): split never discards the id it
+    /// was given. Callers like `Workspace::move_to_dock` remove a tile
+    /// from one tree and hand it to another's `split` — a split that
+    /// silently returned would lose that tile forever.
     pub fn split(&mut self, new: TileId, orientation: Orientation) {
         match (self.root.take(), self.focused) {
             (None, _) => {
@@ -165,10 +170,26 @@ impl Tree {
                 self.fullscreen = None;
                 self.root = Some(split_at(root, focused, new, orientation));
             }
-            // Invariant: focused is Some whenever root is Some.
+            // Degenerate: root present but nothing focused. Live verbs
+            // keep focused Some whenever root is Some, and restore heals
+            // it (`Dock::from_parts` / `Workspace::from_parts` refocus
+            // the first tile) — but if some future path reconstructs this
+            // state anyway, the never-discard invariant above must hold.
+            // Recorded choice: insert at the first tree-order leaf
+            // (equivalent to focus-then-split), rather than dropping the
+            // id or panicking.
             (Some(root), None) => {
-                self.root = Some(root);
-                return;
+                let mut leaves = Vec::new();
+                collect_leaves(&root, &mut leaves);
+                match leaves.first().copied() {
+                    Some(anchor) => {
+                        self.fullscreen = None;
+                        self.root = Some(split_at(root, anchor, new, orientation));
+                    }
+                    // Unreachable (every constructible root bottoms out in
+                    // at least one leaf), but even then the id survives.
+                    None => self.root = Some(Node::Leaf(new)),
+                }
             }
         }
         self.focused = Some(new);
@@ -205,8 +226,12 @@ impl Tree {
             .position(|&id| id == focused)
             .unwrap_or(0);
 
-        // Remove the leaf from the tree.
-        self.root = self.root.take().and_then(|n| remove_leaf(n, focused));
+        // Remove the leaf from the tree (exactly one — see `remove_leaf`).
+        let mut done = false;
+        self.root = self
+            .root
+            .take()
+            .and_then(|n| remove_leaf(n, focused, &mut done));
 
         // Focus the leaf that was immediately after the closed one, or the
         // previous one if the closed tile was last.
@@ -219,7 +244,11 @@ impl Tree {
     /// Remove an arbitrary tile by id, wherever it is (dock-trees task:
     /// session healing's seam — a duplicate leaf claim in a dock tree is
     /// healed by removing that leaf, which `remove_focused` alone can't
-    /// express without disturbing focus). Same structural rules as
+    /// express without disturbing focus). Removes exactly ONE leaf — the
+    /// first in tree order — even when a hostile file duplicated the id
+    /// *within* one tree (review fix: an all-copies prune deleted both
+    /// copies, losing the tile entirely instead of letting the first
+    /// claim win; see `remove_leaf`). Same structural rules as
     /// `close`/`remove_focused`: single-child splits collapse, sibling
     /// ratios renormalize, fullscreen on the removed tile clears. Focus:
     /// if the removed tile *was* focused, the usual tree-order-neighbor
@@ -648,9 +677,21 @@ fn split_at(node: Node, focused: TileId, new: TileId, orientation: Orientation) 
     }
 }
 
-fn remove_leaf(node: Node, target: TileId) -> Option<Node> {
+/// Remove exactly ONE leaf holding `target` — the first in tree order —
+/// rebuilding the node (returns `None` when the removal emptied it).
+/// `done` threads "already removed one" through the recursion. One leaf,
+/// not all (dock-trees review fix): a live tree never holds duplicate ids,
+/// so for every live caller this is the same operation as before — but
+/// session healing removes duplicate leaves from hostile dock trees one
+/// claim at a time, and an all-matches prune there deleted every copy of
+/// an id duplicated *within* one tree, losing the tile entirely instead of
+/// letting the first claim win.
+fn remove_leaf(node: Node, target: TileId, done: &mut bool) -> Option<Node> {
     match node {
-        Node::Leaf(id) if id == target => None,
+        Node::Leaf(id) if id == target && !*done => {
+            *done = true;
+            None
+        }
         leaf @ Node::Leaf(_) => Some(leaf),
         Node::Split {
             orientation,
@@ -661,7 +702,7 @@ fn remove_leaf(node: Node, target: TileId) -> Option<Node> {
             let mut kept_ratios = Vec::new();
             let mut removed = false;
             for (child, ratio) in children.into_iter().zip(ratios) {
-                match remove_leaf(child, target) {
+                match remove_leaf(child, target, done) {
                     Some(child) => {
                         kept_children.push(child);
                         kept_ratios.push(ratio);
@@ -1392,6 +1433,52 @@ mod tests {
         assert!(tree.remove(TileId(1)));
         assert!(tree.is_empty());
         assert_eq!(tree.focused(), None);
+    }
+
+    #[test]
+    fn remove_of_a_duplicated_id_takes_only_the_first_occurrence() {
+        // Review fix: a hostile session file can duplicate an id WITHIN
+        // one tree (node_from_toml has no duplicate check). remove() must
+        // prune exactly one leaf — first in tree order — so healing's
+        // first-claim-wins leaves one copy alive instead of deleting both.
+        let dup = Node::Split {
+            orientation: Orientation::Horizontal,
+            children: vec![
+                Node::Leaf(TileId(5)),
+                Node::Leaf(TileId(9)),
+                Node::Leaf(TileId(5)),
+            ],
+            ratios: vec![1.0 / 3.0; 3],
+        };
+        let mut tree = Tree::from_parts(Some(dup), Some(TileId(9)), None).unwrap();
+        assert!(tree.remove(TileId(5)));
+        assert_eq!(
+            tree.tiles(),
+            vec![TileId(9), TileId(5)],
+            "exactly one copy removed — the first in tree order"
+        );
+        assert_eq!(tree.focused(), Some(TileId(9)), "focus untouched");
+    }
+
+    #[test]
+    fn split_with_root_but_no_focus_inserts_at_the_first_leaf_instead_of_dropping() {
+        // Review fix: the old degenerate arm returned without inserting,
+        // so a caller that had already removed the tile from another tree
+        // (move_to_dock's move-back) lost it forever. The invariant is
+        // "split never discards the id it was given": with no focus, the
+        // first tree-order leaf anchors the insert and focus lands on the
+        // new tile as usual. (Reachable only through a reconstructed
+        // root-Some/focused-None tree — Tree::from_parts heals a dangling
+        // focused to None.)
+        let mut tree = Tree::from_parts(Some(Node::Leaf(TileId(1))), None, None).unwrap();
+        assert_eq!(tree.focused(), None, "fixture sanity: no focus");
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert_eq!(
+            tree.tiles(),
+            vec![TileId(1), TileId(2)],
+            "the id must never be dropped"
+        );
+        assert_eq!(tree.focused(), Some(TileId(2)));
     }
 
     // --- Tree::from_parts (Task 3: session restore reconstruction) -----

@@ -153,10 +153,13 @@ fn keystrokes_drive_the_docks() {
     press(&mut matcher, &mut ws, "shift+up");
     assert!(ws.active().docks().get(DockSide::Bottom).size() > before);
 
-    // ctrl+/ hides it (tree kept); ctrl+/ shows it again.
+    // ctrl+/ hides it (tree kept; focus falls back to Main — the main
+    // tree is non-empty, the only end-to-end pin of the hide-fallback
+    // path); ctrl+/ shows it again.
     press(&mut matcher, &mut ws, "ctrl+/");
     assert!(!ws.active().docks().get(DockSide::Bottom).visible());
     assert!(!ws.active().docks().get(DockSide::Bottom).tree().is_empty());
+    assert_eq!(ws.active().region(), FocusRegion::Main);
     press(&mut matcher, &mut ws, "ctrl+/");
     assert!(ws.active().docks().get(DockSide::Bottom).visible());
 

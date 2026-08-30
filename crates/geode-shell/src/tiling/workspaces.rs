@@ -457,7 +457,22 @@ impl Workspace {
     /// healing step contributes a warning string; none is ever an error.
     pub fn from_parts(tree: Tree, docks: Docks, region: FocusRegion) -> (Workspace, Vec<String>) {
         let mut warnings = Vec::new();
+        let mut tree = tree;
         let mut docks = docks;
+        // Mirror `Dock::from_parts`'s focus heal for the main tree (review
+        // fix): a non-empty tree whose `focused` was healed away (dangling
+        // reference → `None` in `Tree::from_parts`) refocuses its first
+        // tile, silently — the verbs lean on "focused is Some whenever
+        // root is Some" (e.g. `move_to_dock`'s same-side arm removes a
+        // tile from a dock and hands it to this tree's `split`; without a
+        // focus, the split would have to fall back to its degenerate
+        // first-leaf anchor, and before that guard existed it silently
+        // dropped the tile).
+        if tree.focused().is_none()
+            && let Some(&first) = tree.tiles().first()
+        {
+            tree.focus(first);
+        }
         let mut claimed: Vec<TileId> = tree.tiles();
         Self::heal_duplicate_dock_claims(&mut docks, &mut claimed, "", &mut warnings);
         let mut ws = Workspace {
@@ -795,6 +810,7 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tiling::Node;
     use crate::tiling::docks::{DOCK_DEFAULT_SIZE, DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock};
 
     fn act(s: &str) -> ActionId {
@@ -1209,6 +1225,60 @@ mod tests {
         let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(ws.tree().fullscreen(), Some(TileId(1)));
+    }
+
+    #[test]
+    fn workspace_from_parts_heals_a_missing_main_tree_focus_to_the_first_tile() {
+        // Review fix: `Tree::from_parts` heals a dangling `focused` to
+        // None while keeping the root — restored as-is, the main tree
+        // then violated "focused is Some whenever root is Some" and the
+        // move-back verb could drop a tile into `split`'s degenerate arm.
+        // The workspace-level heal mirrors `Dock::from_parts`: refocus
+        // the first tile, silently.
+        let tree = Tree::from_parts(Some(Node::Leaf(TileId(3))), None, None).unwrap();
+        assert_eq!(tree.focused(), None, "fixture sanity");
+        let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            ws.tree().focused(),
+            Some(TileId(3)),
+            "a non-empty restored tree must have a focused tile"
+        );
+    }
+
+    #[test]
+    fn move_back_after_a_hostile_restore_never_loses_the_tile() {
+        // Review repro: main-tree node with a dangling/missing `focused`,
+        // focus in an occupied left dock. The move-back chord removes the
+        // tile from the dock and hands it to the main tree's split —
+        // before the fixes that split silently dropped it. Both ends now
+        // guard: restore heals the main tree's focus, and even without
+        // focus, split anchors at the first leaf.
+        let tree = Tree::from_parts(Some(Node::Leaf(TileId(1))), None, None).unwrap();
+        let mut docks = Docks::default();
+        let dock = docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(2), Orientation::Horizontal);
+        dock.set_visible(true);
+        let (workspace, warnings) =
+            Workspace::from_parts(tree, docks, FocusRegion::Dock(DockSide::Left));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, workspace);
+        let (mut ws, warnings) = Workspaces::from_parts(spaces, 1).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        apply_workspace_action(&mut ws, &act("dock::move_left")); // move back
+
+        let mut all: Vec<TileId> = ws.active().tree().tiles();
+        all.extend(ws.active().docks().tiles());
+        all.sort();
+        assert_eq!(
+            all,
+            vec![TileId(1), TileId(2)],
+            "the moved tile must land in the main tree, never vanish"
+        );
+        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
     }
 
     #[test]
