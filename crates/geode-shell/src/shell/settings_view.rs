@@ -37,7 +37,9 @@
 //! Content v1 (brief): one page, two groups — **Appearance** (theme family
 //! dropdown, light/dark switch, and a font-size toggle button group —
 //! small/medium/large, see the `fontsize` module — all live-applying) and
-//! **Keyboard** (read-only mod-key display). Neither group is resettable: there is no
+//! **Keyboard** (a find-style toggle button group — vim/fzf `/` behavior
+//! in list dialogs, see `vimfind::FindStyle` — plus the read-only mod-key
+//! display). Neither group is resettable: there is no
 //! meaningful "default" to reset *to* here (the config file is the real
 //! default, and writing it back is the config-editor phase's job, not
 //! this dialog's) — a reset button implying otherwise would be misleading.
@@ -68,6 +70,7 @@ use crate::shell::ShellView;
 use crate::shell::dialog;
 use crate::shell::dialog::open_shell_dialog;
 use crate::theme::Mode;
+use crate::vimfind::FindStyle;
 
 /// Open the settings modal (`settings::open`: `ctrl+,`, the palette entry,
 /// and the sidebar profile icon all reach this). A no-op if a modal is
@@ -300,9 +303,39 @@ fn build(
         }),
     ]);
 
-    let keyboard = SettingGroup::new()
-        .title("Keyboard")
-        .item(SettingItem::render(move |_, _, cx| {
+    let keyboard = SettingGroup::new().title("Keyboard").items(vec![
+        // Same toggle-button-group idiom as "Font size" above (house
+        // rule: two fixed options don't earn a dropdown), via the same
+        // custom-render field kind.
+        SettingItem::new(
+            "Find style",
+            SettingField::render({
+                let view = view.clone();
+                move |_options, _window, cx: &mut App| {
+                    let current = view.read(cx).find_style;
+                    let view = view.clone();
+                    ButtonGroup::new("find-style")
+                        .outline()
+                        .small()
+                        .children(FindStyle::ALL.map(|style| {
+                            Button::new(style.config_value())
+                                .label(style.label())
+                                .selected(style == current)
+                        }))
+                        .on_click(move |clicks: &Vec<usize>, _window, cx| {
+                            if let Some(&style) =
+                                clicks.first().and_then(|&ix| FindStyle::ALL.get(ix))
+                            {
+                                set_find_style(&view, style, cx);
+                            }
+                        })
+                }
+            }),
+        )
+        .description(
+            "How / search behaves in list dialogs — vim jumps the selection; fzf filters the rows.",
+        ),
+        SettingItem::render(move |_, _, cx| {
             v_flex()
                 .gap_1()
                 .child(Label::new(format!(
@@ -315,7 +348,8 @@ fn build(
                         .text_color(cx.theme().muted_foreground)
                         .child("set via [keymap] mod in config"),
                 )
-        }));
+        }),
+    ]);
 
     let page = SettingPage::new("Settings")
         .default_open(true)
@@ -380,6 +414,19 @@ pub(crate) fn set_font_size(view: &Entity<ShellView>, size: FontSize, cx: &mut A
     view.update(cx, |shell, cx| {
         shell.font_size = size;
         shell.persist_font_size(cx);
+        cx.notify();
+    });
+}
+
+/// Set the find style and persist it (`[ui] find_style`) — the find-style
+/// button group's setter, standalone for the same direct-drive
+/// testability reasoning as [`set_theme`]/[`set_font_size`]. Nothing to
+/// apply beyond the state itself: `keybindings_view` reads
+/// `ShellView::find_style` fresh on every keystroke and render.
+pub(crate) fn set_find_style(view: &Entity<ShellView>, style: FindStyle, cx: &mut App) {
+    view.update(cx, |shell, cx| {
+        shell.find_style = style;
+        shell.persist_find_style(cx);
         cx.notify();
     });
 }

@@ -43,6 +43,7 @@ use crate::tiling::{
     Workspaces, apply_workspace_action, classify_drop_zone, divider_strips, dock_edge_strips,
     drop_highlight_rect, hit_tile, locate_drop_target, rect_contains,
 };
+use crate::vimfind::{self, FindStyle};
 use geode_core::config::{Config, LayerDoc};
 
 /// How often the background reload watcher polls the watched config
@@ -237,6 +238,14 @@ pub struct ShellView {
     /// the settings control via `settings_view::set_font_size`, config hot
     /// reload) — see the `fontsize` module doc.
     font_size: FontSize,
+    /// The effective `/`-find behavior for list dialogs (vim jump vs. fzf
+    /// filter — `[ui] find_style`, see `vimfind::FindStyle`). Same
+    /// lifecycle as `font_size` above: resolved at startup, re-resolved on
+    /// config hot reload, set directly by the settings control
+    /// (`settings_view::set_find_style`) — minus the render-time apply,
+    /// since there is nothing window-level to apply: `keybindings_view`'s
+    /// key handler and render just read it.
+    find_style: FindStyle,
     focus_handle: FocusHandle,
     /// The open command palette's state (Task 6), or `None` when closed.
     /// Built fresh from the registry/keymap/theme service each time
@@ -577,11 +586,13 @@ impl ShellView {
         .detach();
 
         let font_size = FontSize::from_config(&services.config);
+        let find_style = FindStyle::from_config(&services.config);
 
         Self {
             services,
             matcher: Matcher::default(),
             font_size,
+            find_style,
             focus_handle,
             palette: None,
             modal: None,
@@ -669,6 +680,7 @@ impl ShellView {
             self.services.keymap = keymap;
             // Cheap re-derive; `render` applies it only when it changed.
             self.font_size = FontSize::from_config(&self.services.config);
+            self.find_style = FindStyle::from_config(&self.services.config);
 
             if theme_changed {
                 self.services
@@ -955,6 +967,25 @@ impl ShellView {
             .spawn(async move {
                 if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
                     eprintln!("[fontsize] warning: {e}");
+                }
+            })
+            .detach();
+    }
+
+    /// Persist the current find style to `<user_dir>/app.toml`'s `[ui]`
+    /// table, off the UI thread — the exact contract of [`Self::
+    /// persist_font_size`] just above (missing `user_dir` = silently
+    /// skipped; failures are a stderr warning; last-write-wins races
+    /// accepted for the same rare-UI-action reasons).
+    fn persist_find_style(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let style = self.find_style;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
+                    eprintln!("[findstyle] warning: {e}");
                 }
             })
             .detach();
@@ -7276,6 +7307,105 @@ mod tests {
         );
     }
 
+    /// `settings_view::set_find_style` (the find-style button group's
+    /// setter, driven directly for the same reason `set_theme`'s and
+    /// `set_font_size`'s tests drive the handler rather than the control)
+    /// updates `ShellView::find_style` — the state `keybindings_view`
+    /// reads fresh on every keystroke and render, so there is nothing
+    /// further to apply.
+    #[gpui::test]
+    fn set_find_style_updates_the_shell_state(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            FindStyle::Vim,
+            "sanity: with no [ui] find_style configured, vim is the default"
+        );
+
+        cx.update(|_window, cx| settings_view::set_find_style(&shell, FindStyle::Fzf, cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            FindStyle::Fzf,
+            "set_find_style should update the shell's state immediately"
+        );
+    }
+
+    /// `[ui] find_style` resolves at startup and re-resolves on hot reload
+    /// — the same two paths `font_size` rides (`ShellView::new` /
+    /// `apply_reload`).
+    #[gpui::test]
+    fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut services = test_services();
+        services.config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            FindStyle::Fzf,
+            "[ui] find_style = \"fzf\" should resolve at startup"
+        );
+
+        // A reload whose config lacks the key falls back to vim — the
+        // same lenient re-derive `font_size` gets in `apply_reload`.
+        let new_config = config_with_mod("alt");
+        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.find_style),
+            FindStyle::Vim,
+            "a reload without [ui] find_style should re-resolve to the default"
+        );
+    }
+
     /// Task 9: opening a modal through `dialog::open_shell_dialog` (here,
     /// `settings::open` — the only current call site, migrated onto the
     /// utility) must cancel a pending keymap sequence, the same hygiene
@@ -7642,6 +7772,129 @@ mod tests {
             selected_text(&cx),
             committed,
             "shift+n should step back to the previous match"
+        );
+    }
+
+    /// With `[ui] find_style = "fzf"`, `/` runs the filter idiom end to
+    /// end through real keystrokes: every edit re-selects the FIRST match,
+    /// `down` steps through the matches, and `enter` picks the row and
+    /// starts rebind listening — the wiring over the pure transitions
+    /// `keybindings_view::tests`' fzf block already proves
+    /// (`handle_key`'s gate on `ShellView::find_style` is exactly what
+    /// this exercises).
+    #[gpui::test]
+    fn fzf_find_filters_and_enter_picks_through_real_keystrokes(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut services = test_services();
+        services.config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+            });
+        });
+
+        // The full-list indices of the 'focus' matches — what the narrowed
+        // list will render, in order.
+        let matches = shell.read_with(&cx, |shell, _| {
+            let rows =
+                keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+            let texts: Vec<String> = rows.iter().map(keybindings_view::searchable_text).collect();
+            keybindings_view::filter_matches(&texts, "focus")
+        });
+        assert!(
+            matches.len() >= 2,
+            "sanity: expected at least two 'focus' rows, got {matches:?}"
+        );
+
+        let state_of = |cx: &gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, _| {
+                let state = shell.keybindings.as_ref().expect("dialog open");
+                (
+                    state.selected,
+                    state.find.is_active(),
+                    state.listening.is_some(),
+                )
+            })
+        };
+
+        // A draw with the dialog idle exercises the fzf footer hints
+        // (`chip("up")`/`chip("down")`/`chip("enter")` must all parse).
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.simulate_keystrokes("/ f o c u s");
+        assert_eq!(
+            state_of(&cx),
+            (matches[0], true, false),
+            "each edit should re-select the FIRST match, session live"
+        );
+
+        // Mid-session draw: the list must now paint ONLY matching rows.
+        // Row selectors are keyed by full-list index, so a match row is
+        // painted and the first non-match row (near the top of the full
+        // list, i.e. well within the viewport when unfiltered) is not.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let first_non_match = (0..).find(|ix| !matches.contains(ix)).unwrap();
+        // `debug_bounds` takes `&'static str`; leak the two dynamic
+        // selectors (test-only, a few bytes).
+        let match_selector: &'static str =
+            Box::leak(format!("keybindings-row-{}", matches[0]).into_boxed_str());
+        let non_match_selector: &'static str =
+            Box::leak(format!("keybindings-row-{first_non_match}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(match_selector).is_some(),
+            "the first matching row should be painted during the fzf session"
+        );
+        assert!(
+            cx.debug_bounds(non_match_selector).is_none(),
+            "a non-matching row (index {first_non_match}) must NOT be \
+             painted while the fzf filter narrows the list"
+        );
+
+        cx.simulate_keystrokes("down");
+        assert_eq!(
+            state_of(&cx),
+            (matches[1], true, false),
+            "down should step to the second match"
+        );
+
+        cx.simulate_keystrokes("enter");
+        assert_eq!(
+            state_of(&cx),
+            (matches[1], false, true),
+            "enter should end the session on the picked row and start \
+             rebind listening immediately"
         );
     }
 

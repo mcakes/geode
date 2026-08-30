@@ -8,6 +8,11 @@
 //! list dialog (settings-style or otherwise) can hold a [`VimFind`] next
 //! to its `VimListNav` and get the same `/` interaction.
 //!
+//! The module also owns [`FindStyle`], the `[ui] find_style` user setting
+//! choosing between this vim jump model and an fzf-style *filter* — the
+//! session/query mechanics below are shared by both; only what the caller
+//! does with the query differs (see [`FindStyle`]'s doc comment).
+//!
 //! ## Semantics (vim's jump model, not a filter)
 //!
 //! `/` starts a find session; typed characters build a query shown in the
@@ -43,7 +48,108 @@
 //! Letters, digits, and unshifted symbols — the realistic query alphabet
 //! for matching displayed titles and categories — are unaffected.
 
+use std::path::Path;
+
+use toml_edit::{DocumentMut, Item, Table, value};
+
+use geode_core::config::Config;
+
 use crate::keymap::{Keystroke, Modifiers};
+
+/// Which behavior `/` gets in list dialogs (`[ui] find_style`): vim's
+/// jump model above (the default), or an fzf-style filter. The [`VimFind`]
+/// state machine serves both — `/` starts the session and query editing is
+/// byte-for-byte identical either way; what differs is what the *caller*
+/// does with the query (jump the selection vs. narrow the rendered rows —
+/// the keybinding dialog's `press_while_finding` vs.
+/// `press_while_finding_fzf`). Mirrors [`crate::fontsize::FontSize`]'s
+/// shape exactly: `config_value`/`label`/`from_value`/`from_config` plus a
+/// [`persist_to_user_config`] sibling, so the settings control, startup
+/// resolution, and hot reload all ride the same paths font size does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FindStyle {
+    #[default]
+    Vim,
+    Fzf,
+}
+
+impl FindStyle {
+    /// Display order for the settings control.
+    pub const ALL: [FindStyle; 2] = [FindStyle::Vim, FindStyle::Fzf];
+
+    /// Label for the settings control's button.
+    pub fn label(self) -> &'static str {
+        match self {
+            FindStyle::Vim => "Vim",
+            FindStyle::Fzf => "Fzf",
+        }
+    }
+
+    /// The value written to / read from `[ui] find_style`.
+    pub fn config_value(self) -> &'static str {
+        match self {
+            FindStyle::Vim => "vim",
+            FindStyle::Fzf => "fzf",
+        }
+    }
+
+    /// Parse a config value. `None` for anything that isn't exactly one of
+    /// the two known values — the caller decides the fallback
+    /// ([`FindStyle::from_config`] falls back to `Vim`).
+    pub fn from_value(s: &str) -> Option<FindStyle> {
+        FindStyle::ALL.into_iter().find(|f| f.config_value() == s)
+    }
+
+    /// Resolve the effective find style from the layered config: doc
+    /// `app`, key `ui.find_style`. A missing key, or any unknown value, is
+    /// `Vim` — same lenient shape as `FontSize::from_config`.
+    pub fn from_config(config: &Config) -> FindStyle {
+        config
+            .get("app", "ui.find_style")
+            .and_then(|v| v.as_str())
+            .and_then(FindStyle::from_value)
+            .unwrap_or_default()
+    }
+}
+
+/// Write `[ui] find_style` into `<user_dir>/app.toml`, preserving every
+/// other table, key, and comment — the same toml_edit + atomic-write
+/// contract as [`crate::fontsize::persist_to_user_config`] (see
+/// [`crate::theme::persist_to_user_config`]'s doc comment for the full
+/// failure-mode reasoning: missing file created with `config_version = 1`,
+/// unparseable file left untouched and reported as `Err`, reload-watcher
+/// interplay identical).
+pub fn persist_to_user_config(user_dir: &Path, style: FindStyle) -> Result<(), String> {
+    let path = user_dir.join("app.toml");
+    let existed = path.exists();
+
+    let mut doc = if existed {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?
+    } else {
+        DocumentMut::new()
+    };
+
+    if !existed {
+        doc["config_version"] = value(1_i64);
+    }
+
+    if !doc.get("ui").is_some_and(Item::is_table_like) {
+        doc["ui"] = Item::Table(Table::new());
+    }
+    let ui_table = doc["ui"]
+        .as_table_mut()
+        .expect("just ensured [ui] is a table");
+    ui_table["find_style"] = value(style.config_value());
+
+    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+}
 
 /// Direction for [`find_match`] and the caller's `n`/`N` repeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,5 +518,88 @@ mod tests {
         let text = "ÉCLAIR";
         let range = match_range(text, "éclair").expect("should match");
         assert_eq!(range, 0..text.len());
+    }
+
+    // -- FindStyle (`[ui] find_style`) --------------------------------
+
+    use geode_core::config::{ConfigSources, LayerDoc};
+
+    #[test]
+    fn find_style_values_roundtrip_and_vim_is_the_default() {
+        assert_eq!(FindStyle::default(), FindStyle::Vim);
+        for style in FindStyle::ALL {
+            assert_eq!(FindStyle::from_value(style.config_value()), Some(style));
+        }
+        assert_eq!(FindStyle::Vim.config_value(), "vim");
+        assert_eq!(FindStyle::Fzf.config_value(), "fzf");
+        assert_eq!(FindStyle::Vim.label(), "Vim");
+        assert_eq!(FindStyle::Fzf.label(), "Fzf");
+        assert_eq!(FindStyle::from_value("emacs"), None);
+        assert_eq!(FindStyle::from_value(""), None);
+    }
+
+    #[test]
+    fn find_style_from_config_reads_ui_find_style_with_vim_fallback() {
+        let with = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        assert_eq!(FindStyle::from_config(&with), FindStyle::Fzf);
+
+        let empty = Config::load(&ConfigSources::default());
+        assert_eq!(FindStyle::from_config(&empty), FindStyle::Vim);
+
+        let bogus = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"emacs\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        assert_eq!(FindStyle::from_config(&bogus), FindStyle::Vim);
+    }
+
+    #[test]
+    fn persist_creates_a_fresh_file_with_config_version() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), FindStyle::Fzf).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        assert!(text.contains("config_version = 1"));
+        assert!(text.contains("[ui]"));
+        assert!(text.contains("find_style = \"fzf\""));
+    }
+
+    #[test]
+    fn persist_preserves_comments_and_sibling_ui_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        std::fs::write(
+            &path,
+            "# my config\nconfig_version = 1\n\n[ui]\nfont_size = \"large\" # keep me\n",
+        )
+        .unwrap();
+        persist_to_user_config(dir.path(), FindStyle::Fzf).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("# my config"));
+        assert!(text.contains("font_size = \"large\" # keep me"));
+        assert!(text.contains("find_style = \"fzf\""));
+    }
+
+    #[test]
+    fn persist_overwrites_a_previous_value_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        persist_to_user_config(dir.path(), FindStyle::Fzf).unwrap();
+        persist_to_user_config(dir.path(), FindStyle::Vim).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        assert!(text.contains("find_style = \"vim\""));
+        assert!(!text.contains("find_style = \"fzf\""));
+    }
+
+    #[test]
+    fn persist_refuses_to_touch_an_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.toml");
+        std::fs::write(&path, "not [valid toml").unwrap();
+        assert!(persist_to_user_config(dir.path(), FindStyle::Fzf).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not [valid toml");
     }
 }
