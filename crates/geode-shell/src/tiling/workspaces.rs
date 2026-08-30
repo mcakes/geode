@@ -623,12 +623,22 @@ impl Workspace {
             return false;
         };
         if source == destination {
-            let tree = match source {
-                FocusRegion::Main => &mut self.tree,
-                FocusRegion::Dock(side) => self.docks.get_mut(side).tree_mut(),
-            };
-            tree.swap_tiles(dragged, target);
-            tree.focus(dragged);
+            match source {
+                FocusRegion::Main => {
+                    self.tree.swap_tiles(dragged, target);
+                    self.tree.focus(dragged);
+                }
+                FocusRegion::Dock(side) => {
+                    let dock = self.docks.get_mut(side);
+                    dock.tree_mut().swap_tiles(dragged, target);
+                    dock.tree_mut().focus(dragged);
+                    // Same region-invariant enforcement as the cross-tree
+                    // arm below: unreachable from the visible-layout drop
+                    // path (a hidden dock's tiles are never targets), but
+                    // the verb keeps `Dock(side)` focusable on its own.
+                    dock.set_visible(true);
+                }
+            }
         } else {
             // Cross-tree: rename each end in place. Order matters not at
             // all — the two trees are disjoint (one-place-per-TileId).
@@ -2958,6 +2968,23 @@ mod tests {
             ws.active().docks().get(DockSide::Bottom).visible(),
             "a swap never empties a dock, so it never hides one"
         );
+        assert_tile_invariants(&ws);
+    }
+
+    #[test]
+    fn drop_swap_within_one_dock_tree_swaps_and_focuses_the_dragged_tile() {
+        let mut ws = three_row();
+        // Park 3 and 2 in the left dock (two-tile dock tree [3 | 2]).
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert!(ws.active_mut().focus_main_tile(TileId(2)));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
+        assert!(ws.active_mut().drop_swap(TileId(3), TileId(2)));
+        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        assert_eq!(dock_tree.tiles(), vec![TileId(2), TileId(3)]);
+        assert_eq!(dock_tree.focused(), Some(TileId(3)));
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
         assert_tile_invariants(&ws);
     }
 
