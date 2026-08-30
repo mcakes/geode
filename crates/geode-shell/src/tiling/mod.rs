@@ -10,12 +10,17 @@
 
 mod dividers;
 mod docks;
+mod dropzones;
 mod tree;
 mod workspaces;
 
 pub use dividers::{
     DIVIDER_HIT_WIDTH, DividerStrip, DockEdgeStrip, divider_strips, dock_edge_strips,
     dock_size_from_position,
+};
+pub use dropzones::{
+    DROP_EDGE_BAND, DropTarget, DropZone, classify_drop_zone, drop_highlight_rect, hit_tile,
+    locate_drop_target,
 };
 pub use docks::{
     DOCK_DEFAULT_SIZE, DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion,
