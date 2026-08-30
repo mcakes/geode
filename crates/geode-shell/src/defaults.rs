@@ -156,12 +156,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "dock::toggle_bottom", "Toggle bottom dock", "Dock");
     action(reg, "dock::move_left", "Move tile to left dock", "Dock");
     action(reg, "dock::move_right", "Move tile to right dock", "Dock");
-    action(
-        reg,
-        "dock::move_bottom",
-        "Move tile to bottom dock",
-        "Dock",
-    );
+    action(reg, "dock::move_bottom", "Move tile to bottom dock", "Dock");
     for i in 1..=9 {
         action(
             reg,

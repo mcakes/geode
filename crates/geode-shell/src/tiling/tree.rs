@@ -1379,7 +1379,10 @@ mod tests {
         tree.split(TileId(1), Orientation::Horizontal);
         tree.split(TileId(2), Orientation::Horizontal);
         assert!(!tree.replace_leaf(TileId(99), TileId(3)), "old not a leaf");
-        assert!(!tree.replace_leaf(TileId(1), TileId(2)), "new already a leaf");
+        assert!(
+            !tree.replace_leaf(TileId(1), TileId(2)),
+            "new already a leaf"
+        );
         assert_eq!(tree.tiles(), vec![TileId(1), TileId(2)]);
     }
 

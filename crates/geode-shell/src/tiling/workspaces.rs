@@ -1004,11 +1004,8 @@ mod tests {
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         // Region points at the (empty, hidden) bottom dock.
-        let (ws, warnings) = Workspace::from_parts(
-            tree,
-            Docks::default(),
-            FocusRegion::Dock(DockSide::Bottom),
-        );
+        let (ws, warnings) =
+            Workspace::from_parts(tree, Docks::default(), FocusRegion::Dock(DockSide::Bottom));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(
             ws.region(),
@@ -1184,10 +1181,7 @@ mod tests {
         // The dock now holds the moved tile; the displaced tile occupies
         // the moved tile's exact old slot (leaf replacement, not a fresh
         // split that would re-equalize ratios).
-        assert_eq!(
-            ws.active().docks().get(DockSide::Left).tile(),
-            Some(moved)
-        );
+        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), Some(moved));
         let slot_after = ws
             .active()
             .tree()
@@ -1235,7 +1229,9 @@ mod tests {
         // The returning tile stacked onto the focused leaf: both tiles in
         // that slot are full width, half height.
         assert!(
-            rects.iter().all(|(_, r)| approx(r.w, 1.0) && approx(r.h, 0.5)),
+            rects
+                .iter()
+                .all(|(_, r)| approx(r.w, 1.0) && approx(r.h, 0.5)),
             "bottom-dock return must be a stacked (vertical) split, got {rects:?}"
         );
     }
@@ -1259,7 +1255,10 @@ mod tests {
         let moved = ws.active().tree().focused().unwrap();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        assert_eq!(ws.active().docks().get(DockSide::Bottom).tile(), Some(moved));
+        assert_eq!(
+            ws.active().docks().get(DockSide::Bottom).tile(),
+            Some(moved)
+        );
         assert!(ws.active().docks().get(DockSide::Bottom).visible());
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
         let left = ws.active().docks().get(DockSide::Left);
@@ -1374,7 +1373,11 @@ mod tests {
     fn outward_and_lateral_directions_from_a_dock_are_noops() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        for dir in ["workspace::focus_left", "workspace::focus_up", "workspace::focus_down"] {
+        for dir in [
+            "workspace::focus_left",
+            "workspace::focus_up",
+            "workspace::focus_down",
+        ] {
             assert!(apply_workspace_action(&mut ws, &act(dir)));
             assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
         }
@@ -1443,11 +1446,17 @@ mod tests {
             &mut ws,
             &act("workspace::resize_left")
         ));
-        assert!(approx(ws.active().docks().get(DockSide::Left).size(), start));
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            start
+        ));
         // Along-axis arrows are no-ops for a side dock.
         apply_workspace_action(&mut ws, &act("workspace::resize_up"));
         apply_workspace_action(&mut ws, &act("workspace::resize_down"));
-        assert!(approx(ws.active().docks().get(DockSide::Left).size(), start));
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            start
+        ));
     }
 
     #[test]
@@ -1461,7 +1470,10 @@ mod tests {
             start + RESIZE_STEP
         ));
         apply_workspace_action(&mut ws, &act("workspace::resize_right"));
-        assert!(approx(ws.active().docks().get(DockSide::Right).size(), start));
+        assert!(approx(
+            ws.active().docks().get(DockSide::Right).size(),
+            start
+        ));
     }
 
     #[test]
@@ -1475,7 +1487,10 @@ mod tests {
             start + RESIZE_STEP
         ));
         apply_workspace_action(&mut ws, &act("workspace::resize_down"));
-        assert!(approx(ws.active().docks().get(DockSide::Bottom).size(), start));
+        assert!(approx(
+            ws.active().docks().get(DockSide::Bottom).size(),
+            start
+        ));
     }
 
     #[test]

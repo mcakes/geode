@@ -6,7 +6,7 @@ use geode_core::config::LayerDoc;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults;
 use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
-use geode_shell::tiling::{Rect, Workspaces, apply_workspace_action};
+use geode_shell::tiling::{DockSide, FocusRegion, Rect, Workspaces, apply_workspace_action};
 
 #[test]
 fn keystrokes_drive_the_tiling_tree() {
@@ -83,5 +83,72 @@ fn keystrokes_drive_the_tiling_tree() {
     let layout_before = ws.active().tree().layout(Rect::UNIT);
     press(&mut matcher, &mut ws, "mod+e");
     assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
-    assert_eq!(ws.active().tree().layout(Rect::UNIT).len(), layout_before.len());
+    assert_eq!(
+        ws.active().tree().layout(Rect::UNIT).len(),
+        layout_before.len()
+    );
+}
+
+/// Dock-regions task: the dock verbs run through the exact same pipeline.
+/// The keystroke specs here are the ones BUILTIN_KEYMAP really binds —
+/// `ctrl+{`, not `ctrl+shift+[`: real platform events arrive as the
+/// shifted character with shift cleared (see BUILTIN_KEYMAP's doc
+/// comment), and `parse_keystroke("ctrl+{")` produces that same shape.
+#[test]
+fn keystrokes_drive_the_docks() {
+    let mut registry = ActionRegistry::default();
+    defaults::register_builtin_actions(&mut registry);
+    let doc = LayerDoc::builtin("keymap", defaults::BUILTIN_KEYMAP).unwrap();
+    let mod_alias = defaults::default_mod();
+    let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+
+    let stack = vec![KeyContext::new("workspace")];
+    let mut matcher = Matcher::default();
+    let mut ws = Workspaces::new();
+    let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
+        let ks = parse_keystroke(key, mod_alias).unwrap();
+        match matcher.press(&keymap, ks, &stack) {
+            MatchResult::Matched(action) => {
+                assert!(
+                    apply_workspace_action(ws, &action),
+                    "unhandled action {action}"
+                );
+            }
+            other => panic!("expected a match for {key}, got {other:?}"),
+        }
+    };
+
+    // Two tiles; ctrl+{ parks the focused one in the left dock.
+    press(&mut matcher, &mut ws, "ctrl+v");
+    press(&mut matcher, &mut ws, "ctrl+v");
+    press(&mut matcher, &mut ws, "ctrl+{");
+    assert!(ws.active().docks().get(DockSide::Left).tile().is_some());
+    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+    assert_eq!(ws.active().tree().tiles().len(), 1);
+
+    // ctrl+? relocates it dock-to-dock (left → bottom).
+    press(&mut matcher, &mut ws, "ctrl+?");
+    assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
+    assert!(ws.active().docks().get(DockSide::Bottom).tile().is_some());
+    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+
+    // shift+up grows the focused bottom dock.
+    let before = ws.active().docks().get(DockSide::Bottom).size();
+    press(&mut matcher, &mut ws, "shift+up");
+    assert!(ws.active().docks().get(DockSide::Bottom).size() > before);
+
+    // ctrl+/ hides it (tile kept); ctrl+/ shows it again.
+    press(&mut matcher, &mut ws, "ctrl+/");
+    assert!(!ws.active().docks().get(DockSide::Bottom).visible());
+    assert!(ws.active().docks().get(DockSide::Bottom).tile().is_some());
+    assert_eq!(ws.active().region(), FocusRegion::Main);
+    press(&mut matcher, &mut ws, "ctrl+/");
+    assert!(ws.active().docks().get(DockSide::Bottom).visible());
+
+    // ctrl+] shows the (empty) right dock; ctrl+] hides it again.
+    press(&mut matcher, &mut ws, "ctrl+]");
+    assert!(ws.active().docks().get(DockSide::Right).visible());
+    press(&mut matcher, &mut ws, "ctrl+]");
+    assert!(!ws.active().docks().get(DockSide::Right).visible());
 }

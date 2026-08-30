@@ -1228,8 +1228,7 @@ impl Render for ShellView {
             );
         } else {
             for (id, r) in rects {
-                let is_focused =
-                    region == crate::tiling::FocusRegion::Main && focused == Some(id);
+                let is_focused = region == crate::tiling::FocusRegion::Main && focused == Some(id);
                 surface = surface.child(
                     tile_cell(id, r, is_focused, cx)
                         // Click-to-focus is a convenience: keyboard (hjkl)
@@ -1261,17 +1260,15 @@ impl Render for ShellView {
             match tile {
                 Some(id) => {
                     let is_focused = region == crate::tiling::FocusRegion::Dock(side);
-                    surface = surface.child(
-                        tile_cell(id, r, is_focused, cx).on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |view, _event, _window, cx| {
-                                if view.services.workspaces.active_mut().focus_dock(side) {
-                                    view.session_dirty = true;
-                                }
-                                cx.notify();
-                            }),
-                        ),
-                    );
+                    surface = surface.child(tile_cell(id, r, is_focused, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _event, _window, cx| {
+                            if view.services.workspaces.active_mut().focus_dock(side) {
+                                view.session_dirty = true;
+                            }
+                            cx.notify();
+                        }),
+                    ));
                 }
                 None => {
                     let (hint, selector) = match side {
@@ -1299,11 +1296,7 @@ impl Render for ShellView {
                             .border_1()
                             .border_color(cx.theme().border)
                             .text_color(cx.theme().muted_foreground)
-                            .child(
-                                div()
-                                    .debug_selector(|| selector.to_string())
-                                    .child(hint),
-                            ),
+                            .child(div().debug_selector(|| selector.to_string()).child(hint)),
                     );
                 }
             }
@@ -1657,12 +1650,14 @@ mod tests {
         cx.simulate_keystrokes("ctrl-h");
         cx.simulate_keystrokes("ctrl-v");
 
-        let right_tile =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let right_tile = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
 
         cx.simulate_keystrokes("alt-h");
-        let after_left =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let after_left = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         assert_ne!(
             after_left, right_tile,
             "mod+h (workspace::focus_left) should have moved focus off the right \
@@ -1670,8 +1665,9 @@ mod tests {
         );
 
         cx.simulate_keystrokes("alt-l");
-        let after_right =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let after_right = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         assert_eq!(
             after_right, right_tile,
             "mod+l (workspace::focus_right) should have moved focus back to the \
@@ -1778,8 +1774,9 @@ mod tests {
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("alt-h");
 
-        let before_focus =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let before_focus = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
 
         // Same layout math as `Render for ShellView`: the tile area is the
         // viewport minus the toolbar, sidebar, and status bar.
@@ -1790,12 +1787,18 @@ mod tests {
             let content_height =
                 (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
 
-            let rects = shell.read(cx).services.workspaces.active().tree().layout(Rect {
-                x: 0.0,
-                y: 0.0,
-                w: tile_width,
-                h: content_height,
-            });
+            let rects = shell
+                .read(cx)
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: tile_width,
+                    h: content_height,
+                });
             let (id, r) = rects
                 .into_iter()
                 .find(|(id, _)| Some(*id) != before_focus)
@@ -1809,8 +1812,9 @@ mod tests {
 
         cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
 
-        let after_focus =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let after_focus = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         assert_eq!(
             after_focus,
             Some(target_id),
@@ -1860,15 +1864,18 @@ mod tests {
         cx.simulate_keystrokes("ctrl-v");
         cx.simulate_keystrokes("alt-h");
 
-        let focused = shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let focused = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         let before = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().layout(Rect::UNIT)
         });
 
         cx.simulate_keystrokes("ctrl-shift-right");
 
-        let after_focused =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let after_focused = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         let after = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().layout(Rect::UNIT)
         });
@@ -1932,6 +1939,223 @@ mod tests {
             tile_count, 1,
             "ctrl+shift+w (workspace::close_tile) should have closed the focused tile"
         );
+    }
+
+    /// Shared scaffolding for the dock e2e tests below (dock-regions task):
+    /// open a window over a fresh `ShellView`, draw once so the key
+    /// dispatch tree exists, and hand back the visual context plus the
+    /// downcast shell entity — the exact setup every other e2e test here
+    /// builds inline.
+    fn dock_test_shell(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::VisualTestContext, Entity<ShellView>) {
+        cx.update(gpui_component::init);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        (cx, shell)
+    }
+
+    /// End-to-end: `ctrl+[` (`dock::toggle_left`) through gpui's real key
+    /// pipeline toggles the left dock's visibility both ways, and the
+    /// visible-but-empty dock paints its "move a tile here" hint (asserted
+    /// via `debug_bounds`, same honest limitation as the empty-workspace
+    /// hint test above — text content itself can't be inspected).
+    #[gpui::test]
+    fn ctrl_bracket_keystroke_toggles_the_left_dock_and_paints_its_hint(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+
+        cx.simulate_keystrokes("ctrl-v"); // one tile so the workspace isn't bare
+        cx.simulate_keystrokes("ctrl-[");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (visible, region) = shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            (
+                ws.docks().get(crate::tiling::DockSide::Left).visible(),
+                ws.region(),
+            )
+        });
+        assert!(visible, "ctrl+[ should have shown the left dock");
+        assert_eq!(
+            region,
+            crate::tiling::FocusRegion::Main,
+            "showing an empty dock must not move focus into it"
+        );
+
+        let hint_bounds = cx.debug_bounds("dock-empty-hint-left");
+        assert!(
+            hint_bounds.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the empty left dock should have painted its hint, got {hint_bounds:?}"
+        );
+
+        cx.simulate_keystrokes("ctrl-[");
+        let visible = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .docks()
+                .get(crate::tiling::DockSide::Left)
+                .visible()
+        });
+        assert!(
+            !visible,
+            "a second ctrl+[ should have hidden the dock again"
+        );
+    }
+
+    /// End-to-end: the move-to-dock chord. The user presses ctrl+shift+[,
+    /// but both real platforms deliver that as key `{` with the shift
+    /// modifier CLEARED (see BUILTIN_KEYMAP's doc comment for the verified
+    /// platform-source evidence), so the simulated keystroke is `ctrl-{` —
+    /// which gpui's test parser produces in exactly that platform shape
+    /// (key `{`, no shift). This test pins that the `"ctrl+{"` binding
+    /// matches it end to end: the focused tile leaves the tree, parks in
+    /// the left dock, focus follows, and the session goes dirty. A second
+    /// ctrl+{ sends it back into the tree and auto-hides the dock.
+    #[gpui::test]
+    fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+
+        cx.simulate_keystrokes("ctrl-v");
+        let tile = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused().unwrap()
+        });
+        // Clear the dirty flag left by the split so the assertion below
+        // isolates the dock move's own dirtying.
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+        cx.simulate_keystrokes("ctrl-{");
+
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            assert!(ws.tree().is_empty(), "the tile should have left the tree");
+            let dock = ws.docks().get(crate::tiling::DockSide::Left);
+            assert_eq!(dock.tile(), Some(tile));
+            assert!(dock.visible(), "the dock auto-shows");
+            assert_eq!(
+                ws.region(),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left)
+            );
+            assert!(
+                shell.session_dirty,
+                "a handled dock action must mark the session dirty"
+            );
+        });
+
+        cx.simulate_keystrokes("ctrl-{");
+
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            assert_eq!(ws.tree().tiles(), vec![tile], "the tile returned");
+            assert_eq!(ws.tree().focused(), Some(tile));
+            assert_eq!(ws.region(), crate::tiling::FocusRegion::Main);
+            let dock = ws.docks().get(crate::tiling::DockSide::Left);
+            assert_eq!(dock.tile(), None);
+            assert!(!dock.visible(), "the emptied dock auto-hides");
+        });
+    }
+
+    /// End-to-end: a literal shift-held `[` must NOT trigger the move
+    /// binding — the platforms never deliver that shape (they deliver
+    /// `{`), and gpui's test dispatcher faithfully reproduces whatever
+    /// shape it's given, so this pins that the binding was NOT written as
+    /// `"ctrl+shift+["` (which would match only this never-occurring
+    /// event and nothing real).
+    #[gpui::test]
+    fn a_literal_ctrl_shift_bracket_shape_does_not_move_the_tile(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-shift-["); // key "[", shift=true: not a real platform shape
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            assert!(
+                !ws.tree().is_empty(),
+                "the unmatched keystroke must not have moved the tile"
+            );
+            assert_eq!(ws.docks().get(crate::tiling::DockSide::Left).tile(), None);
+        });
+    }
+
+    /// End-to-end geometry: with a tile parked in the left dock and one in
+    /// the tree, the surface carves the dock column out of the tree's area
+    /// — the tree's layout (the same call `render` makes) starts at the
+    /// dock's right edge, and the whole pass still calls `Tree::layout`
+    /// once (structural: this asserts the observable carve-up, the
+    /// call-count discipline is by construction in `render`).
+    #[gpui::test]
+    fn a_visible_left_dock_carves_its_column_out_of_the_tree_area(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-{"); // right tile → left dock
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        cx.update(|window, cx| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            let area = Rect {
+                x: 0.0,
+                y: 0.0,
+                w: tile_width,
+                h: content_height,
+            };
+            let shell = shell.read(cx);
+            let ws = shell.services.workspaces.active();
+            let (tree_area, dock_rects) = crate::tiling::dock_layout(ws.docks(), area);
+            assert_eq!(dock_rects.len(), 1);
+            let (side, dock_rect) = dock_rects[0];
+            assert_eq!(side, crate::tiling::DockSide::Left);
+            let expected_w = crate::tiling::DOCK_DEFAULT_SIZE * tile_width;
+            assert!(
+                (dock_rect.w - expected_w).abs() < 1e-3,
+                "dock width {} should be size*area_width {}",
+                dock_rect.w,
+                expected_w
+            );
+            assert!((dock_rect.h - content_height).abs() < 1e-3, "full height");
+            let rects = ws.tree().layout(tree_area);
+            assert_eq!(rects.len(), 1);
+            let tree_tile = rects[0].1;
+            assert!(
+                (tree_tile.x - dock_rect.w).abs() < 1e-3,
+                "the tree starts where the dock column ends: {} vs {}",
+                tree_tile.x,
+                dock_rect.w
+            );
+            assert!(
+                (tree_tile.w - (tile_width - dock_rect.w)).abs() < 1e-3,
+                "the tree gets the rest of the width"
+            );
+        });
     }
 
     /// End-to-end: a real `mod+shift+t` keystroke, dispatched through gpui's
@@ -3817,8 +4041,10 @@ mod tests {
             "restoring the saved session must reproduce every workspace's layout"
         );
 
-        let before_ids: std::collections::HashSet<_> =
-            restored.spaces().flat_map(|(_, t)| t.tree().tiles()).collect();
+        let before_ids: std::collections::HashSet<_> = restored
+            .spaces()
+            .flat_map(|(_, t)| t.tree().tiles())
+            .collect();
         let new_id = restored.alloc_tile();
         assert!(
             !before_ids.contains(&new_id),
@@ -5030,16 +5256,18 @@ mod tests {
         assert_eq!(tile_count, 3, "should have created three tiles");
 
         // Record the tile ids in tree order before focusing the middle one.
-        let tiles_before =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().tiles());
+        let tiles_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().tiles()
+        });
         assert_eq!(tiles_before.len(), 3);
 
         // After three splits, the focused tile is the last one (tiles_before[2]).
         // Focus the middle tile (at index 1) using focus_left (mod+h).
         cx.simulate_keystrokes("alt-h");
 
-        let focused_tile =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let focused_tile = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
         assert_eq!(
             focused_tile,
             Some(tiles_before[1]),
@@ -5055,14 +5283,16 @@ mod tests {
         });
         assert_eq!(remaining_tile_count, 2, "should have two tiles after close");
 
-        let tiles_after =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().tiles());
+        let tiles_after = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().tiles()
+        });
         // tiles_after should be [tiles_before[0], tiles_before[2]]
         assert_eq!(tiles_after, vec![tiles_before[0], tiles_before[2]]);
 
         // Assert that the focused tile is tiles_before[2] (the adjacent sibling in tree order).
-        let focused_after_close =
-            shell.read_with(&cx, |shell, _| shell.services.workspaces.active().tree().focused());
+        let focused_after_close = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
 
         assert_eq!(
             focused_after_close,

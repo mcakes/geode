@@ -162,7 +162,9 @@ impl Docks {
 
     /// All docks with their sides, in [`DockSide::ALL`] order.
     pub fn iter(&self) -> impl Iterator<Item = (DockSide, &Dock)> {
-        DockSide::ALL.into_iter().map(move |side| (side, self.get(side)))
+        DockSide::ALL
+            .into_iter()
+            .map(move |side| (side, self.get(side)))
     }
 
     /// Every tile currently parked in a dock, in [`DockSide::ALL`] order.
@@ -251,15 +253,7 @@ pub fn layout(docks: &Docks, area: Rect) -> (Rect, Vec<(DockSide, Rect)>) {
         h = (h - dh).max(0.0);
     }
 
-    (
-        Rect {
-            x,
-            y: area.y,
-            w,
-            h,
-        },
-        out,
-    )
+    (Rect { x, y: area.y, w, h }, out)
 }
 
 #[cfg(test)]
