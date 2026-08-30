@@ -48,6 +48,10 @@ pub struct CompiledQuery {
     pub temp_tables: Vec<String>,
     pub grouping: Vec<String>,
     pub columns: Vec<CompiledColumn>,
+    /// Every dataset the query reads. A joined view is as stale as its
+    /// stalest input (spec §5.4), and the caller cannot compute that
+    /// without knowing which datasets were touched.
+    pub stalest_input: Vec<String>,
 }
 
 fn quoted(cols: &[String]) -> Vec<String> {
@@ -94,6 +98,7 @@ pub fn compile_view(
     schema: &SchemaSpec,
     scope: &Scope,
     dims: &DerivedDimensions,
+    as_of: &crate::query::as_of::AsOf,
 ) -> Result<CompiledQuery, StoreError> {
     let ds = schema
         .dataset(&view.dataset)
@@ -126,6 +131,23 @@ pub fn compile_view(
             view.dataset, view.grouping
         )),
     })?;
+    // Same statement shape, different tables (spec §6.5). Only the as-of
+    // path pays for history; live carries no generation predicate at all.
+    let (kind_for_joins, gen_pred) = match as_of {
+        crate::query::as_of::AsOf::Live => (TableKind::Live, None),
+        crate::query::as_of::AsOf::At(t) => {
+            let archive = table_name(&view.dataset, spine_grain, TableKind::Archive);
+            let gens = crate::query::as_of::resolve_generations(conn, &archive, *t)?;
+            (
+                TableKind::Archive,
+                Some(crate::query::as_of::generation_predicate(&gens)),
+            )
+        }
+    };
+    let and_gen = |p: &str| match &gen_pred {
+        Some(g) => format!("({p}) and ({g})"),
+        None => p.to_string(),
+    };
     let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, spine_grain)?;
     params.extend(spine_scope.params.clone());
     temp_tables.extend(spine_scope.temp_tables.clone());
@@ -145,8 +167,8 @@ pub fn compile_view(
              from {table} where {pred} group by rollup({group}))",
             select = group_cols.join(", "),
             group = group_cols.join(", "),
-            table = table_name(&view.dataset, spine_grain, TableKind::Live),
-            pred = spine_scope.predicate,
+            table = table_name(&view.dataset, spine_grain, kind_for_joins),
+            pred = and_gen(&spine_scope.predicate),
         ));
     }
 
@@ -237,8 +259,8 @@ pub fn compile_view(
             keys = own_q.join(", "),
             comma = if own.is_empty() { "" } else { ", " },
             aggs = aggs.join(", "),
-            table = table_name(&view.dataset, grain, TableKind::Live),
-            pred = grain_scope.predicate,
+            table = table_name(&view.dataset, grain, kind_for_joins),
+            pred = and_gen(&grain_scope.predicate),
         ));
         // The grain subquery's params follow the spine's, in CTE order.
         params.extend(grain_scope.params);
@@ -279,6 +301,67 @@ pub fn compile_view(
                 grain: Some(grain),
                 attribution_by_depth: by_depth,
                 scope_semantics: grain_scope.semantics.clone(),
+            });
+        }
+    }
+
+    // Cross-dataset joins (spec §6.4). Join keys are declared in schema
+    // config and joined onto the spine.
+    //
+    // A join is only meaningful when the grouping reaches the joined
+    // dataset's key: above that level several instruments share the row,
+    // and ROLLUP has already NULLed the key, so the join naturally yields
+    // NULL — which is the honest answer rather than an arbitrary pick.
+    let mut stalest_input = vec![view.dataset.clone()];
+    for (i, join) in view.joins.iter().enumerate() {
+        let Some(joined_ds) = schema.dataset(&join.dataset) else {
+            continue;
+        };
+        stalest_input.push(join.dataset.clone());
+
+        if !join.on.iter().all(|k| view.grouping.contains(k)) {
+            // Nothing to join against: the key is not on the spine.
+            continue;
+        }
+        let Some(joined_grain) = joined_ds.grains().into_iter().find(|g| {
+            join.on
+                .iter()
+                .all(|k| g.key_columns().contains(&k.as_str()))
+        }) else {
+            continue;
+        };
+
+        let alias = format!("join_{i}");
+        let on = join
+            .on
+            .iter()
+            .map(|k| format!("{alias}.\"{k}\" is not distinct from s.\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        joins.push(format!(
+            "left join {} {alias} on {on}",
+            table_name(&join.dataset, joined_grain, kind_for_joins)
+        ));
+
+        for c in &view.columns {
+            let ViewColumn::Dimension { name } = c else {
+                continue;
+            };
+            if joined_ds.column(name).is_none() || view.grouping.contains(name) {
+                continue;
+            }
+            let col_grain = joined_ds.column(name).and_then(|c| c.grain());
+            selects.push(format!("{alias}.\"{name}\" as \"{name}\""));
+            columns.push(CompiledColumn {
+                name: name.clone(),
+                grain: col_grain,
+                attribution_by_depth: (0..=n)
+                    .map(|d| match col_grain {
+                        Some(g) => attribution_of(g, &view.grouping[..d], dims),
+                        None => Attribution::Additive,
+                    })
+                    .collect(),
+                scope_semantics: ScopeSemantics::Direct,
             });
         }
     }
@@ -326,6 +409,7 @@ pub fn compile_view(
         temp_tables,
         grouping: view.grouping.clone(),
         columns,
+        stalest_input,
     })
 }
 
@@ -421,8 +505,127 @@ kind = "measure"
             &schema(),
             &Scope::default(),
             &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
         )
         .unwrap()
+    }
+
+    fn joined_schema() -> SchemaSpec {
+        let mut text = String::new();
+        text.push_str(
+            r#"
+[instrument_ref.columns.book]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.lhu]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.position_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[instrument_ref.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+"#,
+        );
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
+        let joined = SchemaSpec::from_doc(&doc).0;
+        let mut all = schema();
+        all.datasets.extend(joined.datasets);
+        all
+    }
+
+    fn joined_view() -> ViewSpec {
+        let text = r#"
+[with_ref]
+dataset = "risk_snapshot"
+grouping = ["instrument_ref"]
+[[with_ref.joins]]
+dataset = "instrument_ref"
+on = ["instrument_ref"]
+[[with_ref.columns]]
+name = "delta01"
+kind = "measure"
+[[with_ref.columns]]
+name = "strike"
+kind = "dimension"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_join_puts_reference_columns_on_the_row() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into instrument_ref_instrument_live
+                 values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+        )
+        .unwrap();
+
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let strikes: Vec<Option<f64>> = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                r.get("strike")
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            strikes.contains(&Some(4200.0)),
+            "the joined strike must reach the row: {strikes:?}"
+        );
+        // Above the instrument level the key is rolled up to NULL, so the
+        // join yields NULL rather than an arbitrary instrument's strike.
+        assert!(
+            strikes.iter().any(|s| s.is_none()),
+            "the total row must not borrow one instrument's strike"
+        );
+    }
+
+    #[test]
+    fn every_dataset_read_is_recorded_for_the_stalest_input_rule() {
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+        )
+        .unwrap();
+        let mut inputs = q.stalest_input.clone();
+        inputs.sort();
+        assert_eq!(inputs, vec!["instrument_ref", "risk_snapshot"]);
     }
 
     #[test]
@@ -565,6 +768,7 @@ kind = "measure"
             &schema(),
             &Scope::default(),
             &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
         )
         .unwrap();
         let conn = store.writer();
