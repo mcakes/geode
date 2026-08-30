@@ -263,9 +263,12 @@ run with every greek):
   the file.
 - Extra source columns pass through.
 
-Dimension columns are dictionary-encoded at ingest, which is §7.2's
-"interned at ingest" obtained for free and lets the renderer compare
-and format on small integer codes.
+Dimension columns are stored as DuckDB `ENUM` types, which is §7.2's
+"interned at ingest" and lets the renderer compare and format on small
+integer codes (§6.6 — a plain `VARCHAR` would not be dictionary-encoded
+on the way out). Because an ENUM's value set is fixed at declaration,
+ingest widens it when a new dimension value appears, which is a
+metadata operation on the small dimension vocabularies this applies to.
 
 ### 3.7 The implied vol datasets
 
@@ -548,9 +551,23 @@ The three predicate kinds of §4.1 compile as:
   textual.
 - **Expression filter** — the validated AST lowered to SQL.
 
-Values are **bound as parameters, never spliced into SQL text**. A
-selection of several hundred books is a list parameter, not string
-concatenation.
+Values are **bound as parameters, never spliced into SQL text**.
+
+**duckdb-rs cannot bind a list parameter** — `Value::List` binding is
+explicitly an error, verified against 1.10505. So a dimension selection
+of several hundred books uses a **temp table plus semi-join**: the
+selection is written to a connection-local temp table through the
+Appender and the predicate becomes `book in (select v from
+scope_book)`. Values stay bound, the statement text is stable
+regardless of selection size so the prepared plan stays cacheable, and
+it scales past any placeholder limit.
+
+Two alternatives were measured to agree exactly and are kept as
+fallbacks: generating `in (?, ?, …)` with one placeholder per value
+(simple, but statement text varies with N, defeating plan caching), and
+binding one delimiter-joined varchar unpacked by `string_split`
+(stable text, one parameter, but it fails on values containing the
+delimiter).
 
 Layering (§4.2) is resolved in the shell: global AND workspace AND
 tile, with unscoped tiles opting out. The compiler receives one
@@ -710,6 +727,21 @@ wrapped in a `Snapshot` newtype in `geode-core` exposing typed column
 accessors — `f64_column(name) -> &[f64]`, dictionary columns as codes
 plus dictionary.
 
+**`query_arrow` yields many batches, not one** — 2048 rows each, so a
+50k-row result arrives as 25 batches. A `&[f64]` spanning the whole
+column therefore requires concatenation. `Snapshot` concatenates once
+at construction, because blotter results are *aggregates* — one row per
+visible group, typically tens to thousands — while the million rows are
+scanned inside DuckDB and never cross the boundary. For the rare
+ungrouped large result, chunked accessors remain available and the
+concatenation is skipped.
+
+**Dictionary encoding is not automatic.** A plain `VARCHAR` column
+arrives as `StringArray`; only a column typed as a DuckDB `ENUM` comes
+back `Dictionary(UInt8, Utf8)`. §3.6's interning therefore requires
+declaring ENUM types for dimension columns at ingest, which is a
+storage decision, not a query-time one.
+
 Arrow stays an implementation detail: modules get a stable API and
 take no Arrow dependency, while §7.2's `Arc`-shared pointer-swap
 handoff and interned dimension strings come free. No row objects are
@@ -844,11 +876,21 @@ Criterion, over the generated data, CI-gated on regression (§7.4):
 ### 9.4 CI risk
 
 The `duckdb` crate's `bundled` feature compiles DuckDB from C++
-source: a multi-minute build requiring a C++ toolchain on both macOS
-and Windows. It is the right choice — no system-install dependency,
-reproducible from `Cargo.lock` — but it will noticeably slow CI on
-both platforms. Caching strategy is an explicit task in the
+source. **Measured on an M-series Mac at duckdb 1.10505: 127s wall,
+1382s CPU** for a clean build — so on a CI runner with fewer cores,
+expect several times the wall time. It is the right choice — no
+system-install dependency, reproducible from `Cargo.lock` — but
+`libduckdb-sys` must be cached across CI runs or every push pays it
+twice (macOS and Windows). Caching is an explicit task in the
 implementation plan, not an afterthought.
+
+The API assumptions above were verified against a real bundled build
+before the plan was written: persistent database with a second
+connection via `try_clone`, `read_csv` at 37ms for 50k rows,
+`query_arrow`, zero-copy `&[f64]`, `ROLLUP` with `GROUPING()`, a
+`Send + Sync` `interrupt_handle()`, and the publish transaction of §4.3
+at 3ms. Three assumptions failed and are corrected above (§6.2 list
+binding, §6.6 batch chunking, §3.6 ENUM dictionary encoding).
 
 ## 10. Open questions and prerequisites
 
