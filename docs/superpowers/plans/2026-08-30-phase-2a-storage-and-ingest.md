@@ -1906,14 +1906,14 @@ grain = "position"
     }
 
     #[test]
-    fn live_carries_slot_for_replacement_and_file_id_for_provenance() {
+    fn live_carries_batch_for_replacement_and_file_id_for_provenance() {
         let sql = create_table_sql(&dataset(), Grain::Underlying, TableKind::Live);
-        // `slot` is what the publish transaction matches on: filenames carry
+        // `batch` is what the publish transaction matches on: filenames carry
         // dates, so file identity is not partition identity (spec §4.3).
-        assert!(sql.contains("\"slot\" VARCHAR"), "{sql}");
+        assert!(sql.contains("\"batch\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"source_file_id\" BIGINT"), "{sql}");
         // `book` is part of the grain key at every grain, completing the
-        // partition key (dataset, slot, book).
+        // partition key (dataset, batch, book).
         assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
     }
 
@@ -1995,10 +1995,10 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         }
     }
 
-    // Partition key completion: `book` is already in the grain key, `slot`
+    // Partition key completion: `book` is already in the grain key, `batch`
     // is what replacement matches on, `source_file_id` is provenance only
     // (spec §4.3 — filenames carry dates, so file id is not partition id).
-    cols.push("  \"slot\" VARCHAR".to_string());
+    cols.push("  \"batch\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
     if kind == TableKind::Archive {
         cols.push("  \"gen_id\" BIGINT".to_string());
@@ -2273,7 +2273,7 @@ is what keeps its size independent of retention (spec §4.2)."
 - Consumes: `Store` from Task 5.
 - Produces: `Health`, `FileId = i64`, `FileGeneration`, `Catalog<'a>` with
   `ensure_tables`, `lookup_by_path`, `next_gen_id`, `record`,
-  `live_source_time(slot, book)`, `book_freshness(dataset)`, and
+  `live_source_time(batch, book)`, `book_freshness(dataset)`, and
   `dataset_as_of(dataset, books)`. Task 7 uses `live_source_time` for the
   backfill guard; Task 10 uses `lookup_by_path` for change detection.
 
@@ -2411,12 +2411,12 @@ mod tests {
         (dir, store)
     }
 
-    fn record(slot: &str, books: &[&str], source_time: DateTime<Utc>) -> FileGeneration {
+    fn record(batch: &str, books: &[&str], source_time: DateTime<Utc>) -> FileGeneration {
         FileGeneration {
             file_id: 0,
             dataset: "risk_snapshot".into(),
-            slot: slot.into(),
-            path: format!("/src/{slot}.csv").into(),
+            batch: batch.into(),
+            path: format!("/src/{batch}.csv").into(),
             size: 1234,
             mtime: source_time,
             source_time,
@@ -2457,7 +2457,7 @@ mod tests {
     fn live_source_time_is_per_partition_not_per_file() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        // Two business dates share a slot: same partition, different files.
+        // Two business dates share a batch: same partition, different files.
         for (gen, day) in [(1, 29u8), (2, 30u8)] {
             let mut r = FileGeneration {
                 path: format!("/src/risk_2026-08-{day}_BK000.csv").into(),
@@ -2474,7 +2474,7 @@ mod tests {
     fn book_freshness_is_the_oldest_contributing_file() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        // BK000 is split across two slots with different source times.
+        // BK000 is split across two batches with different source times.
         let mut a = record("BK000_part1", &["BK000"], ts("2026-08-30T07:00:00Z"));
         a.gen_id = 1;
         cat.record(&a).unwrap();
@@ -2552,7 +2552,7 @@ pub struct FileGeneration {
     pub dataset: String,
     /// Filename with its date component removed: the partition's identity
     /// across business dates (spec §4.3).
-    pub slot: String,
+    pub batch: String,
     pub path: PathBuf,
     pub size: u64,
     pub mtime: DateTime<Utc>,
@@ -2573,7 +2573,7 @@ const DDL: &str = "
 CREATE TABLE IF NOT EXISTS file_generations (
   file_id BIGINT PRIMARY KEY,
   dataset VARCHAR,
-  slot VARCHAR,
+  batch VARCHAR,
   path VARCHAR,
   size BIGINT,
   mtime TIMESTAMP WITH TIME ZONE,
@@ -2643,7 +2643,7 @@ impl<'a> Catalog<'a> {
                     rec.file_id,
                     rec.file_id,
                     rec.dataset,
-                    rec.slot,
+                    rec.batch,
                     rec.path.to_string_lossy().to_string(),
                     rec.size as i64,
                     rec.mtime,
@@ -2668,7 +2668,7 @@ impl<'a> Catalog<'a> {
     }
 
     pub fn lookup_by_path(&self, path: &Path) -> Result<Option<FileGeneration>, StoreError> {
-        let sql = "select file_id, dataset, slot, path, size, mtime, source_time, gen_id,
+        let sql = "select file_id, dataset, batch, path, size, mtime, source_time, gen_id,
                           loaded_at, row_count, health, health_reason
                    from file_generations where path = ? order by gen_id desc limit 1";
         let mut stmt = self
@@ -2690,7 +2690,7 @@ impl<'a> Catalog<'a> {
         Ok(Some(FileGeneration {
             file_id,
             dataset: row.get(1).unwrap(),
-            slot: row.get(2).unwrap(),
+            batch: row.get(2).unwrap(),
             path: PathBuf::from(row.get::<_, String>(3).unwrap()),
             size: row.get::<_, i64>(4).unwrap() as u64,
             mtime: row.get(5).unwrap(),
@@ -2717,17 +2717,17 @@ impl<'a> Catalog<'a> {
 
     /// The newest source time published for a partition (spec §4.3). This is
     /// what the backfill guard compares against: an older file shares the
-    /// slot, so it must not overwrite what is already live.
+    /// batch, so it must not overwrite what is already live.
     pub fn live_source_time(
         &self,
-        slot: &str,
+        batch: &str,
         book: &str,
     ) -> Result<Option<DateTime<Utc>>, StoreError> {
         let sql = "select max(fg.source_time) from file_generations fg
                    join file_books fb on fb.file_id = fg.file_id
-                   where fg.slot = ? and fb.book = ?";
+                   where fg.batch = ? and fb.book = ?";
         self.conn
-            .query_row(sql, duckdb::params![slot, book], |r| r.get(0))
+            .query_row(sql, duckdb::params![batch, book], |r| r.get(0))
             .map_err(|source| StoreError::Sql { statement: sql.into(), source })
     }
 
@@ -2737,11 +2737,11 @@ impl<'a> Catalog<'a> {
         dataset: &str,
     ) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
         let sql = "select fb.book, min(newest.t)
-                   from (select fg.slot, fb.book, max(fg.source_time) as t
+                   from (select fg.batch, fb.book, max(fg.source_time) as t
                          from file_generations fg
                          join file_books fb on fb.file_id = fg.file_id
                          where fg.dataset = ?
-                         group by fg.slot, fb.book) newest
+                         group by fg.batch, fb.book) newest
                    join file_books fb on fb.book = newest.book
                    group by fb.book order by fb.book";
         let mut stmt = self
@@ -2815,7 +2815,7 @@ the backfill guard needs."
 
 **Interfaces:**
 - Consumes: `Store`, `Catalog`, `ddl::{table_name, TableKind}`, `Grain`.
-- Produces: `Partition { slot: String, book: String }`, `PublishRequest`,
+- Produces: `Partition { batch: String, book: String }`, `PublishRequest`,
   `PublishOutcome { Published { rows }, ArchivedOnly { rows, reason } }`, and
   `publish_file(&Connection, &PublishRequest) -> Result<PublishOutcome, StoreError>`.
   Task 9 calls this as the last step of the load pipeline.
@@ -2852,34 +2852,34 @@ mod tests {
             .execute_batch(
                 "create table measures_position_live(
                      book varchar, position_ref varchar, daily_trading_pnl double,
-                     slot varchar, source_file_id bigint);
+                     batch varchar, source_file_id bigint);
                  create table measures_position_archive(
                      book varchar, position_ref varchar, daily_trading_pnl double,
-                     slot varchar, source_file_id bigint,
+                     batch varchar, source_file_id bigint,
                      gen_id bigint, source_time timestamp with time zone);
                  create table staging_position(
                      book varchar, position_ref varchar, daily_trading_pnl double,
-                     slot varchar, source_file_id bigint);",
+                     batch varchar, source_file_id bigint);",
             )
             .unwrap();
         (dir, store)
     }
 
-    fn stage(store: &Store, book: &str, pnl: f64, slot: &str, file_id: i64) {
+    fn stage(store: &Store, book: &str, pnl: f64, batch: &str, file_id: i64) {
         store
             .writer()
             .execute(
                 "insert into staging_position values (?, 'POS1', ?, ?, ?)",
-                duckdb::params![book, pnl, slot, file_id],
+                duckdb::params![book, pnl, batch, file_id],
             )
             .unwrap();
     }
 
-    fn request(slot: &str, book: &str, gen: i64, t: DateTime<Utc>) -> PublishRequest {
+    fn request(batch: &str, book: &str, gen: i64, t: DateTime<Utc>) -> PublishRequest {
         PublishRequest {
             grain: geode_core::schema::Grain::Position,
             staging_table: "staging_position".into(),
-            partitions: vec![Partition { slot: slot.into(), book: book.into() }],
+            partitions: vec![Partition { batch: batch.into(), book: book.into() }],
             gen_id: gen,
             source_time: t,
             live_source_time: None,
@@ -2958,7 +2958,7 @@ mod tests {
         publish_file(store.writer(), &request("BK000_part1", "BK000", 1, ts("2026-08-30T07:00:00Z"))).unwrap();
         store.writer().execute_batch("delete from staging_position").unwrap();
 
-        // Same book, different slot: the split file's other half.
+        // Same book, different batch: the split file's other half.
         stage(&store, "BK000", 20.0, "BK000_part2", 2);
         publish_file(store.writer(), &request("BK000_part2", "BK000", 2, ts("2026-08-30T08:00:00Z"))).unwrap();
 
@@ -2972,7 +2972,7 @@ mod tests {
         stage(&store, "BK001", 1.0, "BK001_BK002", 1);
         stage(&store, "BK002", 2.0, "BK001_BK002", 1);
         let mut req = request("BK001_BK002", "BK001", 1, ts("2026-08-30T07:00:00Z"));
-        req.partitions.push(Partition { slot: "BK001_BK002".into(), book: "BK002".into() });
+        req.partitions.push(Partition { batch: "BK001_BK002".into(), book: "BK002".into() });
         publish_file(store.writer(), &req).unwrap();
         assert_eq!(live_rows(&store).len(), 2);
     }
@@ -3021,11 +3021,11 @@ use duckdb::Connection;
 use geode_core::schema::Grain;
 use chrono::{DateTime, Utc};
 
-/// The unit of replacement: a slot within a book (spec §4.3). Not the file
+/// The unit of replacement: a batch within a book (spec §4.3). Not the file
 /// — filenames carry dates, so file identity is not partition identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
-    pub slot: String,
+    pub batch: String,
     pub book: String,
 }
 
@@ -3053,7 +3053,7 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     move |source| StoreError::Sql { statement: statement.to_string(), source }
 }
 
-/// A `(slot, book) IN (…)` predicate with the values inlined as quoted
+/// A `(batch, book) IN (…)` predicate with the values inlined as quoted
 /// literals. Safe because both come from the catalog and the sentinel, not
 /// from user input; scope predicates, which do take user input, bind
 /// instead (spec §6.2).
@@ -3062,8 +3062,8 @@ fn partition_predicate(partitions: &[Partition]) -> String {
         .iter()
         .map(|p| {
             format!(
-                "(slot = '{}' and book = '{}')",
-                p.slot.replace('\'', "''"),
+                "(batch = '{}' and book = '{}')",
+                p.batch.replace('\'', "''"),
                 p.book.replace('\'', "''")
             )
         })
@@ -3285,7 +3285,7 @@ grain = "instrument"
     }
 
     fn req(ds: &geode_core::schema::DatasetSpec) -> SplitRequest<'_> {
-        SplitRequest { dataset: ds, raw_table: "staging_raw", slot: "BK0", file_id: 1 }
+        SplitRequest { dataset: ds, raw_table: "staging_raw", batch: "BK0", file_id: 1 }
     }
 
     fn count(store: &Store, table: &str) -> i64 {
@@ -3368,7 +3368,7 @@ grain = "instrument"
     }
 
     #[test]
-    fn slot_and_file_id_are_carried_onto_every_grain() {
+    fn batch_and_file_id_are_carried_onto_every_grain() {
         let (_d, store) = fixture();
         let ds = dataset();
         let out = split_by_grain(store.writer(), &req(&ds)).unwrap();
@@ -3376,7 +3376,7 @@ grain = "instrument"
             let n: i64 = store
                 .writer()
                 .query_row(
-                    &format!("select count(*) from {table} where slot = 'BK0' and source_file_id = 1"),
+                    &format!("select count(*) from {table} where batch = 'BK0' and source_file_id = 1"),
                     [],
                     |r| r.get(0),
                 )
@@ -3447,7 +3447,7 @@ pub struct SplitRequest<'a> {
     pub dataset: &'a DatasetSpec,
     /// The table `read_csv` landed in, already column-mapped.
     pub raw_table: &'a str,
-    pub slot: &'a str,
+    pub batch: &'a str,
     pub file_id: FileId,
 }
 
@@ -3534,12 +3534,12 @@ pub fn split_by_grain(
 
         let sql = format!(
             "create or replace table {table} as
-             select {keys}, {payload}, '{slot}' as slot, {file_id} as source_file_id
+             select {keys}, {payload}, '{batch}' as batch, {file_id} as source_file_id
              from {raw}
              group by {group}",
             keys = key_select.join(", "),
             payload = payload_select.join(", "),
-            slot = req.slot.replace('\'', "''"),
+            batch = req.batch.replace('\'', "''"),
             file_id = req.file_id,
             raw = req.raw_table,
             group = key_group.join(", "),
@@ -3774,7 +3774,7 @@ source_name = "ModelCode"
     fn load(f: &Fixture, file: &geode_demo_data::EmittedFile) -> LoadOutcome {
         let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
         let sentinel = crate::source::parse_sentinel(&text).unwrap();
-        let slot = file
+        let batch = file
             .csv_path
             .file_stem()
             .unwrap()
@@ -3787,7 +3787,7 @@ source_name = "ModelCode"
                 dataset_name: "risk_snapshot",
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
-                slot: &slot,
+                batch: &batch,
             },
         )
         .unwrap()
@@ -3848,7 +3848,7 @@ source_name = "ModelCode"
                 dataset_name: "risk_snapshot",
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
-                slot: "BK000",
+                batch: "BK000",
             },
         )
         .unwrap();
@@ -3858,7 +3858,7 @@ source_name = "ModelCode"
     }
 
     #[test]
-    fn reloading_the_same_slot_replaces_rather_than_accumulates() {
+    fn reloading_the_same_batch_replaces_rather_than_accumulates() {
         let f = fixture();
         let file = ready_file(&f);
         let first = load(&f, file);
@@ -3914,7 +3914,7 @@ source_name = "ModelCode"
                 dataset_name: "risk_snapshot",
                 csv_path: &missing,
                 sentinel: &sentinel,
-                slot: "BK000",
+                batch: "BK000",
             },
         );
         assert!(err.is_err());
@@ -3964,8 +3964,8 @@ pub struct LoadRequest<'a> {
     pub dataset_name: &'a str,
     pub csv_path: &'a Path,
     pub sentinel: &'a Sentinel,
-    /// The file's partition slot: its name with the date component removed.
-    pub slot: &'a str,
+    /// The file's partition batch: its name with the date component removed.
+    pub batch: &'a str,
 }
 
 #[derive(Debug)]
@@ -4062,7 +4062,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         &SplitRequest {
             dataset: req.dataset,
             raw_table: RAW_TABLE,
-            slot: req.slot,
+            batch: req.batch,
             file_id,
         },
     )?;
@@ -4075,12 +4075,12 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     };
     let partitions: Vec<Partition> = books
         .iter()
-        .map(|book| Partition { slot: req.slot.to_string(), book: book.clone() })
+        .map(|book| Partition { batch: req.batch.to_string(), book: book.clone() })
         .collect();
 
     let live_source_time = books
         .iter()
-        .filter_map(|b| catalog.live_source_time(req.slot, b).ok().flatten())
+        .filter_map(|b| catalog.live_source_time(req.batch, b).ok().flatten())
         .max();
 
     let mut published = Vec::new();
@@ -4111,7 +4111,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     let file_id = catalog.record(&FileGeneration {
         file_id,
         dataset: req.dataset_name.to_string(),
-        slot: req.slot.to_string(),
+        batch: req.batch.to_string(),
         path: req.csv_path.to_path_buf(),
         size: meta.len(),
         mtime: meta
@@ -4201,7 +4201,7 @@ idempotence and that a missing CSV fails without touching live."
 **Interfaces:**
 - Consumes: `Sentinel`, `Catalog`, `Health`.
 - Produces: `SourceSpec`, `Readiness`, `Priority`, `CandidateState`,
-  `Candidate`, `SourceSpec::from_toml`, `SourceSpec::slot_of(&Path)`, and
+  `Candidate`, `SourceSpec::from_toml`, `SourceSpec::batch_of(&Path)`, and
   `discover(&SourceSpec, &Catalog, SystemTime) -> Result<Vec<Candidate>, StoreError>`.
   Task 11 turns candidates into a plan.
 
@@ -4244,7 +4244,7 @@ mod tests {
             priority: Priority::LatestRisk,
             poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(3600),
-            slot_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<slot>.+)$".into()),
+            batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
         }
     }
 
@@ -4269,26 +4269,26 @@ mod tests {
     }
 
     #[test]
-    fn slot_strips_the_date_so_business_dates_share_a_partition() {
+    fn batch_strips_the_date_so_business_dates_share_a_partition() {
         let d = tempfile::tempdir().unwrap();
         let s = spec(d.path());
         assert_eq!(
-            s.slot_of(std::path::Path::new("/x/risk_2026-08-30_BK000_part1.csv")),
+            s.batch_of(std::path::Path::new("/x/risk_2026-08-30_BK000_part1.csv")),
             "BK000_part1"
         );
         assert_eq!(
-            s.slot_of(std::path::Path::new("/x/risk_2026-08-29_BK000_part1.csv")),
+            s.batch_of(std::path::Path::new("/x/risk_2026-08-29_BK000_part1.csv")),
             "BK000_part1",
             "two business dates must land in the same partition (spec §4.3)"
         );
     }
 
     #[test]
-    fn slot_falls_back_to_the_whole_stem_without_a_pattern() {
+    fn batch_falls_back_to_the_whole_stem_without_a_pattern() {
         let d = tempfile::tempdir().unwrap();
         let mut s = spec(d.path());
-        s.slot_pattern = None;
-        assert_eq!(s.slot_of(std::path::Path::new("/x/anything.csv")), "anything");
+        s.batch_pattern = None;
+        assert_eq!(s.batch_of(std::path::Path::new("/x/anything.csv")), "anything");
     }
 
     #[test]
@@ -4300,7 +4300,7 @@ mod tests {
         let found = discover(&spec(d.path()), &catalog_on(&st), SystemTime::now()).unwrap();
         assert_eq!(found.len(), 1);
         assert!(matches!(found[0].state, CandidateState::Ready(_)));
-        assert_eq!(found[0].slot, "BK000");
+        assert_eq!(found[0].batch, "BK000");
     }
 
     #[test]
@@ -4357,7 +4357,7 @@ mod tests {
         cat.record(&crate::store::FileGeneration {
             file_id: 0,
             dataset: "risk_snapshot".into(),
-            slot: "BK000".into(),
+            batch: "BK000".into(),
             path: csv.clone(),
             size: meta.len(),
             mtime: Utc::now(),
@@ -4384,7 +4384,7 @@ mod tests {
         cat.record(&crate::store::FileGeneration {
             file_id: 0,
             dataset: "risk_snapshot".into(),
-            slot: "BK000".into(),
+            batch: "BK000".into(),
             path: csv.clone(),
             size: 999_999, // different size => changed
             mtime: Utc::now(),
@@ -4468,23 +4468,23 @@ pub struct SourceSpec {
     pub priority: Priority,
     pub poll_interval: Duration,
     pub pending_timeout: Duration,
-    /// Regex with a named `slot` capture, applied to the file stem, that
+    /// Regex with a named `batch` capture, applied to the file stem, that
     /// strips the date component so business dates share a partition
-    /// (spec §4.3). Without one the whole stem is the slot.
-    pub slot_pattern: Option<String>,
+    /// (spec §4.3). Without one the whole stem is the batch.
+    pub batch_pattern: Option<String>,
 }
 
 impl SourceSpec {
-    pub fn slot_of(&self, csv: &Path) -> String {
+    pub fn batch_of(&self, csv: &Path) -> String {
         let stem = csv.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let Some(pattern) = &self.slot_pattern else {
+        let Some(pattern) = &self.batch_pattern else {
             return stem;
         };
         let Ok(re) = regex::Regex::new(pattern) else {
             return stem;
         };
         re.captures(&stem)
-            .and_then(|c| c.name("slot"))
+            .and_then(|c| c.name("batch"))
             .map(|m| m.as_str().to_string())
             .unwrap_or(stem)
     }
@@ -4508,7 +4508,7 @@ pub enum CandidateState {
 pub struct Candidate {
     pub csv_path: PathBuf,
     pub sentinel_path: PathBuf,
-    pub slot: String,
+    pub batch: String,
     pub size: u64,
     pub mtime: SystemTime,
     pub state: CandidateState,
@@ -4526,13 +4526,13 @@ pub fn discover(
             let Ok(meta) = std::fs::metadata(&csv_path) else { continue };
             let mtime = meta.modified().unwrap_or(now);
             let sentinel_path = sentinel_path_for(&csv_path);
-            let slot = spec.slot_of(&csv_path);
+            let batch = spec.batch_of(&csv_path);
 
             let state = classify(spec, catalog, &csv_path, &sentinel_path, &meta, mtime, now)?;
             out.push(Candidate {
                 csv_path,
                 sentinel_path,
-                slot,
+                batch,
                 size: meta.len(),
                 mtime,
                 state,
@@ -4641,12 +4641,12 @@ share a partition (spec §4.3)."
 **Interfaces:**
 - Consumes: `Candidate`, `CandidateState`, `Priority`, `SourceSpec`.
 - Produces: `WorkItem { source: String, dataset: String, candidate: Candidate,
-  slot: String, priority: Priority, source_time: DateTime<Utc> }`,
+  batch: String, priority: Priority, source_time: DateTime<Utc> }`,
   `WorkPlan { items: Vec<WorkItem> }`, and `build_plan(&[(SourceSpec, Vec<Candidate>)])
   -> WorkPlan`. Task 12's runner works the plan.
 
-**The rule that makes cold start fast** (spec §5.4): within a slot, only the
-*newest* file earns its source's priority. Every older file for the same slot
+**The rule that makes cold start fast** (spec §5.4): within a batch, only the
+*newest* file earns its source's priority. Every older file for the same batch
 drops to `Backfill`, however recent the source. That is what puts current
 risk on screen first while history loads behind it.
 
@@ -4676,23 +4676,23 @@ mod tests {
             priority,
             poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(60),
-            slot_pattern: None,
+            batch_pattern: None,
         }
     }
 
-    fn candidate(slot: &str, day: u8, state_ready: bool) -> Candidate {
+    fn candidate(batch: &str, day: u8, state_ready: bool) -> Candidate {
         let as_of = ts(&format!("2026-08-{day:02}T07:00:00Z"));
         Candidate {
-            csv_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv").into(),
-            sentinel_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv.done").into(),
-            slot: slot.into(),
+            csv_path: format!("/src/risk_2026-08-{day:02}_{batch}.csv").into(),
+            sentinel_path: format!("/src/risk_2026-08-{day:02}_{batch}.csv.done").into(),
+            batch: batch.into(),
             size: 1,
             mtime: SystemTime::now(),
             state: if state_ready {
                 CandidateState::Ready(crate::source::Sentinel {
                     as_of,
                     columns: vec!["Book".into()],
-                    books: vec![slot.into()],
+                    books: vec![batch.into()],
                     row_count: None,
                     dataset: None,
                     business_date: None,
@@ -4710,11 +4710,11 @@ mod tests {
             vec![candidate("BK000", 30, true), candidate("BK001", 30, false)],
         )]);
         assert_eq!(plan.items.len(), 1);
-        assert_eq!(plan.items[0].slot, "BK000");
+        assert_eq!(plan.items[0].batch, "BK000");
     }
 
     #[test]
-    fn within_a_slot_only_the_newest_file_keeps_its_source_priority() {
+    fn within_a_batch_only_the_newest_file_keeps_its_source_priority() {
         let plan = build_plan(&[(
             spec("risk", Priority::LatestRisk),
             vec![
@@ -4753,12 +4753,12 @@ mod tests {
     }
 
     #[test]
-    fn slots_are_independent() {
+    fn batches_are_independent() {
         let plan = build_plan(&[(
             spec("risk", Priority::LatestRisk),
             vec![candidate("BK000", 30, true), candidate("BK001", 29, true)],
         )]);
-        // BK001's newest is the 29th; it is still that slot's current file.
+        // BK001's newest is the 29th; it is still that batch's current file.
         for item in &plan.items {
             assert_eq!(item.priority, Priority::LatestRisk, "{item:?}");
         }
@@ -4794,7 +4794,7 @@ use chrono::{DateTime, Utc};
 pub struct WorkItem {
     pub source: String,
     pub dataset: String,
-    pub slot: String,
+    pub batch: String,
     pub candidate: Candidate,
     pub priority: Priority,
     pub source_time: DateTime<Utc>,
@@ -4810,13 +4810,13 @@ pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
     let mut items: Vec<WorkItem> = Vec::new();
 
     for (spec, candidates) in discovered {
-        // Only the newest file per slot is "current"; the rest are history,
+        // Only the newest file per batch is "current"; the rest are history,
         // however recent the source. This is what puts today's risk on
         // screen before yesterday's finishes loading.
-        let mut newest_per_slot: HashMap<&str, DateTime<Utc>> = HashMap::new();
+        let mut newest_per_batch: HashMap<&str, DateTime<Utc>> = HashMap::new();
         for c in candidates {
             if let CandidateState::Ready(s) = &c.state {
-                let e = newest_per_slot.entry(c.slot.as_str()).or_insert(s.as_of);
+                let e = newest_per_batch.entry(c.batch.as_str()).or_insert(s.as_of);
                 if s.as_of > *e {
                     *e = s.as_of;
                 }
@@ -4827,13 +4827,13 @@ pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
             let CandidateState::Ready(sentinel) = &c.state else {
                 continue;
             };
-            let is_current = newest_per_slot
-                .get(c.slot.as_str())
+            let is_current = newest_per_batch
+                .get(c.batch.as_str())
                 .is_some_and(|newest| *newest == sentinel.as_of);
             items.push(WorkItem {
                 source: spec.name.clone(),
                 dataset: spec.dataset.clone(),
-                slot: c.slot.clone(),
+                batch: c.batch.clone(),
                 candidate: c.clone(),
                 priority: if is_current { spec.priority } else { Priority::Backfill },
                 source_time: sentinel.as_of,
@@ -4869,8 +4869,8 @@ Expected: PASS (5 tests).
 git add crates/geode-data
 git commit -m "feat(data): cold-start priority ladder
 
-Within a slot only the newest file keeps its source's priority; every
-older file for the same slot drops to Backfill however recent the source.
+Within a batch only the newest file keeps its source's priority; every
+older file for the same batch drops to Backfill however recent the source.
 That is what puts current risk on screen first while history loads behind
 it (spec §5.4).
 
@@ -4938,7 +4938,7 @@ mod tests {
             priority: Priority::LatestRisk,
             poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(3600),
-            slot_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<slot>.+)$".into()),
+            batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
         };
         let cat = crate::store::Catalog::new(store.writer());
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
@@ -4983,22 +4983,22 @@ mod tests {
         let events = drain(&rx, expected + 2);
         handle.shutdown();
 
-        let first_slot = events.iter().find_map(|e| match e {
-            IngestEvent::Published { slot, .. } => Some(slot.clone()),
+        let first_batch = events.iter().find_map(|e| match e {
+            IngestEvent::Published { batch, .. } => Some(batch.clone()),
             _ => None,
         });
-        // The preempting item may or may not win the very first slot
+        // The preempting item may or may not win the very first batch
         // depending on whether a load was already in flight, but it must
         // not be last.
         let positions: Vec<usize> = events
             .iter()
             .enumerate()
             .filter_map(|(i, e)| match e {
-                IngestEvent::Published { slot, .. } if *slot == current.slot => Some(i),
+                IngestEvent::Published { batch, .. } if *batch == current.batch => Some(i),
                 _ => None,
             })
             .collect();
-        assert!(!positions.is_empty(), "preempting item never ran; first was {first_slot:?}");
+        assert!(!positions.is_empty(), "preempting item never ran; first was {first_batch:?}");
         assert!(
             positions[0] < events.len().saturating_sub(1),
             "a current file must not wait behind all remaining backfill"
@@ -5114,14 +5114,14 @@ use std::thread::JoinHandle;
 pub enum IngestEvent {
     Published {
         dataset: String,
-        slot: String,
+        batch: String,
         gen_id: i64,
         books: Vec<String>,
         rows: usize,
         health: Health,
     },
     Failed {
-        slot: String,
+        batch: String,
         reason: String,
     },
     /// The queue drained. Not a terminal state — more work may be submitted.
@@ -5232,7 +5232,7 @@ fn run(
                     dataset_name: &dataset_name,
                     csv_path: &item.candidate.csv_path,
                     sentinel,
-                    slot: &item.slot,
+                    batch: &item.batch,
                 },
             )
             .map_err(|e| e.to_string())
@@ -5241,7 +5241,7 @@ fn run(
         let event = match outcome {
             Ok(Ok(loaded)) => IngestEvent::Published {
                 dataset: dataset_name.clone(),
-                slot: item.slot.clone(),
+                batch: item.batch.clone(),
                 gen_id: loaded.gen_id,
                 books: match &item.candidate.state {
                     CandidateState::Ready(s) => s.books.clone(),
@@ -5250,9 +5250,9 @@ fn run(
                 rows: loaded.rows,
                 health: loaded.health,
             },
-            Ok(Err(reason)) => IngestEvent::Failed { slot: item.slot.clone(), reason },
+            Ok(Err(reason)) => IngestEvent::Failed { batch: item.batch.clone(), reason },
             Err(_) => IngestEvent::Failed {
-                slot: item.slot.clone(),
+                batch: item.batch.clone(),
                 reason: "ingest task panicked".into(),
             },
         };
@@ -5321,7 +5321,7 @@ benchmark question spec §5.6 declines to assume."
   Result<SweepReport, StoreError>`, and `checkpoint(&Connection)`.
 
 **Retention is per partition, not per dataset.** "Keep 50 generations" means
-each `(slot, book)` keeps its own 50 — otherwise a busy book would evict a
+each `(batch, book)` keeps its own 50 — otherwise a busy book would evict a
 quiet one's history. `oldest_remaining` is published so the time-travel UI
 can show how far back a user may go (spec §4.6).
 
@@ -5352,7 +5352,7 @@ mod tests {
             .writer()
             .execute_batch(
                 "create table measures_position_archive(
-                     book varchar, slot varchar, gen_id bigint,
+                     book varchar, batch varchar, gen_id bigint,
                      source_time timestamp with time zone);",
             )
             .unwrap();
@@ -5361,15 +5361,15 @@ mod tests {
 
     /// `gens` generations for each of two partitions, one hour apart.
     fn fill(store: &Store, gens: i64) {
-        for slot in ["BK000", "BK001"] {
+        for batch in ["BK000", "BK001"] {
             for g in 1..=gens {
                 store
                     .writer()
                     .execute(
                         "insert into measures_position_archive values (?, ?, ?, ?)",
                         duckdb::params![
-                            slot,
-                            slot,
+                            batch,
+                            batch,
                             g,
                             ts("2026-08-30T00:00:00Z") + Duration::hours(g)
                         ],
@@ -5509,7 +5509,7 @@ Prepend to `crates/geode-data/src/store/retention.rs`:
 //! is persistent, so defaults are generous — but unbounded history would
 //! still grow the database file without limit.
 //!
-//! Retention is per partition: "keep 50 generations" means each (slot, book)
+//! Retention is per partition: "keep 50 generations" means each (batch, book)
 //! keeps its own 50, so a busy book cannot evict a quiet one's history.
 
 use crate::store::StoreError;
@@ -5572,13 +5572,13 @@ pub fn sweep(
             }
 
             let sql = format!(
-                "delete from {archive} where (slot, book, gen_id) not in (
-                     select slot, book, gen_id from (
-                         select slot, book, gen_id, source_time,
+                "delete from {archive} where (batch, book, gen_id) not in (
+                     select batch, book, gen_id from (
+                         select batch, book, gen_id, source_time,
                                 row_number() over (
-                                    partition by slot, book order by source_time desc
+                                    partition by batch, book order by source_time desc
                                 ) as rn
-                         from (select distinct slot, book, gen_id, source_time from {archive})
+                         from (select distinct batch, book, gen_id, source_time from {archive})
                      ) where {keep}
                  )",
                 keep = keep.join(" and "),

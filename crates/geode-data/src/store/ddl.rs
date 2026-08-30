@@ -51,10 +51,10 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         }
     }
 
-    // Partition key completion: `book` is already in the grain key, `slot`
+    // Partition key completion: `book` is already in the grain key, `batch`
     // is what replacement matches on, `source_file_id` is provenance only
     // (spec §4.3 — filenames carry dates, so file id is not partition id).
-    cols.push("  \"slot\" VARCHAR".to_string());
+    cols.push("  \"batch\" VARCHAR".to_string());
     cols.push("  \"source_file_id\" BIGINT".to_string());
     if kind == TableKind::Archive {
         cols.push("  \"gen_id\" BIGINT".to_string());
@@ -131,14 +131,14 @@ mod tests {
     }
 
     #[test]
-    fn live_carries_slot_for_replacement_and_file_id_for_provenance() {
+    fn live_carries_batch_for_replacement_and_file_id_for_provenance() {
         let sql = create_table_sql(&sample_dataset(), Grain::Underlying, TableKind::Live);
-        // `slot` is what the publish transaction matches on: filenames carry
+        // `batch` is what the publish transaction matches on: filenames carry
         // dates, so file identity is not partition identity (spec §4.3).
-        assert!(sql.contains("\"slot\" VARCHAR"), "{sql}");
+        assert!(sql.contains("\"batch\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"source_file_id\" BIGINT"), "{sql}");
         // `book` is part of the grain key at every grain, completing the
-        // partition key (dataset, slot, book).
+        // partition key (dataset, batch, book).
         assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
     }
 
