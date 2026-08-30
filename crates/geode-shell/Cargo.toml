@@ -7,6 +7,16 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+# Profiler support (spec §7.4), off by default: nothing but gpui's own
+# `profiler` feature (hdrhistogram frame/input-latency histograms, the
+# painted debug frame overlay, hang detection) plus the two shell actions
+# that surface it (`perf::gpui_overlay`, `perf::dump` —
+# `shell::profiling_hook`). No Tracy client: gpui at the pinned rev uses
+# the backend-less `profiling` facade, and this workspace deliberately
+# adds no backend dependency. Enable via geode-app's same-named feature.
+profiling = ["gpui/profiler"]
+
 [dependencies]
 geode-core.workspace = true
 gpui.workspace = true

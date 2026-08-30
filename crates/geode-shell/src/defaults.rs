@@ -90,6 +90,7 @@ context = "workspace"
 "ctrl+," = "settings::open"
 "ctrl+=" = "fontsize::increase"
 "ctrl+-" = "fontsize::decrease"
+"mod+shift+p" = "perf::toggle_overlay"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -210,6 +211,43 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // regardless. Category "Keyboard", not "Appearance" — this edits
     // behavior (bindings), not how the app looks.
     action(reg, "keybindings::open", "Keyboard shortcuts", "Keyboard");
+    // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
+    // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
+    // unlike the punctuation story above, so this spelling is real; free
+    // on both platforms and unclaimed by the builtin map, whose only other
+    // shift+letter chord is mod+shift+t). `perf::reset` is palette-only —
+    // resetting counters is an occasional deliberate act, not muscle
+    // memory worth a chord.
+    action(
+        reg,
+        "perf::toggle_overlay",
+        "Toggle performance overlay",
+        "Diagnostics",
+    );
+    action(
+        reg,
+        "perf::reset",
+        "Reset performance counters",
+        "Diagnostics",
+    );
+    // Profiler-feature actions (the `profiling` feature — gpui's own
+    // `profiler` histograms/overlay): registered only when compiled in,
+    // so the palette never advertises a no-op.
+    #[cfg(feature = "profiling")]
+    {
+        action(
+            reg,
+            "perf::gpui_overlay",
+            "Cycle gpui frame overlay",
+            "Diagnostics",
+        );
+        action(
+            reg,
+            "perf::dump",
+            "Dump frame-time stats to stderr",
+            "Diagnostics",
+        );
+    }
 }
 
 /// The default primary modifier (spec §3.1: Alt, remappable).
@@ -246,8 +284,9 @@ mod tests {
         // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
         // fullscreen + close + 3 dock toggles + 3 dock moves + 9 workspace
         // switches + 2 palette::toggle bindings + theme toggle +
-        // settings::open (Task 5) + 2 font size steps.
-        assert!(keymap.bindings().len() >= 38);
+        // settings::open (Task 5) + 2 font size steps + perf overlay
+        // toggle (spec §7.4).
+        assert!(keymap.bindings().len() >= 39);
     }
 
     #[test]
