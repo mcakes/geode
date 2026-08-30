@@ -23,13 +23,29 @@
 //! friendly crate API, so per the brief both are vendored verbatim into
 //! `assets/themes/` (22 files: `default.json` plus the 21 family files) and
 //! embedded here with `include_str!` — no runtime file I/O, binary stays
-//! self-contained. `bloomberg.json` sits alongside them as the 23rd file:
-//! Geode's own theme rather than a vendored one. It ships two dark variants
-//! under one family, the Tokyo Night arrangement — `"Bloomberg"`, the
-//! classic Terminal palette (black ground, amber text, blue column heads),
-//! and `"Bloomberg Modern"`, the current Terminal look (near-black blue-grey
-//! ground, white text, orange as accent only). Both are written against the
-//! same `ThemeSet` schema, so neither needs special handling here.
+//! self-contained.
+//!
+//! Four further files are written for this repo rather than vendored, to the
+//! same `ThemeSet` schema so none of them needs special handling here:
+//! - `bloomberg.json` — two dark variants under one family, the Tokyo Night
+//!   arrangement: `"Bloomberg"`, the classic Terminal palette (black ground,
+//!   amber text, blue column heads), and `"Bloomberg Modern"`, the current
+//!   look (near-black blue-grey ground, white text, orange as accent only).
+//! - `modus.json` — `"Modus Operandi"`/`"Modus Vivendi"`, the one family
+//!   here that ships a real light/dark pair, so `toggle_mode` swaps within
+//!   it instead of falling back to Default. Its whole design constraint is a
+//!   7:1 (WCAG AAA) floor on every information-bearing pairing; that floor
+//!   is measured, not assumed — see the note below.
+//! - `nord.json` — the canonical nord0–nord15 palette.
+//! - `tradingview.json` — `"TradingView Dark"`, dark-only, named for the
+//!   mode because the product ships a light theme too.
+//!
+//! Contrast: the two derived-tint colours in Nord and TradingView
+//! (`muted.foreground`, `tab.foreground`) were raised off their first values
+//! to clear 4.5:1, and Nord's `chart_bearish` uses a lighter tint of nord11
+//! rather than nord11 itself, which sits at only 3.05:1 on nord0 — too weak
+//! to encode a loss. Nord's `danger` fill keeps light-on-nord11 (3.55:1)
+//! because that is what Nord itself does; it is chrome, not data.
 //!
 //! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
 //! `ThemeConfig` (`crates/ui/src/theme/schema.rs`) — a theme JSON file is a
@@ -150,6 +166,8 @@ const BUNDLED: &[(&str, &str)] = &[
         "molokai",
         include_str!("../../../assets/themes/molokai.json"),
     ),
+    ("modus", include_str!("../../../assets/themes/modus.json")),
+    ("nord", include_str!("../../../assets/themes/nord.json")),
     (
         "solarized",
         include_str!("../../../assets/themes/solarized.json"),
@@ -161,6 +179,10 @@ const BUNDLED: &[(&str, &str)] = &[
     (
         "tokyonight",
         include_str!("../../../assets/themes/tokyonight.json"),
+    ),
+    (
+        "tradingview",
+        include_str!("../../../assets/themes/tradingview.json"),
     ),
     (
         "twilight",
@@ -540,14 +562,47 @@ mod tests {
     fn bundled_themes_all_parse_clean() {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
-        // 23 files (22 vendored plus Geode's own `bloomberg.json`), several
-        // with more than one variant (e.g. Tokyo Night ships 3 dark
-        // variants) — comfortably more than one-per-file.
+        // 26 files (22 vendored plus the 4 written here), several with more
+        // than one variant (e.g. Tokyo Night ships 3 dark variants) —
+        // comfortably more than one-per-file.
         assert!(
             service.entries.len() >= BUNDLED.len(),
             "expected at least one ThemeConfig per bundled file, got {}",
             service.entries.len()
         );
+    }
+
+    #[test]
+    fn modus_ships_a_light_dark_pair_so_the_mode_toggle_stays_in_family() {
+        let (service, warnings) = load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        // Unlike the dark-only families, Modus ships both modes, so
+        // `set_mode`/`toggle_mode` swap within it instead of falling back
+        // to Default (see `ThemeService::set_mode`).
+        assert_eq!(
+            service.resolve("Modus", Mode::Light).unwrap().name.as_ref(),
+            "Modus Operandi"
+        );
+        assert_eq!(
+            service.resolve("Modus", Mode::Dark).unwrap().name.as_ref(),
+            "Modus Vivendi"
+        );
+    }
+
+    #[test]
+    fn nord_and_tradingview_are_bundled_dark_only() {
+        let (service, warnings) = load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let nord = service
+            .resolve("nord", Mode::Dark)
+            .expect("family lookup is case-insensitive");
+        assert_eq!(nord.name.as_ref(), "Nord");
+        assert!(nord.mode.is_dark());
+        // Named "TradingView Dark" rather than bare (the product ships a
+        // light theme too), so the family + mode form is what resolves it.
+        let tv = service.resolve("TradingView", Mode::Dark).unwrap();
+        assert_eq!(tv.name.as_ref(), "TradingView Dark");
+        assert!(tv.mode.is_dark());
     }
 
     #[test]
