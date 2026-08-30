@@ -276,10 +276,16 @@ impl Tree {
     /// ratios renormalize, fullscreen on the removed tile clears. Focus:
     /// if the removed tile *was* focused, the usual tree-order-neighbor
     /// refocus applies; otherwise the existing focus is untouched. Returns
-    /// false (tree untouched) when `id` isn't a leaf here. Crate-private on
-    /// purpose — live verbs move tiles through `remove_focused`/`split`,
-    /// which keep the one-place-per-TileId invariant at the `Workspace`
-    /// seam; this exists only for restore-time healing.
+    /// false (tree untouched) when `id` isn't a leaf here. Crate-private
+    /// on purpose: originally this existed only for restore-time healing
+    /// (the keyboard verbs move tiles through `remove_focused`/`split`),
+    /// and since the tile-drag task it is also the live "pick the tile
+    /// up" half of the mouse drop verbs (`Workspace::
+    /// remove_tile_anywhere`) — which name the moved tile by id, not by
+    /// focus, so `remove_focused` can't express them. Either way the
+    /// one-place-per-TileId invariant stays enforced at the `Workspace`
+    /// seam: every live caller re-inserts the removed id into exactly one
+    /// tree before returning.
     ///
     /// (Replaces the dock-regions task's `replace_leaf`, which existed
     /// solely for the move-to-occupied-dock *swap* rule; dock trees killed

@@ -640,8 +640,38 @@ impl Workspace {
                 }
             }
         } else {
-            // Cross-tree: rename each end in place. Order matters not at
-            // all — the two trees are disjoint (one-place-per-TileId).
+            // Cross-tree: rename each end in place. With the one-place-
+            // per-TileId invariant intact both renames are infallible and
+            // order-free (the two trees are disjoint) — but the pair must
+            // be *atomic* even against an invariant already broken by a
+            // healing miss, so both preconditions are checked BEFORE the
+            // first rename mutates anything (review fix): `replace_tile`
+            // refuses when its `new` id is already a leaf of that tree,
+            // and checking only the first rename's *result* would not be
+            // enough — the source rename could succeed and the
+            // destination rename then refuse (a duplicate `dragged`
+            // already there), leaving `dragged` renamed away from every
+            // tree, the one outcome a drop verb must never produce.
+            // Unreachable through live verbs and healed restores; the
+            // debug_assert makes a future regression loud while release
+            // builds get an honest untouched no-op.
+            let source_tree = match source {
+                FocusRegion::Main => &self.tree,
+                FocusRegion::Dock(side) => self.docks.get(side).tree(),
+            };
+            let destination_tree = match destination {
+                FocusRegion::Main => &self.tree,
+                FocusRegion::Dock(side) => self.docks.get(side).tree(),
+            };
+            if source_tree.contains(target) || destination_tree.contains(dragged) {
+                debug_assert!(
+                    false,
+                    "one-place-per-TileId invariant pre-broken \
+                     (dragged {dragged:?} / target {target:?} duplicated across trees); \
+                     refusing the cross-tree swap untouched"
+                );
+                return false;
+            }
             match source {
                 FocusRegion::Main => self.tree.replace_tile(dragged, target),
                 FocusRegion::Dock(side) => self
@@ -2997,6 +3027,32 @@ mod tests {
         assert!(!ws.active_mut().drop_swap(TileId(9), TileId(2)));
         assert_eq!(ws.active().tree(), &before);
         assert_tile_invariants(&ws);
+    }
+
+    /// Review fix: the cross-tree swap must be atomic even against a
+    /// one-place-per-TileId invariant already broken by a healing miss —
+    /// refused loudly (debug_assert) BEFORE the first rename mutates
+    /// anything, because a source rename followed by a refused
+    /// destination rename would lose the dragged id from every tree.
+    /// The broken state is not constructible through any live verb or
+    /// healed restore, so it is built directly through the
+    /// module-private fields here.
+    #[test]
+    #[should_panic(expected = "one-place-per-TileId")]
+    fn drop_swap_refuses_a_pre_broken_duplicate_id_before_mutating() {
+        let mut w = Workspace::default();
+        w.tree.split(TileId(1), Orientation::Horizontal);
+        w.tree.split(TileId(2), Orientation::Horizontal);
+        let dock = w.docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(3), Orientation::Horizontal);
+        // The invariant break: tile 1 claimed by BOTH the main tree and
+        // the dock tree.
+        dock.tree_mut().split(TileId(1), Orientation::Horizontal);
+        dock.set_visible(true);
+        // dragged 1 resolves to Main (region_of checks the tree first);
+        // target 3 lives in the dock, whose tree also holds a duplicate
+        // of the dragged id — the pre-check must fire, not the renames.
+        w.drop_swap(TileId(1), TileId(3));
     }
 
     #[test]

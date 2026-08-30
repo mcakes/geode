@@ -186,13 +186,20 @@ const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 ///   Windows samples the live key state (`gpui_windows/src/events.rs`,
 ///   `current_modifiers` — `VK_MENU` is Alt), so a `mod+down` arrives
 ///   with `alt: true` on both platforms.
-/// - A release we couldn't see (a mouse-up outside the window, or a move
-///   arriving with the button no longer pressed) *cancels* rather than
-///   drops: the actual release point is unknown, and applying the drop at
-///   wherever the cursor happens to be next would rearrange from a
-///   position the user never released at. (The divider catcher's missed
-///   release *finishes* instead — correct there because its effects were
-///   already applied live; here nothing is applied until an actual drop.)
+/// - A truly lost release — a move arriving with the button no longer
+///   pressed — *cancels* rather than drops: the actual release point is
+///   unknown, and applying the drop at wherever the cursor happens to be
+///   next would rearrange from a position the user never released at.
+///   (The divider catcher's missed release *finishes* instead — correct
+///   there because its effects were already applied live; here nothing
+///   is applied until an actual drop.) The catcher's `on_mouse_up_out`,
+///   by contrast, routes through the drop like `on_mouse_up` does
+///   (review blocker fix): gpui's keyboard-modality hover suppression
+///   makes `up_out` fire for an ordinary in-window release whenever a
+///   keystroke was the last input, and the keyboard is hot mid-drag —
+///   see the catcher's own comment in `render` for the full mechanism.
+///   An actually-outside-window release still applies nothing that way,
+///   because no drop target exists outside every tile and dock.
 #[derive(Debug, Clone, PartialEq)]
 struct TileDrag {
     tile: TileId,
@@ -1424,10 +1431,18 @@ impl ShellView {
 
     /// Apply the drop that ends a tile drag (mouse-up on the tile-drag
     /// catcher). A below-threshold drag — a sloppy mod+click — applies
-    /// nothing at all, focus included (recorded decision on [`TileDrag`]);
-    /// a workspace mismatch (the render-top guard normally cancels first,
-    /// but this keeps the guarantee independent of event/render ordering,
-    /// same as `apply_divider_drag`'s check) likewise. Otherwise the
+    /// nothing at all, focus included (recorded decision on [`TileDrag`]).
+    /// The full set of render-top cancel conditions is re-checked at drop
+    /// time too — workspace mismatch, palette/modal open, pending
+    /// keystroke sequence (review should-fix: gpui dispatches multiple
+    /// input events between frames, so `ctrl+k` followed by the release
+    /// within one frame window would otherwise apply the drop underneath
+    /// the just-opened palette; the render-top guard normally cancels
+    /// first, but re-checking here keeps the guarantee independent of
+    /// event/render ordering, the same standard `apply_divider_drag`'s
+    /// workspace check sets). Fullscreen needs no shell-side re-check:
+    /// [`locate_drop_target`] itself resolves no target for a fullscreen
+    /// layout. Otherwise the
     /// cursor resolves through the pure [`locate_drop_target`] against
     /// *live* state — the same `dock_layout`/`Tree::layout` authorities
     /// the render pass uses, re-derived once here rather than snapshotted
@@ -1442,7 +1457,12 @@ impl ShellView {
         let Some(drag) = self.tile_drag.take() else {
             return;
         };
-        if drag.active && drag.workspace == self.services.workspaces.active_index() {
+        if drag.active
+            && drag.workspace == self.services.workspaces.active_index()
+            && self.palette.is_none()
+            && self.modal.is_none()
+            && self.matcher.pending().is_empty()
+        {
             let viewport = window.viewport_size();
             let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
             let area = Rect {
@@ -2001,6 +2021,13 @@ impl Render for ShellView {
                     // lets a `#[gpui::test]` confirm strips painted (or
                     // didn't — fullscreen) via `debug_bounds`.
                     .debug_selector(|| format!("divider-strip-{i}"))
+                    // Recorded interaction with the tile-drag gesture: a
+                    // mod+mouse-down landing within the 8px strip starts a
+                    // divider RESIZE, never a tile drag — the strip
+                    // occludes the tile body it overlaps and this handler
+                    // checks no modifiers. Deterministic and accepted: a
+                    // mod+drag aimed within ~4px of a tile's edge grabs
+                    // the divider instead of the tile.
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _event, _window, cx| {
@@ -2196,9 +2223,24 @@ impl Render for ShellView {
             // coexist — each drag kind's mouse-down is unreachable while
             // the other's catcher occludes the window (and
             // `try_arm_tile_drag` checks anyway). A move arriving with
-            // the button no longer pressed, or a release outside the
-            // window, cancels with nothing applied — see `TileDrag`'s doc
-            // for why that differs from the divider catcher's finish.
+            // the button no longer pressed cancels with nothing applied
+            // — see `TileDrag`'s doc for why that differs from the
+            // divider catcher's finish. `on_mouse_up_out` routes through
+            // the DROP, not a cancel (review blocker fix): gpui's
+            // input-modality hover suppression means it fires for a
+            // perfectly ordinary in-window release whenever a keystroke
+            // was the last input — a KeyDown sets the window's
+            // `last_input_modality` to Keyboard (pinned window.rs,
+            // `dispatch_event`), a MouseUp does NOT reset it, and
+            // `HitboxId::is_hovered` returns false under keyboard
+            // modality, which flips the hovered-gated `on_mouse_up` off
+            // and the `!is_hovered`-gated `on_mouse_up_out` on. The
+            // keyboard is documented hot mid-drag, so "press any key,
+            // release without moving" is a real user path and must drop,
+            // not silently cancel. A genuinely outside-window release
+            // still applies nothing through this route:
+            // `locate_drop_target` has no target at a position outside
+            // every tile and dock, and a no-target drop is a no-op.
             .when(tile_drag_armed, |el| {
                 el.child(
                     div()
@@ -2236,9 +2278,13 @@ impl Render for ShellView {
                         )
                         .on_mouse_up_out(
                             MouseButton::Left,
-                            cx.listener(|view, _event, _window, cx| {
-                                view.cancel_tile_drag();
-                                cx.notify();
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
                             }),
                         ),
                 )
@@ -3675,6 +3721,131 @@ mod tests {
         assert!(
             shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
             "no drag arms without the mod key"
+        );
+    }
+
+    /// Review blocker regression: a keystroke mid-drag flips gpui's
+    /// input modality to Keyboard, `MouseUp` does not flip it back, and
+    /// `HitboxId::is_hovered` is false under keyboard modality — so a
+    /// stationary release after ANY keypress reaches the catcher through
+    /// `on_mouse_up_out`, not `on_mouse_up`. The keyboard is documented
+    /// hot mid-drag, so that release must still DROP (the fix routes
+    /// `up_out` through `finish_tile_drag`); before the fix it silently
+    /// cancelled.
+    #[gpui::test]
+    fn a_keystroke_mid_drag_does_not_turn_a_stationary_release_into_a_cancel(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        // An unbound key — hits the matcher, matches nothing, changes no
+        // shell state, but flips the window's input modality to Keyboard.
+        cx.simulate_keystrokes("x");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .tile_drag
+                .as_ref()
+                .is_some_and(|drag| drag.active)),
+            "an unbound keystroke mid-drag must not cancel the drag"
+        );
+
+        // Release without moving: under keyboard modality this dispatches
+        // through the catcher's `on_mouse_up_out` gate.
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .tiles()),
+            vec![right, left],
+            "the stationary release after a keystroke must still apply the edge drop"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .focused()),
+            Some(right),
+            "focus follows the moved tile"
+        );
+        assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+        assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
+    }
+
+    /// Review should-fix regression: in production, input events arrive
+    /// between frames — the palette-toggle keystroke and the release can
+    /// both land before any render runs the cancel guard (the test
+    /// harness draws at the end of every simulated event's update, so
+    /// the two events are dispatched inside ONE `cx.update` here, the
+    /// same one-frame window real platforms produce; the mid-update
+    /// asserts verify the guard genuinely hasn't run). The drop-time
+    /// re-check in `finish_tile_drag` must refuse to apply the drop
+    /// underneath the just-opened palette.
+    #[gpui::test]
+    fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        cx.update(|window, cx| {
+            window.dispatch_keystroke(gpui::Keystroke::parse("ctrl-k").unwrap(), cx);
+            assert!(
+                shell.read(cx).palette.is_some(),
+                "the keystroke opened the palette"
+            );
+            assert!(
+                shell.read(cx).tile_drag.is_some(),
+                "no render has run since the keystroke, so the render-top guard has \
+                 not cancelled the drag — the drop-time re-check is the only defense"
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: drop,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release must not apply the drop underneath the just-opened palette"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "nothing applied, nothing persisted"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "the drag is over either way"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.palette.is_some()),
+            "the palette stays open"
         );
     }
 
