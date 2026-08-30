@@ -3944,7 +3944,732 @@ migration — cheap, because the database is derived from the CSVs."
 
 ---
 
-**Remaining tasks (9–14) continue below.** Tasks 9–10 the query pool with
-cancellation and as-of routing; Task 11 the `DataService` facade; Task 12
-the throwaway debug tile; Task 13 the §7.1 requery benchmarks; Task 14
-cross-file conflict detection.
+### Task 9: The query pool, cancellation and coalescing
+
+**Files:**
+- Create: `crates/geode-data/src/query/pool.rs`
+- Modify: `crates/geode-data/src/query/mod.rs`
+
+**Interfaces:**
+- Consumes: `Store::reader`, `CompiledQuery`, `Snapshot`, `Provenance`.
+- Produces: `QueryId(u64)`, `ViewId(String)`, `QueryRequest { view: ViewId,
+  compiled: CompiledQuery, grouping_len: usize, provenance: Provenance }`,
+  `QueryResult { id, view, snapshot }`, `QueryPool::spawn(Store, usize) ->
+  (QueryPool, Receiver<QueryResult>)`, `QueryPool::{submit, cancel,
+  shutdown}`. Task 11 wraps this in `DataService`.
+
+**Per §7.3, four properties, each with a test:**
+
+- The UI thread never holds a connection; the pool owns them.
+- **One in-flight query per view, latest-wins.** Leaning on a regroup key
+  five times yields one query, not five.
+- Every request and result is generation-tagged; a stale result arriving
+  after a newer request is dropped, never delivered.
+- **A superseded query is interrupted, not awaited** — via
+  `Connection::interrupt_handle()`, which is `Send + Sync` (verified
+  against 1.10505).
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/query/pool.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// A store with one live table holding `rows` rows, and a compiled
+    /// query over it that is slow enough to be interrupted.
+    fn fixture(rows: usize) -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(&format!(
+                "create table t as select i as k, i::double as v
+                 from range(0, {rows}) t(i);"
+            ))
+            .unwrap();
+        (dir, store)
+    }
+
+    fn query(sql: &str) -> CompiledQuery {
+        CompiledQuery {
+            sql: sql.to_string(),
+            params: Vec::new(),
+            temp_tables: Vec::new(),
+            grouping: Vec::new(),
+            columns: vec![geode_core::snapshot::ColumnMeta {
+                name: "v".into(),
+                attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
+                scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+            }],
+            stalest_input: Vec::new(),
+        }
+    }
+
+    fn request(view: &str, sql: &str) -> QueryRequest {
+        QueryRequest {
+            view: ViewId(view.to_string()),
+            compiled: query(sql),
+            grouping_len: 0,
+            provenance: geode_core::snapshot::Provenance::default(),
+        }
+    }
+
+    #[test]
+    fn a_submitted_query_returns_a_snapshot() {
+        let (_d, store) = fixture(1_000);
+        let (pool, rx) = QueryPool::spawn(store, 2);
+        pool.submit(request("v1", "select sum(v) as v from t"));
+        let result = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(result.view, ViewId("v1".into()));
+        assert_eq!(result.snapshot.rows(), 1);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn leaning_on_a_regroup_key_yields_one_result_not_five() {
+        // Latest-wins coalescing (spec §7.3).
+        let (_d, store) = fixture(200_000);
+        let (pool, rx) = QueryPool::spawn(store, 2);
+        for i in 0..5 {
+            pool.submit(request("v1", &format!("select sum(v) + {i} as v from t")));
+        }
+        let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        // Whatever else arrives must not be a *superseded* result.
+        let extra: Vec<_> = std::iter::from_fn(|| rx.recv_timeout(Duration::from_millis(300)).ok())
+            .collect();
+        assert!(
+            extra.len() <= 1,
+            "expected coalescing, got {} extra results",
+            extra.len()
+        );
+        assert_eq!(first.view, ViewId("v1".into()));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn different_views_do_not_coalesce_with_each_other() {
+        let (_d, store) = fixture(1_000);
+        let (pool, rx) = QueryPool::spawn(store, 2);
+        pool.submit(request("v1", "select sum(v) as v from t"));
+        pool.submit(request("v2", "select count(*)::double as v from t"));
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            seen.push(rx.recv_timeout(Duration::from_secs(30)).unwrap().view);
+        }
+        seen.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(seen, vec![ViewId("v1".into()), ViewId("v2".into())]);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_stale_result_is_dropped_rather_than_delivered() {
+        // Generation-tagged: ids increase, and no result may arrive whose
+        // id is older than one already delivered for the same view.
+        let (_d, store) = fixture(100_000);
+        let (pool, rx) = QueryPool::spawn(store, 4);
+        let mut ids = Vec::new();
+        for _ in 0..4 {
+            ids.push(pool.submit(request("v1", "select sum(v) as v from t")));
+        }
+        let mut delivered = Vec::new();
+        while let Ok(r) = rx.recv_timeout(Duration::from_secs(5)) {
+            delivered.push(r.id);
+        }
+        for w in delivered.windows(2) {
+            assert!(w[0] < w[1], "results must arrive in id order: {delivered:?}");
+        }
+        assert_eq!(
+            delivered.last().copied(),
+            ids.last().copied(),
+            "the newest request must be the one that lands"
+        );
+        pool.shutdown();
+    }
+
+    #[test]
+    fn cancelling_a_view_stops_its_in_flight_query() {
+        let (_d, store) = fixture(2_000_000);
+        let (pool, rx) = QueryPool::spawn(store, 2);
+        pool.submit(request(
+            "v1",
+            "select sum(v) as v from t a, t b where a.k = b.k",
+        ));
+        std::thread::sleep(Duration::from_millis(50));
+        pool.cancel(&ViewId("v1".into()));
+        // Either nothing arrives, or an error result — but not a hang.
+        let _ = rx.recv_timeout(Duration::from_secs(20));
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_failing_query_reports_rather_than_killing_the_pool() {
+        let (_d, store) = fixture(100);
+        let (pool, rx) = QueryPool::spawn(store, 2);
+        pool.submit(request("bad", "select * from no_such_table"));
+        pool.submit(request("good", "select sum(v) as v from t"));
+        let mut views = Vec::new();
+        for _ in 0..2 {
+            if let Ok(r) = rx.recv_timeout(Duration::from_secs(30)) {
+                views.push(r.view);
+            }
+        }
+        assert!(
+            views.contains(&ViewId("good".into())),
+            "one bad query must not stop the pool: {views:?}"
+        );
+        pool.shutdown();
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_and_does_not_hang() {
+        let (_d, store) = fixture(100);
+        let (pool, _rx) = QueryPool::spawn(store, 2);
+        pool.shutdown();
+        pool.shutdown();
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data pool`
+Expected: FAIL — `cannot find struct QueryPool`.
+
+- [ ] **Step 3: Implement the pool**
+
+Prepend to `crates/geode-data/src/query/pool.rs`:
+
+```rust
+//! The read pool (spec §6.7, §7.3). Owns the read connections so the UI
+//! thread never holds one, coalesces latest-wins per view, tags every
+//! request and result so a stale arrival can be dropped, and interrupts a
+//! superseded query rather than awaiting it.
+
+use crate::query::compile::CompiledQuery;
+use crate::store::Store;
+use geode_core::snapshot::{Provenance, Snapshot};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ViewId(pub String);
+
+pub type QueryId = u64;
+
+pub struct QueryRequest {
+    pub view: ViewId,
+    pub compiled: CompiledQuery,
+    pub grouping_len: usize,
+    pub provenance: Provenance,
+}
+
+pub struct QueryResult {
+    pub id: QueryId,
+    pub view: ViewId,
+    /// `Err` carries the failure; a bad query degrades its own view and
+    /// leaves the pool running (spec §10.1).
+    pub snapshot: Snapshot,
+}
+
+#[derive(Default)]
+struct Queue {
+    /// At most one pending request per view: a newer submit replaces the
+    /// pending one outright, which is what makes coalescing latest-wins.
+    pending: HashMap<ViewId, (QueryId, QueryRequest)>,
+    /// Interrupt handles for queries currently running.
+    running: HashMap<ViewId, (QueryId, Arc<duckdb::InterruptHandle>)>,
+    shutdown: bool,
+}
+
+pub struct QueryPool {
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    next_id: AtomicU64,
+    threads: Mutex<Vec<JoinHandle<()>>>,
+}
+
+impl QueryPool {
+    pub fn spawn(store: Store, workers: usize) -> (QueryPool, Receiver<QueryResult>) {
+        let (tx, rx) = channel();
+        let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
+        let store = Arc::new(store);
+        let mut threads = Vec::new();
+
+        for i in 0..workers.max(1) {
+            let q = Arc::clone(&queue);
+            let tx = tx.clone();
+            let store = Arc::clone(&store);
+            threads.push(
+                std::thread::Builder::new()
+                    .name(format!("geode-query-{i}"))
+                    .spawn(move || worker(store, q, tx))
+                    .expect("spawning a query worker"),
+            );
+        }
+
+        (
+            QueryPool {
+                queue,
+                next_id: AtomicU64::new(1),
+                threads: Mutex::new(threads),
+            },
+            rx,
+        )
+    }
+
+    /// Replace this view's pending request. Returns the id assigned, which
+    /// increases monotonically so callers can discard stale arrivals.
+    pub fn submit(&self, req: QueryRequest) -> QueryId {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        // A superseded query is interrupted, not awaited (spec §7.3).
+        if let Some((running_id, handle)) = q.running.get(&req.view)
+            && *running_id < id
+        {
+            handle.interrupt();
+        }
+        q.pending.insert(req.view.clone(), (id, req));
+        cvar.notify_all();
+        id
+    }
+
+    pub fn cancel(&self, view: &ViewId) {
+        let (lock, _) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.pending.remove(view);
+        if let Some((_, handle)) = q.running.get(view) {
+            handle.interrupt();
+        }
+    }
+
+    pub fn shutdown(&self) {
+        {
+            let (lock, cvar) = &*self.queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            q.shutdown = true;
+            for (_, handle) in q.running.values() {
+                handle.interrupt();
+            }
+            cvar.notify_all();
+        }
+        for t in self
+            .threads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for QueryPool {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn worker(store: Arc<Store>, queue: Arc<(Mutex<Queue>, Condvar)>, tx: Sender<QueryResult>) {
+    let Ok(conn) = store.reader() else {
+        return;
+    };
+    let handle = conn.interrupt_handle();
+
+    loop {
+        let (id, req) = {
+            let (lock, cvar) = &*queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if q.shutdown {
+                    return;
+                }
+                if let Some(view) = q.pending.keys().next().cloned() {
+                    let (id, req) = q.pending.remove(&view).expect("just observed");
+                    q.running.insert(view, (id, Arc::clone(&handle)));
+                    break (id, req);
+                }
+                let (guard, _) = cvar
+                    .wait_timeout(q, std::time::Duration::from_millis(50))
+                    .unwrap_or_else(|e| e.into_inner());
+                q = guard;
+            }
+        };
+
+        let outcome = run_one(&conn, &req);
+
+        {
+            let (lock, _) = &*queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            // Only clear if we are still the running query for this view.
+            if q.running.get(&req.view).is_some_and(|(rid, _)| *rid == id) {
+                q.running.remove(&req.view);
+            }
+            // A newer request for this view is already pending: our result
+            // is stale, so drop it rather than delivering it (spec §7.3).
+            if q.pending.get(&req.view).is_some_and(|(pid, _)| *pid > id) {
+                continue;
+            }
+        }
+
+        if let Ok(snapshot) = outcome
+            && tx
+                .send(QueryResult {
+                    id,
+                    view: req.view.clone(),
+                    snapshot,
+                })
+                .is_err()
+        {
+            return;
+        }
+
+        for t in &req.compiled.temp_tables {
+            let _ = conn.execute_batch(&format!("drop table if exists {t}"));
+        }
+    }
+}
+
+fn run_one(conn: &duckdb::Connection, req: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+    let mut stmt = conn.prepare(&req.compiled.sql)?;
+    let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
+        .query_arrow(duckdb::params_from_iter(req.compiled.params.iter()))?
+        .collect();
+    let meta = req
+        .compiled
+        .columns
+        .iter()
+        .map(|c| geode_core::snapshot::ColumnMeta {
+            name: c.name.clone(),
+            attribution_by_depth: c.attribution_by_depth.clone(),
+            scope_semantics: c.scope_semantics.clone(),
+        })
+        .collect();
+    Snapshot::from_batches(batches, meta, req.grouping_len, req.provenance.clone())
+        .map_err(|e| duckdb::Error::ArrowTypeToDuckdbType(e.to_string(), 0))
+}
+```
+
+> **Implementer note:** `Snapshot::from_batches` takes `arrow::RecordBatch`
+> and duckdb re-exports its own. They are the same type only if the arrow
+> versions match — pin `geode-core`'s `arrow` to what
+> `cargo tree -p geode-data -i arrow` reports (Task 7, Step 1). If they
+> diverge, `run_one` must go through `duckdb::arrow` and `geode-core` must
+> re-export it rather than depending on `arrow` directly.
+
+Add to `crates/geode-data/src/query/mod.rs`:
+
+```rust
+pub mod pool;
+
+pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-data pool`
+Expected: PASS (7 tests).
+
+- [ ] **Step 5: Lint, format, commit**
+
+```bash
+cargo fmt && cargo clippy -p geode-data --all-targets -- -D warnings
+git add crates/geode-data
+git commit -m "feat(data): query pool with cancellation and latest-wins coalescing
+
+Owns the read connections so the UI thread never holds one. At most one
+pending request per view, so leaning on a regroup key five times yields
+one query. Requests and results are id-tagged and a result superseded
+while it ran is dropped rather than delivered. A superseded query is
+interrupted through interrupt_handle(), not awaited.
+
+A failing query degrades its own view and leaves the pool running,
+asserted by submitting a broken query alongside a good one."
+```
+
+---
+
+### Task 10: As-of routing
+
+**Files:**
+- Create: `crates/geode-data/src/query/as_of.rs`
+- Modify: `crates/geode-data/src/query/compile.rs`
+- Modify: `crates/geode-data/src/query/mod.rs`
+
+**Interfaces:**
+- Consumes: `Catalog`, `ddl::{table_name, TableKind}`, `CompiledQuery`.
+- Produces: `AsOf::{Live, At(DateTime<Utc>)}`,
+  `resolve_generations(&Connection, &str, DateTime<Utc>) ->
+  Result<Vec<(String, String, i64)>, StoreError>` returning
+  `(batch, book, gen_id)`, and `compile_view` gaining an `as_of: AsOf`
+  parameter.
+
+**Same compiled SQL, different tables** (spec §6.5). The live path carries
+no generation predicate at all; only the as-of path pays for history. Per
+partition, as-of resolves the newest generation at or before the requested
+time — so the state is "each partition as it stood at T", which is the
+question a trader is actually asking when books refresh independently.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/query/as_of.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// An archive with two partitions refreshing on different clocks:
+    /// BK000 at 07:00 and 14:00, BK001 only at 09:00.
+    fn fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table measures_position_archive(
+                     book varchar, lhu varchar, position_ref varchar,
+                     counterparty varchar, daily_trading_pnl double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 insert into measures_position_archive values
+                   ('BK000','L','P1','C', 1, 'BK000', 1, 1, '2026-08-30T07:00:00Z'),
+                   ('BK000','L','P1','C', 2, 'BK000', 2, 2, '2026-08-30T14:00:00Z'),
+                   ('BK001','L','P2','C', 3, 'BK001', 3, 3, '2026-08-30T09:00:00Z');",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn resolves_the_newest_generation_at_or_before_the_request() {
+        let (_d, store) = fixture();
+        let gens = resolve_generations(
+            store.writer(),
+            "measures_position_archive",
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        let bk000 = gens.iter().find(|(b, ..)| b == "BK000").unwrap();
+        assert_eq!(bk000.2, 1, "07:00, not the 14:00 generation");
+        let bk001 = gens.iter().find(|(b, ..)| b == "BK001").unwrap();
+        assert_eq!(bk001.2, 3);
+    }
+
+    #[test]
+    fn each_partition_resolves_on_its_own_clock() {
+        // Books refresh independently, so 'as it stood at T' is per
+        // partition, not one dataset-wide generation (spec §4.5).
+        let (_d, store) = fixture();
+        let gens = resolve_generations(
+            store.writer(),
+            "measures_position_archive",
+            ts("2026-08-30T08:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(gens.len(), 1, "BK001 did not exist yet at 08:00: {gens:?}");
+        assert_eq!(gens[0].0, "BK000");
+    }
+
+    #[test]
+    fn a_time_before_all_history_resolves_to_nothing() {
+        let (_d, store) = fixture();
+        let gens = resolve_generations(
+            store.writer(),
+            "measures_position_archive",
+            ts("2026-08-29T00:00:00Z"),
+        )
+        .unwrap();
+        assert!(gens.is_empty());
+    }
+
+    #[test]
+    fn the_predicate_selects_exactly_the_resolved_generations() {
+        let (_d, store) = fixture();
+        let gens = resolve_generations(
+            store.writer(),
+            "measures_position_archive",
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        let pred = generation_predicate(&gens);
+        let total: f64 = store
+            .writer()
+            .query_row(
+                &format!(
+                    "select sum(daily_trading_pnl) from measures_position_archive where {pred}"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 4.0, "BK000's 07:00 row plus BK001's, not the 14:00");
+    }
+
+    #[test]
+    fn an_empty_resolution_selects_no_rows_rather_than_all() {
+        assert_eq!(generation_predicate(&[]), "false");
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data as_of`
+Expected: FAIL — `cannot find function resolve_generations`.
+
+- [ ] **Step 3: Implement as-of routing**
+
+Prepend to `crates/geode-data/src/query/as_of.rs`:
+
+```rust
+//! Time travel (spec §4.5, §6.5). The same compiled SQL, aimed at the
+//! archive tables, with the generation resolved per partition.
+//!
+//! Datasets and books refresh on independent cadences, so the resolved
+//! state is "each partition as it stood at T" — the question a trader is
+//! actually asking. The live path carries no generation predicate at all;
+//! only this path pays for history.
+
+use crate::store::StoreError;
+use chrono::{DateTime, Utc};
+use duckdb::Connection;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AsOf {
+    Live,
+    At(DateTime<Utc>),
+}
+
+impl AsOf {
+    pub fn is_live(&self) -> bool {
+        matches!(self, AsOf::Live)
+    }
+}
+
+/// `(batch, book, gen_id)` — the newest generation at or before `at`, for
+/// every partition that existed by then.
+pub fn resolve_generations(
+    conn: &Connection,
+    archive_table: &str,
+    at: DateTime<Utc>,
+) -> Result<Vec<(String, String, i64)>, StoreError> {
+    let sql = format!(
+        "select batch, book, gen_id from (
+             select batch, book, gen_id, source_time,
+                    row_number() over (
+                        partition by batch, book order by source_time desc
+                    ) as rn
+             from (select distinct batch, book, gen_id, source_time
+                   from {archive_table}
+                   where source_time <= ?)
+         ) where rn = 1"
+    );
+    let err = |source| StoreError::Sql {
+        statement: sql.clone(),
+        source,
+    };
+    let mut stmt = conn.prepare(&sql).map_err(err)?;
+    let rows = stmt
+        .query_map(duckdb::params![at], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(err)?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+/// A predicate selecting exactly those generations. Values come from the
+/// catalog, not from user input, so they are inlined as quoted literals;
+/// scope predicates, which do take user input, bind (spec §6.2).
+pub fn generation_predicate(generations: &[(String, String, i64)]) -> String {
+    if generations.is_empty() {
+        // Selecting nothing, not everything: a time before all history is
+        // an empty result, never the whole archive.
+        return "false".to_string();
+    }
+    generations
+        .iter()
+        .map(|(batch, book, gen)| {
+            format!(
+                "(batch = '{}' and book = '{}' and gen_id = {gen})",
+                batch.replace('\'', "''"),
+                book.replace('\'', "''")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
+```
+
+In `compile_view`, take `as_of: &AsOf` and use it to pick the table and
+extend each subquery's predicate:
+
+```rust
+    // Same statement shape, different tables (spec §6.5).
+    let (kind, gen_pred) = match as_of {
+        AsOf::Live => (TableKind::Live, None),
+        AsOf::At(t) => {
+            let archive = table_name(spine_grain, TableKind::Archive);
+            let gens = crate::query::as_of::resolve_generations(conn, &archive, *t)?;
+            (
+                TableKind::Archive,
+                Some(crate::query::as_of::generation_predicate(&gens)),
+            )
+        }
+    };
+```
+
+and append `and {gen_pred}` to the spine and each grain predicate when it
+is `Some`. Replace every `TableKind::Live` in the function with `kind`.
+
+Add to `crates/geode-data/src/query/mod.rs`:
+
+```rust
+pub mod as_of;
+
+pub use as_of::{AsOf, generation_predicate, resolve_generations};
+```
+
+Update the Task 5 and Task 6 tests to pass `&AsOf::Live`.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-data`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt && cargo clippy -p geode-data --all-targets -- -D warnings
+git add crates/geode-data
+git commit -m "feat(data): as-of routing over the archive
+
+The same compiled SQL aimed at archive tables, with the generation
+resolved per partition: books refresh independently, so 'as it stood at
+T' is per partition rather than one dataset-wide generation (spec §4.5).
+
+A time before all history selects nothing rather than everything —
+asserted, because 'false' and a missing predicate differ by the entire
+archive."
+```
+
+---
+
+**Remaining tasks (11–14) continue below.** Task 11 the `DataService`
+facade; Task 12 the throwaway debug tile; Task 13 the §7.1 requery
+benchmarks; Task 14 cross-file conflict detection.
