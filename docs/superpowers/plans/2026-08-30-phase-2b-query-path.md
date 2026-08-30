@@ -4670,6 +4670,646 @@ archive."
 
 ---
 
-**Remaining tasks (11–14) continue below.** Task 11 the `DataService`
-facade; Task 12 the throwaway debug tile; Task 13 the §7.1 requery
-benchmarks; Task 14 cross-file conflict detection.
+### Task 11: The `DataService` facade
+
+**Files:**
+- Create: `crates/geode-data/src/service.rs`
+- Modify: `crates/geode-data/src/lib.rs`
+
+**Interfaces:**
+- Consumes: everything built so far.
+- Produces: `DataService::open(DataServiceConfig) -> Result<DataService,
+  StoreError>`, `DataService::{query, cancel, freshness, as_of_bounds,
+  ingest_events, query_results, shutdown}`, `DataServiceConfig { db_path,
+  schema, views, dimensions, sources }`. Task 12 and every future module
+  use only this.
+
+**This is the door** (spec §5). Modules ask `DataService` and nothing else;
+no module opens a file, holds a connection, or names a table. Everything
+below is an implementation detail from here on.
+
+`query` takes a view name, a scope and an as-of, compiles, and submits —
+so a caller never touches the compiler either. Freshness comes from the
+catalog and is attached to the snapshot as provenance, which is how §5.4's
+stalest-input rule reaches the UI without every module reimplementing it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/service.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::scope::{DimensionSelection, Scope};
+    use std::time::Duration;
+
+    /// A service over a generated source directory, fully ingested.
+    fn service() -> (tempfile::TempDir, tempfile::TempDir, DataService) {
+        let (db, src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
+        // Ingest everything ready, so the query path has data.
+        for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
+            let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+            let sentinel = crate::source::parse_sentinel(&text).unwrap();
+            let batch = crate::ingest::load::tests_support::batch_of(&file.csv_path);
+            let _ = crate::ingest::load_file(
+                &store,
+                &crate::ingest::LoadRequest {
+                    dataset: &ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &file.csv_path,
+                    sentinel: &sentinel,
+                    batch: &batch,
+                },
+            );
+        }
+        drop(store);
+
+        let service = DataService::open(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema: tests_support::schema(),
+            views: tests_support::views(),
+            dimensions: Default::default(),
+            sources: Vec::new(),
+            query_workers: 2,
+        })
+        .unwrap();
+        (db, src, service)
+    }
+
+    #[test]
+    fn a_query_by_view_name_returns_a_snapshot() {
+        let (_db, _src, svc) = service();
+        svc.query("tree", &Scope::default(), crate::query::AsOf::Live)
+            .unwrap();
+        let r = svc
+            .query_results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        assert!(r.snapshot.rows() > 0);
+        svc.shutdown();
+    }
+
+    #[test]
+    fn an_unknown_view_is_an_error_not_a_panic() {
+        let (_db, _src, svc) = service();
+        assert!(
+            svc.query("nonesuch", &Scope::default(), crate::query::AsOf::Live)
+                .is_err()
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_scope_narrows_the_result() {
+        let (_db, _src, svc) = service();
+        svc.query("tree", &Scope::default(), crate::query::AsOf::Live)
+            .unwrap();
+        let all = svc
+            .query_results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .snapshot
+            .rows();
+
+        let scoped = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK000".into()],
+            }],
+            ..Scope::default()
+        };
+        svc.query("tree", &scoped, crate::query::AsOf::Live).unwrap();
+        let narrowed = svc
+            .query_results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap()
+            .snapshot
+            .rows();
+        assert!(narrowed < all, "{narrowed} should be fewer than {all}");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn the_snapshot_carries_per_dataset_freshness() {
+        let (_db, _src, svc) = service();
+        svc.query("tree", &Scope::default(), crate::query::AsOf::Live)
+            .unwrap();
+        let r = svc
+            .query_results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        let p = r.snapshot.provenance();
+        assert!(!p.datasets.is_empty(), "freshness must reach the snapshot");
+        assert!(p.stalest().is_some());
+        svc.shutdown();
+    }
+
+    #[test]
+    fn as_of_bounds_report_how_far_back_time_travel_can_go() {
+        let (_db, _src, svc) = service();
+        // Nothing archived yet on a first load, so the bound is None
+        // rather than a fabricated time.
+        let bounds = svc.as_of_bounds("risk_snapshot").unwrap();
+        assert!(bounds.is_none() || bounds.is_some());
+        svc.shutdown();
+    }
+
+    #[test]
+    fn shutdown_is_idempotent() {
+        let (_db, _src, svc) = service();
+        svc.shutdown();
+        svc.shutdown();
+    }
+}
+```
+
+> **Implementer note:** `tests_support::schema()` and
+> `tests_support::views()` are small helpers to add beside this module,
+> returning the `SchemaSpec` from Task 9's `load::tests_support` fixture
+> and a `ViewSpec` list containing the `tree` view from Task 5's tests.
+> Reuse those literals rather than writing new ones.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data service`
+Expected: FAIL — `cannot find struct DataService`.
+
+- [ ] **Step 3: Implement the facade**
+
+Prepend to `crates/geode-data/src/service.rs`:
+
+```rust
+//! `DataService` — the only door to data (spec §5).
+//!
+//! Modules ask this and nothing else: no module opens a file, holds a
+//! connection, or names a table. Everything below is an implementation
+//! detail, which is what makes the future sidecar-process split an
+//! evolution rather than a rewrite (§2).
+
+use crate::ingest::IngestEvent;
+use crate::query::as_of::AsOf;
+use crate::query::compile::compile_view;
+use crate::query::pool::{QueryPool, QueryRequest, QueryResult, ViewId};
+use crate::source::SourceSpec;
+use crate::store::{Catalog, Store, StoreError};
+use chrono::{DateTime, Utc};
+use geode_core::dimensions::DerivedDimensions;
+use geode_core::schema::SchemaSpec;
+use geode_core::scope::Scope;
+use geode_core::snapshot::{Freshness, Provenance};
+use geode_core::view::ViewSpec;
+use std::path::PathBuf;
+use std::sync::mpsc::Receiver;
+
+pub struct DataServiceConfig {
+    pub db_path: PathBuf,
+    pub schema: SchemaSpec,
+    pub views: Vec<ViewSpec>,
+    pub dimensions: DerivedDimensions,
+    pub sources: Vec<SourceSpec>,
+    pub query_workers: usize,
+}
+
+pub struct DataService {
+    config: DataServiceConfig,
+    /// A dedicated connection for compilation and catalog reads. The pool
+    /// owns its own; this one never runs a view query.
+    conn: duckdb::Connection,
+    pool: QueryPool,
+    results: Receiver<QueryResult>,
+}
+
+impl DataService {
+    pub fn open(config: DataServiceConfig) -> Result<DataService, StoreError> {
+        let store = Store::open(&config.db_path)?;
+        for ds in &config.schema.datasets {
+            store.apply_schema(ds)?;
+        }
+        Catalog::new(store.writer()).ensure_tables()?;
+        let conn = store.reader()?;
+        let (pool, results) = QueryPool::spawn(store, config.query_workers.max(1));
+        Ok(DataService {
+            config,
+            conn,
+            pool,
+            results,
+        })
+    }
+
+    /// Compile and submit. Results arrive on [`Self::query_results`];
+    /// a newer query for the same view supersedes an older one.
+    pub fn query(&self, view: &str, scope: &Scope, as_of: AsOf) -> Result<u64, StoreError> {
+        let spec = self
+            .config
+            .views
+            .iter()
+            .find(|v| v.name == view)
+            .ok_or_else(|| StoreError::Sql {
+                statement: format!("query view '{view}'"),
+                source: duckdb::Error::InvalidParameterName(format!("unknown view '{view}'")),
+            })?;
+
+        let compiled = compile_view(
+            &self.conn,
+            spec,
+            &self.config.schema,
+            scope,
+            &self.config.dimensions,
+            &as_of,
+        )?;
+
+        // Freshness travels with the result, so §5.4's stalest-input rule
+        // reaches the UI without every module reimplementing it.
+        let mut provenance = Provenance {
+            as_of_request: match &as_of {
+                AsOf::Live => None,
+                AsOf::At(t) => Some(t.to_rfc3339()),
+            },
+            ..Provenance::default()
+        };
+        let catalog = Catalog::new(&self.conn);
+        for dataset in &compiled.stalest_input {
+            provenance.datasets.push(Freshness {
+                dataset: dataset.clone(),
+                as_of: catalog
+                    .dataset_as_of(dataset, &[])?
+                    .map(|t| t.to_rfc3339()),
+                generation: catalog.next_gen_id()?.saturating_sub(1),
+            });
+        }
+
+        let grouping_len = compiled.grouping.len();
+        Ok(self.pool.submit(QueryRequest {
+            view: ViewId(view.to_string()),
+            compiled,
+            grouping_len,
+            provenance,
+        }))
+    }
+
+    pub fn cancel(&self, view: &str) {
+        self.pool.cancel(&ViewId(view.to_string()));
+    }
+
+    pub fn query_results(&self) -> &Receiver<QueryResult> {
+        &self.results
+    }
+
+    /// Per-book freshness for a dataset (spec §4.5).
+    pub fn freshness(&self, dataset: &str) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
+        Catalog::new(&self.conn).book_freshness(dataset)
+    }
+
+    /// How far back time travel can go, or `None` when nothing is
+    /// archived — never a fabricated time.
+    pub fn as_of_bounds(&self, dataset: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
+        let sql = "select min(source_time) from measures_position_archive";
+        let _ = dataset;
+        self.conn
+            .query_row(sql, [], |r| r.get(0))
+            .map_err(|source| StoreError::Sql {
+                statement: sql.into(),
+                source,
+            })
+    }
+
+    /// Ingest events, once a runner is attached. Phase 2b leaves ingest
+    /// driven by the caller; wiring the runner in is `geode-app`'s job.
+    pub fn ingest_events(&self) -> Option<&Receiver<IngestEvent>> {
+        None
+    }
+
+    pub fn shutdown(&self) {
+        self.pool.shutdown();
+    }
+}
+```
+
+Add to `crates/geode-data/src/lib.rs`:
+
+```rust
+pub mod service;
+
+pub use service::{DataService, DataServiceConfig};
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-data service`
+Expected: PASS (6 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+cargo fmt && cargo clippy -p geode-data --all-targets -- -D warnings
+git add crates/geode-data
+git commit -m "feat(data): DataService facade
+
+The only door to data (spec §5): modules ask this and nothing else, so no
+module opens a file, holds a connection, or names a table. That is what
+keeps the future sidecar-process split an evolution rather than a
+rewrite.
+
+query() takes a view name, a scope and an as-of, compiles and submits, so
+callers never touch the compiler. Freshness is attached as provenance,
+which is how the stalest-input rule reaches the UI without every module
+reimplementing it. as_of_bounds returns None when nothing is archived
+rather than fabricating a time."
+```
+
+---
+
+### Task 12: The throwaway debug tile
+
+**Files:**
+- Create: `crates/geode-shell/src/dataprobe.rs`
+- Modify: `crates/geode-shell/src/lib.rs`
+- Modify: `crates/geode-app/src/main.rs`
+- Modify: `crates/geode-app/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `DataService`, `Snapshot`, `Attribution`, `ScopeSemantics`.
+- Produces: `DataProbe` (a gpui view), `DataProbe::new(Entity<...>)`.
+
+**This is deliberately throwaway** (spec §7). It exists because the §7.1
+requery budget is end-to-end — "query + snapshot handoff + first painted
+frame" — and cannot be measured headless. The blotter deletes it in Phase 3.
+Do not invest in its appearance; invest in it showing the truth.
+
+**Read the `gpui` and `gpui-component` skills before writing this file.**
+They are vendored in this repo and cover entities, focus, async and
+rendering.
+
+**What it must show**, because each one is a claim the phase makes:
+
+- Per-book freshness and generation, so per-book staleness is visible.
+- Row count and the query's wall time.
+- The first N rows, with the depth of each so the tree structure is
+  legible.
+- `Attribution` per column per row-depth — a `DeterminedNonAdditive` cell
+  rendered differently from an `Additive` one, and `NonAttributable` blank.
+- `ScopeSemantics` when a column was semi-joined.
+
+- [ ] **Step 1: Add the dependency**
+
+In `crates/geode-app/Cargo.toml`, add `geode-data` to `[dependencies]`.
+
+- [ ] **Step 2: Write the tile**
+
+Create `crates/geode-shell/src/dataprobe.rs`. Follow the existing tile
+patterns in `crates/geode-shell/src/shell/mod.rs` for layout and theme
+tokens. The view holds an `Arc<Snapshot>` and re-renders when a new one
+arrives over the `DataService` result channel, polled from a gpui
+background task.
+
+Render, in order: a freshness header (`book · as-of · gen`), a stats line
+(`rows`, `query ms`), then a table of the first 50 rows. For each measure
+cell, look up `snapshot.meta(col).attribution_by_depth[depth]` where
+`depth = snapshot.depth_of_row(row)`, and render:
+
+- `Additive` — the value, normally.
+- `DeterminedNonAdditive` — the value, dimmed, with a trailing marker
+  (`†`) and a legend line explaining "shown for this row, do not total".
+- `NonAttributable` — blank.
+
+When any visible column's `scope_semantics` is `SemiJoined`, append a line
+naming the dimensions: "trading PnL covers positions with SPX risk, not
+the SPX share".
+
+- [ ] **Step 3: Wire it into the shell**
+
+Add `pub mod dataprobe;` to `crates/geode-shell/src/lib.rs`, register an
+action that opens the tile, and bind it in `defaults.rs` under a debug
+binding (alongside `mod+shift+p`, the existing perf overlay).
+
+- [ ] **Step 4: Verify it runs**
+
+Run: `cargo run -p geode-app`
+Open the probe tile. Expected: real numbers from a real database, with a
+blank cell at the underlying level for trading PnL and a marked cell at
+the position level.
+
+Use the `run` skill if the app needs a demo source directory generated
+first.
+
+- [ ] **Step 5: Write a `TestAppContext` test**
+
+Per spec §10.3, module behaviour is tested through real focus and
+dispatch. Add a test that opens the probe with a fixture `DataService`,
+simulates the open action, and asserts the rendered text contains the row
+count and at least one blank-and-marked cell.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cargo fmt && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
+git add crates/geode-shell crates/geode-app
+git commit -m "feat(shell): throwaway data probe tile
+
+Exists because the §7.1 requery budget is specified end-to-end through a
+painted frame and cannot be measured headless. The blotter deletes it in
+phase 3, so it is deliberately plain.
+
+Shows what the phase claims: per-book freshness and generation, row count
+and query time, and each cell rendered by its Attribution — normal when
+additive, dimmed and marked when determined-but-not-additive, blank when
+non-attributable. Names the semi-joined dimensions when a column was
+reached by membership rather than directly, because 'positions with SPX
+risk' must not read as 'the SPX share'."
+```
+
+---
+
+### Task 13: The §7.1 requery benchmarks
+
+**Files:**
+- Create: `crates/geode-data/benches/query.rs`
+- Modify: `crates/geode-data/Cargo.toml`
+- Modify: `docs/perf.md`
+
+**Interfaces:**
+- Consumes: `DataService`, `geode-demo-data`.
+- Produces: no library API — the measurement that decides whether §7.1's
+  central contract holds.
+
+**This is the point of the phase.** `<50ms end-to-end at 1M rows` is the
+contract that decides whether the blotter feels instant, and nothing has
+tested it. Everything else in 2b exists to make this measurable.
+
+**Measure the shape the app actually runs** (the mistake caught in 2a's
+benchmarks): grouped three levels deep, joined across grains, scoped —
+not a bare `select`.
+
+- [ ] **Step 1: Register the bench**
+
+In `crates/geode-data/Cargo.toml`:
+
+```toml
+[[bench]]
+name = "query"
+harness = false
+```
+
+- [ ] **Step 2: Write the benchmarks**
+
+Create `crates/geode-data/benches/query.rs` with these groups:
+
+- `query_requery/1m_rows_grouped_joined_scoped` — the §7.1 contract. Ingest
+  1M rows once, then time `DataService::query` submit-to-snapshot for the
+  `lhu > underlying > position` view with a book scope. **Budget: <50ms.**
+- `query_requery/regroup` — same data, changing only the grouping tuple,
+  which is the interaction a trader performs with `Ctrl+1..9`.
+- `query_requery/rescope` — same grouping, changing the book selection.
+- `query_snapshot_handoff` — `Snapshot::from_batches` alone, so the
+  concatenation cost is separable from the query cost.
+- `query_as_of` — the same query against the archive, to price history
+  against live.
+- `query_enum_vs_varchar` — the same grouped query with dimension columns
+  stored as `ENUM` and as `VARCHAR`, which is what justifies Task 8.
+
+Build each with `DataService`, submit, and block on `query_results()`.
+
+- [ ] **Step 3: Run and record**
+
+Run: `cargo bench -p geode-data -- query_`
+
+Record every number in `docs/perf.md` beside the 2a ingest table, with the
+machine stated. **State plainly whether the <50ms budget is met.** If it is
+not, that is a finding about the architecture, not a benchmark to tune
+until it passes — report it and stop, because the grain-split design rests
+on the claim that joining aggregates at group cardinality is cheap.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/geode-data docs/perf.md
+git commit -m "perf(data): requery benchmarks against the §7.1 contract
+
+<50ms end-to-end at 1M rows is the contract that decides whether the
+blotter feels instant, and until now nothing tested it. Measures the
+shape the app actually runs — grouped three levels, joined across grains,
+scoped — rather than a bare select, which is the mistake 2a's first
+benchmark run made.
+
+Also prices regroup against rescope, snapshot handoff on its own, archive
+against live, and ENUM against VARCHAR dimension storage, which is what
+justifies carrying the interning work over from 2a."
+```
+
+---
+
+### Task 14: Cross-file conflict detection
+
+**Files:**
+- Modify: `crates/geode-data/src/ingest/split.rs`
+- Modify: `crates/geode-data/src/store/catalog.rs`
+
+**Interfaces:**
+- Consumes: `Conflict`, `Catalog`.
+- Produces: `Catalog::{record_attribute_conflicts, attribute_conflicts}`
+  and a `attribute_conflicts` table.
+
+**Carried over from 2a**, which detects disagreement *within* a file but
+not across them. `instrument_ref` is derived by deduplicating instrument
+attributes out of every risk CSV, and instruments are reused across books
+whose files are written at different times — so the same instrument
+routinely arrives twice with different values (spec §3.5).
+
+**The point is diagnostic, not corrective.** Newest source time wins, as
+2a already does. What is missing is the *signal*: a steady stream of
+conflicts on one column is evidence that the column is not at instrument
+grain at all, which is how the §3.4 grain assignments get corrected.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to the test module in `crates/geode-data/src/ingest/load.rs`:
+
+```rust
+    #[test]
+    fn the_same_instrument_disagreeing_across_files_is_recorded() {
+        // 2a detects disagreement within a file. Instruments are reused
+        // across books, and those books' files are written at different
+        // times, so cross-file disagreement is the common case (spec §3.5).
+        let f = fixture();
+        for file in f.emitted.files.iter().filter(|x| x.sentinel_path.is_some()) {
+            load(&f, file);
+        }
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let conflicts = cat.attribute_conflicts("instrument_ref").unwrap();
+        assert!(
+            !conflicts.is_empty(),
+            "the fixture plants a model_code disagreement across files"
+        );
+        let model = conflicts.iter().find(|c| c.column == "model_code").unwrap();
+        assert!(model.instruments > 0);
+    }
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data disagreeing_across_files`
+Expected: FAIL — `no method named attribute_conflicts`.
+
+- [ ] **Step 3: Implement**
+
+In `crates/geode-data/src/store/catalog.rs`, add an
+`attribute_conflicts(dataset)` query that groups the live instrument table
+by `instrument_ref` and counts columns whose `min` differs from `max`
+across the whole table — the same shape as the within-file detector, run
+over everything rather than one file's staging table. Record the counts
+after each publish so diagnostics can show a trend rather than a snapshot.
+
+- [ ] **Step 4: Run, lint, commit**
+
+```bash
+cargo test -p geode-data && cargo fmt && cargo clippy -p geode-data --all-targets -- -D warnings
+git add crates/geode-data
+git commit -m "feat(data): cross-file attribute conflict detection
+
+Carried over from 2a, which detects disagreement within a file but not
+across them — and instruments are reused across books whose files are
+written at different times, so cross-file is the common case.
+
+Diagnostic, not corrective: newest source time still wins. The value is
+the signal, because a steady stream of conflicts on one column is
+evidence it is not at instrument grain at all, which is how the §3.4
+assignments get corrected."
+```
+
+---
+
+## Self-Review
+
+**Spec coverage.** §6.1 view definitions → Task 2. §6.2 scope, its parser
+and layering → Tasks 1, 4. §6.3 grain-aware aggregation, `Attribution`,
+`ScopeSemantics`, the single-`ROLLUP` tree → Tasks 3, 5. §6.4 joins and the
+stalest-input rule → Tasks 6, 11. §6.5 as-of routing → Task 10. §6.6
+snapshots and their provenance → Task 7. §6.7 concurrency, cancellation and
+coalescing → Task 9. §6.8 derived dimensions → Task 2. §7 the vertical
+slice → Task 12. §9.3 the requery benchmarks → Task 13. §3.6/§7.2 ENUM
+interning and §3.5 cross-file conflicts, both carried from 2a → Tasks 8, 14.
+
+**Known gaps, deliberate.** The scope *bar* and dimension pickers stay in
+Phase 4 (§1.3) — this builds the model and compiler, not the interaction
+surface. `implied_vol_surface` still has no declared columns (§10.6), so
+Task 6 exercises joins against `instrument_ref` and the vol join follows
+the same path once that dataset is specified. Property tests over generated
+scope stacks (§10.3) are folded into Task 4's tests rather than given their
+own task; if they grow, split them out.
+
+**The one place to expect trouble.** Task 9's `Snapshot::from_batches`
+takes an `arrow::RecordBatch` while duckdb re-exports its own. They are the
+same type only if the versions match, which is why Task 7 pins `arrow` to
+whatever `cargo tree -p geode-data -i arrow` reports. If they ever diverge,
+`geode-core` should re-export `duckdb::arrow` rather than depend on `arrow`
+directly — noted in both tasks.
+
+**Sequencing.** Tasks 1–3 are pure `geode-core` and need no database, so
+they can be done in any order. Task 5 depends on 2, 3 and 4. Task 13 is the
+one that can invalidate the design, so do not leave it until last if
+schedule is tight — a stripped version of it can run right after Task 9.
+
+## Execution Handoff
+
+Plan saved to `docs/superpowers/plans/2026-08-30-phase-2b-query-path.md`.
