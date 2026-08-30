@@ -61,6 +61,29 @@ pub(crate) const EPS: f32 = 1e-3;
 /// Smallest fraction any split child may occupy.
 pub const MIN_RATIO: f32 = 0.05;
 
+/// Stable name for one divider in a tree (drag-splitters task): the path
+/// of child indices from the root down to the owning `Split`, plus the
+/// index of the boundary's left/top child — the same `(index, index + 1)`
+/// adjacent-pair convention [`Tree::move_divider`] operates in. An address
+/// is captured at mouse-down and applied on every mouse-move, and the tree
+/// can change in between (a keyboard split mid-drag, a session reload), so
+/// it deliberately names *structure* rather than borrowing into it:
+/// [`Tree::drag_divider`] re-validates the whole path on every application
+/// and treats anything stale as a no-op, never a panic. Accepted limit of
+/// name-by-structure (review round): a same-tree structural mutation
+/// mid-drag can leave an address that still *validates* but names a
+/// different boundary than the one grabbed (e.g. a split inserted before
+/// it renumbers siblings). The shell cancels drags on every guarded path
+/// (overlay open, workspace switch, fullscreen), so the remaining exposure
+/// is a keyboard split/close raced against a held button — worst case a
+/// benign misresize of a neighboring, still-clamped pair, never a panic or
+/// an invariant break.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DividerAddress {
+    pub path: Vec<usize>,
+    pub index: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Leaf(TileId),
@@ -446,6 +469,114 @@ impl Tree {
             return true;
         }
         false
+    }
+
+    /// Set the ratio pair at `address` so the divider lands under an
+    /// absolute cursor position (drag-splitters task — the mouse
+    /// counterpart of [`Tree::move_divider`], which stays byte-identical
+    /// for the keyboard path). `bounds` is the rect this tree is laid out
+    /// in (the same one the render pass gives [`Tree::layout`]) and
+    /// `(x, y)` is the cursor in that space; the walk down `address.path`
+    /// re-derives the owning split's sub-rect from the ratios exactly the
+    /// way `layout_node` does, then picks the coordinate matching the
+    /// split's orientation — the caller never needs to know which axis a
+    /// divider moves along.
+    ///
+    /// Same invariants as `move_divider`, expressed absolutely instead of
+    /// incrementally: only the adjacent pair `(index, index + 1)` changes,
+    /// their sum is preserved (so every other sibling and the normalized
+    /// total are untouched), and the new position clamps into
+    /// `MIN_RATIO..=(pair total − MIN_RATIO)` — dragging past the clamp
+    /// pins the divider at the clamp rather than failing, because during
+    /// a live drag "stop at the limit" is the behavior the hand expects
+    /// (the keyboard's discrete step rejects instead; both end at the same
+    /// boundary).
+    ///
+    /// Returns `false` — tree untouched — for anything stale or
+    /// degenerate: a path that runs through a leaf or off the end of a
+    /// split's children (the layout changed mid-drag), a boundary index
+    /// with no right-hand sibling, a non-finite cursor coordinate, a
+    /// zero-extent bounds, or a pair whose total is already below
+    /// `2 × MIN_RATIO` (constructible via `from_parts`, which renormalizes
+    /// but doesn't enforce `MIN_RATIO`; a clamp range would be inverted).
+    /// Also `false` — the review-round no-change contract — when the
+    /// clamped result equals the ratio the pair already has (a repeated
+    /// position, or a drag pinned at a clamp it's already sitting at):
+    /// "true" strictly means "the layout changed", so the caller can key
+    /// re-renders and dirty bookkeeping off it directly.
+    pub fn drag_divider(&mut self, address: &DividerAddress, x: f32, y: f32, bounds: Rect) -> bool {
+        let Some(root) = &mut self.root else {
+            return false;
+        };
+        let mut node = root;
+        let mut rect = bounds;
+        for &ix in &address.path {
+            let Node::Split {
+                orientation,
+                children,
+                ratios,
+            } = node
+            else {
+                return false;
+            };
+            if ix >= children.len() {
+                return false;
+            }
+            let before: f32 = ratios[..ix].iter().sum();
+            rect = match orientation {
+                Orientation::Horizontal => Rect {
+                    x: rect.x + rect.w * before,
+                    y: rect.y,
+                    w: rect.w * ratios[ix],
+                    h: rect.h,
+                },
+                Orientation::Vertical => Rect {
+                    x: rect.x,
+                    y: rect.y + rect.h * before,
+                    w: rect.w,
+                    h: rect.h * ratios[ix],
+                },
+            };
+            node = &mut children[ix];
+        }
+        let Node::Split {
+            orientation,
+            ratios,
+            ..
+        } = node
+        else {
+            return false;
+        };
+        let i = address.index;
+        if i + 1 >= ratios.len() {
+            return false;
+        }
+        let (origin, extent, pos) = match orientation {
+            Orientation::Horizontal => (rect.x, rect.w, x),
+            Orientation::Vertical => (rect.y, rect.h, y),
+        };
+        if !pos.is_finite() || extent <= 0.0 {
+            return false;
+        }
+        let start: f32 = ratios[..i].iter().sum();
+        let total = ratios[i] + ratios[i + 1];
+        if total < 2.0 * MIN_RATIO {
+            return false;
+        }
+        let new_a = ((pos - origin) / extent - start).clamp(MIN_RATIO, total - MIN_RATIO);
+        // No-change detection (review fix): without it, every move pinned
+        // at a clamp the divider is already sitting at would report true
+        // and trigger a re-render for an identical layout. 1e-6 epsilon in
+        // ratio space: far below any perceptible change (one pixel on an
+        // 8K-wide split is ~1e-4 of it), far above f32 noise at this
+        // scale — and the common no-op cases (same cursor position, same
+        // clamp bound) reproduce bit-identical values anyway.
+        if (new_a - ratios[i]).abs() < 1e-6 {
+            return false;
+        }
+        ratios[i] = new_a;
+        ratios[i + 1] = total - new_a;
+        true
     }
 
     /// Clear any fullscreen state without touching focus (dock-regions
@@ -1229,6 +1360,218 @@ mod tests {
             !tree.move_divider(Direction::Right, 0.1),
             "single tile has no divider to move"
         );
+    }
+
+    // --- drag_divider (drag-splitters task) -----------------------------
+
+    /// Pixel-flavored bounds for drag tests: dragging is defined against
+    /// the laid-out rect, so these tests use a non-unit, offset rect to
+    /// prove the origin/extent math rather than hiding it behind 0..1.
+    const DRAG_BOUNDS: Rect = Rect {
+        x: 100.0,
+        y: 50.0,
+        w: 1000.0,
+        h: 800.0,
+    };
+
+    #[test]
+    fn drag_divider_sets_the_pair_from_an_absolute_position() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        // Cursor at x=400 within x 100..1100 → boundary at 30%.
+        assert!(tree.drag_divider(&addr, 400.0, 0.0, DRAG_BOUNDS));
+        let r1 = rect_of(&tree, 1);
+        let r2 = rect_of(&tree, 2);
+        assert!(approx(r1.w, 0.3) && approx(r2.w, 0.7) && approx(r2.x, 0.3));
+    }
+
+    #[test]
+    fn drag_divider_vertical_split_reads_the_y_coordinate() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Vertical);
+        tree.split(TileId(2), Orientation::Vertical);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        // Cursor at y=650 within y 50..850 → boundary at 75%; the x
+        // coordinate is junk on purpose — a vertical split must ignore it.
+        assert!(tree.drag_divider(&addr, -9999.0, 650.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).h, 0.75));
+        assert!(approx(rect_of(&tree, 2).h, 0.25));
+    }
+
+    #[test]
+    fn drag_divider_clamps_at_min_ratio_instead_of_failing() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        // Dragging way past the left edge pins the pair at MIN_RATIO —
+        // the live-drag behavior is "stop at the limit", where the
+        // keyboard's discrete move_divider step rejects outright.
+        assert!(tree.drag_divider(&addr, -500.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, MIN_RATIO));
+        assert!(approx(rect_of(&tree, 2).w, 1.0 - MIN_RATIO));
+        // And past the right edge the other way.
+        assert!(tree.drag_divider(&addr, 5000.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, 1.0 - MIN_RATIO));
+        assert!(approx(rect_of(&tree, 2).w, MIN_RATIO));
+    }
+
+    #[test]
+    fn drag_divider_middle_pair_leaves_other_siblings_untouched() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.split(TileId(3), Orientation::Horizontal);
+        // Boundary between 2 and 3 (pair index 1) to 40% of the bounds:
+        // tile 1 keeps its third; 2 and 3 split the remaining 2/3 at the
+        // new boundary.
+        let addr = DividerAddress {
+            path: vec![],
+            index: 1,
+        };
+        assert!(tree.drag_divider(&addr, 500.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, 1.0 / 3.0), "tile 1 untouched");
+        assert!(approx(rect_of(&tree, 2).w, 0.4 - 1.0 / 3.0));
+        assert!(approx(rect_of(&tree, 3).w, 0.6));
+    }
+
+    #[test]
+    fn drag_divider_nested_split_maps_through_the_sub_rect() {
+        let mut tree = grid(); // [(1 / 4) | (2 / 3)]
+        // The left column's inner divider (path [0], boundary 0) dragged
+        // to y=250 within the column's full-height y 50..850 → 25%.
+        let addr = DividerAddress {
+            path: vec![0],
+            index: 0,
+        };
+        assert!(tree.drag_divider(&addr, 0.0, 250.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).h, 0.25));
+        assert!(approx(rect_of(&tree, 4).h, 0.75));
+        // The right column's pair is untouched.
+        assert!(approx(rect_of(&tree, 2).h, 0.5));
+        assert!(approx(rect_of(&tree, 3).h, 0.5));
+    }
+
+    #[test]
+    fn drag_divider_stale_addresses_are_safe_noops() {
+        let mut tree = grid();
+        let before = rects(&tree);
+        // Path runs through a leaf (leaf at [0, 0] has no children).
+        let through_leaf = DividerAddress {
+            path: vec![0, 0, 0],
+            index: 0,
+        };
+        assert!(!tree.drag_divider(&through_leaf, 500.0, 400.0, DRAG_BOUNDS));
+        // Path index off the end of a split's children.
+        let past_children = DividerAddress {
+            path: vec![7],
+            index: 0,
+        };
+        assert!(!tree.drag_divider(&past_children, 500.0, 400.0, DRAG_BOUNDS));
+        // Boundary index with no right-hand sibling.
+        let past_boundary = DividerAddress {
+            path: vec![],
+            index: 1,
+        };
+        assert!(!tree.drag_divider(&past_boundary, 500.0, 400.0, DRAG_BOUNDS));
+        // Address that lands on a leaf rather than a split.
+        let at_leaf = DividerAddress {
+            path: vec![0, 0],
+            index: 0,
+        };
+        assert!(!tree.drag_divider(&at_leaf, 500.0, 400.0, DRAG_BOUNDS));
+        assert_eq!(rects(&tree), before, "failed drags must change nothing");
+    }
+
+    #[test]
+    fn drag_divider_refuses_junk_geometry() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        assert!(!tree.drag_divider(&addr, f32::NAN, 0.0, DRAG_BOUNDS));
+        let flat = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 800.0,
+        };
+        assert!(!tree.drag_divider(&addr, 0.0, 0.0, flat));
+        assert!(approx(rect_of(&tree, 1).w, 0.5), "tree untouched");
+    }
+
+    #[test]
+    fn drag_divider_reports_false_when_nothing_changes() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        // A real move reports true; repeating the exact position reports
+        // false (nothing changed), so callers can skip re-renders.
+        assert!(tree.drag_divider(&addr, 400.0, 0.0, DRAG_BOUNDS));
+        assert!(!tree.drag_divider(&addr, 400.0, 0.0, DRAG_BOUNDS));
+        // Pinning at a clamp: the move that first hits it is a change...
+        assert!(tree.drag_divider(&addr, -500.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, MIN_RATIO));
+        // ...but every further move pinned at the same clamp is not.
+        assert!(!tree.drag_divider(&addr, -600.0, 0.0, DRAG_BOUNDS));
+        assert!(!tree.drag_divider(&addr, -9999.0, 0.0, DRAG_BOUNDS));
+        assert!(approx(rect_of(&tree, 1).w, MIN_RATIO), "still pinned");
+    }
+
+    #[test]
+    fn drag_divider_on_an_empty_tree_is_a_noop() {
+        let mut tree = Tree::default();
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        assert!(!tree.drag_divider(&addr, 500.0, 400.0, DRAG_BOUNDS));
+    }
+
+    #[test]
+    fn drag_divider_refuses_a_pair_too_small_to_clamp() {
+        // from_parts renormalizes but doesn't enforce MIN_RATIO, so a
+        // hostile session can leave a pair totalling under 2×MIN_RATIO —
+        // the clamp range would be inverted, so the drag must refuse.
+        let tree = Tree::from_parts(
+            Some(Node::Split {
+                orientation: Orientation::Horizontal,
+                children: vec![
+                    Node::Leaf(TileId(1)),
+                    Node::Leaf(TileId(2)),
+                    Node::Leaf(TileId(3)),
+                ],
+                ratios: vec![0.04, 0.04, 0.92],
+            }),
+            Some(TileId(1)),
+            None,
+        );
+        let mut tree = tree.expect("structurally valid");
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        let before = rects(&tree);
+        assert!(!tree.drag_divider(&addr, 500.0, 0.0, DRAG_BOUNDS));
+        assert_eq!(rects(&tree), before);
     }
 
     #[test]

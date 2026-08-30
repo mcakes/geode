@@ -1,10 +1,7 @@
 use super::docks::{DockSide, Docks, FocusRegion};
-use super::tree::{Direction, Orientation, TileId, Tree};
+use super::tree::{Direction, DividerAddress, Orientation, Rect, TileId, Tree};
 use crate::actions::ActionId;
 use std::collections::BTreeMap;
-
-#[cfg(test)]
-use super::tree::Rect;
 
 /// One workspace's complete layout state (dock-regions task): the i3-style
 /// split [`Tree`] for the main working set, the three fixed [`Docks`], and
@@ -256,6 +253,82 @@ impl Workspace {
                 dock.set_size(size + grow * RESIZE_STEP);
             }
         }
+    }
+
+    /// Drag one of the main tree's dividers to an absolute cursor position
+    /// (drag-splitters task): a thin forwarding verb to
+    /// [`Tree::drag_divider`], which owns all the validation and clamp
+    /// semantics. Lives here (like [`Workspace::resize`]) because the
+    /// tree field is private — but unlike `resize` it is NOT region-aware:
+    /// a drag names its divider by address, not by where keyboard focus
+    /// happens to live, and deliberately never moves focus or the region.
+    pub fn drag_main_divider(
+        &mut self,
+        address: &DividerAddress,
+        x: f32,
+        y: f32,
+        bounds: Rect,
+    ) -> bool {
+        self.tree.drag_divider(address, x, y, bounds)
+    }
+
+    /// [`Workspace::drag_main_divider`]'s dock counterpart: drag a divider
+    /// *inside* one dock's own tree. `bounds` is that dock's laid-out
+    /// frame rect (the drag re-derives sub-rects from it, same as the main
+    /// tree from the tree area). Refused (`false`, tree untouched) while
+    /// the dock is hidden — review-round behavior change, recorded: the
+    /// first cut kept applying to a dock hidden mid-drag (ctrl+[ with the
+    /// button down), which contradicted the rule everywhere else that a
+    /// drag never silently resizes an invisible layout (the shell cancels
+    /// on fullscreen for exactly that reason, and [`Workspace::
+    /// drag_dock_edge`] already refused hidden docks). The dock keeps its
+    /// tree; the in-flight drag just no-ops until release, and nothing
+    /// already applied is undone. Focus and region stay untouched.
+    pub fn drag_dock_divider(
+        &mut self,
+        side: DockSide,
+        address: &DividerAddress,
+        x: f32,
+        y: f32,
+        bounds: Rect,
+    ) -> bool {
+        let dock = self.docks.get_mut(side);
+        if !dock.visible() {
+            return false;
+        }
+        dock.tree_mut().drag_divider(address, x, y, bounds)
+    }
+
+    /// Drag a dock's frame edge (the boundary between the dock and the
+    /// main area) to an absolute cursor position: projects the cursor onto
+    /// a size fraction of `area` (the content area `dock_layout` carves —
+    /// the same rect keyboard resize's `RESIZE_STEP` is a fraction of) via
+    /// [`super::dividers::dock_size_from_position`], then routes it
+    /// through [`super::docks::Dock::set_size`], which owns the
+    /// 0.10..=0.50 clamp — so dragging past the range pins at the clamp,
+    /// mirroring [`Tree::drag_divider`]'s clamp-not-fail behavior. `false`
+    /// (untouched) for a degenerate area/cursor or a hidden dock — a
+    /// hidden dock has no visible edge, so an edge drag reaching it can
+    /// only be stale. Also `false` when the clamped size equals the size
+    /// the dock already has (same no-change contract as
+    /// [`Tree::drag_divider`], review fix): a move pinned at a clamp the
+    /// dock is already sitting at must not read as a change, so callers
+    /// can key re-renders and dirty bookkeeping off the return directly.
+    pub fn drag_dock_edge(&mut self, side: DockSide, x: f32, y: f32, area: Rect) -> bool {
+        let Some(frac) = super::dividers::dock_size_from_position(side, x, y, area) else {
+            return false;
+        };
+        let dock = self.docks.get_mut(side);
+        if !dock.visible() {
+            return false;
+        }
+        let before = dock.size();
+        dock.set_size(frac);
+        // Compare post-clamp against pre-clamp — `set_size` owns the
+        // 0.10..=0.50 range, so this is the one honest way to know whether
+        // the clamp actually let anything through. Same 1e-6 epsilon (in
+        // content-area fraction space) as `Tree::drag_divider`.
+        (dock.size() - before).abs() >= 1e-6
     }
 
     /// Close the focused tile, wherever it lives. In `Main` this is the
@@ -1327,6 +1400,222 @@ mod tests {
             &mut lone,
             &act("workspace::toggle_split_orientation")
         ));
+    }
+
+    // --- divider / dock-edge drags (drag-splitters task) ----------------
+
+    #[test]
+    fn drag_main_divider_moves_the_pair_without_touching_focus_or_region() {
+        let mut ws = two_tiles(); // focus on the right tile
+        let focused_before = ws.active().focused_tile();
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        let bounds = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 800.0,
+        };
+        assert!(ws.active_mut().drag_main_divider(&addr, 300.0, 0.0, bounds));
+        let rects = ws.active().tree().layout(Rect::UNIT);
+        assert!(approx(rects[0].1.w, 0.3) && approx(rects[1].1.w, 0.7));
+        assert_eq!(ws.active().focused_tile(), focused_before);
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+    }
+
+    #[test]
+    fn drag_dock_divider_resizes_within_the_docks_own_tree() {
+        let mut ws = two_tiles();
+        // Park both tiles in the left dock so its tree has a split (a
+        // second dock::move_left from the dock would move the tile BACK,
+        // so refocus the main region's remaining tile between moves).
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let remaining = ws.active().tree().focused().expect("one tile left in main");
+        assert!(ws.active_mut().focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+            2
+        );
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        let dock_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 250.0,
+            h: 800.0,
+        };
+        // Side docks insert Horizontal (see `dock_insert_orientation`), so
+        // the divider is vertical: drag it to x=62.5 within the 250-wide
+        // dock frame → 25%.
+        assert!(
+            ws.active_mut()
+                .drag_dock_divider(DockSide::Left, &addr, 62.5, 0.0, dock_rect)
+        );
+        let rects = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        assert!(approx(rects[0].1.w, 0.25), "got {}", rects[0].1.w);
+        // The main tree (now empty) and the dock's frame size are untouched.
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            DOCK_DEFAULT_SIZE
+        ));
+    }
+
+    #[test]
+    fn drag_dock_edge_sets_the_frame_size_with_the_existing_clamps() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 800.0,
+        };
+        // Cursor at x=400 → 0.40 of the area's width.
+        assert!(
+            ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
+        );
+        assert!(approx(ws.active().docks().get(DockSide::Left).size(), 0.40));
+        // Past the max pins at DOCK_MAX_SIZE (set_size's clamp), and past
+        // the min pins at DOCK_MIN_SIZE — clamp-not-fail, like tree drags.
+        assert!(
+            ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 900.0, 0.0, area)
+        );
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            DOCK_MAX_SIZE
+        ));
+        // No-change contract (review fix): further moves pinned at the
+        // same clamp report false — the size didn't move, so callers must
+        // not re-render or latch dirty state off them.
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 950.0, 0.0, area)
+        );
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 999.0, 0.0, area)
+        );
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            DOCK_MAX_SIZE
+        ));
+        assert!(
+            ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 10.0, 0.0, area)
+        );
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            DOCK_MIN_SIZE
+        ));
+        // And a repeat of the exact same in-range position is a no-change
+        // too.
+        assert!(
+            ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 300.0, 0.0, area)
+        );
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 300.0, 0.0, area)
+        );
+    }
+
+    #[test]
+    fn drag_dock_divider_refuses_a_hidden_dock() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let remaining = ws.active().tree().focused().expect("one tile left in main");
+        assert!(ws.active_mut().focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let addr = DividerAddress {
+            path: vec![],
+            index: 0,
+        };
+        let dock_rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 250.0,
+            h: 800.0,
+        };
+        // Hide the dock mid-"drag": further applications must refuse and
+        // leave the hidden tree untouched (a drag never silently resizes
+        // an invisible layout — same rationale as the shell's fullscreen
+        // cancel and drag_dock_edge's own hidden-dock refusal; review
+        // round reconciled the two).
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        let before = ws
+            .active()
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .layout(Rect::UNIT);
+        assert!(
+            !ws.active_mut()
+                .drag_dock_divider(DockSide::Left, &addr, 62.5, 0.0, dock_rect)
+        );
+        assert_eq!(
+            ws.active()
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .layout(Rect::UNIT),
+            before,
+            "a hidden dock's tree must not resize"
+        );
+    }
+
+    #[test]
+    fn drag_dock_edge_refuses_hidden_docks_and_junk_geometry() {
+        let mut ws = two_tiles();
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 800.0,
+        };
+        // Hidden dock: an edge drag reaching it can only be stale.
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
+        );
+        assert!(approx(
+            ws.active().docks().get(DockSide::Left).size(),
+            DOCK_DEFAULT_SIZE
+        ));
+        // Degenerate area / non-finite cursor: no-op, and crucially NOT a
+        // set_size(NaN) — that would "heal" the size back to the default.
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert!(
+            ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
+        );
+        let flat = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0,
+        };
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, 400.0, 0.0, flat)
+        );
+        assert!(
+            !ws.active_mut()
+                .drag_dock_edge(DockSide::Left, f32::NAN, 0.0, area)
+        );
+        assert!(approx(ws.active().docks().get(DockSide::Left).size(), 0.40));
     }
 
     // --- dock toggling (dock-regions task) ------------------------------
