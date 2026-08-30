@@ -549,21 +549,45 @@ impl Workspace {
     /// removing the tile would leave no target to insert beside) or when
     /// either id is not a current leaf anywhere.
     pub fn drop_split(&mut self, dragged: TileId, target: TileId, edge: Direction) -> bool {
-        if dragged == target || self.region_of(target).is_none() {
+        if dragged == target {
             return false;
         }
         // Verify BOTH ends before removing anything: refusal must never
-        // strand the dragged tile outside every tree.
-        let Some(_source) = self.region_of(dragged) else {
+        // strand the dragged tile outside every tree. (The destination
+        // derived here stays valid across the removal below — removal of
+        // `dragged` can never move `target`.)
+        let Some(source) = self.region_of(dragged) else {
             return false;
         };
-        // The destination is re-derived *after* the removal (not reused
-        // from before it) purely for clarity — removal of `dragged` can
-        // never move `target`, so this always matches the pre-check.
+        let Some(destination) = self.region_of(target) else {
+            return false;
+        };
+        // Same one-place-per-TileId pre-check as `drop_swap`'s cross-tree
+        // arm (post-merge review BUG 5 — the defense was asymmetric): if
+        // the invariant is already broken and the DESTINATION tree holds
+        // a duplicate of `dragged`, `insert_at_leaf` below would refuse
+        // (`contains(new)`) and the never-lose-a-tile fallback `split()`
+        // would then insert a SECOND copy of the duplicated id. Refuse
+        // loudly BEFORE `remove_tile_anywhere` mutates anything —
+        // unreachable through live verbs and healed restores, so the
+        // debug_assert makes a future regression loud while release
+        // builds get an honest untouched no-op.
+        if destination != source {
+            let destination_tree = match destination {
+                FocusRegion::Main => &self.tree,
+                FocusRegion::Dock(side) => self.docks.get(side).tree(),
+            };
+            if destination_tree.contains(dragged) {
+                debug_assert!(
+                    false,
+                    "one-place-per-TileId invariant pre-broken \
+                     (dragged {dragged:?} duplicated into the destination tree); \
+                     refusing the edge drop untouched"
+                );
+                return false;
+            }
+        }
         self.remove_tile_anywhere(dragged);
-        let destination = self
-            .region_of(target)
-            .expect("removal of dragged never removes target");
         let after = match edge {
             Direction::Left | Direction::Up => false,
             Direction::Right | Direction::Down => true,
@@ -721,6 +745,21 @@ impl Workspace {
             return false;
         };
         if source == FocusRegion::Dock(side) {
+            return false;
+        }
+        // Same one-place-per-TileId pre-check as `drop_swap`/`drop_split`
+        // (post-merge review BUG 5): the unconditional `split()` below
+        // never refuses, so a duplicate of `dragged` already parked in
+        // the target dock's tree (a pre-broken invariant — `source` is
+        // some OTHER region, `region_of` returns the first claim) would
+        // gain a second copy. Refuse loudly before anything mutates.
+        if self.docks.get(side).tree().contains(dragged) {
+            debug_assert!(
+                false,
+                "one-place-per-TileId invariant pre-broken \
+                 (dragged {dragged:?} duplicated into the target dock's tree); \
+                 refusing the dock drop untouched"
+            );
             return false;
         }
         self.remove_tile_anywhere(dragged);
@@ -3053,6 +3092,50 @@ mod tests {
         // target 3 lives in the dock, whose tree also holds a duplicate
         // of the dragged id — the pre-check must fire, not the renames.
         w.drop_swap(TileId(1), TileId(3));
+    }
+
+    /// Post-merge review BUG 5: `drop_split` had no counterpart to
+    /// `drop_swap`'s pre-broken-duplicate defense — its
+    /// insert_at_leaf-refused fallback `split()` would insert a SECOND
+    /// copy of an id already duplicated into the destination tree. The
+    /// same pre-check must refuse (debug_assert loud) BEFORE
+    /// `remove_tile_anywhere` mutates anything. Broken state built via
+    /// module-private fields, same as the drop_swap test above.
+    #[test]
+    #[should_panic(expected = "one-place-per-TileId")]
+    fn drop_split_refuses_a_pre_broken_duplicate_id_before_mutating() {
+        let mut w = Workspace::default();
+        w.tree.split(TileId(1), Orientation::Horizontal);
+        w.tree.split(TileId(2), Orientation::Horizontal);
+        let dock = w.docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(3), Orientation::Horizontal);
+        // The invariant break: tile 1 claimed by BOTH the main tree and
+        // the dock tree.
+        dock.tree_mut().split(TileId(1), Orientation::Horizontal);
+        dock.set_visible(true);
+        // dragged 1 resolves to Main (region_of checks the tree first);
+        // target 3 lives in the dock, whose tree also holds a duplicate
+        // of the dragged id — the pre-check must fire, not the
+        // remove-then-fallback-split.
+        w.drop_split(TileId(1), TileId(3), Direction::Right);
+    }
+
+    /// Post-merge review BUG 5, `drop_to_dock` arm: its unconditional
+    /// `split()` into the target dock's tree would likewise duplicate a
+    /// pre-broken id — same pre-check, same loud refusal before any
+    /// mutation.
+    #[test]
+    #[should_panic(expected = "one-place-per-TileId")]
+    fn drop_to_dock_refuses_a_pre_broken_duplicate_id_before_mutating() {
+        let mut w = Workspace::default();
+        w.tree.split(TileId(1), Orientation::Horizontal);
+        w.tree.split(TileId(2), Orientation::Horizontal);
+        let dock = w.docks.get_mut(DockSide::Left);
+        dock.tree_mut().split(TileId(3), Orientation::Horizontal);
+        // Tile 1 claimed by BOTH the main tree and the target dock.
+        dock.tree_mut().split(TileId(1), Orientation::Horizontal);
+        dock.set_visible(true);
+        w.drop_to_dock(TileId(1), DockSide::Left);
     }
 
     #[test]
