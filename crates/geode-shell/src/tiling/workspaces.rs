@@ -888,6 +888,16 @@ pub struct Workspaces {
     spaces: BTreeMap<u8, Workspace>,
     active: u8,
     next_tile: u64,
+    /// Monotone count of actual workspace switches (post-merge review
+    /// finding 7). The shell's drag state pins this at mouse-down instead
+    /// of pinning `active` itself: comparing the INDEX alone lets a
+    /// switch-away-and-back that lands entirely between two renders look
+    /// like "never left" (the one-frame ABA), while an epoch comparison
+    /// can only pass when no switch happened at all. Bumped only on a
+    /// switch that actually changes `active` — re-selecting the current
+    /// workspace changes nothing on screen and must not void an
+    /// in-flight drag.
+    switch_epoch: u64,
 }
 
 impl Default for Workspaces {
@@ -904,11 +914,18 @@ impl Workspaces {
             spaces,
             active: 1,
             next_tile: 0,
+            switch_epoch: 0,
         }
     }
 
     pub fn active_index(&self) -> u8 {
         self.active
+    }
+
+    /// See the field doc: the ABA-proof "which workspace era is this"
+    /// pin for the shell's drag re-checks.
+    pub fn switch_epoch(&self) -> u64 {
+        self.switch_epoch
     }
 
     pub fn active(&self) -> &Workspace {
@@ -923,12 +940,17 @@ impl Workspaces {
             .expect("active workspace always exists")
     }
 
-    /// Switch to workspace `n` (1..=9), creating it empty if needed.
+    /// Switch to workspace `n` (1..=9), creating it empty if needed. An
+    /// actual change of active workspace bumps [`Workspaces::switch_epoch`]
+    /// (a same-index re-select does not — nothing on screen changes).
     pub fn switch(&mut self, n: u8) -> bool {
         if !(1..=9).contains(&n) {
             return false;
         }
         self.spaces.entry(n).or_default();
+        if n != self.active {
+            self.switch_epoch += 1;
+        }
         self.active = n;
         true
     }
@@ -1039,6 +1061,9 @@ impl Workspaces {
                 spaces,
                 active,
                 next_tile,
+                // A fresh restore starts a fresh switch-era; no drag can
+                // predate it (drags never survive across sessions).
+                switch_epoch: 0,
             },
             warnings,
         ))
@@ -1210,6 +1235,28 @@ mod tests {
         assert!(!ws.switch(0));
         assert!(!ws.switch(10));
         assert_eq!(ws.active_index(), 5);
+    }
+
+    /// Post-merge review finding 7: every actual switch bumps the epoch
+    /// (away-and-back is two bumps, never a return to the pinned value),
+    /// while a same-index re-select and an out-of-range refusal bump
+    /// nothing.
+    #[test]
+    fn switch_epoch_counts_actual_switches_only() {
+        let mut ws = Workspaces::new();
+        let start = ws.switch_epoch();
+        assert!(ws.switch(1), "re-selecting the active workspace is valid");
+        assert_eq!(ws.switch_epoch(), start, "same-index switch: no bump");
+        assert!(!ws.switch(0));
+        assert_eq!(ws.switch_epoch(), start, "refused switch: no bump");
+        assert!(ws.switch(2));
+        assert!(ws.switch(1));
+        assert_eq!(
+            ws.switch_epoch(),
+            start + 2,
+            "away-and-back is two bumps — the ABA the epoch exists to expose"
+        );
+        assert_eq!(ws.active_index(), 1);
     }
 
     #[test]

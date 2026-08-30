@@ -108,13 +108,18 @@ enum DividerDragTarget {
 /// tree/dock rect for tree dividers, the whole content area for dock
 /// edges — mouse events arrive in window space, so the rect is stored
 /// pre-offset by the sidebar/toolbar chrome rather than converting every
-/// event), `axis` picks the resize cursor while dragging, `workspace` is
-/// the active workspace index at mouse-down (review fix: the keyboard
+/// event), `axis` picks the resize cursor while dragging, `epoch` is
+/// [`Workspaces::switch_epoch`] at mouse-down (review fix: the keyboard
 /// stays live during a drag, so mod+N can switch workspaces mid-drag —
 /// without this pin the next move would walk the NEW workspace's tree
 /// with the OLD one's address and bounds, and a structurally-valid
 /// address would apply to the wrong tree; a mismatch cancels the drag
-/// instead), and `moved` records whether any move actually changed the
+/// instead. Post-merge review finding 7 upgraded the pin from the
+/// workspace INDEX to the switch epoch: index equality let a
+/// switch-away-and-back with no render between look like "never left" —
+/// the one-frame ABA — while the epoch bumps on every actual switch, so
+/// it can only compare equal when no switch happened at all), and
+/// `moved` records whether any move actually changed the
 /// layout. `moved` latches on the first actual change and stays latched:
 /// a drag that wanders and returns to its exact starting position still
 /// dirties the session on release — accepted, recorded honestly, since
@@ -125,7 +130,7 @@ struct DividerDrag {
     target: DividerDragTarget,
     bounds: Rect,
     axis: Orientation,
-    workspace: u8,
+    epoch: u64,
     moved: bool,
 }
 
@@ -164,8 +169,9 @@ const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 /// body's mod+mouse-down and consumed by its own full-window drag catcher
 /// (see `render` — the same capture mechanism as [`DividerDrag`]'s
 /// catcher). Nothing is applied until the drop: the drag holds only the
-/// grabbed tile's id, the workspace it belongs to (pinned at mouse-down
-/// for the same switch-mid-drag reason as `DividerDrag::workspace`), and
+/// grabbed tile's id, the workspace switch epoch at mouse-down (pinned
+/// for the same switch-mid-drag reason as `DividerDrag::epoch`, ABA-
+/// proofing included — see that field's doc), and
 /// cursor positions in window space. That makes cancel truly free —
 /// clearing this state undoes nothing and dirties nothing, unlike a
 /// divider drag whose cancel must preserve already-applied resizes.
@@ -203,7 +209,7 @@ const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 #[derive(Debug, Clone, PartialEq)]
 struct TileDrag {
     tile: TileId,
-    workspace: u8,
+    epoch: u64,
     /// Window-space mouse-down position the threshold is measured from.
     origin: (f32, f32),
     /// Latest window-space cursor position — what the ghost follows and
@@ -1346,10 +1352,10 @@ impl ShellView {
     /// guarantee independent of event/render ordering. Pure math only —
     /// the caller notifies.
     fn apply_divider_drag(&mut self, x: f32, y: f32) -> bool {
-        let Some(workspace) = self.divider_drag.as_ref().map(|drag| drag.workspace) else {
+        let Some(epoch) = self.divider_drag.as_ref().map(|drag| drag.epoch) else {
             return false;
         };
-        if workspace != self.services.workspaces.active_index() {
+        if epoch != self.services.workspaces.switch_epoch() {
             self.cancel_divider_drag();
             return false;
         }
@@ -1441,7 +1447,7 @@ impl ShellView {
         let position = (f32::from(event.position.x), f32::from(event.position.y));
         self.tile_drag = Some(TileDrag {
             tile: id,
-            workspace: self.services.workspaces.active_index(),
+            epoch: self.services.workspaces.switch_epoch(),
             origin: position,
             cursor: position,
             active: false,
@@ -1553,7 +1559,12 @@ impl ShellView {
             return;
         };
         if drag.active
-            && drag.workspace == self.services.workspaces.active_index()
+            // Epoch, not index (post-merge review finding 7): index
+            // equality let a switch-away-and-back with no render between
+            // satisfy the letter of the re-check — the epoch bumps on
+            // every actual switch, so it only matches when no switch
+            // happened at all.
+            && drag.epoch == self.services.workspaces.switch_epoch()
             && self.palette.is_none()
             && self.modal.is_none()
             && self.matcher.pending().is_empty()
@@ -1643,7 +1654,8 @@ impl Render for ShellView {
         if self.divider_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal.is_some()
-                || drag.workspace != self.services.workspaces.active_index()
+                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
                     .services
                     .workspaces
@@ -1674,7 +1686,8 @@ impl Render for ShellView {
             self.palette.is_some()
                 || self.modal.is_some()
                 || !self.matcher.pending().is_empty()
-                || drag.workspace != self.services.workspaces.active_index()
+                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                || drag.epoch != self.services.workspaces.switch_epoch()
                 || self
                     .services
                     .workspaces
@@ -2152,11 +2165,11 @@ impl Render for ShellView {
                                 target: target.clone(),
                                 bounds: drag_bounds,
                                 axis,
-                                // Pin the workspace the drag belongs to
-                                // (read at mouse-down, not paint): a
+                                // Pin the workspace era the drag belongs
+                                // to (read at mouse-down, not paint): a
                                 // mod+N switch mid-drag cancels rather
                                 // than retargeting — see `DividerDrag`.
-                                workspace: view.services.workspaces.active_index(),
+                                epoch: view.services.workspaces.switch_epoch(),
                                 moved: false,
                             });
                             cx.stop_propagation();
@@ -4435,6 +4448,78 @@ mod tests {
             shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
             "window deactivation mid-divider-drag must end the drag"
         );
+    }
+
+    /// Post-merge review finding 7 (one-frame workspace ABA): the drop
+    /// re-check used to compare workspace INDEX equality only, so a
+    /// switch away and back with no render between satisfied the letter
+    /// of the check while violating its intent. The switch-epoch pin
+    /// closes it: any actual switch bumps the epoch, so away-and-back
+    /// can never look like "never left".
+    ///
+    /// Honesty note on how the state is built: at the pinned gpui rev
+    /// this gap is NOT reachable through the real key pipeline — traced
+    /// while writing this test: `Window::dispatch_key_event` draws first
+    /// whenever the window is dirty, and the first switch's notify makes
+    /// it dirty, so the second switch's keystroke always runs the
+    /// render-top cancel guard (index mismatch) before dispatching.
+    /// `dispatch_mouse_event` does NOT draw-when-dirty, but the only
+    /// mouse path to a switch (a sidebar pill click) is occluded by the
+    /// drag catcher mid-drag. The epoch re-check is defense in depth for
+    /// exactly that reason — it must hold even if gpui's dispatch-order
+    /// details change under an upgrade — so the test dispatches the
+    /// switch ACTIONS directly (no key dispatch, no draw), constructing
+    /// the letter-of-the-rule state the guard can't otherwise see.
+    #[gpui::test]
+    fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+
+        // Switch away, switch back, and release — all inside ONE
+        // `cx.update`, no draw between: the index is back to where the
+        // drag started by release time, so only the epoch comparison can
+        // refuse the drop.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("workspace::switch_2".to_string()), window, cx);
+                shell.dispatch(&ActionId("workspace::switch_1".to_string()), window, cx);
+            });
+            assert_eq!(
+                shell.read(cx).services.workspaces.active_index(),
+                1,
+                "sanity: back on the original workspace before the release"
+            );
+            assert!(
+                shell.read(cx).tile_drag.is_some(),
+                "no render has run, so the render-top guard has not cancelled \
+                 the drag — the drop-time epoch re-check is the only defense"
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: drop,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "a release after an away-and-back switch inside one frame must \
+             apply nothing"
+        );
+        assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
     }
 
     /// Review fix 4: the which-key hint paints a solid panel with no
