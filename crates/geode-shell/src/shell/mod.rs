@@ -770,6 +770,15 @@ impl ShellView {
             // keymap_edit.rs are its pure cores). Reachable today only via
             // the palette (defaults.rs: no key binding).
             keybindings_view::open(self, window, cx);
+        } else if action.0 == "fontsize::increase" {
+            // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
+            // on the notify, persistence mirrors the settings control's
+            // set_font_size path.
+            self.font_size = self.font_size.larger();
+            self.persist_font_size(cx);
+        } else if action.0 == "fontsize::decrease" {
+            self.font_size = self.font_size.smaller();
+            self.persist_font_size(cx);
         }
     }
 
@@ -6122,6 +6131,77 @@ mod tests {
             px(16.0),
             "the render after set_font_size(Large) should apply 16px as the \
              window rem size"
+        );
+    }
+
+    /// End-to-end: `ctrl+=` / `ctrl+-` (`fontsize::increase`/`decrease`)
+    /// step the UI font size through real keystrokes, clamped at both ends
+    /// — the keyboard path onto the same state the settings toggle group
+    /// drives.
+    #[gpui::test]
+    fn ctrl_equals_and_minus_step_the_font_size_with_clamping(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        let font_size =
+            |cx: &gpui::VisualTestContext| shell.read_with(cx, |shell, _| shell.font_size);
+
+        assert_eq!(font_size(&cx), crate::fontsize::FontSize::Medium);
+
+        cx.simulate_keystrokes("ctrl-=");
+        assert_eq!(font_size(&cx), crate::fontsize::FontSize::Large);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.update(|window, _cx| window.rem_size()),
+            px(16.0),
+            "ctrl+= should have applied Large's 16px rem size"
+        );
+
+        cx.simulate_keystrokes("ctrl-=");
+        assert_eq!(
+            font_size(&cx),
+            crate::fontsize::FontSize::Large,
+            "increase clamps at Large"
+        );
+
+        cx.simulate_keystrokes("ctrl--");
+        cx.simulate_keystrokes("ctrl--");
+        assert_eq!(font_size(&cx), crate::fontsize::FontSize::Small);
+        cx.simulate_keystrokes("ctrl--");
+        assert_eq!(
+            font_size(&cx),
+            crate::fontsize::FontSize::Small,
+            "decrease clamps at Small"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            cx.update(|window, _cx| window.rem_size()),
+            px(12.0),
+            "two decreases from Large should land on Small's 12px rem size"
         );
     }
 

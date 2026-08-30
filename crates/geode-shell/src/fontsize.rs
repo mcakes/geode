@@ -72,6 +72,25 @@ impl FontSize {
         }
     }
 
+    /// One step larger, clamped at `Large` (`fontsize::increase`,
+    /// `ctrl+=` — the browser-zoom idiom; repeated presses at the top are
+    /// a no-op, not a wrap).
+    pub fn larger(self) -> FontSize {
+        match self {
+            FontSize::Small => FontSize::Medium,
+            FontSize::Medium | FontSize::Large => FontSize::Large,
+        }
+    }
+
+    /// One step smaller, clamped at `Small` (`fontsize::decrease`,
+    /// `ctrl+-`).
+    pub fn smaller(self) -> FontSize {
+        match self {
+            FontSize::Large => FontSize::Medium,
+            FontSize::Medium | FontSize::Small => FontSize::Small,
+        }
+    }
+
     /// Parse a config value. `None` for anything that isn't exactly one of
     /// the three known values — the caller decides the fallback
     /// ([`FontSize::from_config`] falls back to `Medium`).
@@ -140,6 +159,16 @@ mod tests {
         assert_eq!(FontSize::Medium.rem_px(), 14.0);
         assert_eq!(FontSize::Large.rem_px(), 16.0);
         assert_eq!(FontSize::default(), FontSize::Medium);
+    }
+
+    #[test]
+    fn larger_and_smaller_step_through_the_scale_and_clamp_at_the_ends() {
+        assert_eq!(FontSize::Small.larger(), FontSize::Medium);
+        assert_eq!(FontSize::Medium.larger(), FontSize::Large);
+        assert_eq!(FontSize::Large.larger(), FontSize::Large, "clamp, no wrap");
+        assert_eq!(FontSize::Large.smaller(), FontSize::Medium);
+        assert_eq!(FontSize::Medium.smaller(), FontSize::Small);
+        assert_eq!(FontSize::Small.smaller(), FontSize::Small, "clamp");
     }
 
     #[test]

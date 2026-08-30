@@ -88,6 +88,8 @@ context = "workspace"
 "ctrl+shift+p" = "palette::toggle"
 "mod+shift+t" = "theme::toggle_mode"
 "ctrl+," = "settings::open"
+"ctrl+=" = "fontsize::increase"
+"ctrl+-" = "fontsize::decrease"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -182,6 +184,25 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // the palette alongside the theme rows, which share the same category
     // (`palette::THEME_CATEGORY`).
     action(reg, "settings::open", "Open settings", "Appearance");
+    // Step the UI font size (crate::fontsize, clamped small..=large).
+    // ctrl+= / ctrl+- — the browser-zoom idiom: the unshifted key next to
+    // backspace is `=`, and platforms deliver ctrl+that-key as key "="
+    // (see the shift+punctuation note on BUILTIN_KEYMAP's doc comment for
+    // why "ctrl++" would be both unpressable-without-shift and unparseable
+    // — parse_keystroke splits on '+'). Same "Appearance" category as the
+    // settings dialog that owns the equivalent toggle group.
+    action(
+        reg,
+        "fontsize::increase",
+        "Increase font size",
+        "Appearance",
+    );
+    action(
+        reg,
+        "fontsize::decrease",
+        "Decrease font size",
+        "Appearance",
+    );
     // The keybinding dialog (Part B). Palette-only by design: no key
     // binding of its own in BUILTIN_KEYMAP — bootstrapping a dialog whose
     // whole purpose is showing/editing keybindings out of a keybinding
@@ -225,8 +246,8 @@ mod tests {
         // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
         // fullscreen + close + 3 dock toggles + 3 dock moves + 9 workspace
         // switches + 2 palette::toggle bindings + theme toggle +
-        // settings::open (Task 5).
-        assert!(keymap.bindings().len() >= 36);
+        // settings::open (Task 5) + 2 font size steps.
+        assert!(keymap.bindings().len() >= 38);
     }
 
     #[test]
