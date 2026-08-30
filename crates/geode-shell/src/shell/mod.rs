@@ -1940,10 +1940,10 @@ mod tests {
         );
     }
 
-    /// End-to-end: `ctrl+shift+w` (`workspace::close_tile`, rebound from
-    /// `mod+shift+q`) closes the focused tile.
+    /// End-to-end: `ctrl+w` (`workspace::close_tile`) closes the focused
+    /// tile.
     #[gpui::test]
-    fn ctrl_shift_w_keystroke_closes_the_focused_tile(cx: &mut gpui::TestAppContext) {
+    fn ctrl_w_keystroke_closes_the_focused_tile(cx: &mut gpui::TestAppContext) {
         cx.update(gpui_component::init);
 
         let window = cx
@@ -1981,14 +1981,14 @@ mod tests {
             2
         );
 
-        cx.simulate_keystrokes("ctrl-shift-w");
+        cx.simulate_keystrokes("ctrl-w");
 
         let tile_count = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count, 1,
-            "ctrl+shift+w (workspace::close_tile) should have closed the focused tile"
+            "ctrl+w (workspace::close_tile) should have closed the focused tile"
         );
     }
 
@@ -2134,7 +2134,7 @@ mod tests {
     /// through gpui's real key pipeline. ctrl+v parks a tile via ctrl+{,
     /// then a second ctrl+v splits within the dock's tree (the old
     /// build refused this) — two tiles in the dock, session dirty — and
-    /// ctrl+shift+w closes one, leaving the dock visible with the
+    /// ctrl+w closes one, leaving the dock visible with the
     /// survivor.
     #[gpui::test]
     fn splits_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
@@ -2164,7 +2164,7 @@ mod tests {
             );
         });
 
-        cx.simulate_keystrokes("ctrl-shift-w"); // close the focused dock tile
+        cx.simulate_keystrokes("ctrl-w"); // close the focused dock tile
         shell.read_with(&cx, |shell, _| {
             let ws = shell.services.workspaces.active();
             let dock = ws.docks().get(crate::tiling::DockSide::Left);
@@ -2245,7 +2245,7 @@ mod tests {
         // so go through move-back, then close, leaving a truly empty
         // Main-focused workspace).
         cx.simulate_keystrokes("ctrl-{"); // tile returns to the tree
-        cx.simulate_keystrokes("ctrl-shift-w"); // close it: empty workspace, Main
+        cx.simulate_keystrokes("ctrl-w"); // close it: empty workspace, Main
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -3220,7 +3220,7 @@ mod tests {
         );
     }
 
-    /// A shell chord (`ctrl+shift+w` = `workspace::close_tile`) must not
+    /// A shell chord (`ctrl+w` = `workspace::close_tile`) must not
     /// fire while the palette is open — proven with a real tile actually
     /// present to close (an empty workspace closing "a tile" that was
     /// never there wouldn't distinguish "correctly swallowed" from
@@ -3252,7 +3252,7 @@ mod tests {
         });
 
         // Create a real tile (ctrl+v = workspace::split_right) so there is
-        // something for a leaked ctrl+shift+w to actually close.
+        // something for a leaked ctrl+w to actually close.
         cx.simulate_keystrokes("ctrl-v");
         let tile_count_before = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().tiles().len()
@@ -3268,18 +3268,18 @@ mod tests {
             "sanity: ctrl-k should have opened the palette"
         );
 
-        cx.simulate_keystrokes("ctrl-shift-w");
+        cx.simulate_keystrokes("ctrl-w");
 
         assert!(
             shell.read_with(&cx, |shell, _| shell.palette.is_some()),
-            "ctrl+shift+w must not close the palette either"
+            "ctrl+w must not close the palette either"
         );
         let tile_count_after = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().tiles().len()
         });
         assert_eq!(
             tile_count_after, 1,
-            "ctrl+shift+w (workspace::close_tile) must not fire while the \
+            "ctrl+w (workspace::close_tile) must not fire while the \
              palette is open — the tile from before must still be there"
         );
     }
@@ -5528,8 +5528,8 @@ mod tests {
             "should have focused the middle tile (one position left)"
         );
 
-        // Close the middle tile (ctrl+shift+w).
-        cx.simulate_keystrokes("ctrl-shift-w");
+        // Close the middle tile (ctrl+w).
+        cx.simulate_keystrokes("ctrl-w");
 
         // Verify we have two tiles left.
         let remaining_tile_count = shell.read_with(&cx, |shell, _| {

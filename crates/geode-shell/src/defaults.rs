@@ -38,9 +38,13 @@ use geode_core::config::Config;
 /// as the shifted character with the shift modifier *cleared* — a real
 /// `KeyDownEvent` for shift+[ arrives as key `{`, `shift: false`, so a
 /// `"ctrl+shift+["` binding would never match anything. (Letters are the
-/// opposite: shift+w stays `w` + shift, which is why `ctrl+shift+w` above
-/// is bound with the modifier.) The e2e dock tests dispatch `ctrl-{`
+/// opposite: a shifted letter stays the letter + shift modifier, so
+/// letter chords like `ctrl+shift+arrows`' letter analogs would be bound
+/// with the modifier spelled out.) The e2e dock tests dispatch `ctrl-{`
 /// through gpui's real pipeline to pin this shape.
+///
+/// Close-tile is `ctrl+w` (user direction — the browser/vim close idiom;
+/// free since the vim window prefix retired, and unclaimed by macOS).
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 context = "workspace"
@@ -61,7 +65,7 @@ context = "workspace"
 "ctrl+h" = "workspace::split_down"
 "mod+e" = "workspace::toggle_split_orientation"
 "mod+f" = "workspace::fullscreen_tile"
-"ctrl+shift+w" = "workspace::close_tile"
+"ctrl+w" = "workspace::close_tile"
 "ctrl+[" = "dock::toggle_left"
 "ctrl+]" = "dock::toggle_right"
 "ctrl+/" = "dock::toggle_bottom"
