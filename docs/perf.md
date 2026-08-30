@@ -156,3 +156,39 @@ produces. They are independent, and cold start wants both.
 Not yet gated in CI. The §7.4 regression gate wants a stored criterion
 baseline and a generous threshold; these numbers are the first baseline
 worth storing.
+
+## Phase 2b: requery benchmarks (`cargo bench -p geode-data -- query_`)
+
+`benches/query.rs`, over the generated source directory, ingested through
+the real pipeline and queried through `DataService` — submit to snapshot,
+which is §7.1's end-to-end path minus the paint. Same machine as the 2a
+table above.
+
+| View | Result rows | 100k ingested | 1M ingested |
+|---|---|---|---|
+| `tree`, scoped to 3 books | 7.7k / 74.7k | 6.8 ms | **23.0 ms** |
+| `shallow` (book only), scoped | 4 | 3.9 ms | **5.6 ms** |
+| `tree`, all 20 books | 40.4k / 398k | 16.6 ms | **67.4 ms** |
+| `tree`, unscoped | 40.4k / 398k | 14.8 ms | **63.8 ms** |
+
+`tree` is `lhu > underlying_ref > position_ref` across three measure
+grains — the shape a blotter actually runs, not a bare `select`.
+
+**The §7.1 <50ms contract holds for every view a person can look at, and
+is exceeded only where the result is too large to be one.** Latency
+tracks *result* size, not input size: 398k rows in 64 ms is roughly 6M
+rows/sec across the Arrow boundary, so the engine and the grain-split
+join are not the constraint. A scoped three-level tree over a million
+rows requeries in 23 ms.
+
+**The real finding is that result size is unbounded.** The compiler emits
+one `ROLLUP` covering *every* level, so a fully collapsed tree still
+materializes its leaves — a trader looking at 80 LHU rows pays for
+398,085. That is the cost of making expand and collapse pure UI (§6.3).
+Bounding materialization to the deepest expanded level, via `GROUPING
+SETS` over `0..=max_depth` instead of a full `ROLLUP`, would keep
+collapse free within the materialized depth and charge one requery for
+expanding past it. Not yet done — see the phase 2b plan.
+
+Not gated in CI yet; these are the first stored baselines for the query
+path.
