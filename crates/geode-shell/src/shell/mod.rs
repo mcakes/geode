@@ -1531,6 +1531,17 @@ impl ShellView {
             && self.palette.is_none()
             && self.modal.is_none()
             && self.matcher.pending().is_empty()
+            // The dragged tile must still exist (post-merge review BUG 3
+            // — same event/render-ordering independence as the checks
+            // above: ctrl+w and the release can land in one frame
+            // window). The drop verbs would refuse a vanished id anyway;
+            // checking here keeps the shared cancel conditions one list.
+            && self
+                .services
+                .workspaces
+                .active()
+                .region_of(drag.tile)
+                .is_some()
         {
             let viewport = window.viewport_size();
             let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
@@ -1624,10 +1635,15 @@ impl Render for ShellView {
         // drag (which keeps its already-applied resize live behind the
         // handler-less hint), a tile drag is all about *choosing a drop
         // target among the tiles*, and doing that under a panel that
-        // covers part of them would be blind targeting. All of these make
-        // cancelling truly free here: a tile drag applies nothing until
-        // its drop, so cancel undoes nothing, dirties nothing, and needs
-        // none of the divider guard's `moved` bookkeeping.
+        // covers part of them would be blind targeting. PLUS (post-merge
+        // review BUG 3) the dragged tile no longer existing anywhere:
+        // ctrl+w can close it mid-drag (the keyboard stays hot), and
+        // without this check the ghost and zone highlight kept painting
+        // — promising a drop the verbs would silently refuse. All of
+        // these make cancelling truly free here: a tile drag applies
+        // nothing until its drop, so cancel undoes nothing, dirties
+        // nothing, and needs none of the divider guard's `moved`
+        // bookkeeping.
         if self.tile_drag.as_ref().is_some_and(|drag| {
             self.palette.is_some()
                 || self.modal.is_some()
@@ -1640,6 +1656,12 @@ impl Render for ShellView {
                     .tree()
                     .fullscreen()
                     .is_some()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .region_of(drag.tile)
+                    .is_none()
         }) {
             self.cancel_tile_drag();
         }
@@ -4145,6 +4167,63 @@ mod tests {
             widths_after_move,
             "no further tracking after Escape ended the divider drag"
         );
+    }
+
+    /// Post-merge review BUG 3: ctrl+w can close the dragged tile
+    /// mid-drag (the keyboard stays hot), and neither the render-top
+    /// guard nor `finish_tile_drag` checked the tile still exists —
+    /// leaving a ghost + zone highlight promising a drop that would
+    /// silently no-op. The dragged tile's existence must join the shared
+    /// cancel conditions: the drag cancels at the next paint, no
+    /// highlight paints, and the release applies nothing.
+    #[gpui::test]
+    fn closing_the_dragged_tile_mid_drag_cancels_the_drag(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        // Drag the LEFT tile (the focused one — ctrl+w closes the focused
+        // tile, so dragging it is what makes the close hit the drag).
+        let grab = main_tile_point(&mut cx, &shell, left, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let over = main_tile_point(&mut cx, &shell, right, 0.05, 0.5);
+        cx.simulate_mouse_move(over, MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("tile-drop-highlight").is_some(),
+            "sanity: the active drag paints its zone highlight before the close"
+        );
+
+        cx.simulate_keystrokes("ctrl-w"); // closes the focused (= dragged) tile
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "closing the dragged tile mid-drag must cancel the drag"
+        );
+        assert!(
+            cx.debug_bounds("tile-drop-highlight").is_none(),
+            "no zone highlight may keep painting for a tile that no longer exists"
+        );
+        assert!(
+            cx.debug_bounds("tile-drag-ghost").is_none(),
+            "no ghost may keep painting for a tile that no longer exists"
+        );
+
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+        cx.simulate_mouse_up(over, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release after the cancel applies nothing"
+        );
+        assert!(!shell.read_with(&cx, |shell, _| shell.session_dirty));
     }
 
     /// Review fix 4: the which-key hint paints a solid panel with no
