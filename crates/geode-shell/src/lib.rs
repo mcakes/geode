@@ -11,6 +11,7 @@ pub mod fontsize;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod palette;
+pub mod perf;
 pub mod reload;
 pub mod session;
 pub mod shell;

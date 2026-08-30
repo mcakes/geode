@@ -9,6 +9,13 @@ name = "geode"
 path = "src/main.rs"
 bench = false
 
+[features]
+# Profiler support (spec §7.4), off by default — turns on geode-shell's
+# same-named feature (which is gpui's own `profiler` feature; see that
+# Cargo.toml's comment). Build with `cargo run -p geode-app --features
+# profiling`; verified by `cargo check -p geode-app --features profiling`.
+profiling = ["geode-shell/profiling"]
+
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true

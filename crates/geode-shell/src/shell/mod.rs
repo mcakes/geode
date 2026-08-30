@@ -9,6 +9,9 @@
 pub mod dialog;
 pub mod keybindings_view;
 pub mod keys;
+pub mod perf_overlay;
+#[cfg(feature = "profiling")]
+pub mod profiling_hook;
 pub mod settings_view;
 pub mod sidebar;
 pub mod status;
@@ -34,6 +37,7 @@ use crate::fonts;
 use crate::fontsize::{self, FontSize};
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::palette::{self, PaletteItem, PaletteState};
+use crate::perf::{self, FrameHistogram};
 use crate::reload;
 use crate::session;
 use crate::theme;
@@ -432,6 +436,21 @@ pub struct ShellView {
     /// `Entity<InputState>` across frames to keep its own cursor/selection/
     /// focus state, not something rebuildable from scratch each render.
     filter_input: Entity<InputState>,
+    /// Frame-time histogram (spec §7.4 — always compiled, cheap): fed at
+    /// the top of `render` with the interval since the previous render.
+    /// See `crate::perf`'s module doc for exactly what that signal does
+    /// and doesn't capture. Owned plainly by the view — recording is a
+    /// `&mut` array bump, no locks, no allocation, no extra frames.
+    perf: FrameHistogram,
+    /// `Instant` at the top of the previous `render` call, the other half
+    /// of the frame-interval measurement. `None` until the first render
+    /// (nothing to measure yet) — never reset after that: an idle gap is
+    /// excluded by `perf::IDLE_CUTOFF` at record time instead.
+    last_render_started: Option<std::time::Instant>,
+    /// Whether the perf readout overlay is painted (`perf::toggle_overlay`,
+    /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
+    /// changes nothing about recording, which always runs.
+    perf_overlay: bool,
 }
 
 /// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
@@ -641,6 +660,9 @@ impl ShellView {
             divider_drag: None,
             tile_drag: None,
             filter_input,
+            perf: FrameHistogram::new(),
+            last_render_started: None,
+            perf_overlay: false,
         }
     }
 
@@ -921,6 +943,25 @@ impl ShellView {
         } else if action.0 == "fontsize::decrease" {
             self.font_size = self.font_size.smaller();
             self.persist_font_size(cx);
+        } else if action.0 == "perf::toggle_overlay" {
+            // Spec §7.4's debug readout toggle. Display-only — the
+            // histogram records regardless (see `render`'s top) — so the
+            // toggle is just a bool flip plus a repaint.
+            self.perf_overlay = !self.perf_overlay;
+            cx.notify();
+        } else if action.0 == "perf::reset" {
+            // Zero the frame-time counters so a measurement can start
+            // from a known point (e.g. right before an interaction worth
+            // profiling). Notify so a visible overlay repaints its
+            // zeroed numbers immediately.
+            self.perf.reset();
+            cx.notify();
+        } else {
+            // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
+            // — compiled (and registered) only with the `profiling`
+            // feature; see `shell::profiling_hook`.
+            #[cfg(feature = "profiling")]
+            profiling_hook::dispatch(self, action, window, cx);
         }
     }
 
@@ -1680,6 +1721,26 @@ impl ShellView {
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Frame-time instrumentation (spec §7.4), first thing so the
+        // interval is measured from the true top of each render. Records
+        // the render-to-render interval — see `crate::perf`'s module doc
+        // for exactly what this signal captures (consecutive renders
+        // during interaction bursts) and doesn't (compositor time, the
+        // last frame before idleness). O(1), allocation-free, and it
+        // never notifies or schedules anything, so recording can't force
+        // a frame; intervals >= IDLE_CUTOFF are counted as idle gaps,
+        // not frames.
+        let render_started = std::time::Instant::now();
+        if let Some(prev) = self.last_render_started {
+            let interval = render_started.saturating_duration_since(prev);
+            if interval < perf::IDLE_CUTOFF {
+                self.perf.record_micros(interval.as_micros() as u64);
+            } else {
+                self.perf.note_discarded_idle();
+            }
+        }
+        self.last_render_started = Some(render_started);
+
         // Fix-round finding: consume a pending focus restore left by a
         // background path that closed the palette with no `Window` in hand
         // (see `pending_focus_restore`'s and `apply_reload`'s own doc
@@ -2662,6 +2723,17 @@ impl Render for ShellView {
                     status::HEIGHT,
                     cx,
                 ))
+            })
+            // The frame-time readout (spec §7.4, `perf::toggle_overlay`),
+            // painted above every other shell layer — a diagnostic that
+            // must stay visible while the palette/modal/which-key it might
+            // be measuring are up. Top-right, clear of the which-key panel
+            // (bottom-right) and the status bar. No handlers, no timer:
+            // it repaints only when something else invalidates the window,
+            // showing values as-of the last invalidation (see
+            // `perf_overlay`'s module doc for why that's deliberate).
+            .when(self.perf_overlay, |el| {
+                el.child(perf_overlay::render(&self.perf, toolbar_height, cx))
             })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so
@@ -9117,5 +9189,137 @@ mod tests {
                 .is_some()),
             "clicking the already-selected row again should start listening"
         );
+    }
+
+    /// Boilerplate shared by the perf tests below: open a window, return
+    /// the `VisualTestContext` plus the downcast `ShellView` entity.
+    fn open_shell(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::VisualTestContext, gpui::Entity<ShellView>) {
+        cx.update(gpui_component::init);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut cx).unwrap().read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+        (cx, shell)
+    }
+
+    /// Spec §7.4's debug overlay toggle, end to end through the real key
+    /// pipeline: `mod+shift+p` (alt is the test/default mod) dispatches
+    /// `perf::toggle_overlay`, which paints the readout panel; a second
+    /// press removes it. Bounds via the `perf-overlay` debug selector —
+    /// the same honest what-the-test-can-see contract as
+    /// `empty_workspace_paints_the_hint`.
+    #[gpui::test]
+    fn perf_overlay_toggles_via_the_bound_action(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = open_shell(cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("perf-overlay").is_none(),
+            "the overlay must start hidden"
+        );
+
+        cx.simulate_keystrokes("alt-shift-p");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.perf_overlay),
+            "alt+shift+p should dispatch perf::toggle_overlay and set the flag"
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds = cx.debug_bounds("perf-overlay");
+        assert!(
+            bounds.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the perf overlay should paint with non-zero bounds, got {bounds:?}"
+        );
+
+        cx.simulate_keystrokes("alt-shift-p");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("perf-overlay").is_none(),
+            "a second toggle should remove the overlay"
+        );
+    }
+
+    /// The recording seam: every `ShellView::render` after the first
+    /// records one frame-interval sample (consecutive test draws are far
+    /// below `perf::IDLE_CUTOFF`), and `perf::reset` zeroes the counters
+    /// through the same dispatch chain every other action uses. Recording
+    /// itself must not notify — pinned here by the count being exactly
+    /// the number of draws driven, with no runaway extra frames.
+    #[gpui::test]
+    fn render_records_frame_samples_and_reset_clears_them(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = open_shell(cx);
+        // Window-open itself already drew at least once (the very first
+        // render records nothing — no previous render to measure from —
+        // but any second one records), so take the count after an
+        // explicit draw as the baseline rather than assuming 0.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let baseline = shell.read_with(&cx, |shell, _| shell.perf.count());
+
+        // Dirty the view and draw: each re-render past the first records
+        // a sample. (A notify can flush into its own automatic test draw
+        // in addition to the explicit one, so this asserts growth per
+        // round, not an exact per-draw delta.)
+        let mut last = baseline;
+        for _ in 0..3 {
+            shell.update(&mut cx, |_, cx| cx.notify());
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let count = shell.read_with(&cx, |shell, _| shell.perf.count());
+            assert!(
+                count > last,
+                "a dirtied re-render should record at least one sample \
+                 (was {last}, now {count})"
+            );
+            last = count;
+        }
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.perf.max_micros()) > 0,
+            "recorded samples should carry a real nonzero interval"
+        );
+
+        // Recording must not itself notify (it would turn the shell into a
+        // permanent redraw loop): once effects settle, the count stays put.
+        cx.run_until_parked();
+        let settled = shell.read_with(&cx, |shell, _| shell.perf.count());
+        cx.run_until_parked();
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.perf.count()),
+            settled,
+            "no further samples may appear without a real invalidation"
+        );
+
+        // `perf::reset` zeroes the counters through the same dispatch
+        // chain every action uses. Asserted inside the update, before the
+        // notify it issues flushes into a fresh (recorded) repaint.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("perf::reset".to_string()), window, cx);
+                assert_eq!(
+                    shell.perf.count(),
+                    0,
+                    "perf::reset should zero the histogram"
+                );
+            });
+        });
     }
 }
