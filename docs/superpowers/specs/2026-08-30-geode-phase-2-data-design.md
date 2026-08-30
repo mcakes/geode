@@ -578,11 +578,50 @@ underlying-level row fan-out. Double-counting is impossible by
 construction rather than by discipline, and the join is at group
 cardinality — tens or hundreds of rows — not at table cardinality.
 
-Where a grouping tuple is finer than a measure's grain (grouping by
-underlying while showing trading PnL), the measure cannot be
-attributed and the compiler marks the column non-attributable for that
-grouping rather than inventing an allocation. Rendering that marker is
-Phase 3's job; producing it is Phase 2's.
+Two distinct mismatches arise between a measure's grain and the rest
+of the query. They get different answers.
+
+**Grouping finer than the measure's grain** — grouping by underlying
+while showing trading PnL. No correct number exists: attributing a
+position's trading PnL to one of its underlyings requires an
+allocation rule, which is financial reasoning and belongs upstream
+(PHILOSOPHY §1). The cell is **NULL** and the column is marked
+`NonAttributable` for that grouping. Repeating the position total on
+each underlying row is rejected — it invites mental double-counting by
+the reader even though no `SUM` is wrong.
+
+**Scope finer than the measure's grain** — scoping to one underlying
+while showing trading PnL. Here a well-defined answer does exist, and
+it is neither ignoring the predicate nor blanking the column. The
+compiler splits the effective scope by the finest grain each predicate
+references. Predicates naming columns present at the subquery's grain
+apply directly; finer ones apply as a **semi-join** against the grain
+where those columns do exist:
+
+```sql
+select K, sum(daily_trading_pnl) from measures_position mp
+where <predicates available at position grain>
+  and exists (select 1 from measures_underlying mu
+              where mu.<K> = mp.<K>
+                and <finer predicates>)
+group by K
+```
+
+The resulting number means "trading PnL of positions that have SPX
+risk". It is emphatically not "the SPX share of trading PnL", and set
+beside greeks in the same row — which genuinely are the SPX portion —
+that distinction is exactly the kind of ambiguity PHILOSOPHY §3
+forbids leaving unmarked. So the column carries `SemiJoined` naming
+the dimensions applied by membership rather than directly.
+
+The same mechanism covers scope predicates over `instrument_ref`
+attributes such as `ModelCode`: direct at instrument grain and finer,
+semi-join at position grain.
+
+Semi-join is the default because it is what a trader usually means,
+but it is a per-view, per-measure config choice — `semi_join`,
+`unscoped`, or `blank` — since a desk-summary view may legitimately
+want the unscoped total.
 
 **Pair measures aggregated to a coarser grouping need a declared
 rule.** Rolling cross gamma up by `underlying_ref` is ambiguous:
@@ -592,12 +631,6 @@ is therefore non-attributable to an underlying-level grouping unless
 the view definition declares a rule — attribute to both sides, or to
 neither. It aggregates without ceremony to groupings at or coarser
 than instrument, which is the common case.
-
-A scope predicate on a dimension finer than a measure's grain has the
-same ambiguity — filtering to one underlying and asking for a
-position's trading PnL. The design makes it visible rather than
-silently picking an answer: the snapshot carries the marker, and the
-tile shows it, the same honesty pattern as unscoped tiles (§4.2).
 
 ### 6.4 Joins
 
@@ -633,7 +666,10 @@ handoff and interned dimension strings come free. No row objects are
 materialized anywhere.
 
 A snapshot carries its data plus provenance: per-dataset generations
-and source times, non-attributable column markers, and health state.
+and source times, health state, and per-column `ScopeSemantics` —
+`Direct`, `SemiJoined { dimensions }`, or `NonAttributable` (§6.3).
+Phase 2 computes those markers; Phase 3 decides how they are drawn.
+The debug tile prints them verbatim.
 
 ### 6.7 Concurrency and cancellation
 
@@ -725,6 +761,12 @@ No checked-in fixture files (§7.4).
 - **Grain correctness:** the property that matters most — aggregating
   a coarse measure over any grouping and any scope never
   double-counts. Property-tested.
+- **Grain mismatch semantics (§6.3):** a grouping finer than a
+  measure's grain yields NULL marked `NonAttributable`; a scope finer
+  than a measure's grain yields the semi-joined total marked
+  `SemiJoined` with the right dimensions named; the `unscoped` and
+  `blank` per-view overrides do what they say. Asserted on values, not
+  only on markers.
 - **Scope compilation:** property tests that generated scope stacks
   compose to valid, correct SQL (§10.3), plus parser error cases with
   caret positions.
