@@ -306,9 +306,18 @@ serves view queries and one dedicated writer connection serves ingest.
 Per dataset, two tables:
 
 - **`<dataset>_live`** — exactly the current rows for every file
-  partition. No generation column, no history predicate, size
-  independent of retention. This is the property §6 was buying, and it
-  is what keeps §7.1's requery budget reachable by construction.
+  partition. No history predicate, size independent of retention. This
+  is the property §6 was buying, and it is what keeps §7.1's requery
+  budget reachable by construction.
+
+  Live *does* carry `gen_id` and `source_time`, unlike an earlier draft
+  of this section. Live holds one generation per partition, so no query
+  ever filters on them — the property that matters is the absence of a
+  history *predicate*, not of the columns. Carrying them is what lets
+  the publish transaction move rows into the archive with their own
+  stamps intact; without that, archived rows inherit their successor's
+  timestamp and as-of to any moment when the older generation was live
+  returns nothing (§4.4).
 - **`<dataset>_archive`** — append-only, every row stamped with its
   `gen_id`. Touched only by as-of queries and the retention sweeper.
 
@@ -321,16 +330,22 @@ the UI path.
 
 Because a file may carry several books and a book may be split across
 files, the replacement key is neither `book` alone nor the file alone.
-It is the **partition key `(dataset, slot, book)`**, where a *slot* is
+It is the **partition key `(dataset, batch, book)`**, where a *batch* is
 the file's name with its date and time component removed, extracted by
-a per-source pattern (`slot_pattern` in config; the whole stem when no
+a per-source pattern (`batch_pattern` in config; the whole stem when no
 pattern is declared). `risk_2026-08-30_BK000_part1.csv` and
-`risk_2026-08-29_BK000_part1.csv` share the slot `BK000_part1`.
+`risk_2026-08-29_BK000_part1.csv` share the batch `BK000_part1`.
+
+The term is the desk's own: strip the timestamp and what remains
+identifies which batch of the run this file is. It deliberately avoids
+"slot", which §4.4 of the foundation design already uses for the nine
+`Ctrl+1..9` grouping presets — two unrelated meanings for one word in
+config would be its own kind of bug.
 
 Publishing a file atomically replaces the live rows for every
 partition it covers, its books taken from the sentinel. A file
 carrying two books replaces two partitions; a book split across two
-files occupies two slots and each replaces only its own. Both awkward
+files occupies two batches and each replaces only its own. Both awkward
 cases are handled with no waiting and no configured file-to-book
 mapping — discovery stays automatic.
 
@@ -345,16 +360,26 @@ One transaction on the writer connection:
 One transaction per file, over the partitions `P` it covers:
 
 ```
-INSERT INTO <ds>_archive
-    SELECT *, <current_gen>, <current_source_time> FROM <ds>_live
-    WHERE (slot, book) IN P;
-DELETE FROM <ds>_live WHERE (slot, book) IN P;
-INSERT INTO <ds>_live SELECT * FROM <staging>;
+INSERT INTO <ds>_archive SELECT * FROM <ds>_live WHERE (batch, book) IN P;
+DELETE FROM <ds>_live WHERE (batch, book) IN P;
+INSERT INTO <ds>_live
+    SELECT *, <gen>, <source_time> FROM <staging>;
 ```
 
-Live therefore carries `slot` and `source_file_id` alongside the grain
-key: `slot` is what replacement matches on, `source_file_id` is what
+The outgoing rows move with `SELECT *`, keeping the generation stamps
+they carried while live — live and archive have identical columns for
+exactly this reason.
+
+Live therefore carries `batch` and `source_file_id` alongside the grain
+key: `batch` is what replacement matches on, `source_file_id` is what
 provenance and health report against.
+
+**Publishing with an empty partition set is an error**, not a no-op: the
+delete would match nothing while the insert still ran, so live would
+accumulate a duplicate copy on every republish. Partitions come from the
+*staged rows*, not from the sentinel's advisory book list, so a row whose
+book the sentinel omits cannot land in a partition replacement will never
+match; the mismatch degrades health instead.
 
 Publishes serialize; one at a time through the single writer.
 
@@ -370,12 +395,16 @@ Two consequences:
 
 - As-of resolution orders by source time throughout: the newest
   generation at or before T, per file partition.
-- **The publish rule is guarded.** A file's rows enter `live` only if
-  its source time is newer than what live currently holds for that
-  partition (§4.3). Otherwise they are written straight to `archive`.
+- **The publish rule is guarded.** A file's rows enter `live` unless its
+  source time is *strictly older* than what live currently holds for that
+  partition (§4.3); otherwise they are written straight to `archive`.
+  Strictly older matters: discovery only queues a file whose size or
+  source time differs from what was loaded, so a file arriving at the
+  same source time is a *corrected republish* of that generation and must
+  replace it rather than being filed away as history.
   Without this guard a backfill would silently overwrite this morning's
   risk with last Tuesday's — and since a backfilled file shares its
-  slot with the current one, it targets exactly the partition that must
+  batch with the current one, it targets exactly the partition that must
   not be clobbered.
 
 ### 4.5 Freshness metadata
@@ -526,8 +555,21 @@ the same discipline as §7.3's query coalescing.
 
 A bounded worker pool (`ingest.workers`) parses and stages in
 parallel; publish transactions serialize through the single writer per
-§5.3. Whether additional concurrent writer connections buy anything is
-a benchmark question and is deliberately not assumed here.
+§5.3.
+
+**Measured, not assumed: parallel staging is 1.87× faster at realistic
+file sizes** — 5.75s sequential against 3.07s across four connections,
+over 17 files of ~118k rows each (`docs/perf.md`). The expectation had
+been that it would not help, since DuckDB's CSV reader is already
+multi-threaded and should saturate the cores by itself. That is
+directionally right but incomplete: the advantage shrinks as files grow
+(2.69× at 24k rows per file, 1.87× at 118k) without disappearing at the
+sizes the desk's files actually reach. Per-file fixed cost is paid
+regardless of file size, and parallelism hides it.
+
+Phase 2a ships the runner single-threaded — correct, and simplest to get
+right — with the worker pool as the measured next optimization rather
+than a speculative one.
 
 §7.1's contract stands: a background refresh of any size may never
 drop a foreground frame. Ingest is off-thread, publish transactions
@@ -943,5 +985,8 @@ Non-blocking, resolvable in config:
 5. The desk-to-book mapping has no source — `Desk` is not a CSV
    column. Config-declared for now.
 6. `implied_vol_surface`'s columns and source are unspecified (§3.7).
-7. Whether concurrent writer connections improve ingest throughput
-   (§5.6) — a benchmark question.
+7. ~~Whether concurrent staging improves ingest throughput (§5.6).~~
+   **Answered: yes, 1.87× at ~118k rows per file, narrowing as files
+   grow.** See §5.6 and `docs/perf.md`. Where the advantage finally
+   disappears is unmeasured — it needs files larger than the generator
+   can hold in memory.

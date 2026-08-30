@@ -1,197 +1,277 @@
-//! Deterministic synthetic risk data for benchmarks, tests, and `--demo`
-//! mode (spec §7.4, §10.3). Seeded: same config always yields identical
-//! data. Struct-of-arrays per the performance philosophy — no row objects.
+//! Deterministic synthetic risk data at the desk's real grain (spec §9.1).
+//! Seeded: same config always yields identical data. Struct-of-arrays per
+//! PHILOSOPHY §6 — no row objects.
 
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+mod emit;
+mod generate;
+mod model;
 
-pub struct GeneratorConfig {
-    pub rows: usize,
-    pub seed: u64,
-}
-
-impl Default for GeneratorConfig {
-    fn default() -> Self {
-        Self {
-            rows: 100_000,
-            seed: 42,
-        }
-    }
-}
-
-/// Struct-of-arrays risk snapshot: one Vec per column, index = row.
-pub struct RiskBatch {
-    pub position_id: Vec<u64>,
-    pub book: Vec<String>,
-    pub desk: Vec<String>,
-    pub model_code: Vec<String>,
-    pub underlying: Vec<String>,
-    pub instrument: Vec<String>,
-    pub npv: Vec<f64>,
-    pub pnl: Vec<f64>,
-    pub delta: Vec<f64>,
-    pub gamma: Vec<f64>,
-    pub vega: Vec<f64>,
-    pub theta: Vec<f64>,
-    pub rho: Vec<f64>,
-}
-
-impl RiskBatch {
-    pub fn len(&self) -> usize {
-        self.position_id.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-const UNDERLYINGS: &[&str] = &[
-    "SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2",
-];
-const MODEL_CODES: &[&str] = &[
-    "EURP", "AMRP", "VSWP", "AUTO", "CLIQ", "BARR", "DIGI", "VANL",
-];
-const DESKS: &[&str] = &["IDX_EXO_EU", "IDX_EXO_US", "IDX_EXO_AS"];
-const BOOK_COUNT: usize = 20;
-
-pub fn generate(config: &GeneratorConfig) -> RiskBatch {
-    let mut rng = StdRng::seed_from_u64(config.seed);
-    let n = config.rows;
-
-    let mut batch = RiskBatch {
-        position_id: Vec::with_capacity(n),
-        book: Vec::with_capacity(n),
-        desk: Vec::with_capacity(n),
-        model_code: Vec::with_capacity(n),
-        underlying: Vec::with_capacity(n),
-        instrument: Vec::with_capacity(n),
-        npv: Vec::with_capacity(n),
-        pnl: Vec::with_capacity(n),
-        delta: Vec::with_capacity(n),
-        gamma: Vec::with_capacity(n),
-        vega: Vec::with_capacity(n),
-        theta: Vec::with_capacity(n),
-        rho: Vec::with_capacity(n),
-    };
-
-    for i in 0..n {
-        batch.position_id.push(i as u64);
-        batch
-            .book
-            .push(format!("BK{:03}", rng.random_range(0..BOOK_COUNT)));
-        batch
-            .desk
-            .push(DESKS[rng.random_range(0..DESKS.len())].to_string());
-        batch
-            .model_code
-            .push(MODEL_CODES[rng.random_range(0..MODEL_CODES.len())].to_string());
-        batch
-            .underlying
-            .push(UNDERLYINGS[rng.random_range(0..UNDERLYINGS.len())].to_string());
-        batch.instrument.push(format!("INST{i:08}"));
-        batch.npv.push(rng.random_range(-5_000_000.0..5_000_000.0));
-        batch.pnl.push(rng.random_range(-500_000.0..500_000.0));
-        batch.delta.push(rng.random_range(-100_000.0..100_000.0));
-        batch.gamma.push(rng.random_range(-5_000.0..5_000.0));
-        batch.vega.push(rng.random_range(-50_000.0..50_000.0));
-        batch.theta.push(rng.random_range(-10_000.0..10_000.0));
-        batch.rho.push(rng.random_range(-20_000.0..20_000.0));
-    }
-
-    batch
-}
-
-// No quoting/escaping: every string column draws from fixed, comma-free vocabularies. Revisit if the vocabularies ever grow free-form values.
-pub fn write_csv<W: std::io::Write>(batch: &RiskBatch, out: &mut W) -> std::io::Result<()> {
-    writeln!(
-        out,
-        "position_id,book,desk,model_code,underlying,instrument,npv,pnl,delta,gamma,vega,theta,rho"
-    )?;
-    for i in 0..batch.len() {
-        writeln!(
-            out,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{}",
-            batch.position_id[i],
-            batch.book[i],
-            batch.desk[i],
-            batch.model_code[i],
-            batch.underlying[i],
-            batch.instrument[i],
-            batch.npv[i],
-            batch.pnl[i],
-            batch.delta[i],
-            batch.gamma[i],
-            batch.vega[i],
-            batch.theta[i],
-            batch.rho[i],
-        )?;
-    }
-    Ok(())
-}
+pub use emit::{EmitOptions, EmittedDirectory, EmittedFile, emit_directory};
+pub use generate::{GeneratorConfig, generate};
+pub use model::RiskBatch;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
-    #[test]
-    fn generates_requested_row_count() {
-        let batch = generate(&GeneratorConfig {
-            rows: 1_000,
+    fn cfg(rows: usize) -> GeneratorConfig {
+        GeneratorConfig {
+            rows,
             seed: 42,
-        });
-        assert_eq!(batch.len(), 1_000);
-        assert_eq!(batch.book.len(), 1_000);
-        assert_eq!(batch.npv.len(), 1_000);
+            business_dates: 2,
+        }
     }
 
     #[test]
     fn same_seed_yields_identical_data() {
-        let cfg = GeneratorConfig { rows: 500, seed: 7 };
-        let a = generate(&cfg);
-        let b = generate(&cfg);
-        assert_eq!(a.position_id, b.position_id);
-        assert_eq!(a.book, b.book);
-        assert_eq!(a.npv, b.npv);
-        assert_eq!(a.delta, b.delta);
+        let a = generate(&cfg(2_000));
+        let b = generate(&cfg(2_000));
+        assert_eq!(a.position_ref, b.position_ref);
+        assert_eq!(a.delta01, b.delta01);
+        assert_eq!(a.cross_gamma02, b.cross_gamma02);
     }
 
     #[test]
-    fn different_seeds_yield_different_data() {
-        let a = generate(&GeneratorConfig { rows: 500, seed: 1 });
-        let b = generate(&GeneratorConfig { rows: 500, seed: 2 });
-        assert_ne!(a.npv, b.npv);
+    fn reaches_the_requested_row_count() {
+        // Book and LHU cardinality is fixed, so position count is what must
+        // scale. Before this was enforced the generator capped near 3k rows
+        // per business date and the §7.4 million-row benchmarks would have
+        // silently measured a few thousand.
+        for target in [1_000usize, 20_000, 250_000] {
+            let b = generate(&GeneratorConfig {
+                rows: target,
+                seed: 42,
+                business_dates: 1,
+            });
+            assert_eq!(b.len(), target, "target {target}");
+        }
+    }
+
+    #[test]
+    fn emits_ordered_pairs_per_instrument() {
+        let b = generate(&cfg(5_000));
+        // Every row names two distinct underlyings.
+        for i in 0..b.len() {
+            assert_ne!(b.underlying_ref[i], b.underlying2_ref[i], "row {i}");
+        }
+        // At least one instrument has three underlyings, hence six rows.
+        let mut per_instrument: std::collections::HashMap<&str, HashSet<&str>> = Default::default();
+        for i in 0..b.len() {
+            per_instrument
+                .entry(&b.instrument_ref[i])
+                .or_default()
+                .insert(&b.underlying_ref[i]);
+        }
+        assert!(
+            per_instrument.values().any(|u| u.len() >= 3),
+            "expected at least one worst-of with 3+ underlyings"
+        );
+    }
+
+    #[test]
+    fn coarse_measures_repeat_identically_within_their_grain() {
+        let b = generate(&cfg(5_000));
+        // NPV is instrument-grain: identical on every row of an instrument.
+        let mut seen: std::collections::HashMap<&str, f64> = Default::default();
+        for i in 0..b.len() {
+            let e = seen.entry(&b.instrument_ref[i]).or_insert(b.npv[i]);
+            assert_eq!(
+                *e, b.npv[i],
+                "npv varies within instrument {}",
+                b.instrument_ref[i]
+            );
+        }
+    }
+
+    #[test]
+    fn single_underlying_greeks_repeat_across_a_row_s_pairs() {
+        let b = generate(&cfg(5_000));
+        let mut seen: std::collections::HashMap<(&str, &str), f64> = Default::default();
+        for i in 0..b.len() {
+            let key = (b.instrument_ref[i].as_str(), b.underlying_ref[i].as_str());
+            let e = seen.entry(key).or_insert(b.delta01[i]);
+            assert_eq!(
+                *e, b.delta01[i],
+                "delta01 varies within (instrument, underlying)"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_gamma_is_symmetric_across_orderings() {
+        let b = generate(&cfg(5_000));
+        let mut seen: std::collections::HashMap<(&str, String), f64> = Default::default();
+        for i in 0..b.len() {
+            let (u1, u2) = (&b.underlying_ref[i], &b.underlying2_ref[i]);
+            let canon = if u1 <= u2 {
+                format!("{u1}|{u2}")
+            } else {
+                format!("{u2}|{u1}")
+            };
+            let e = seen
+                .entry((b.instrument_ref[i].as_str(), canon))
+                .or_insert(b.cross_gamma02[i]);
+            assert_eq!(
+                *e, b.cross_gamma02[i],
+                "cross gamma differs between orderings"
+            );
+        }
     }
 
     #[test]
     fn dimensions_have_realistic_bounded_cardinality() {
-        use std::collections::HashSet;
-        let batch = generate(&GeneratorConfig {
-            rows: 10_000,
-            seed: 42,
-        });
-        let books: HashSet<_> = batch.book.iter().collect();
-        let underlyings: HashSet<_> = batch.underlying.iter().collect();
+        let b = generate(&cfg(20_000));
+        let books: HashSet<_> = b.book.iter().collect();
+        let underlyings: HashSet<_> = b.underlying_ref.iter().collect();
+        let lhus: HashSet<_> = b.lhu.iter().collect();
+        assert!((2..=20).contains(&books.len()), "books: {}", books.len());
+        assert!(underlyings.len() <= 10);
         assert!(
-            books.len() > 1 && books.len() <= 20,
-            "books: {}",
-            books.len()
+            lhus.len() > books.len(),
+            "each book should hold several LHUs"
         );
-        assert!(underlyings.len() > 1 && underlyings.len() <= 10);
     }
 
     #[test]
-    fn csv_has_header_and_one_line_per_row() {
-        let batch = generate(&GeneratorConfig { rows: 10, seed: 42 });
-        let mut out = Vec::new();
-        write_csv(&batch, &mut out).unwrap();
-        let text = String::from_utf8(out).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 11);
+    fn emits_csvs_and_sentinels_with_the_awkward_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+
+        assert!(out.files.len() >= 4, "expected several files");
+
+        // A book split across two files — per business date, since each
+        // date produces its own generation of every file.
+        let dates: HashSet<&String> = batch.business_date.iter().collect();
+        let split: Vec<&str> = out
+            .files
+            .iter()
+            .filter(|f| f.books == vec!["BK000".to_string()])
+            .map(|f| f.csv_path.file_stem().unwrap().to_str().unwrap())
+            .collect();
         assert_eq!(
-            lines[0],
-            "position_id,book,desk,model_code,underlying,instrument,npv,pnl,delta,gamma,vega,theta,rho"
+            split.len(),
+            2 * dates.len(),
+            "BK000 must be split across two files per business date: {split:?}"
         );
-        assert!(lines[1].starts_with("0,"));
+        for date in &dates {
+            for part in [1, 2] {
+                let want = format!("risk_{date}_BK000_part{part}");
+                assert!(split.contains(&want.as_str()), "missing {want}");
+            }
+        }
+
+        // A file carrying more than one book.
+        assert!(
+            out.files.iter().any(|f| f.books.len() > 1),
+            "expected a multi-book file"
+        );
+
+        // Exactly one CSV without a sentinel (readiness: pending).
+        let pending: Vec<_> = out
+            .files
+            .iter()
+            .filter(|f| f.sentinel_path.is_none())
+            .collect();
+        assert_eq!(pending.len(), 1);
+
+        // Optional columns absent from at least one file.
+        assert!(
+            out.files
+                .iter()
+                .any(|f| !f.columns.iter().any(|c| c == "Skew01")),
+            "expected a file missing an optional column"
+        );
+
+        for f in &out.files {
+            assert!(f.csv_path.exists());
+            if let Some(s) = &f.sentinel_path {
+                assert!(s.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn sentinel_json_carries_source_time_and_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(5_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+        let f = out
+            .files
+            .iter()
+            .find(|f| f.sentinel_path.is_some())
+            .unwrap();
+        let text = std::fs::read_to_string(f.sentinel_path.as_ref().unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert!(v["as_of"].as_str().unwrap().starts_with("20"));
+        assert_eq!(v["row_count"].as_u64().unwrap() as usize, f.rows);
+        let cols: Vec<String> = v["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cols, f.columns);
+        assert!(
+            cols.contains(&"Delta01".to_string()),
+            "source spelling, not snake_case"
+        );
+        assert!(cols.contains(&"Delta01_USD".to_string()));
+    }
+
+    #[test]
+    fn csv_row_count_matches_the_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(5_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+        for f in &out.files {
+            let text = std::fs::read_to_string(&f.csv_path).unwrap();
+            assert_eq!(text.lines().count(), f.rows + 1, "{:?}", f.csv_path);
+        }
+    }
+
+    #[test]
+    fn a_split_book_never_splits_a_position_across_files() {
+        // The two halves of a split book are different partitions, and the
+        // grain split dedups only within a file. A position spanning both
+        // would land in live twice and double its trading PnL — the exact
+        // failure the grain split exists to prevent.
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+
+        let mut file_of_position: std::collections::HashMap<&str, &std::path::Path> =
+            Default::default();
+        for f in &out.files {
+            let text = std::fs::read_to_string(&f.csv_path).unwrap();
+            let mut lines = text.lines();
+            let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+            let pos_col = header.iter().position(|h| *h == "PositionRef").unwrap();
+            for line in lines {
+                let position = line.split(',').nth(pos_col).unwrap();
+                let seen = file_of_position
+                    .entry(Box::leak(position.to_string().into_boxed_str()))
+                    .or_insert(f.csv_path.as_path());
+                assert_eq!(
+                    *seen,
+                    f.csv_path.as_path(),
+                    "position {position} appears in two files"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn conflicting_instrument_attributes_are_planted() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let opts = EmitOptions::new(dir.path());
+        let out = emit_directory(&batch, &opts).unwrap();
+        assert!(
+            !out.conflicting_instruments.is_empty(),
+            "the fixture must plant at least one attribute disagreement"
+        );
     }
 }

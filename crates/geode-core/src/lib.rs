@@ -2,3 +2,4 @@
 //! and performance utilities. See docs/superpowers/specs/ §2.
 
 pub mod config;
+pub mod schema;
