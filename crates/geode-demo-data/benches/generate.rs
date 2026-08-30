@@ -14,6 +14,7 @@ fn bench_generate(c: &mut Criterion) {
             black_box(generate(&GeneratorConfig {
                 rows: 100_000,
                 seed: 42,
+                business_dates: 1,
             }))
         })
     });
@@ -22,6 +23,7 @@ fn bench_generate(c: &mut Criterion) {
             black_box(generate(&GeneratorConfig {
                 rows: 1_000_000,
                 seed: 42,
+                business_dates: 1,
             }))
         })
     });
