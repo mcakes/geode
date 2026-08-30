@@ -482,6 +482,32 @@ impl ShellView {
         })
         .detach();
 
+        // End any in-flight drag when the window deactivates (post-merge
+        // review finding 6): cmd+tab away with the button held means the
+        // release lands in some other app where no event reaches this
+        // window — without this observer the stale ACTIVE drag survived,
+        // and the click that re-activated the window could advance and
+        // apply it. `cx.observe_window_activation` is available at the
+        // pinned gpui rev (App/context.rs; the platform layer feeds it
+        // from `on_active_status_change`, which macOS and Windows both
+        // wire). Each drag kind ends per its own recorded semantics — the
+        // same split as the Escape cancel in `handle_key_down`: a tile
+        // drag CANCELS (nothing was applied, so nothing is lost) and a
+        // divider drag FINISHES (its resizes were applied live and
+        // persist; `cancel_divider_drag` keeps them and dirties the
+        // session). The BUG 4 buttonless-move cancel remains the backstop
+        // for any deactivation a platform fails to report.
+        cx.observe_window_activation(window, |view, window, cx| {
+            if !window.is_window_active()
+                && (view.tile_drag.is_some() || view.divider_drag.is_some())
+            {
+                view.cancel_tile_drag();
+                view.cancel_divider_drag();
+                cx.notify();
+            }
+        })
+        .detach();
+
         // `last_snapshot` starts empty rather than being seeded with a
         // synchronous `reload::scan` call right here: that would be real
         // filesystem I/O on the UI thread, during `new` (spec PHILOSOPHY.md
@@ -4350,6 +4376,64 @@ mod tests {
         assert!(
             shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
             "a buttonless move (lost release) must finish the divider drag"
+        );
+    }
+
+    /// Post-merge review finding 6: cmd+tab away with the button held,
+    /// release elsewhere — without an activation observer the stale
+    /// ACTIVE drag persisted and the re-activation click could advance
+    /// and apply it. `ShellView::new` now registers
+    /// `cx.observe_window_activation` (verified available at the pinned
+    /// gpui rev) and ends both drag kinds on deactivation (tile: cancel;
+    /// divider: finish). The test drives the harness's real activation
+    /// plumbing: `activate_window` marks the test window active, and
+    /// `deactivate_window` fires the platform active-status callback.
+    #[gpui::test]
+    fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+
+        // Tile drag: deactivation cancels with nothing applied.
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        let over = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        cx.simulate_mouse_move(over, MouseButton::Left, gpui::Modifiers::none());
+        assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_some()));
+
+        cx.deactivate_window();
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "window deactivation mid-tile-drag must cancel the drag"
+        );
+        cx.simulate_mouse_up(over, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release after re-activation applies nothing"
+        );
+
+        // Divider drag: deactivation finishes it (applied moves persist).
+        cx.update(|window, _cx| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let strip = cx
+            .debug_bounds("divider-strip-0")
+            .expect("two tiles paint their splitter strip");
+        let dgrab = strip.center();
+        cx.simulate_mouse_down(dgrab, MouseButton::Left, gpui::Modifiers::none());
+        assert!(shell.read_with(&cx, |shell, _| shell.divider_drag.is_some()));
+        cx.deactivate_window();
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "window deactivation mid-divider-drag must end the drag"
         );
     }
 
