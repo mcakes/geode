@@ -579,6 +579,101 @@ impl Tree {
         true
     }
 
+    /// Insert `new` as `anchor`'s split sibling on a chosen side (tile-drag
+    /// task — the drop verbs' insert primitive; `split` stays byte-identical
+    /// for the keyboard path). Exactly `split`'s structural rules, anchored
+    /// by id instead of by focus and with an explicit side: when `anchor`'s
+    /// parent split already has `orientation`, `new` becomes a flat sibling
+    /// immediately before/after it with ratios equalized (the same v1
+    /// equalize-on-insert simplification `split` documents); otherwise the
+    /// anchor leaf wraps into a new 2-way split of `orientation` occupying
+    /// its old footprint, `new` on the requested side at 0.5/0.5. Focus
+    /// moves to `new` (drop semantics: focus follows the moved tile) and —
+    /// mirroring `split`'s rule that an explicit layout operation trumps a
+    /// stale fullscreen — any fullscreen clears.
+    ///
+    /// Returns `false`, tree untouched, when `anchor` isn't a leaf here,
+    /// `new` already is, or the two are the same id. Unlike `split`, a
+    /// refusal can NOT lose the id being inserted, because refusal happens
+    /// before anything is removed anywhere — callers (the `Workspace` drop
+    /// verbs) verify the anchor exists *before* removing the dragged tile
+    /// from its source tree, and fall back to a plain `split` if this
+    /// somehow still refuses, so a tile can never vanish mid-move.
+    pub(crate) fn insert_at_leaf(
+        &mut self,
+        anchor: TileId,
+        new: TileId,
+        orientation: Orientation,
+        after: bool,
+    ) -> bool {
+        if anchor == new || !self.contains(anchor) || self.contains(new) {
+            return false;
+        }
+        // `contains(anchor)` just passed, so the root exists.
+        let root = self.root.take().expect("contains(anchor) implies a root");
+        self.fullscreen = None;
+        self.root = Some(insert_beside(root, anchor, new, orientation, after));
+        self.focused = Some(new);
+        true
+    }
+
+    /// Rename one leaf in place: the leaf holding `old` becomes `new`, with
+    /// structure, ratios, and every other leaf untouched (tile-drag task —
+    /// one half of a cross-tree center-drop swap; the other tree runs the
+    /// mirror-image replace). Focus and fullscreen references *follow the
+    /// position*, not the id: if `old` was focused (or fullscreen), the
+    /// tile now in that spot — `new` — inherits it, so the source tree of a
+    /// swap keeps its focus memory pointing at the same on-screen slot.
+    /// Returns `false`, untouched, when `old` isn't a leaf here or `new`
+    /// already is (the one-place-per-TileId invariant is the caller's to
+    /// uphold across trees; within one tree this check enforces it).
+    pub(crate) fn replace_tile(&mut self, old: TileId, new: TileId) -> bool {
+        if old == new || !self.contains(old) || self.contains(new) {
+            return false;
+        }
+        fn rename(node: &mut Node, old: TileId, new: TileId) {
+            match node {
+                Node::Leaf(id) => {
+                    if *id == old {
+                        *id = new;
+                    }
+                }
+                Node::Split { children, .. } => {
+                    for child in children {
+                        rename(child, old, new);
+                    }
+                }
+            }
+        }
+        if let Some(root) = &mut self.root {
+            rename(root, old, new);
+        }
+        if self.focused == Some(old) {
+            self.focused = Some(new);
+        }
+        if self.fullscreen == Some(old) {
+            self.fullscreen = Some(new);
+        }
+        true
+    }
+
+    /// Swap two leaves of *this* tree in place (tile-drag task — the
+    /// same-tree center-drop; [`Tree::move_direction`] uses the identical
+    /// mechanism for its geometric-neighbor swap). Structure and ratios
+    /// are untouched; focus is deliberately not moved here — both ids are
+    /// still present, and which one the drop focuses is `Workspace`'s
+    /// decision, not the tree's. Returns `false`, untouched, unless both
+    /// ids are distinct leaves of this tree.
+    pub(crate) fn swap_tiles(&mut self, a: TileId, b: TileId) -> bool {
+        if a == b || !self.contains(a) || !self.contains(b) {
+            return false;
+        }
+        if let Some(root) = &mut self.root {
+            swap_leaves(root, a, b);
+        }
+        true
+    }
+
     /// Clear any fullscreen state without touching focus (dock-regions
     /// task). Exists for `Workspace::move_to_dock`: moving a tile into a
     /// dock must exit fullscreen first — a fullscreen layout covers the
@@ -798,6 +893,66 @@ fn split_at(node: Node, focused: TileId, new: TileId, orientation: Orientation) 
             let children = children
                 .into_iter()
                 .map(|c| split_at(c, focused, new, orientation))
+                .collect();
+            Node::Split {
+                orientation: existing,
+                children,
+                ratios,
+            }
+        }
+    }
+}
+
+/// [`split_at`]'s side-aware sibling (tile-drag task, backing
+/// [`Tree::insert_at_leaf`]): identical structural rules — flat sibling
+/// insert with equalized ratios when the anchor's parent split already has
+/// `orientation`, otherwise wrap the anchor leaf into a new 0.5/0.5 split —
+/// except the anchor is named by id and `after` picks which side `new`
+/// lands on (`split_at` always inserts after the focused leaf).
+fn insert_beside(
+    node: Node,
+    anchor: TileId,
+    new: TileId,
+    orientation: Orientation,
+    after: bool,
+) -> Node {
+    match node {
+        Node::Leaf(id) if id == anchor => {
+            let children = if after {
+                vec![Node::Leaf(id), Node::Leaf(new)]
+            } else {
+                vec![Node::Leaf(new), Node::Leaf(id)]
+            };
+            Node::Split {
+                orientation,
+                children,
+                ratios: vec![0.5, 0.5],
+            }
+        }
+        leaf @ Node::Leaf(_) => leaf,
+        Node::Split {
+            orientation: existing,
+            mut children,
+            ratios,
+        } => {
+            if existing == orientation
+                && let Some(ix) = children
+                    .iter()
+                    .position(|c| matches!(c, Node::Leaf(id) if *id == anchor))
+            {
+                let at = if after { ix + 1 } else { ix };
+                children.insert(at, Node::Leaf(new));
+                let n = children.len() as f32;
+                let ratios = vec![1.0 / n; children.len()];
+                return Node::Split {
+                    orientation: existing,
+                    children,
+                    ratios,
+                };
+            }
+            let children = children
+                .into_iter()
+                .map(|c| insert_beside(c, anchor, new, orientation, after))
                 .collect();
             Node::Split {
                 orientation: existing,
@@ -2073,5 +2228,132 @@ mod tests {
         assert!(approx(r2.h, 1.0) && approx(r2.w, 0.25));
         assert!(approx(r3.h, 1.0) && approx(r3.w, 0.25));
         assert!(approx(r2.x, 0.5) && approx(r3.x, 0.75));
+    }
+
+    // --- insert_at_leaf / replace_tile / swap_tiles (tile-drag task) ----
+
+    #[test]
+    fn insert_at_leaf_before_and_after_join_a_matching_orientation_split() {
+        // [1 | 2]: inserting 3 after 1 lands between them; inserting 4
+        // before 1 lands leftmost — all flat siblings, ratios equalized.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert!(tree.insert_at_leaf(TileId(1), TileId(3), Orientation::Horizontal, true));
+        assert!(tree.insert_at_leaf(TileId(1), TileId(4), Orientation::Horizontal, false));
+        let order: Vec<TileId> = tree.tiles();
+        assert_eq!(
+            order,
+            vec![TileId(4), TileId(1), TileId(3), TileId(2)],
+            "before lands left of the anchor, after lands right"
+        );
+        for id in [1, 2, 3, 4] {
+            assert!(
+                approx(rect_of(&tree, id).w, 0.25),
+                "flat sibling insert equalizes ratios"
+            );
+        }
+        assert_eq!(tree.focused(), Some(TileId(4)), "focus follows the insert");
+    }
+
+    #[test]
+    fn insert_at_leaf_cross_orientation_wraps_the_anchor_on_the_chosen_side() {
+        // [1 | 2]: a Vertical insert before 2 wraps 2's slot with the new
+        // tile on top; after would put it below.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        assert!(tree.insert_at_leaf(TileId(2), TileId(3), Orientation::Vertical, false));
+        let r2 = rect_of(&tree, 2);
+        let r3 = rect_of(&tree, 3);
+        assert!(approx(r3.x, 0.5) && approx(r3.y, 0.0) && approx(r3.h, 0.5));
+        assert!(approx(r2.x, 0.5) && approx(r2.y, 0.5) && approx(r2.h, 0.5));
+        assert!(
+            approx(rect_of(&tree, 1).w, 0.5),
+            "the anchor's sibling keeps its slot"
+        );
+    }
+
+    #[test]
+    fn insert_at_leaf_refuses_bad_ids_untouched() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let before = tree.clone();
+        assert!(
+            !tree.insert_at_leaf(TileId(9), TileId(3), Orientation::Horizontal, true),
+            "missing anchor"
+        );
+        assert!(
+            !tree.insert_at_leaf(TileId(1), TileId(2), Orientation::Horizontal, true),
+            "new id already present"
+        );
+        assert!(
+            !tree.insert_at_leaf(TileId(1), TileId(1), Orientation::Horizontal, true),
+            "anchor == new"
+        );
+        assert_eq!(tree, before, "refusals leave the tree untouched");
+    }
+
+    #[test]
+    fn insert_at_leaf_exits_fullscreen_like_split_does() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.toggle_fullscreen();
+        assert!(tree.fullscreen().is_some());
+        assert!(tree.insert_at_leaf(TileId(1), TileId(3), Orientation::Vertical, true));
+        assert_eq!(
+            tree.fullscreen(),
+            None,
+            "an explicit layout operation trumps a stale fullscreen"
+        );
+    }
+
+    #[test]
+    fn replace_tile_renames_the_leaf_and_remaps_focus_and_fullscreen() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        tree.focus(TileId(1));
+        let r1_before = rect_of(&tree, 1);
+        tree.toggle_fullscreen(); // fullscreen on 1
+        assert!(tree.replace_tile(TileId(1), TileId(9)));
+        assert!(!tree.contains(TileId(1)));
+        assert_eq!(
+            tree.fullscreen(),
+            Some(TileId(9)),
+            "a fullscreen reference follows the renamed slot"
+        );
+        // Drop fullscreen to compare the underlying slot geometry.
+        tree.exit_fullscreen();
+        assert_eq!(rect_of(&tree, 9), r1_before, "same slot, new id");
+        assert_eq!(tree.focused(), Some(TileId(9)), "focus follows the slot");
+    }
+
+    #[test]
+    fn replace_tile_refuses_bad_ids_untouched() {
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.split(TileId(2), Orientation::Horizontal);
+        let before = tree.clone();
+        assert!(!tree.replace_tile(TileId(9), TileId(3)), "old missing");
+        assert!(!tree.replace_tile(TileId(1), TileId(2)), "new present");
+        assert!(!tree.replace_tile(TileId(1), TileId(1)), "old == new");
+        assert_eq!(tree, before);
+    }
+
+    #[test]
+    fn swap_tiles_swaps_positions_without_touching_focus() {
+        let mut tree = grid();
+        let r1 = rect_of(&tree, 1);
+        let r3 = rect_of(&tree, 3);
+        let focused = tree.focused();
+        assert!(tree.swap_tiles(TileId(1), TileId(3)));
+        assert_eq!(rect_of(&tree, 1), r3);
+        assert_eq!(rect_of(&tree, 3), r1);
+        assert_eq!(tree.focused(), focused, "swap alone never moves focus");
+        assert!(!tree.swap_tiles(TileId(1), TileId(1)), "self-swap refused");
+        assert!(!tree.swap_tiles(TileId(1), TileId(99)), "missing id");
     }
 }

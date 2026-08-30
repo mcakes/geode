@@ -408,10 +408,7 @@ mod tests {
         let ws = workspace_with_dock();
         assert_eq!(locate_drop_target(ws.active(), AREA, -5.0, 400.0), None);
         assert_eq!(locate_drop_target(ws.active(), AREA, 500.0, 5000.0), None);
-        assert_eq!(
-            locate_drop_target(ws.active(), AREA, f32::NAN, 400.0),
-            None
-        );
+        assert_eq!(locate_drop_target(ws.active(), AREA, f32::NAN, 400.0), None);
         // Empty main tree, no docks: nothing anywhere.
         let empty = Workspaces::new();
         assert_eq!(locate_drop_target(empty.active(), AREA, 500.0, 400.0), None);
