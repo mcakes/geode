@@ -581,14 +581,50 @@ cardinality — tens or hundreds of rows — not at table cardinality.
 Two distinct mismatches arise between a measure's grain and the rest
 of the query. They get different answers.
 
-**Grouping finer than the measure's grain** — grouping by underlying
-while showing trading PnL. No correct number exists: attributing a
-position's trading PnL to one of its underlyings requires an
-allocation rule, which is financial reasoning and belongs upstream
-(PHILOSOPHY §1). The cell is **NULL** and the column is marked
-`NonAttributable` for that grouping. Repeating the position total on
-each underlying row is rejected — it invites mental double-counting by
-the reader even though no `SUM` is wrong.
+**Grouping mismatched with the measure's grain.** Two properties,
+evaluated per grouping tuple, not per view:
+
+- **Additive** — every measure row belongs to exactly one group. Safe
+  to sum; children total to their parent.
+- **Determined** — the group identifies a unique measure key, so a
+  value exists for the row, but sibling groups repeat it and children
+  do not total to their parent.
+
+That yields three states, carried per column per level as
+`Attribution`:
+
+| State | Condition | Cell |
+|---|---|---|
+| `Additive` | grouping is a function of the measure's key | the aggregate |
+| `DeterminedNonAdditive` | grouping determines a unique measure key but repeats it across siblings | the value, marked |
+| `NonAttributable` | neither | NULL, marked |
+
+Worked example — grouping `lhu > underlying > position`, showing
+trading PnL (position grain):
+
+| Level | Group tuple | State |
+|---|---|---|
+| 1 | `lhu` | `Additive` — every position sits in exactly one LHU |
+| 2 | `lhu, underlying` | `NonAttributable` — a position has several underlyings |
+| 3 | `lhu, underlying, position` | `DeterminedNonAdditive` — the position is identified, but repeats across its underlying siblings under a blank parent |
+
+Greeks, being underlying-grain, are `Additive` at all three levels of
+the same grouping. It is only measures coarser than the grouping path
+that degrade, and they can recover at a deeper level, as level 3 shows.
+
+`NonAttributable` never invents an allocation: attributing a
+position's trading PnL to one of its underlyings is financial
+reasoning and belongs upstream (PHILOSOPHY §1).
+`DeterminedNonAdditive` shows the real number with a marker meaning
+*do not total this column*, because a trader who has drilled to a
+position row should see that position's PnL. The marker must be
+unmistakable — under a blank parent, an unmarked repeated value reads
+as a bug. Rendering it is Phase 3's; computing it is Phase 2's.
+
+Rejected: showing the value on one arbitrary sibling and blanking the
+rest so the visible column totals. It reintroduces the carrier-row
+failure of §3.2 — the number vanishes when scope excludes that
+sibling.
 
 **Scope finer than the measure's grain** — scoping to one underlying
 while showing trading PnL. Here a well-defined answer does exist, and
@@ -627,10 +663,24 @@ want the unscoped total.
 rule.** Rolling cross gamma up by `underlying_ref` is ambiguous:
 canonicalization (§3.3) means an SPX-RUT pair would otherwise land
 only under whichever name sorts first, which is arbitrary. Cross gamma
-is therefore non-attributable to an underlying-level grouping unless
+is therefore `NonAttributable` at an underlying-level grouping unless
 the view definition declares a rule — attribute to both sides, or to
-neither. It aggregates without ceremony to groupings at or coarser
-than instrument, which is the common case.
+neither. It is `Additive` at groupings at or coarser than instrument,
+which is the common case.
+
+**The tree is one query, not one query per node.** A blotter grouping
+is a hierarchy, and every level is a prefix of the grouping tuple, so
+the compiler emits a single `ROLLUP(lhu, underlying, position_ref)`
+returning all levels in one result, with `GROUPING()` identifying the
+level of each row. `Attribution` is computed per level from the schema
+alone and travels with the snapshot.
+
+The consequence matters more than the mechanism: expanding and
+collapsing become pure UI operations against data already in hand —
+§7.1's <8ms budget — rather than a requery per node against the 50ms
+one. Lazy per-node queries remain the fallback if level cardinality
+ever explodes on a deep grouping, which is a benchmark question, not
+an assumption.
 
 ### 6.4 Joins
 
@@ -666,10 +716,12 @@ handoff and interned dimension strings come free. No row objects are
 materialized anywhere.
 
 A snapshot carries its data plus provenance: per-dataset generations
-and source times, health state, and per-column `ScopeSemantics` —
-`Direct`, `SemiJoined { dimensions }`, or `NonAttributable` (§6.3).
-Phase 2 computes those markers; Phase 3 decides how they are drawn.
-The debug tile prints them verbatim.
+and source times, health state, and two orthogonal per-column markers
+from §6.3 — `ScopeSemantics` (`Direct` or `SemiJoined { dimensions }`,
+how the scope was applied) and `Attribution` (`Additive`,
+`DeterminedNonAdditive`, or `NonAttributable`, per grouping level).
+Phase 2 computes both; Phase 3 decides how they are drawn. The debug
+tile prints them verbatim.
 
 ### 6.7 Concurrency and cancellation
 
@@ -761,12 +813,19 @@ No checked-in fixture files (§7.4).
 - **Grain correctness:** the property that matters most — aggregating
   a coarse measure over any grouping and any scope never
   double-counts. Property-tested.
-- **Grain mismatch semantics (§6.3):** a grouping finer than a
-  measure's grain yields NULL marked `NonAttributable`; a scope finer
-  than a measure's grain yields the semi-joined total marked
-  `SemiJoined` with the right dimensions named; the `unscoped` and
-  `blank` per-view overrides do what they say. Asserted on values, not
-  only on markers.
+- **Grain mismatch semantics (§6.3):** over a multi-level grouping,
+  every level gets the right `Attribution` — the `lhu > underlying >
+  position` case must come back `Additive`, `NonAttributable`,
+  `DeterminedNonAdditive` in that order, with the leaf carrying the
+  position's true PnL and level 2 carrying NULL. A scope finer than a
+  measure's grain yields the semi-joined total marked `SemiJoined`
+  with the right dimensions named; the `unscoped` and `blank`
+  per-view overrides do what they say. Asserted on values, not only on
+  markers — a semi-join that silently ignored its predicate would
+  otherwise pass.
+- **Rollup shape:** a `ROLLUP` query returns every level exactly once,
+  `GROUPING()` identifies levels correctly, and children of an
+  `Additive` parent sum to it.
 - **Scope compilation:** property tests that generated scope stacks
   compose to valid, correct SQL (§10.3), plus parser error cases with
   caret positions.
