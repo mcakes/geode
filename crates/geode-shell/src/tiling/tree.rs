@@ -191,7 +191,11 @@ impl Tree {
             }
             (Some(root), Some(focused)) => {
                 self.fullscreen = None;
-                self.root = Some(split_at(root, focused, new, orientation));
+                // `insert_beside` with `after: true` IS the focused-leaf
+                // split (post-merge review cleanup 10 — the previous
+                // `split_at` was a second copy of the same rules minus
+                // the side choice).
+                self.root = Some(insert_beside(root, focused, new, orientation, true));
             }
             // Degenerate: root present but nothing focused. Live verbs
             // keep focused Some whenever root is Some, and restore heals
@@ -207,7 +211,7 @@ impl Tree {
                 match leaves.first().copied() {
                     Some(anchor) => {
                         self.fullscreen = None;
-                        self.root = Some(split_at(root, anchor, new, orientation));
+                        self.root = Some(insert_beside(root, anchor, new, orientation, true));
                     }
                     // Unreachable (every constructible root bottoms out in
                     // at least one leaf), but even then the id survives.
@@ -637,22 +641,13 @@ impl Tree {
         if old == new || !self.contains(old) || self.contains(new) {
             return false;
         }
-        fn rename(node: &mut Node, old: TileId, new: TileId) {
-            match node {
-                Node::Leaf(id) => {
-                    if *id == old {
-                        *id = new;
-                    }
-                }
-                Node::Split { children, .. } => {
-                    for child in children {
-                        rename(child, old, new);
-                    }
-                }
-            }
-        }
+        // `swap_leaves` doubles as the rename walker (post-merge review
+        // cleanup 10 — this method used to carry its own identical
+        // recursion): the guard above just established `new` has no leaf
+        // in this tree, so swapping `old`↔`new` degenerates to exactly
+        // "every `old` leaf becomes `new`" with nothing else touched.
         if let Some(root) = &mut self.root {
-            rename(root, old, new);
+            swap_leaves(root, old, new);
         }
         if self.focused == Some(old) {
             self.focused = Some(new);
@@ -866,55 +861,14 @@ fn collect_leaves(node: &Node, out: &mut Vec<TileId>) {
     }
 }
 
-fn split_at(node: Node, focused: TileId, new: TileId, orientation: Orientation) -> Node {
-    match node {
-        Node::Leaf(id) if id == focused => Node::Split {
-            orientation,
-            children: vec![Node::Leaf(id), Node::Leaf(new)],
-            ratios: vec![0.5, 0.5],
-        },
-        leaf @ Node::Leaf(_) => leaf,
-        Node::Split {
-            orientation: existing,
-            mut children,
-            ratios,
-        } => {
-            if existing == orientation {
-                // Same orientation and the focused leaf is a direct child:
-                // insert as a sibling right after it, equalizing ratios.
-                if let Some(ix) = children
-                    .iter()
-                    .position(|c| matches!(c, Node::Leaf(id) if *id == focused))
-                {
-                    children.insert(ix + 1, Node::Leaf(new));
-                    let n = children.len() as f32;
-                    let ratios = vec![1.0 / n; children.len()];
-                    return Node::Split {
-                        orientation: existing,
-                        children,
-                        ratios,
-                    };
-                }
-            }
-            let children = children
-                .into_iter()
-                .map(|c| split_at(c, focused, new, orientation))
-                .collect();
-            Node::Split {
-                orientation: existing,
-                children,
-                ratios,
-            }
-        }
-    }
-}
-
-/// [`split_at`]'s side-aware sibling (tile-drag task, backing
-/// [`Tree::insert_at_leaf`]): identical structural rules — flat sibling
-/// insert with equalized ratios when the anchor's parent split already has
-/// `orientation`, otherwise wrap the anchor leaf into a new 0.5/0.5 split —
-/// except the anchor is named by id and `after` picks which side `new`
-/// lands on (`split_at` always inserts after the focused leaf).
+/// The one structural insert-beside-a-leaf primitive (tile-drag task,
+/// backing [`Tree::insert_at_leaf`] — and, post-merge review cleanup 10,
+/// [`Tree::split`] too, which is exactly this with `after: true` at the
+/// focused leaf; the tree used to carry a second, `after`-less copy named
+/// `split_at` restating the same rules): flat sibling insert with
+/// equalized ratios when the anchor's parent split already has
+/// `orientation`, otherwise wrap the anchor leaf into a new 0.5/0.5
+/// split, with `after` picking which side `new` lands on.
 fn insert_beside(
     node: Node,
     anchor: TileId,
