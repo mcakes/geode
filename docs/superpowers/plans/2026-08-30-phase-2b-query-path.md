@@ -3059,8 +3059,892 @@ under an underlying, and 7 twice at the leaves — never 14."
 
 ---
 
-**Remaining tasks (6–14) continue below.** Task 6 cross-dataset joins;
-Task 7 the `Snapshot` type; Task 8 the ENUM interning carried over from 2a;
-Tasks 9–10 the query pool with cancellation and as-of routing; Task 11 the
-`DataService` facade; Task 12 the throwaway debug tile; Task 13 the §7.1
-requery benchmarks; Task 14 cross-file conflict detection.
+### Task 6: Cross-dataset joins
+
+**Files:**
+- Modify: `crates/geode-data/src/query/compile.rs`
+
+**Interfaces:**
+- Consumes: `JoinSpec` from Task 2, `CompiledQuery` from Task 5.
+- Produces: no new types — `compile_view` gains join handling, and
+  `CompiledQuery` gains `pub stalest_input: Vec<String>` naming every
+  dataset the query reads, so Task 7 can apply §5.4's stalest-input rule.
+
+**Two joins are day-one** (spec §6.4): `measures_* ⋈ instrument_ref` on
+`instrument_ref`, and `measures_underlying ⋈ implied_vol_summary` on
+`underlying_ref`. The first is what puts strike and expiry on a blotter
+row; the second is the motivating vol-inline case.
+
+**A joined view is as stale as its stalest input** (spec §5.4), so the
+compiler records which datasets it touched rather than leaving the caller
+to guess.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the test module in `crates/geode-data/src/query/compile.rs`:
+
+```rust
+    fn joined_schema() -> SchemaSpec {
+        let mut text = String::from(
+            r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.underlying2_ref]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[instrument_ref.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+"#,
+        );
+        text.push('\n');
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0
+    }
+
+    fn joined_view() -> ViewSpec {
+        let text = r#"
+[with_ref]
+dataset = "risk_snapshot"
+grouping = ["instrument_ref"]
+[[with_ref.joins]]
+dataset = "instrument_ref"
+on = ["instrument_ref"]
+[[with_ref.columns]]
+name = "delta01"
+kind = "measure"
+[[with_ref.columns]]
+name = "strike"
+kind = "dimension"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_join_puts_reference_columns_on_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let schema = joined_schema();
+        store.apply_schema(schema.dataset("risk_snapshot").unwrap()).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table instrument_ref_live(
+                     instrument_ref varchar, strike double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 insert into instrument_ref_live values ('I1', 4200.0, 'b', 1, 1, now());
+                 insert into measures_underlying_live values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, now());
+                 insert into measures_underlying_pair_live values
+                   ('BK0','L0','P1','C','I1','RUT','SPX', 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+        )
+        .unwrap();
+
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let strikes: Vec<Option<f64>> = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| r.get("strike"))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(
+            strikes.iter().any(|s| *s == Some(4200.0)),
+            "the joined strike must reach the row: {strikes:?}"
+        );
+    }
+
+    #[test]
+    fn every_dataset_read_is_recorded_for_the_stalest_input_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let schema = joined_schema();
+        store.apply_schema(schema.dataset("risk_snapshot").unwrap()).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table instrument_ref_live(
+                     instrument_ref varchar, strike double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);",
+            )
+            .unwrap();
+
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+        )
+        .unwrap();
+        let mut inputs = q.stalest_input.clone();
+        inputs.sort();
+        assert_eq!(inputs, vec!["instrument_ref", "risk_snapshot"]);
+    }
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data compile`
+Expected: FAIL — `no field stalest_input`.
+
+- [ ] **Step 3: Implement joins**
+
+In `crates/geode-data/src/query/compile.rs`, add the field to
+`CompiledQuery`:
+
+```rust
+    /// Every dataset the query reads. A joined view is as stale as its
+    /// stalest input (spec §5.4), and the caller cannot compute that
+    /// without knowing which datasets were touched.
+    pub stalest_input: Vec<String>,
+```
+
+Inside `compile_view`, after the measure-grain loop and before derived
+columns, join each declared dataset and select its columns:
+
+```rust
+    // Cross-dataset joins (spec §6.4). Join keys are declared in schema
+    // config; the joined dataset's live table is joined once and its
+    // columns selected through it.
+    let mut stalest_input = vec![view.dataset.clone()];
+    for (i, join) in view.joins.iter().enumerate() {
+        let Some(joined_ds) = schema.dataset(&join.dataset) else {
+            continue;
+        };
+        stalest_input.push(join.dataset.clone());
+        let alias = format!("join_{i}");
+        let table = format!("{}_live", join.dataset);
+
+        // The spine carries every key column, so the join keys resolve
+        // against it.
+        let on = join
+            .on
+            .iter()
+            .map(|k| format!("{alias}.\"{k}\" is not distinct from s.\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        joins.push(format!("left join {table} {alias} on {on}"));
+
+        for c in &view.columns {
+            let ViewColumn::Dimension { name } = c else {
+                continue;
+            };
+            if joined_ds.column(name).is_none() || view.grouping.contains(name) {
+                continue;
+            }
+            // A joined attribute is constant within its own grain, so it
+            // is meaningful only where the grouping reaches that grain;
+            // above it, several instruments share the row.
+            selects.push(format!("any_value({alias}.\"{name}\") as \"{name}\""));
+            columns.push(CompiledColumn {
+                name: name.clone(),
+                grain: joined_ds.column(name).and_then(|c| c.grain()),
+                attribution_by_depth: (0..=n)
+                    .map(|d| match joined_ds.column(name).and_then(|c| c.grain()) {
+                        Some(g) => attribution_of(g, &view.grouping[..d], dims),
+                        None => Attribution::Additive,
+                    })
+                    .collect(),
+                scope_semantics: ScopeSemantics::Direct,
+            });
+        }
+    }
+```
+
+The `any_value` needs the outer select to aggregate, so wrap the outer
+query in a `group by` over the spine columns when any join is present.
+Replace the final `sql` construction with:
+
+```rust
+    let outer_group = if view.joins.is_empty() {
+        String::new()
+    } else {
+        let mut keys: Vec<String> = view
+            .grouping
+            .iter()
+            .map(|g| format!("s.\"{g}\""))
+            .collect();
+        keys.push("s.depth_mask".to_string());
+        // Every non-aggregated selected column must be grouped; measures
+        // arrive pre-aggregated from their CTEs, so they group by value.
+        for c in &columns {
+            if c.grain.is_some() && !view.grouping.contains(&c.name) {
+                keys.push(format!("\"{}\"", c.name));
+            }
+        }
+        format!(" group by {}", keys.join(", "))
+    };
+
+    let sql = format!(
+        "with {ctes} select {selects} from spine s {joins}{outer_group}{order}",
+        ctes = ctes.join(",\n"),
+        selects = selects.join(", "),
+        joins = joins.join(" "),
+    );
+
+    Ok(CompiledQuery {
+        sql,
+        params,
+        temp_tables,
+        grouping: view.grouping.clone(),
+        columns,
+        stalest_input,
+    })
+```
+
+Update the earlier `Ok(CompiledQuery { … })` in Task 5's implementation to
+this final form — there is only one construction site.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-data compile`
+Expected: PASS (9 tests).
+
+- [ ] **Step 5: Lint, format, commit**
+
+```bash
+cargo fmt && cargo clippy -p geode-data --all-targets -- -D warnings
+git add crates/geode-data
+git commit -m "feat(data): cross-dataset joins in the view compiler
+
+Joins the declared datasets onto the spine on their configured keys, so
+instrument reference columns reach the blotter row and the vol-inline
+case works. A joined attribute is constant within its own grain, so it is
+selected with any_value and carries the attribution of that grain — above
+it, several instruments share the row.
+
+CompiledQuery records every dataset read, because a joined view is as
+stale as its stalest input (spec §5.4) and the caller cannot work that
+out without knowing what was touched."
+```
+
+---
+
+### Task 7: The `Snapshot` type
+
+**Files:**
+- Create: `crates/geode-core/src/snapshot.rs`
+- Modify: `crates/geode-core/src/lib.rs`
+- Modify: `crates/geode-core/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `Attribution`, `ScopeSemantics`, `Grain`.
+- Produces: `Snapshot`, `ColumnMeta`, `Provenance`, `Freshness`,
+  `Snapshot::{rows, column_names, f64_column, str_column, i64_column,
+  depth_of_row, meta, provenance}`. Tasks 9, 11 and 12 consume it.
+
+**Arrow stays an implementation detail** (spec §6.6): `geode-core` depends
+on `arrow` so the accessors can be zero-copy, but the type modules see is
+`Snapshot`, with typed accessors returning plain slices. Nothing outside
+this file names an Arrow type.
+
+**`query_arrow` yields 2048-row batches, not one** (verified against
+1.10505), so a column-wide `&[f64]` needs concatenation. `Snapshot`
+concatenates once at construction: blotter results are *aggregates* — one
+row per visible group — while the million rows are scanned inside DuckDB
+and never cross the boundary.
+
+- [ ] **Step 1: Add the arrow dependency**
+
+In `crates/geode-core/Cargo.toml`:
+
+```toml
+[dependencies]
+arrow = "58.4.0"
+```
+
+The version must match the one duckdb-rs re-exports, or the two crates'
+`RecordBatch` types are different types. Check with
+`cargo tree -p geode-data -i arrow` and pin to what that reports.
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `crates/geode-core/src/snapshot.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::attribution::{Attribution, ScopeSemantics};
+    use arrow::array::{Float64Array, Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    /// Two batches, so concatenation is actually exercised — this is the
+    /// shape query_arrow really returns.
+    fn batches() -> Vec<RecordBatch> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("book", DataType::Utf8, true),
+            Field::new("depth_mask", DataType::Int64, true),
+            Field::new("delta01", DataType::Float64, true),
+        ]));
+        let one = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![Some("BK000"), None])),
+                Arc::new(Int64Array::from(vec![0, 1])),
+                Arc::new(Float64Array::from(vec![Some(10.0), Some(30.0)])),
+            ],
+        )
+        .unwrap();
+        let two = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("BK001")])),
+                Arc::new(Int64Array::from(vec![0])),
+                Arc::new(Float64Array::from(vec![Some(20.0)])),
+            ],
+        )
+        .unwrap();
+        vec![one, two]
+    }
+
+    fn meta() -> Vec<ColumnMeta> {
+        vec![
+            ColumnMeta {
+                name: "book".into(),
+                attribution_by_depth: vec![Attribution::Additive; 2],
+                scope_semantics: ScopeSemantics::Direct,
+            },
+            ColumnMeta {
+                name: "depth_mask".into(),
+                attribution_by_depth: vec![Attribution::Additive; 2],
+                scope_semantics: ScopeSemantics::Direct,
+            },
+            ColumnMeta {
+                name: "delta01".into(),
+                attribution_by_depth: vec![Attribution::Additive; 2],
+                scope_semantics: ScopeSemantics::Direct,
+            },
+        ]
+    }
+
+    fn snapshot() -> Snapshot {
+        Snapshot::from_batches(batches(), meta(), 1, Provenance::default()).unwrap()
+    }
+
+    #[test]
+    fn concatenates_batches_into_one_addressable_column() {
+        let s = snapshot();
+        assert_eq!(s.rows(), 3, "both batches, not just the first");
+        assert_eq!(s.f64_column("delta01").unwrap(), &[10.0, 30.0, 20.0]);
+    }
+
+    #[test]
+    fn string_columns_read_by_row_including_nulls() {
+        let s = snapshot();
+        assert_eq!(s.str_column("book").unwrap().value(0), "BK000");
+        assert!(s.str_column("book").unwrap().is_null(1));
+    }
+
+    #[test]
+    fn an_unknown_or_mistyped_column_is_none_not_a_panic() {
+        let s = snapshot();
+        assert!(s.f64_column("nonesuch").is_none());
+        assert!(s.f64_column("book").is_none(), "wrong type must not panic");
+    }
+
+    #[test]
+    fn depth_is_decoded_from_the_grouping_bitmask() {
+        // n = 1: mask 0 is the leaf, mask 1 the grand total.
+        let s = snapshot();
+        assert_eq!(s.depth_of_row(0), Some(1));
+        assert_eq!(s.depth_of_row(1), Some(0));
+    }
+
+    #[test]
+    fn column_metadata_is_addressable_by_name() {
+        let s = snapshot();
+        assert_eq!(
+            s.meta("delta01").unwrap().attribution_by_depth[1],
+            Attribution::Additive
+        );
+        assert!(s.meta("nonesuch").is_none());
+    }
+
+    #[test]
+    fn freshness_reports_the_stalest_input() {
+        // A joined view is as stale as its stalest input (spec §5.4).
+        let mut p = Provenance::default();
+        p.datasets.push(Freshness {
+            dataset: "risk_snapshot".into(),
+            as_of: Some("2026-08-30T14:32:00Z".into()),
+            generation: 47,
+        });
+        p.datasets.push(Freshness {
+            dataset: "implied_vol_summary".into(),
+            as_of: Some("2026-08-30T07:00:00Z".into()),
+            generation: 3,
+        });
+        let s = Snapshot::from_batches(batches(), meta(), 1, p).unwrap();
+        assert_eq!(
+            s.provenance().stalest().map(|f| f.dataset.as_str()),
+            Some("implied_vol_summary")
+        );
+    }
+
+    #[test]
+    fn an_empty_result_is_a_valid_snapshot() {
+        let s = Snapshot::from_batches(Vec::new(), meta(), 1, Provenance::default()).unwrap();
+        assert_eq!(s.rows(), 0);
+        assert!(s.f64_column("delta01").is_none_or(|c| c.is_empty()));
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `cargo test -p geode-core snapshot`
+Expected: FAIL — `cannot find struct Snapshot`.
+
+- [ ] **Step 4: Implement `Snapshot`**
+
+Prepend to `crates/geode-core/src/snapshot.rs`:
+
+```rust
+//! The immutable columnar result handed to the UI (spec §6.6).
+//!
+//! Arrow is an implementation detail: modules see `Snapshot` and typed
+//! accessors returning plain slices, and nothing outside this file names
+//! an Arrow type. Snapshots are `Arc`-shared, so handoff is a pointer
+//! swap (§7.2) and no row objects are materialized anywhere.
+//!
+//! `query_arrow` returns 2048-row batches, so a column-wide slice needs
+//! concatenation. That happens once here, at construction: blotter
+//! results are aggregates — one row per visible group — while the million
+//! rows are scanned inside DuckDB and never cross this boundary.
+
+use crate::attribution::{Attribution, ScopeSemantics};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+use arrow::compute::concat_batches;
+use arrow::record_batch::RecordBatch;
+
+#[derive(Debug, Clone)]
+pub struct ColumnMeta {
+    pub name: String,
+    /// Indexed by depth; see [`Snapshot::depth_of_row`].
+    pub attribution_by_depth: Vec<Attribution>,
+    pub scope_semantics: ScopeSemantics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Freshness {
+    pub dataset: String,
+    /// RFC 3339, or `None` when the dataset has never loaded.
+    pub as_of: Option<String>,
+    pub generation: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Provenance {
+    pub datasets: Vec<Freshness>,
+    /// Set when the result came from the archive rather than live.
+    pub as_of_request: Option<String>,
+}
+
+impl Provenance {
+    /// The stalest input. A joined view is as stale as this (spec §5.4),
+    /// and a tile mixing cadences shows per-dataset freshness rather than
+    /// one misleading timestamp.
+    pub fn stalest(&self) -> Option<&Freshness> {
+        self.datasets
+            .iter()
+            .filter(|f| f.as_of.is_some())
+            .min_by(|a, b| a.as_of.cmp(&b.as_of))
+    }
+}
+
+#[derive(Debug)]
+pub struct Snapshot {
+    batch: Option<RecordBatch>,
+    meta: Vec<ColumnMeta>,
+    /// Number of grouping columns, for decoding the depth bitmask.
+    grouping_len: usize,
+    provenance: Provenance,
+}
+
+impl Snapshot {
+    pub fn from_batches(
+        batches: Vec<RecordBatch>,
+        meta: Vec<ColumnMeta>,
+        grouping_len: usize,
+        provenance: Provenance,
+    ) -> Result<Snapshot, arrow::error::ArrowError> {
+        let batch = match batches.first() {
+            None => None,
+            Some(first) => Some(concat_batches(&first.schema(), &batches)?),
+        };
+        Ok(Snapshot {
+            batch,
+            meta,
+            grouping_len,
+            provenance,
+        })
+    }
+
+    pub fn rows(&self) -> usize {
+        self.batch.as_ref().map_or(0, |b| b.num_rows())
+    }
+
+    pub fn column_names(&self) -> Vec<&str> {
+        self.meta.iter().map(|m| m.name.as_str()).collect()
+    }
+
+    pub fn meta(&self, name: &str) -> Option<&ColumnMeta> {
+        self.meta.iter().find(|m| m.name == name)
+    }
+
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    fn column(&self, name: &str) -> Option<&dyn Array> {
+        let batch = self.batch.as_ref()?;
+        let idx = batch.schema().index_of(name).ok()?;
+        Some(batch.column(idx).as_ref())
+    }
+
+    /// Zero-copy over the whole column. `None` when absent or not f64 —
+    /// never a panic, because a view can name a column the data lacks.
+    pub fn f64_column(&self, name: &str) -> Option<&[f64]> {
+        Some(self.column(name)?.as_any().downcast_ref::<Float64Array>()?.values())
+    }
+
+    pub fn i64_column(&self, name: &str) -> Option<&[i64]> {
+        Some(self.column(name)?.as_any().downcast_ref::<Int64Array>()?.values())
+    }
+
+    /// Strings are returned as the Arrow array: offsets make a `&[&str]`
+    /// impossible without allocating, and the renderer reads by row.
+    pub fn str_column(&self, name: &str) -> Option<&StringArray> {
+        self.column(name)?.as_any().downcast_ref::<StringArray>()
+    }
+
+    /// How many grouping columns are present on this row. The compiler
+    /// emits `grouping(...)` as `depth_mask`; under ROLLUP a level with
+    /// `d` of `n` columns present has mask `2^(n-d) - 1`.
+    pub fn depth_of_row(&self, row: usize) -> Option<usize> {
+        let mask = *self.i64_column("depth_mask")?.get(row)?;
+        (0..=self.grouping_len).find(|d| ((1i64 << (self.grouping_len - d)) - 1).max(0) == mask)
+    }
+}
+```
+
+Add to `crates/geode-core/src/lib.rs`:
+
+```rust
+pub mod snapshot;
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cargo test -p geode-core snapshot`
+Expected: PASS (7 tests).
+
+- [ ] **Step 6: Lint, format, commit**
+
+```bash
+cargo fmt && cargo clippy -p geode-core --all-targets -- -D warnings
+git add crates/geode-core
+git commit -m "feat(core): Snapshot with typed zero-copy accessors
+
+The immutable columnar result the UI reads. Arrow is an implementation
+detail — modules see Snapshot and slices, and nothing outside the module
+names an Arrow type.
+
+query_arrow returns 2048-row batches, so a column-wide slice needs
+concatenation; that happens once at construction, which is cheap because
+blotter results are aggregates while the million rows stay inside DuckDB.
+The concatenation is asserted with a two-batch fixture rather than a
+single-batch one that would pass either way.
+
+Carries provenance: per-dataset freshness with a stalest() accessor, so a
+tile mixing cadences can show per-dataset times rather than one
+misleading timestamp (spec §5.4)."
+```
+
+---
+
+### Task 8: ENUM dictionary encoding (carried over from 2a)
+
+**Files:**
+- Modify: `crates/geode-data/src/store/ddl.rs`
+- Modify: `crates/geode-data/src/ingest/load.rs`
+- Modify: `crates/geode-core/src/snapshot.rs`
+
+**Interfaces:**
+- Consumes: `DatasetSpec`, `Store`.
+- Produces: `ddl::enum_type_sql(&DatasetSpec) -> Vec<String>`,
+  `widen_enum(&Connection, &str, &[String]) -> Result<usize, StoreError>`,
+  and `Snapshot::dict_column(name) -> Option<(&[u8], &StringArray)>`.
+
+**Why now and not in 2a.** Spec §3.6 requires dimension columns to be
+DuckDB `ENUM` so §7.2's "interned at ingest" holds — a plain `VARCHAR`
+comes back `StringArray`, not `Dictionary(UInt8, Utf8)`, verified against
+1.10505. 2a deferred it because nothing there read a snapshot and so
+nothing could measure the benefit. Task 13 measures it.
+
+**This is a stored-type change**, so it needs a rebuilt database rather
+than a migration — cheap, because the database is derived from the CSVs.
+The load pipeline widens an ENUM when a new dimension value appears, which
+is a metadata operation on the small vocabularies this applies to.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to the test module in `crates/geode-data/src/store/ddl.rs`:
+
+```rust
+    #[test]
+    fn dimension_columns_are_declared_as_enums() {
+        let ds = sample_dataset();
+        let types = enum_type_sql(&ds);
+        assert!(
+            types.iter().any(|t| t.contains("book_enum")),
+            "a dimension needs an ENUM type so it returns dictionary-encoded: {types:?}"
+        );
+        let sql = create_table_sql(&ds, Grain::Position, TableKind::Live);
+        assert!(sql.contains("\"book\" book_enum"), "{sql}");
+        // Keys and measures are unaffected.
+        assert!(sql.contains("\"daily_trading_pnl\" DOUBLE"), "{sql}");
+    }
+
+    #[test]
+    fn live_and_archive_still_have_identical_columns_with_enums() {
+        let ds = sample_dataset();
+        for grain in [Grain::Position, Grain::Underlying] {
+            let live = create_table_sql(&ds, grain, TableKind::Live);
+            let archive = create_table_sql(&ds, grain, TableKind::Archive);
+            let cols = |sql: &str| {
+                sql.lines()
+                    .filter(|l| l.trim_start().starts_with('"'))
+                    .map(|l| l.trim().trim_end_matches(',').to_string())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(cols(&live), cols(&archive), "grain {grain:?}");
+        }
+    }
+```
+
+Add to the test module in `crates/geode-data/src/ingest/load.rs`:
+
+```rust
+    #[test]
+    fn a_new_dimension_value_widens_the_enum_rather_than_failing() {
+        // Vocabularies grow: a new book must not fail the load.
+        let f = fixture();
+        let file = ready_file(&f);
+        load(&f, file);
+        let added = crate::store::ddl::widen_enum(
+            f.store.writer(),
+            "book_enum",
+            &["BK999".to_string()],
+        )
+        .unwrap();
+        assert_eq!(added, 1);
+        // Idempotent: widening with a value already present adds nothing.
+        let again = crate::store::ddl::widen_enum(
+            f.store.writer(),
+            "book_enum",
+            &["BK999".to_string()],
+        )
+        .unwrap();
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn dimension_columns_come_back_dictionary_encoded() {
+        // This is what §7.2's "interned at ingest" actually requires.
+        let f = fixture();
+        let file = ready_file(&f);
+        load(&f, file);
+        let conn = f.store.writer();
+        let mut stmt = conn
+            .prepare("select book from measures_position_live limit 10")
+            .unwrap();
+        let batches: Vec<duckdb::arrow::record_batch::RecordBatch> =
+            stmt.query_arrow([]).unwrap().collect();
+        assert!(
+            matches!(
+                batches[0].schema().field(0).data_type(),
+                duckdb::arrow::datatypes::DataType::Dictionary(_, _)
+            ),
+            "got {:?}",
+            batches[0].schema().field(0).data_type()
+        );
+    }
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data enum`
+Expected: FAIL — `cannot find function enum_type_sql`.
+
+- [ ] **Step 3: Implement ENUM types and widening**
+
+In `crates/geode-data/src/store/ddl.rs`, add:
+
+```rust
+/// The ENUM type name for a dimension column.
+pub fn enum_type_name(column: &str) -> String {
+    format!("{column}_enum")
+}
+
+/// `CREATE TYPE` statements for every dimension column in the dataset.
+///
+/// Dimension columns are stored as ENUM so they return
+/// `Dictionary(UInt8, Utf8)` rather than `StringArray` — which is what
+/// §7.2's "interned at ingest" requires, and what lets the renderer
+/// compare and format on small integer codes (spec §3.6, §6.6).
+///
+/// Types start empty and are widened by ingest as values appear.
+pub fn enum_type_sql(ds: &DatasetSpec) -> Vec<String> {
+    ds.columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Dimension))
+        .map(|c| {
+            format!(
+                "CREATE TYPE IF NOT EXISTS {} AS ENUM ()",
+                enum_type_name(&c.name)
+            )
+        })
+        .collect()
+}
+
+/// Add values to an ENUM that are not already in it. Returns how many
+/// were added. A metadata operation, on vocabularies of tens to hundreds.
+pub fn widen_enum(
+    conn: &duckdb::Connection,
+    type_name: &str,
+    values: &[String],
+) -> Result<usize, crate::store::StoreError> {
+    let mut added = 0;
+    for v in values {
+        let sql = format!(
+            "ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{}'",
+            v.replace('\'', "''")
+        );
+        match conn.execute_batch(&sql) {
+            Ok(()) => added += 1,
+            Err(source) => {
+                return Err(crate::store::StoreError::Sql {
+                    statement: sql,
+                    source,
+                });
+            }
+        }
+    }
+    Ok(added)
+}
+```
+
+> **Implementer note:** DuckDB's `ADD VALUE IF NOT EXISTS` succeeds
+> silently when the value is present, so `added` over-counts. Make the
+> function query `enum_range(NULL::<type>)` first and only issue `ALTER`
+> for genuinely new values — the test asserts the idempotent case returns
+> 0, which forces this.
+
+In `create_table_sql`, use the ENUM type for dimension columns:
+
+```rust
+        let ty = match ds.column(key) {
+            Some(c) if matches!(c.role, ColumnRole::Dimension) => enum_type_name(key),
+            Some(c) => c.ty.sql().to_string(),
+            None => "VARCHAR".to_string(),
+        };
+        cols.push(format!("  \"{key}\" {ty}"));
+```
+
+In `Store::apply_schema`, run `enum_type_sql` before the table DDL.
+
+In `crates/geode-data/src/ingest/load.rs`, before the publish step, widen
+each dimension ENUM with the distinct values the staged rows carry.
+
+- [ ] **Step 4: Add `dict_column` to `Snapshot`**
+
+In `crates/geode-core/src/snapshot.rs`:
+
+```rust
+    /// A dictionary-encoded dimension column: per-row codes plus the
+    /// shared value dictionary. The renderer compares and formats on the
+    /// codes rather than the strings (spec §7.2).
+    pub fn dict_column(&self, name: &str) -> Option<(&[u8], &StringArray)> {
+        use arrow::array::DictionaryArray;
+        use arrow::datatypes::UInt8Type;
+        let arr = self
+            .column(name)?
+            .as_any()
+            .downcast_ref::<DictionaryArray<UInt8Type>>()?;
+        let values = arr.values().as_any().downcast_ref::<StringArray>()?;
+        Some((arr.keys().values(), values))
+    }
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cargo test -p geode-data && cargo test -p geode-core snapshot`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+cargo fmt && cargo clippy --workspace --all-targets -- -D warnings
+git add crates/geode-data crates/geode-core
+git commit -m "feat(data): ENUM dictionary encoding for dimension columns
+
+Carried over from phase 2a, which deferred it because nothing there read
+a snapshot and so nothing could measure the benefit.
+
+Dimension columns are stored as DuckDB ENUM so they return
+Dictionary(UInt8, Utf8) rather than StringArray — which is what §7.2's
+'interned at ingest' actually requires, and what lets the renderer
+compare and format on small integer codes. Ingest widens an ENUM when a
+new value appears, which is a metadata operation on vocabularies of tens
+to hundreds.
+
+A stored-type change, so it needs a rebuilt database rather than a
+migration — cheap, because the database is derived from the CSVs."
+```
+
+---
+
+**Remaining tasks (9–14) continue below.** Tasks 9–10 the query pool with
+cancellation and as-of routing; Task 11 the `DataService` facade; Task 12
+the throwaway debug tile; Task 13 the §7.1 requery benchmarks; Task 14
+cross-file conflict detection.
