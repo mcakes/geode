@@ -4422,6 +4422,104 @@ mod tests {
     /// `settings::open` (dispatched via `ctrl+,`, the palette, or the
     /// sidebar profile icon) opens the real settings modal (Task 5, Task 9
     /// instant-modal redesign): `shell.modal` flips `Some`, and the modal
+    /// Every shell dialog's panel starts at the same top edge —
+    /// `dialog::MODAL_TOP_RATIO` of the viewport below the backdrop's own
+    /// top — rather than being vertically centered (user direction:
+    /// differently-sized dialogs centering to different heights defeats
+    /// spatial memory; a shared top edge is what the eye expects). Proven
+    /// across two differently-sized dialogs: settings (tall) and keyboard
+    /// shortcuts must paint their panels at the SAME y, at exactly the
+    /// ratio offset.
+    #[gpui::test]
+    fn all_shell_dialogs_share_the_same_top_edge(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        let open_and_measure = |cx: &mut gpui::VisualTestContext, action: &str| {
+            cx.update(|window, cx| {
+                shell.update(cx, |shell, cx| {
+                    shell.dispatch(&ActionId(action.to_string()), window, cx);
+                });
+            });
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            let backdrop = cx
+                .debug_bounds("shell-modal-backdrop")
+                .expect("backdrop painted");
+            let panel = cx.debug_bounds("shell-modal-panel").expect("panel painted");
+            // Close again (escape path) so the next dialog can open.
+            cx.simulate_keystrokes("escape");
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            (
+                f32::from(panel.origin.y) - f32::from(backdrop.origin.y),
+                f32::from(backdrop.size.height),
+                f32::from(backdrop.origin.y),
+            )
+        };
+
+        let (settings_top, backdrop_height, backdrop_origin_y) =
+            open_and_measure(&mut cx, "settings::open");
+        let (keybindings_top, _, _) = open_and_measure(&mut cx, "keybindings::open");
+
+        let expected = backdrop_height * dialog::MODAL_TOP_RATIO;
+        assert!(
+            (settings_top - expected).abs() < 1.0,
+            "the settings panel should start MODAL_TOP_RATIO down the \
+             backdrop, expected {expected}, got {settings_top}"
+        );
+        assert_eq!(
+            settings_top, keybindings_top,
+            "differently-sized dialogs must share the same top edge, got \
+             {settings_top} vs {keybindings_top}"
+        );
+
+        // The command palette shares the line too (user direction: it's
+        // dialog-like). It renders in the same coordinate space the modal
+        // backdrop does (both absolute children of ShellView's root), so
+        // the captured backdrop origin is the shared reference point.
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("palette::toggle".to_string()), window, cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let palette_panel = cx
+            .debug_bounds("palette-panel")
+            .expect("palette panel painted");
+        let palette_top = f32::from(palette_panel.origin.y) - backdrop_origin_y;
+        assert!(
+            (palette_top - expected).abs() < 1.0,
+            "the palette panel should start on the same shared top edge, \
+             expected {expected}, got {palette_top}"
+        );
+    }
+
     /// chrome (`dialog::render_modal` — backdrop + panel + title row +
     /// settings content) actually paints, checked two ways: it adds quads
     /// over the empty-workspace baseline, AND its backdrop/panel

@@ -224,6 +224,15 @@ pub fn open_shell_dialog_with_key<F>(
 /// independent use of this ratio is required rather than one being enough.
 pub(crate) const MODAL_MAX_HEIGHT_RATIO: f32 = 0.8;
 
+/// Fraction of the viewport height every modal's top edge sits below the
+/// backdrop's top (user direction: dialogs share one top edge rather than
+/// centering vertically — differently-sized dialogs centering to
+/// different heights defeats spatial memory). 0.1 pairs with
+/// [`MODAL_MAX_HEIGHT_RATIO`]'s 0.8: a full-height dialog gets the same
+/// 10% margin below as above, and anything smaller hangs from the shared
+/// top edge.
+pub(crate) const MODAL_TOP_RATIO: f32 = 0.1;
+
 /// Vertical space [`render_modal`]'s own chrome — the title row
 /// (`.text_lg()` title + small ghost close button) plus the panel's
 /// `pt_4()`/`pb_4()`/`gap_3()` — takes up around the content region, in
@@ -243,7 +252,9 @@ pub(crate) const MODAL_CHROME_ALLOWANCE: f32 = 96.;
 /// Render one open modal's chrome: a full-window backdrop on
 /// `cx.theme().overlay` (the same token gpui-component's own `Dialog`
 /// overlay uses — `overlay_color`, pinned checkout `crates/ui/src/dialog/
-/// dialog.rs`), centered over it a panel on `cx.theme().popover`/
+/// dialog.rs`), and over it — horizontally centered, top edge anchored at
+/// [`MODAL_TOP_RATIO`] so every dialog starts at the same line — a panel
+/// on `cx.theme().popover`/
 /// `popover_foreground` with a `cx.theme().border` border and the *same*
 /// double box-shadow that `Dialog`'s own entrance animation converges to at
 /// `delta = 1.0` (i.e. its fully-open, fully-opaque end state) — reproduced
@@ -357,8 +368,12 @@ pub(crate) fn render_modal(
         .w(px(viewport_width))
         .h(px(viewport_height))
         .flex()
-        .items_center()
+        // Horizontally centered, top-anchored at MODAL_TOP_RATIO (not
+        // `items_center`'s vertical centering — see that constant's doc):
+        // every dialog's top edge lands on the same line.
+        .items_start()
         .justify_center()
+        .pt(px(viewport_height * MODAL_TOP_RATIO))
         .bg(overlay)
         .debug_selector(|| "shell-modal-backdrop".to_string())
         .on_mouse_down(

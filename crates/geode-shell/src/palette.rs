@@ -438,7 +438,9 @@ fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> Sty
     StyledText::new(title.to_string()).with_highlights(runs.into_iter().map(|r| (r, style)))
 }
 
-/// The palette overlay: a centered, top-third, ~560px-wide panel on
+/// The palette overlay: a horizontally centered ~560px-wide panel, top
+/// edge on the same line as every shell dialog
+/// (`dialog::MODAL_TOP_RATIO`), on
 /// `cx.theme().popover`, a real gpui-component `Input` for the query
 /// (`query_input` — native caret/selection/clipboard, see this module's own
 /// doc comment for the routing story), and every filtered result inside a
@@ -511,7 +513,10 @@ pub fn render(
     let theme = cx.theme();
     let width = WIDTH.min((viewport_width - 32.0).max(160.0));
     let left = ((viewport_width - width) / 2.0).max(0.0);
-    let top = (viewport_height / 3.0).max(0.0);
+    // Same top edge as every shell dialog (`dialog::MODAL_TOP_RATIO`, user
+    // direction — the palette is dialog-like, and one shared line beats a
+    // separate top-third anchor for spatial memory).
+    let top = (viewport_height * crate::shell::dialog::MODAL_TOP_RATIO).max(0.0);
 
     let results = state.filtered();
 
