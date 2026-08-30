@@ -53,10 +53,9 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, MouseButton, StyledText, Window,
-    div, px,
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, StyledText,
+    Window, div, px,
 };
-use gpui_component::kbd::Kbd;
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use geode_core::config::Layer;
@@ -434,21 +433,25 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
     );
 }
 
-/// Convert this crate's own [`Keystroke`] into `gpui::Keystroke` for
-/// [`Kbd::new`] — the reverse of `shell::keys::convert_keystroke`, and the
-/// only place this module touches `gpui::Keystroke`'s fields directly.
-fn to_gpui_keystroke(ks: &Keystroke) -> gpui::Keystroke {
-    gpui::Keystroke {
-        modifiers: gpui::Modifiers {
-            control: ks.mods.ctrl,
-            alt: ks.mods.alt,
-            shift: ks.mods.shift,
-            platform: ks.mods.cmd,
-            function: false,
-        },
-        key: ks.key.clone(),
-        key_char: None,
-    }
+/// One keystroke as a small muted pill — the look of gpui-component's
+/// `Kbd`, but labeled with [`palette::render_keystroke`]'s lowercase
+/// `ctrl+k` text in the data face, matching how the palette and which-key
+/// render bindings (`Kbd` itself hardwires uppercase key names, so this
+/// dialog stopped routing through it).
+fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
+    div()
+        .font_family(crate::fonts::MONO)
+        .text_xs()
+        .text_color(fg)
+        .bg(bg)
+        .px_1()
+        .py_0p5()
+        .min_w_5()
+        .text_center()
+        .rounded(px(4.))
+        .flex_shrink_0()
+        .child(palette::render_keystroke(ks))
+        .into_any_element()
 }
 
 /// The [`dialog::ModalKeyHandler`] for this dialog: while listening, every
@@ -650,7 +653,7 @@ fn highlighted_text(text: &str, query: Option<&str>, primary: gpui::Hsla) -> Any
 }
 
 /// The [`dialog::ShellModal::build`] closure body: a scrollable row list
-/// (title + category on the left, the current binding as [`Kbd`] chips —
+/// (title + category on the left, the current binding as [`key_chip`]s —
 /// or "unbound" — on the right, live capture chips while listening) plus a
 /// muted footer hint. `entity` is the `Entity<ShellView>` every row's click
 /// handler captures to reach [`on_row_clicked`] later, at click time —
@@ -668,6 +671,10 @@ fn build(
     };
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let theme = cx.theme();
+    // Copied out so [`key_chip`] and the render closures below don't have
+    // to hold the `theme` borrow.
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
     let hl_query = highlight_query(state);
 
     let mut list = v_flex()
@@ -717,11 +724,7 @@ fn build(
             } else {
                 h_flex()
                     .gap_1()
-                    .children(
-                        pending
-                            .iter()
-                            .map(|ks| Kbd::new(to_gpui_keystroke(ks)).into_any_element()),
-                    )
+                    .children(pending.iter().map(|ks| key_chip(ks, chip_fg, chip_bg)))
                     .into_any_element()
             }
         } else {
@@ -732,7 +735,7 @@ fn build(
                         bound
                             .keystrokes
                             .iter()
-                            .map(|ks| Kbd::new(to_gpui_keystroke(ks)).into_any_element()),
+                            .map(|ks| key_chip(ks, chip_fg, chip_bg)),
                     )
                     .into_any_element(),
                 None => div()
@@ -758,15 +761,15 @@ fn build(
         list = list.child(row_el);
     }
 
-    // Keystroke chips for the footer hints — the same `Kbd` rendering the
-    // rows use, so key names in helper text look like the keys they mean.
-    // `Kbd` renders exactly one keystroke, so multi-key idioms (`gg`) are
-    // adjacent chips and count prefixes (`5j`) stay plain text: a count is
-    // an example pattern, not a keystroke.
-    let chip = |spec: &str| {
+    // Keystroke chips for the footer hints — the same [`key_chip`]
+    // rendering the rows use, so key names in helper text look like the
+    // keys they mean. A chip renders exactly one keystroke, so multi-key
+    // idioms (`gg`) are adjacent chips and count prefixes (`5j`) stay
+    // plain text: a count is an example pattern, not a keystroke.
+    let chip = move |spec: &str| {
         let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
             .expect("footer hint keystrokes are hardcoded valid");
-        Kbd::new(to_gpui_keystroke(&ks)).into_any_element()
+        key_chip(&ks, chip_fg, chip_bg)
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
@@ -790,23 +793,18 @@ fn build(
             .font_family(crate::fonts::MONO)
             .child(find_display)
             .into_any_element()
-    } else if let Some(pending) = state.nav.pending_display() {
-        div().child(format!("{pending}…")).into_any_element()
     } else {
-        h_flex()
-            .gap_1()
-            .items_center()
-            .flex_wrap()
-            .children(vec![
+        // A pending nav gesture (`5`, `g`) deliberately does NOT take over
+        // this line — mid-chord, the normal hints stay put rather than
+        // flickering to a `5…` echo.
+        // Three rows, one idiom family each: motion, find, rebind — so the
+        // hints read as a table rather than one wrapped run-on line.
+        v_flex()
+            .gap_0p5()
+            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
                 chip("j"),
                 chip("k"),
                 sep("move (counts: 5j) ·"),
-                chip("/"),
-                sep("find,"),
-                chip("n"),
-                sep("/"),
-                chip("shift+n"),
-                sep("next ·"),
                 chip("g"),
                 chip("g"),
                 sep("/"),
@@ -816,12 +814,22 @@ fn build(
                 chip("ctrl+u"),
                 chip("ctrl+f"),
                 chip("ctrl+b"),
-                sep("page ·"),
+                sep("page"),
+            ]))
+            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
+                chip("/"),
+                sep("find,"),
+                chip("n"),
+                sep("/"),
+                chip("shift+n"),
+                sep("next"),
+            ]))
+            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
                 chip("space"),
                 sep("/"),
                 chip("enter"),
                 sep("to rebind"),
-            ])
+            ]))
             .into_any_element()
     };
 
