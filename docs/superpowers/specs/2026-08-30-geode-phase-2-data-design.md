@@ -700,13 +700,30 @@ evaluated per grouping tuple, not per view:
   do not total to their parent.
 
 That yields three states, carried per column per level as
-`Attribution`:
+`Attribution`. Split the grouping tuple `G` into the columns the
+measure's key determines (`A`) and those it does not (`E`), and give each
+grain its **identity columns** — the columns naming the entity the
+measure belongs to, a fixed property of the grain:
+
+| Grain | Identity columns |
+|---|---|
+| `Position` | `position_ref` |
+| `Instrument` | `instrument_ref` |
+| `Underlying` | `instrument_ref, underlying_ref` |
+| `UnderlyingPair` | `instrument_ref, underlying_ref, underlying2_ref` |
 
 | State | Condition | Cell |
 |---|---|---|
-| `Additive` | grouping is a function of the measure's key | the aggregate |
-| `DeterminedNonAdditive` | grouping determines a unique measure key but repeats it across siblings | the value, marked |
+| `Additive` | `E` is empty — every grouping column is determined by the key | the aggregate |
+| `DeterminedNonAdditive` | `A` pins the grain's identity columns | the value, marked |
 | `NonAttributable` | neither | NULL, marked |
+
+**`counterparty` needs no special handling**, though it is a key column
+and not an identity column. A position spans counterparties, so
+counterparty subdivides a position's rows rather than naming it, and
+summing across it is ordinary aggregation — the same thing that happens
+when a book-level row sums the positions inside it. An earlier draft
+treated it as an exemption to be declared; it is not.
 
 Worked example — grouping `lhu > underlying > position`, showing
 trading PnL (position grain):
@@ -861,6 +878,41 @@ Per §7.3:
 - Channels are bounded; backpressure surfaces as source health, never
   as UI stall.
 
+### 6.8 Derived dimensions
+
+Some dimensions the desk groups by are not in the source files at all.
+`desk` is the standing case: the CSVs carry `book`, and which desk a book
+belongs to is desk knowledge, maintained in config as a book mapping.
+
+A **derived dimension** is declared as a many-to-one map from an existing
+column:
+
+```toml
+[dimensions.desk]
+from = "book"
+[dimensions.desk.values]
+IDX_EXO_EU = ["BK000", "BK001", "BK002"]
+IDX_EXO_US = ["BK003", "BK004"]
+```
+
+The compiler materializes each map as a small lookup table and joins it
+when the dimension is grouped or scoped.
+
+**The `from` clause is doing two jobs, and the second is the subtle one.**
+It supplies the column, and it *declares a functional dependency*. Because
+`book` is a key column at every grain and `desk` is determined by it,
+grouping by `desk` is additive — every position sits in exactly one desk,
+so summing is correct. Without the declaration the attribution rule (§6.3)
+would see a grouping column absent from every grain key, mark it
+non-attributable, and blank out the top row of the most natural rollup on
+the desk.
+
+This is the only functional dependency the compiler needs. An earlier
+draft of this section proposed declaring the whole containment hierarchy
+(desk ⊃ book ⊃ lhu ⊃ position); that is unnecessary, because every other
+level *is* a key column and is therefore already determined by the key.
+Only dimensions from outside the key need declaring.
+
 ## 7. The vertical slice
 
 A shell-owned debug tile, explicitly labelled throwaway, showing:
@@ -1008,8 +1060,11 @@ Non-blocking, resolvable in config:
 4. `Rho010_USD` was absent from the supplied column list while
    `RhoRFR010_USD` appeared twice; assumed a slip and the family
    assumed symmetric.
-5. The desk-to-book mapping has no source — `Desk` is not a CSV
-   column. Config-declared for now.
+5. ~~The desk-to-book mapping has no source — `Desk` is not a CSV
+   column.~~ **Resolved: a config-maintained book mapping**, declared as
+   a *derived dimension* (§6.8). It does double duty — it supplies the
+   column, and it declares the functional dependency `book → desk` that
+   makes grouping by desk additive.
 6. `implied_vol_surface`'s columns and source are unspecified (§3.7).
 7. ~~Whether concurrent staging improves ingest throughput (§5.6).~~
    **Answered: yes, 1.87× at ~118k rows per file, narrowing as files
