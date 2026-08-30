@@ -159,6 +159,20 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
 ///
 /// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
 /// runs at all.
+///
+/// **Out-of-range guard** (fix-round nit): the indices are positions in
+/// the *lowered* match text while `boundaries` comes from the
+/// original-case `title`, and `str::to_lowercase` is not always
+/// char-count-preserving — 'İ' (U+0130, dotted capital I) lowercases to
+/// the two chars `"i\u{307}"`, so a title containing it produces match
+/// indices past its own last char. Every title this palette renders
+/// today is plain ASCII (action titles and `"Theme: {name}"` rows over
+/// the bundled theme names), so this is unreachable in practice — but
+/// this function runs on the render path, where an out-of-bounds
+/// `boundaries[..]` would be a panic mid-frame rather than a wrong
+/// highlight, and free-form theme names would be all it takes. Indices
+/// that fall outside the title are therefore skipped (the in-range
+/// characters still highlight normally) instead of indexing.
 fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
     if indices.is_empty() {
         return Vec::new();
@@ -172,20 +186,29 @@ fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>>
         .map(|(b, _)| b)
         .chain(std::iter::once(title.len()))
         .collect();
+    // `boundaries` holds one entry per char plus the sentinel, so this is
+    // the title's char count — the exclusive upper bound on a usable
+    // index (see the guard note above).
+    let char_count = boundaries.len() - 1;
 
     let mut runs = Vec::new();
-    let mut run_start = indices[0];
-    let mut run_end = indices[0];
-    for &idx in &indices[1..] {
-        if idx == run_end + 1 {
-            run_end = idx;
+    let mut run: Option<(usize, usize)> = None;
+    for &idx in indices {
+        if idx >= char_count {
             continue;
         }
-        runs.push(boundaries[run_start]..boundaries[run_end + 1]);
-        run_start = idx;
-        run_end = idx;
+        run = match run {
+            Some((start, end)) if idx == end + 1 => Some((start, idx)),
+            Some((start, end)) => {
+                runs.push(boundaries[start]..boundaries[end + 1]);
+                Some((idx, idx))
+            }
+            None => Some((idx, idx)),
+        };
     }
-    runs.push(boundaries[run_start]..boundaries[run_end + 1]);
+    if let Some((start, end)) = run {
+        runs.push(boundaries[start]..boundaries[end + 1]);
+    }
     runs
 }
 
@@ -847,6 +870,33 @@ mod tests {
     #[test]
     fn highlight_runs_on_no_matched_indices_is_empty() {
         assert!(highlight_runs("anything", &[]).is_empty());
+    }
+
+    /// Fix-round nit guard: 'İ' (U+0130) lowercases to "i\u{307}" — TWO
+    /// chars — so match indices (positions in the LOWERED text, per
+    /// `fuzzy_match`'s contract) can exceed the original title's char
+    /// count. Unreachable with today's all-ASCII titles, but it was a
+    /// panic-on-the-render-path landmine (`boundaries[run_end + 1]` out
+    /// of bounds) if theme names ever go free-form. The guard skips the
+    /// expansion-only indices instead of panicking; the in-range chars
+    /// still highlight.
+    #[test]
+    fn highlight_runs_survives_lowercase_char_expansion() {
+        let title = "İstanbul"; // 8 chars; lowered "i\u{307}stanbul" is 9
+        let (_, indices) = fuzzy_match(title, title).unwrap();
+        assert_eq!(
+            indices.len(),
+            9,
+            "sanity: the self-match produces one index per LOWERED char, \
+             one more than the title has"
+        );
+        let runs = highlight_runs(title, &indices);
+        assert_eq!(
+            runs,
+            vec![0..title.len()],
+            "the whole title highlights; the expansion-only index is skipped, \
+             not a panic"
+        );
     }
 
     #[test]

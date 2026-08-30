@@ -1490,42 +1490,74 @@ impl ShellView {
         self.tile_drag = None;
     }
 
-    /// Cancel an armed-but-never-activated tile drag on a left release
-    /// that the tile-drag catcher could not see (post-merge review BUG 1
-    /// — the phantom-armed-drag fix, recorded choice among the three
-    /// candidates: this window-level fallback, rather than arming only on
-    /// a catcher-observed move or a special-case in the catcher's own up
+    /// End a drag — of either kind — on a left release its own catcher
+    /// could not see (post-merge review BUG 1 for the tile drag; the
+    /// fix-round should-fix extended it to the divider drag, whose arm
+    /// has the identical gap. Recorded choice among the three candidates:
+    /// this window-level fallback, rather than arming only on a
+    /// catcher-observed move or a special-case in the catcher's own up
     /// path, because it is the only one that closes the gap at its root).
-    /// The gap: `try_arm_tile_drag` runs from a tile's `on_mouse_down`,
-    /// but the only up/up_out listeners belong to the catcher element that
-    /// enters the hitbox tree at the NEXT paint — and gpui dispatches
-    /// every queued input event between frames, so a fast mod+click's
-    /// down and up can both land before any draw. Before this fix that
-    /// release hit no listener at all and the armed drag survived
-    /// indefinitely: the next frame painted the full-window grabbing
-    /// catcher, the user's next stationary mouse-down was swallowed (the
-    /// catcher registers no down handler), and an unmodified
-    /// press-drag(>threshold)-release could be APPLIED as a rearrangement
-    /// with no mod key held.
+    /// The gap: a tile's `on_mouse_down` (`try_arm_tile_drag`) and a
+    /// strip's `on_mouse_down` (the `DividerDrag` arm) both run from
+    /// listeners in the CURRENT frame, but each drag's only up/up_out
+    /// listeners belong to its catcher element, which enters the hitbox
+    /// tree at the NEXT paint — and gpui dispatches every queued input
+    /// event between frames, so a fast click's down and up can both land
+    /// before any draw. Before this fix that release hit no listener at
+    /// all and the armed drag survived indefinitely: the next frame
+    /// painted the full-window catcher (grabbing cursor for tiles,
+    /// resize cursor for dividers), the user's next stationary
+    /// mouse-down was swallowed (neither catcher registers a down
+    /// handler), and an unmodified press-drag could be APPLIED — a
+    /// rearrangement with no mod key held, or a live resize of a divider
+    /// the user never grabbed.
     ///
     /// Called from a pair of listeners on the root element (`render`),
-    /// which is painted every frame: `on_mouse_up` (bubble, hovered)
-    /// catches the gap-frame release, and `on_mouse_up_out` (capture,
-    /// not-hovered) catches the same release under keyboard input
-    /// modality or with an occluding overlay above the root — between
-    /// them every left release reaches this method. Guarded to the
-    /// never-activated state only: an ACTIVE drag's release must keep
-    /// routing through the catcher's own `finish_tile_drag` drop path
-    /// (the root's capture-phase `up_out` runs before the catcher's
-    /// handlers, so without the guard it would cancel real drops). A drag
-    /// can only be active once a catcher-observed move latched it, and a
-    /// catcher exists only after a paint — so in the gap frame this guard
-    /// is always met, and after a paint the cancel here is behaviorally
-    /// identical to the below-threshold no-op finish the catcher would
-    /// have performed anyway.
-    fn heal_unactivated_tile_drag(&mut self, cx: &mut Context<Self>) {
-        if self.tile_drag.as_ref().is_some_and(|drag| !drag.active) {
+    /// which is painted every frame: `on_mouse_up` (bubble, hovered) and
+    /// `on_mouse_up_out` (capture, not-hovered) — between them every
+    /// left release reaches this method, for BOTH drag kinds, across all
+    /// four modality×state combinations:
+    /// - gap frame (no catcher painted), mouse modality: the root is
+    ///   hovered, its bubble `on_mouse_up` fires — the phantom clears;
+    /// - gap frame, keyboard modality: nothing is hovered
+    ///   (`HitboxId::is_hovered` is false under keyboard modality), the
+    ///   root's capture `on_mouse_up_out` fires — same heal;
+    /// - post-paint with a catcher up, mouse modality: the occluding
+    ///   catcher removes the root from the hover chain, so the root's
+    ///   `up_out` fires (capture phase — BEFORE the catcher's own bubble
+    ///   `on_mouse_up`);
+    /// - post-paint, keyboard modality: both the root's and the
+    ///   catcher's `up_out` fire in capture phase, root (outermost)
+    ///   first.
+    ///
+    /// In the two post-paint cases this method acting FIRST must not
+    /// change what the catcher's own release path would have done, and
+    /// the two drag kinds guarantee that differently:
+    /// - tile drag: guarded to the never-activated state only — an
+    ///   ACTIVE drag's release must keep routing through the catcher's
+    ///   `finish_tile_drag` drop path, so an early cancel here would eat
+    ///   real drops. A drag can only be active once a catcher-observed
+    ///   move latched it (a catcher exists only after a paint), so in
+    ///   the gap frame the guard is always met, and after a paint the
+    ///   cancel equals the below-threshold no-op finish the catcher
+    ///   would have performed anyway.
+    /// - divider drag: cancelled UNconditionally, safe because for
+    ///   dividers finish IS cancel-plus-notify — every resize was
+    ///   already applied live by the moves, the catcher's own up applies
+    ///   nothing positional, and `cancel_divider_drag` keeps the applied
+    ///   state and dirties the session iff the drag moved. (It has no
+    ///   `active` latch to guard on, and needs none.) The catcher's
+    ///   subsequent finish finds the drag already gone and no-ops.
+    fn heal_drags_on_root_release(&mut self, cx: &mut Context<Self>) {
+        let heal_tile = self.tile_drag.as_ref().is_some_and(|drag| !drag.active);
+        if heal_tile {
             self.cancel_tile_drag();
+        }
+        let heal_divider = self.divider_drag.is_some();
+        if heal_divider {
+            self.cancel_divider_drag();
+        }
+        if heal_tile || heal_divider {
             cx.notify();
         }
     }
@@ -2275,25 +2307,27 @@ impl Render for ShellView {
             .relative()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
-            // Root-level left-release fallback (post-merge review BUG 1):
-            // clears an armed-but-never-activated tile drag whose release
-            // landed in the arm-to-first-paint gap, before the catcher's
-            // own up handlers exist — see `heal_unactivated_tile_drag`'s
-            // doc comment for the full mechanism and why BOTH listeners
-            // are needed (`on_mouse_up` is bubble-phase and hover-gated,
+            // Root-level left-release fallback (post-merge review BUG 1,
+            // extended to divider drags by the fix-round should-fix):
+            // ends a drag of either kind whose release landed in the
+            // arm-to-first-paint gap, before its catcher's own up
+            // handlers exist — see `heal_drags_on_root_release`'s doc
+            // comment for the full mechanism, the four modality×state
+            // combinations, and why BOTH listeners are needed
+            // (`on_mouse_up` is bubble-phase and hover-gated,
             // `on_mouse_up_out` capture-phase and NOT-hovered-gated;
-            // input modality and occluding overlays flip which one fires,
-            // and together they cover every left release).
+            // input modality and occluding overlays flip which one
+            // fires, and together they cover every left release).
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|view, _event, _window, cx| {
-                    view.heal_unactivated_tile_drag(cx);
+                    view.heal_drags_on_root_release(cx);
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|view, _event, _window, cx| {
-                    view.heal_unactivated_tile_drag(cx);
+                    view.heal_drags_on_root_release(cx);
                 }),
             )
             .bg(cx.theme().background)
@@ -4120,6 +4154,109 @@ mod tests {
                 .focused()),
             Some(right),
             "the plain click focused the tile it landed on (click-to-focus intact)"
+        );
+    }
+
+    /// Fix-round should-fix (the divider-drag twin of BUG 1): a strip's
+    /// mouse-down arms `divider_drag`, but the divider catcher's up
+    /// handlers only enter the hitbox tree at the next paint — so a
+    /// sub-frame click on a strip (down + up before any draw) left a
+    /// phantom armed divider drag: the full-window resize-cursor catcher
+    /// painted, the next mouse-down was swallowed, and an unmodified
+    /// press-drag (no intervening buttonless move) live-RESIZED the
+    /// phantom's divider. The root-element release fallback must clear
+    /// it, and a subsequent unmodified press-drag must resize nothing.
+    #[gpui::test]
+    fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
+        let widths_before: Vec<f32> = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect::UNIT)
+                .into_iter()
+                .map(|(_, r)| r.w)
+                .collect()
+        });
+
+        let strip = cx
+            .debug_bounds("divider-strip-0")
+            .expect("two tiles paint their splitter strip");
+        let grab = strip.center();
+        // Down + up dispatched inside ONE `cx.update`, no draw between —
+        // the same technique as the tile-drag phantom test above.
+        cx.update(|window, cx| {
+            window.dispatch_event(
+                gpui::PlatformInput::MouseDown(MouseDownEvent {
+                    button: MouseButton::Left,
+                    position: grab,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                    first_mouse: false,
+                }),
+                cx,
+            );
+            assert!(
+                shell.read(cx).divider_drag.is_some(),
+                "sanity: the strip's mouse-down armed a divider drag"
+            );
+            window.dispatch_event(
+                gpui::PlatformInput::MouseUp(MouseUpEvent {
+                    button: MouseButton::Left,
+                    position: grab,
+                    modifiers: gpui::Modifiers::none(),
+                    click_count: 1,
+                }),
+                cx,
+            );
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "a release in the same frame as the arm must clear the armed \
+             divider drag (no phantom survives to the catcher's first paint)"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a phantom that moved nothing persists nothing"
+        );
+
+        // An unmodified press-drag afterwards must be the plain gesture it
+        // is (click-to-focus on the tile it lands on), never a live resize
+        // of the phantom's divider.
+        let press = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(press, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_move(
+            gpui::point(press.x - px(120.0), press.y),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_up(
+            gpui::point(press.x - px(120.0), press.y),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .layout(Rect::UNIT)
+                    .into_iter()
+                    .map(|(_, r)| r.w)
+                    .collect::<Vec<f32>>()
+            }),
+            widths_before,
+            "an unmodified press-drag after the phantom window must not resize \
+             any divider"
         );
     }
 
