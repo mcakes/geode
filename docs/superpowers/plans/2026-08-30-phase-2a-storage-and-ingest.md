@@ -4143,9 +4143,1097 @@ idempotence and that a missing CSV fails without touching live."
 
 ---
 
-**Remaining tasks (10–14) continue below.** Task 10 adds discovery
-(globbing, readiness strategies, change detection, slot extraction); Task 11
-the priority ladder; Task 12 the ingest runner with its worker pool,
-preemptible backfill and panic boundary. Task 13 adds the retention sweeper
-and checkpoint scheduling; Task 14 the ingest benchmarks and the CI caching
-change.
+### Task 10: Discovery — globbing, readiness, change detection
+
+**Files:**
+- Create: `crates/geode-data/src/source/discovery.rs`
+- Modify: `crates/geode-data/src/source/mod.rs`
+- Modify: `crates/geode-data/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `Sentinel`, `Catalog`, `Health`.
+- Produces: `SourceSpec`, `Readiness`, `Priority`, `CandidateState`,
+  `Candidate`, `SourceSpec::from_toml`, `SourceSpec::slot_of(&Path)`, and
+  `discover(&SourceSpec, &Catalog, SystemTime) -> Result<Vec<Candidate>, StoreError>`.
+  Task 11 turns candidates into a plan.
+
+**Polling, not watching** (spec §5.1): `notify` is unreliable over SMB, which
+§11 flags as a hazard, and polling degrades honestly where watches fail
+silently.
+
+- [ ] **Step 1: Add dependencies**
+
+In `crates/geode-data/Cargo.toml` `[dependencies]`:
+
+```toml
+glob = "0.3.3"
+regex = "1.11.1"
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `crates/geode-data/src/source/discovery.rs` with only this test
+module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn spec(root: &std::path::Path) -> SourceSpec {
+        SourceSpec {
+            name: "risk_files".into(),
+            dataset: "risk_snapshot".into(),
+            paths: vec![format!("{}/*.csv", root.display())],
+            readiness: Readiness::Sentinel,
+            priority: Priority::LatestRisk,
+            poll_interval: Duration::from_secs(30),
+            pending_timeout: Duration::from_secs(3600),
+            slot_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<slot>.+)$".into()),
+        }
+    }
+
+    fn write(root: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let p = root.join(name);
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    const SENTINEL: &str = r#"{"as_of":"2026-08-30T07:00:00Z","columns":["Book"],"books":["BK000"]}"#;
+
+    fn catalog_on(store: &crate::store::Store) -> crate::store::Catalog<'_> {
+        let c = crate::store::Catalog::new(store.writer());
+        c.ensure_tables().unwrap();
+        c
+    }
+
+    fn store() -> (tempfile::TempDir, crate::store::Store) {
+        let d = tempfile::tempdir().unwrap();
+        let s = crate::store::Store::open(d.path().join("g.duckdb")).unwrap();
+        (d, s)
+    }
+
+    #[test]
+    fn slot_strips_the_date_so_business_dates_share_a_partition() {
+        let d = tempfile::tempdir().unwrap();
+        let s = spec(d.path());
+        assert_eq!(
+            s.slot_of(std::path::Path::new("/x/risk_2026-08-30_BK000_part1.csv")),
+            "BK000_part1"
+        );
+        assert_eq!(
+            s.slot_of(std::path::Path::new("/x/risk_2026-08-29_BK000_part1.csv")),
+            "BK000_part1",
+            "two business dates must land in the same partition (spec §4.3)"
+        );
+    }
+
+    #[test]
+    fn slot_falls_back_to_the_whole_stem_without_a_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = spec(d.path());
+        s.slot_pattern = None;
+        assert_eq!(s.slot_of(std::path::Path::new("/x/anything.csv")), "anything");
+    }
+
+    #[test]
+    fn a_csv_with_its_sentinel_is_ready_and_carries_the_parsed_sentinel() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+        let (_sd, st) = store();
+        let found = discover(&spec(d.path()), &catalog_on(&st), SystemTime::now()).unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(matches!(found[0].state, CandidateState::Ready(_)));
+        assert_eq!(found[0].slot, "BK000");
+    }
+
+    #[test]
+    fn a_csv_without_a_sentinel_is_pending_not_broken() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        let (_sd, st) = store();
+        let found = discover(&spec(d.path()), &catalog_on(&st), SystemTime::now()).unwrap();
+        assert!(matches!(found[0].state, CandidateState::Pending));
+    }
+
+    #[test]
+    fn pending_past_the_timeout_becomes_pending_too_long() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        let (_sd, st) = store();
+        let later = SystemTime::now() + Duration::from_secs(7200);
+        let found = discover(&spec(d.path()), &catalog_on(&st), later).unwrap();
+        assert!(matches!(found[0].state, CandidateState::PendingTooLong));
+    }
+
+    #[test]
+    fn a_sentinel_older_than_its_csv_means_the_file_is_being_rewritten() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+        std::thread::sleep(Duration::from_millis(20));
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        let (_sd, st) = store();
+        let found = discover(&spec(d.path()), &catalog_on(&st), SystemTime::now()).unwrap();
+        assert!(matches!(found[0].state, CandidateState::Pending), "{:?}", found[0].state);
+    }
+
+    #[test]
+    fn a_malformed_sentinel_is_orphaned_with_the_reason() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", "{ not json");
+        let (_sd, st) = store();
+        let found = discover(&spec(d.path()), &catalog_on(&st), SystemTime::now()).unwrap();
+        match &found[0].state {
+            CandidateState::Orphaned { reason } => assert!(reason.contains("JSON"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_already_loaded_unchanged_file_is_skipped() {
+        let d = tempfile::tempdir().unwrap();
+        let csv = write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+        let (_sd, st) = store();
+        let cat = catalog_on(&st);
+        let meta = std::fs::metadata(&csv).unwrap();
+        cat.record(&crate::store::FileGeneration {
+            file_id: 0,
+            dataset: "risk_snapshot".into(),
+            slot: "BK000".into(),
+            path: csv.clone(),
+            size: meta.len(),
+            mtime: time::OffsetDateTime::now_utc(),
+            source_time: time::macros::datetime!(2026-08-30 07:00 UTC),
+            gen_id: 1,
+            loaded_at: time::OffsetDateTime::now_utc(),
+            row_count: 1,
+            books: vec!["BK000".into()],
+            health: crate::health::Health::Ok,
+        })
+        .unwrap();
+
+        let found = discover(&spec(d.path()), &cat, SystemTime::now()).unwrap();
+        assert!(matches!(found[0].state, CandidateState::Unchanged));
+    }
+
+    #[test]
+    fn a_changed_file_is_ready_again() {
+        let d = tempfile::tempdir().unwrap();
+        let csv = write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+        let (_sd, st) = store();
+        let cat = catalog_on(&st);
+        cat.record(&crate::store::FileGeneration {
+            file_id: 0,
+            dataset: "risk_snapshot".into(),
+            slot: "BK000".into(),
+            path: csv.clone(),
+            size: 999_999, // different size => changed
+            mtime: time::OffsetDateTime::now_utc(),
+            source_time: time::macros::datetime!(2026-08-30 07:00 UTC),
+            gen_id: 1,
+            loaded_at: time::OffsetDateTime::now_utc(),
+            row_count: 1,
+            books: vec!["BK000".into()],
+            health: crate::health::Health::Ok,
+        })
+        .unwrap();
+        let found = discover(&spec(d.path()), &cat, SystemTime::now()).unwrap();
+        assert!(matches!(found[0].state, CandidateState::Ready(_)));
+    }
+
+    #[test]
+    fn multiple_globs_are_all_searched() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        for d in [&a, &b] {
+            write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+            write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+        }
+        let mut s = spec(a.path());
+        s.paths.push(format!("{}/*.csv", b.path().display()));
+        let (_sd, st) = store();
+        assert_eq!(discover(&s, &catalog_on(&st), SystemTime::now()).unwrap().len(), 2);
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `cargo test -p geode-data discovery`
+Expected: FAIL — `cannot find struct SourceSpec`.
+
+- [ ] **Step 4: Implement discovery**
+
+Prepend to `crates/geode-data/src/source/discovery.rs`:
+
+```rust
+//! Source discovery (spec §5.1, §5.2). Polls configured directory globs,
+//! decides readiness, and skips what has not changed.
+//!
+//! Polling rather than filesystem watches: `notify` is unreliable over SMB
+//! (spec §11), and polling degrades honestly where a watch fails silently.
+
+use crate::source::sentinel::{Sentinel, parse_sentinel};
+use crate::store::Catalog;
+use crate::store::StoreError;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
+
+/// How a source decides a file is complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    /// `<name>.done` exists and is at least as new as the CSV.
+    Sentinel,
+    /// No sentinel convention: require a stable (size, mtime) across N polls.
+    StableMtime { polls: u32 },
+}
+
+/// Where a source sits in the cold-start ladder (spec §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// Current risk on screen first.
+    LatestRisk,
+    /// Vol, instrument reference, scenario data.
+    LatestOther,
+    /// Older files not already in the database.
+    Backfill,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceSpec {
+    pub name: String,
+    pub dataset: String,
+    /// One or more directory globs (spec §5.1).
+    pub paths: Vec<String>,
+    pub readiness: Readiness,
+    pub priority: Priority,
+    pub poll_interval: Duration,
+    pub pending_timeout: Duration,
+    /// Regex with a named `slot` capture, applied to the file stem, that
+    /// strips the date component so business dates share a partition
+    /// (spec §4.3). Without one the whole stem is the slot.
+    pub slot_pattern: Option<String>,
+}
+
+impl SourceSpec {
+    pub fn slot_of(&self, csv: &Path) -> String {
+        let stem = csv.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let Some(pattern) = &self.slot_pattern else {
+            return stem;
+        };
+        let Ok(re) = regex::Regex::new(pattern) else {
+            return stem;
+        };
+        re.captures(&stem)
+            .and_then(|c| c.name("slot"))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or(stem)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum CandidateState {
+    /// Complete and not yet loaded.
+    Ready(Sentinel),
+    /// Waiting on its sentinel. Expected, not broken.
+    Pending,
+    /// Waiting past the source's timeout.
+    PendingTooLong,
+    /// Already loaded at this size and mtime.
+    Unchanged,
+    /// Present but unusable — a malformed or unreadable sentinel.
+    Orphaned { reason: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct Candidate {
+    pub csv_path: PathBuf,
+    pub sentinel_path: PathBuf,
+    pub slot: String,
+    pub size: u64,
+    pub mtime: SystemTime,
+    pub state: CandidateState,
+}
+
+pub fn discover(
+    spec: &SourceSpec,
+    catalog: &Catalog,
+    now: SystemTime,
+) -> Result<Vec<Candidate>, StoreError> {
+    let mut out = Vec::new();
+    for pattern in &spec.paths {
+        let Ok(paths) = glob::glob(pattern) else { continue };
+        for csv_path in paths.flatten() {
+            let Ok(meta) = std::fs::metadata(&csv_path) else { continue };
+            let mtime = meta.modified().unwrap_or(now);
+            let sentinel_path = sentinel_path_for(&csv_path);
+            let slot = spec.slot_of(&csv_path);
+
+            let state = classify(spec, catalog, &csv_path, &sentinel_path, &meta, mtime, now)?;
+            out.push(Candidate {
+                csv_path,
+                sentinel_path,
+                slot,
+                size: meta.len(),
+                mtime,
+                state,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.csv_path.cmp(&b.csv_path));
+    Ok(out)
+}
+
+fn sentinel_path_for(csv: &Path) -> PathBuf {
+    let mut name = csv.file_name().map(|s| s.to_os_string()).unwrap_or_default();
+    name.push(".done");
+    csv.with_file_name(name)
+}
+
+fn classify(
+    spec: &SourceSpec,
+    catalog: &Catalog,
+    csv_path: &Path,
+    sentinel_path: &Path,
+    meta: &std::fs::Metadata,
+    mtime: SystemTime,
+    now: SystemTime,
+) -> Result<CandidateState, StoreError> {
+    if spec.readiness != Readiness::Sentinel {
+        // The stable-mtime fallback needs poll history the runner keeps; a
+        // single discovery pass can only report it as pending.
+        return Ok(CandidateState::Pending);
+    }
+
+    let Ok(sentinel_meta) = std::fs::metadata(sentinel_path) else {
+        let waited = now.duration_since(mtime).unwrap_or_default();
+        return Ok(if waited > spec.pending_timeout {
+            CandidateState::PendingTooLong
+        } else {
+            CandidateState::Pending
+        });
+    };
+
+    // A sentinel older than its CSV means the file is being rewritten.
+    let sentinel_mtime = sentinel_meta.modified().unwrap_or(now);
+    if sentinel_mtime < mtime {
+        return Ok(CandidateState::Pending);
+    }
+
+    let text = match std::fs::read_to_string(sentinel_path) {
+        Ok(t) => t,
+        Err(e) => return Ok(CandidateState::Orphaned { reason: e.to_string() }),
+    };
+    let sentinel = match parse_sentinel(&text) {
+        Ok(s) => s,
+        Err(e) => return Ok(CandidateState::Orphaned { reason: e.to_string() }),
+    };
+
+    // Change detection: (size, mtime) against what we last loaded.
+    if let Some(prev) = catalog.lookup_by_path(csv_path)? {
+        if prev.size == meta.len() && prev.source_time == sentinel.as_of {
+            return Ok(CandidateState::Unchanged);
+        }
+    }
+    Ok(CandidateState::Ready(sentinel))
+}
+```
+
+Add to `crates/geode-data/src/source/mod.rs`:
+
+```rust
+pub mod discovery;
+
+pub use discovery::{
+    Candidate, CandidateState, Priority, Readiness, SourceSpec, discover,
+};
+```
+
+- [ ] **Step 5: Run to verify tests pass**
+
+Run: `cargo test -p geode-data discovery`
+Expected: PASS (10 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): source discovery with sentinel-gated readiness
+
+Polls configured globs (notify is unreliable over SMB, spec §11), reads
+the tiny sentinel first so schema drift is caught before a
+multi-hundred-megabyte parse, and skips files whose size and source time
+match what was already loaded.
+
+Readiness states are honest rather than binary: pending, pending-too-long,
+orphaned-with-reason, and the rewritten-file case where the sentinel is
+older than its CSV. Slot extraction strips the date so two business dates
+share a partition (spec §4.3)."
+```
+
+---
+
+### Task 11: The priority ladder
+
+**Files:**
+- Create: `crates/geode-data/src/ingest/plan.rs`
+- Modify: `crates/geode-data/src/ingest/mod.rs`
+
+**Interfaces:**
+- Consumes: `Candidate`, `CandidateState`, `Priority`, `SourceSpec`.
+- Produces: `WorkItem { source: String, dataset: String, candidate: Candidate,
+  slot: String, priority: Priority, source_time: OffsetDateTime }`,
+  `WorkPlan { items: Vec<WorkItem> }`, and `build_plan(&[(SourceSpec, Vec<Candidate>)])
+  -> WorkPlan`. Task 12's runner works the plan.
+
+**The rule that makes cold start fast** (spec §5.4): within a slot, only the
+*newest* file earns its source's priority. Every older file for the same slot
+drops to `Backfill`, however recent the source. That is what puts current
+risk on screen first while history loads behind it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/ingest/plan.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::{Candidate, CandidateState, Priority, Readiness, SourceSpec};
+    use std::time::{Duration, SystemTime};
+    use time::OffsetDateTime;
+
+    fn spec(name: &str, priority: Priority) -> SourceSpec {
+        SourceSpec {
+            name: name.into(),
+            dataset: format!("{name}_dataset"),
+            paths: vec![],
+            readiness: Readiness::Sentinel,
+            priority,
+            poll_interval: Duration::from_secs(30),
+            pending_timeout: Duration::from_secs(60),
+            slot_pattern: None,
+        }
+    }
+
+    fn candidate(slot: &str, day: u8, state_ready: bool) -> Candidate {
+        let as_of = time::macros::datetime!(2026-08-01 07:00 UTC).replace_day(day).unwrap();
+        Candidate {
+            csv_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv").into(),
+            sentinel_path: format!("/src/risk_2026-08-{day:02}_{slot}.csv.done").into(),
+            slot: slot.into(),
+            size: 1,
+            mtime: SystemTime::now(),
+            state: if state_ready {
+                CandidateState::Ready(crate::source::Sentinel {
+                    as_of,
+                    columns: vec!["Book".into()],
+                    books: vec![slot.into()],
+                    row_count: None,
+                    dataset: None,
+                    business_date: None,
+                })
+            } else {
+                CandidateState::Pending
+            },
+        }
+    }
+
+    #[test]
+    fn only_ready_candidates_enter_the_plan() {
+        let plan = build_plan(&[(
+            spec("risk", Priority::LatestRisk),
+            vec![candidate("BK000", 30, true), candidate("BK001", 30, false)],
+        )]);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].slot, "BK000");
+    }
+
+    #[test]
+    fn within_a_slot_only_the_newest_file_keeps_its_source_priority() {
+        let plan = build_plan(&[(
+            spec("risk", Priority::LatestRisk),
+            vec![
+                candidate("BK000", 28, true),
+                candidate("BK000", 30, true),
+                candidate("BK000", 29, true),
+            ],
+        )]);
+        let newest = plan.items.iter().find(|i| i.source_time.day() == 30).unwrap();
+        assert_eq!(newest.priority, Priority::LatestRisk);
+        for older in plan.items.iter().filter(|i| i.source_time.day() != 30) {
+            assert_eq!(older.priority, Priority::Backfill, "history must not outrank current risk");
+        }
+    }
+
+    #[test]
+    fn ordering_is_priority_then_newest_first() {
+        let plan = build_plan(&[
+            (spec("vol", Priority::LatestOther), vec![candidate("VOL", 30, true)]),
+            (
+                spec("risk", Priority::LatestRisk),
+                vec![candidate("BK000", 30, true), candidate("BK000", 29, true)],
+            ),
+        ]);
+        let order: Vec<(Priority, u8)> =
+            plan.items.iter().map(|i| (i.priority, i.source_time.day())).collect();
+        assert_eq!(
+            order,
+            vec![
+                (Priority::LatestRisk, 30),
+                (Priority::LatestOther, 30),
+                (Priority::Backfill, 29),
+            ],
+            "current risk, then everything else current, then history"
+        );
+    }
+
+    #[test]
+    fn slots_are_independent() {
+        let plan = build_plan(&[(
+            spec("risk", Priority::LatestRisk),
+            vec![candidate("BK000", 30, true), candidate("BK001", 29, true)],
+        )]);
+        // BK001's newest is the 29th; it is still that slot's current file.
+        for item in &plan.items {
+            assert_eq!(item.priority, Priority::LatestRisk, "{item:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_input_yields_an_empty_plan() {
+        assert!(build_plan(&[]).items.is_empty());
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data plan`
+Expected: FAIL — `cannot find function build_plan`.
+
+- [ ] **Step 3: Implement the ladder**
+
+Prepend to `crates/geode-data/src/ingest/plan.rs`:
+
+```rust
+//! The cold-start priority ladder (spec §5.4). Ingest is a priority queue,
+//! not a sweep: the desk has strong priors about what it wants to see
+//! first, and a sentinel-only scan is cheap enough to plan the whole run
+//! before opening a single CSV.
+
+use crate::source::{Candidate, CandidateState, Priority, SourceSpec};
+use std::collections::HashMap;
+use time::OffsetDateTime;
+
+#[derive(Debug, Clone)]
+pub struct WorkItem {
+    pub source: String,
+    pub dataset: String,
+    pub slot: String,
+    pub candidate: Candidate,
+    pub priority: Priority,
+    pub source_time: OffsetDateTime,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkPlan {
+    /// Highest priority first; newest first within a priority.
+    pub items: Vec<WorkItem>,
+}
+
+pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
+    let mut items: Vec<WorkItem> = Vec::new();
+
+    for (spec, candidates) in discovered {
+        // Only the newest file per slot is "current"; the rest are history,
+        // however recent the source. This is what puts today's risk on
+        // screen before yesterday's finishes loading.
+        let mut newest_per_slot: HashMap<&str, OffsetDateTime> = HashMap::new();
+        for c in candidates {
+            if let CandidateState::Ready(s) = &c.state {
+                let e = newest_per_slot.entry(c.slot.as_str()).or_insert(s.as_of);
+                if s.as_of > *e {
+                    *e = s.as_of;
+                }
+            }
+        }
+
+        for c in candidates {
+            let CandidateState::Ready(sentinel) = &c.state else {
+                continue;
+            };
+            let is_current = newest_per_slot
+                .get(c.slot.as_str())
+                .is_some_and(|newest| *newest == sentinel.as_of);
+            items.push(WorkItem {
+                source: spec.name.clone(),
+                dataset: spec.dataset.clone(),
+                slot: c.slot.clone(),
+                candidate: c.clone(),
+                priority: if is_current { spec.priority } else { Priority::Backfill },
+                source_time: sentinel.as_of,
+            });
+        }
+    }
+
+    items.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then(b.source_time.cmp(&a.source_time))
+    });
+    WorkPlan { items }
+}
+```
+
+Add to `crates/geode-data/src/ingest/mod.rs`:
+
+```rust
+pub mod plan;
+
+pub use plan::{WorkItem, WorkPlan, build_plan};
+```
+
+- [ ] **Step 4: Run to verify tests pass**
+
+Run: `cargo test -p geode-data plan`
+Expected: PASS (5 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): cold-start priority ladder
+
+Within a slot only the newest file keeps its source's priority; every
+older file for the same slot drops to Backfill however recent the source.
+That is what puts current risk on screen first while history loads behind
+it (spec §5.4).
+
+The plan is built from a sentinel-only scan, so a cold start is ordered
+before any CSV is opened."
+```
+
+---
+
+### Task 12: The ingest runner
+
+**Files:**
+- Create: `crates/geode-data/src/ingest/runner.rs`
+- Modify: `crates/geode-data/src/ingest/mod.rs`
+
+**Interfaces:**
+- Consumes: `Store`, `WorkPlan`, `WorkItem`, `load_file`, `Health`.
+- Produces: `IngestEvent`, `IngestRunner::spawn(Store, DatasetSpec, String)
+  -> (IngestHandle, Receiver<IngestEvent>)`, `IngestHandle::submit(WorkPlan)`,
+  `IngestHandle::shutdown()`. Phase 2b's `DataService` owns the handle.
+
+**One ingest thread, not a pool — deliberately.** DuckDB is
+single-writer, so every publish serializes anyway (spec §5.3, §5.6). Parse
+parallelism across separate connections is a *benchmark question* the spec
+explicitly declines to assume, so Task 14 measures it before anyone builds
+it. What this task must get right is preemption and never dying.
+
+**Preemption granularity is one file** (spec §5.4): the runner re-sorts its
+queue between files, so a newly landed current file jumps ahead of remaining
+backfill without interrupting a load in flight.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `crates/geode-data/src/ingest/runner.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::source::Priority;
+    use std::time::Duration;
+
+    fn drain(rx: &std::sync::mpsc::Receiver<IngestEvent>, n: usize) -> Vec<IngestEvent> {
+        let mut out = Vec::new();
+        for _ in 0..n {
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(e) => out.push(e),
+                Err(_) => break,
+            }
+        }
+        out
+    }
+
+    /// Builds a store, schema, and a source directory; returns a plan over it.
+    fn harness() -> (tempfile::TempDir, tempfile::TempDir, crate::store::Store,
+                     geode_core::schema::DatasetSpec, crate::ingest::WorkPlan) {
+        // Reuse the load-pipeline fixture builders (Task 9) via the shared
+        // test support module, then discover + plan over the emitted dir.
+        let (db_dir, src_dir, store, ds) = crate::ingest::load::tests_support::fixture();
+        let spec = crate::source::SourceSpec {
+            name: "risk".into(),
+            dataset: "risk_snapshot".into(),
+            paths: vec![format!("{}/*.csv", src_dir.path().display())],
+            readiness: crate::source::Readiness::Sentinel,
+            priority: Priority::LatestRisk,
+            poll_interval: Duration::from_secs(30),
+            pending_timeout: Duration::from_secs(3600),
+            slot_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<slot>.+)$".into()),
+        };
+        let cat = crate::store::Catalog::new(store.writer());
+        let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
+        let plan = crate::ingest::build_plan(&[(spec, found)]);
+        (db_dir, src_dir, store, ds, plan)
+    }
+
+    #[test]
+    fn works_a_plan_and_reports_every_publish() {
+        let (_db, _src, store, ds, plan) = harness();
+        let expected = plan.items.len();
+        assert!(expected > 0, "fixture must produce work");
+
+        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        handle.submit(plan);
+        let events = drain(&rx, expected + 1);
+        handle.shutdown();
+
+        let published = events.iter().filter(|e| matches!(e, IngestEvent::Published { .. })).count();
+        assert_eq!(published, expected);
+        assert!(events.iter().any(|e| matches!(e, IngestEvent::PlanComplete)));
+    }
+
+    #[test]
+    fn a_newly_submitted_current_file_preempts_remaining_backfill() {
+        let (_db, _src, store, ds, mut plan) = harness();
+        // Force everything to Backfill, then submit one current item.
+        for item in &mut plan.items {
+            item.priority = Priority::Backfill;
+        }
+        let current = {
+            let mut c = plan.items[plan.items.len() - 1].clone();
+            c.priority = Priority::LatestRisk;
+            c
+        };
+        let expected = plan.items.len();
+
+        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        handle.submit(plan);
+        handle.submit(crate::ingest::WorkPlan { items: vec![current.clone()] });
+
+        let events = drain(&rx, expected + 2);
+        handle.shutdown();
+
+        let first_slot = events.iter().find_map(|e| match e {
+            IngestEvent::Published { slot, .. } => Some(slot.clone()),
+            _ => None,
+        });
+        // The preempting item may or may not win the very first slot
+        // depending on whether a load was already in flight, but it must
+        // not be last.
+        let positions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                IngestEvent::Published { slot, .. } if *slot == current.slot => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert!(!positions.is_empty(), "preempting item never ran; first was {first_slot:?}");
+        assert!(
+            positions[0] < events.len().saturating_sub(1),
+            "a current file must not wait behind all remaining backfill"
+        );
+    }
+
+    #[test]
+    fn a_failing_item_degrades_and_the_runner_keeps_going() {
+        let (_db, _src, store, ds, mut plan) = harness();
+        let good = plan.items.len();
+        // Point one item at a nonexistent CSV.
+        let mut broken = plan.items[0].clone();
+        broken.candidate.csv_path = broken.candidate.csv_path.with_file_name("gone.csv");
+        plan.items.insert(0, broken);
+
+        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        handle.submit(plan);
+        let events = drain(&rx, good + 2);
+        handle.shutdown();
+
+        assert!(events.iter().any(|e| matches!(e, IngestEvent::Failed { .. })));
+        let published = events.iter().filter(|e| matches!(e, IngestEvent::Published { .. })).count();
+        assert_eq!(published, good, "one bad file must not stop the run (spec §5.7)");
+    }
+
+    #[test]
+    fn shutdown_is_idempotent_and_does_not_hang() {
+        let (_db, _src, store, ds, _plan) = harness();
+        let (handle, _rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        handle.shutdown();
+        handle.shutdown();
+    }
+}
+```
+
+Add a shared fixture builder to `crates/geode-data/src/ingest/load.rs` so the
+runner tests reuse it — move the body of the existing `fixture()` and
+`schema()` test helpers into:
+
+```rust
+#[cfg(test)]
+pub(crate) mod tests_support {
+    /// (db dir, source dir, store, dataset) — the same fixture the load
+    /// tests use, exposed so the runner tests build on it rather than
+    /// duplicating it.
+    pub(crate) fn fixture() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        crate::store::Store,
+        geode_core::schema::DatasetSpec,
+    ) {
+        // ... body moved from the private `fixture()` above, returning the
+        // source TempDir instead of holding it, and calling
+        // `Catalog::ensure_tables` before returning.
+        unimplemented!("move the Task 9 fixture body here verbatim")
+    }
+}
+```
+
+> **Implementer note:** replace the `unimplemented!` with the Task 9
+> `fixture()` body verbatim, changing its return type to the tuple above.
+> The `unimplemented!` is a move marker, not a design placeholder — the code
+> to move is fully written in Task 9.
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-data runner`
+Expected: FAIL — `cannot find struct IngestRunner`.
+
+- [ ] **Step 3: Implement the runner**
+
+Prepend to `crates/geode-data/src/ingest/runner.rs`:
+
+```rust
+//! The ingest runner (spec §5.4–§5.7). Owns the writer connection on its
+//! own thread, works a priority-ordered queue, and never takes the app down.
+//!
+//! One thread, not a pool, deliberately: DuckDB is single-writer so every
+//! publish serializes anyway (spec §5.3). Whether parsing in parallel across
+//! separate connections buys anything is a benchmark question the spec
+//! declines to assume (spec §5.6), and Task 14 measures it.
+//!
+//! Preemption granularity is one file: the queue is re-sorted between
+//! items, so a newly landed current file jumps ahead of remaining backfill
+//! without interrupting a load in flight (spec §5.4).
+
+use crate::health::Health;
+use crate::ingest::load::{LoadRequest, load_file};
+use crate::ingest::plan::{WorkItem, WorkPlan};
+use crate::source::{CandidateState, Priority};
+use crate::store::Store;
+use geode_core::schema::DatasetSpec;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
+
+#[derive(Debug, Clone)]
+pub enum IngestEvent {
+    Published {
+        dataset: String,
+        slot: String,
+        gen_id: i64,
+        books: Vec<String>,
+        rows: usize,
+        health: Health,
+    },
+    Failed {
+        slot: String,
+        reason: String,
+    },
+    /// The queue drained. Not a terminal state — more work may be submitted.
+    PlanComplete,
+}
+
+#[derive(Default)]
+struct Queue {
+    items: Vec<WorkItem>,
+    shutdown: bool,
+}
+
+pub struct IngestHandle {
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+pub struct IngestRunner;
+
+impl IngestRunner {
+    pub fn spawn(
+        store: Store,
+        dataset: DatasetSpec,
+        dataset_name: String,
+    ) -> (IngestHandle, Receiver<IngestEvent>) {
+        let (tx, rx) = channel();
+        let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
+        let worker_queue = Arc::clone(&queue);
+
+        let thread = std::thread::Builder::new()
+            .name("geode-ingest".into())
+            .spawn(move || run(store, dataset, dataset_name, worker_queue, tx))
+            .expect("spawning the ingest thread");
+
+        (IngestHandle { queue, thread: Mutex::new(Some(thread)) }, rx)
+    }
+}
+
+impl IngestHandle {
+    /// Add work. Items are merged into the queue and the whole queue is
+    /// re-sorted, so a current file preempts pending backfill.
+    pub fn submit(&self, plan: WorkPlan) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        q.items.extend(plan.items);
+        q.items.sort_by(|a, b| {
+            a.priority.cmp(&b.priority).then(b.source_time.cmp(&a.source_time))
+        });
+        cvar.notify_all();
+    }
+
+    pub fn shutdown(&self) {
+        {
+            let (lock, cvar) = &*self.queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            q.shutdown = true;
+            cvar.notify_all();
+        }
+        if let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for IngestHandle {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn run(
+    store: Store,
+    dataset: DatasetSpec,
+    dataset_name: String,
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    tx: Sender<IngestEvent>,
+) {
+    loop {
+        let item = {
+            let (lock, cvar) = &*queue;
+            let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+            loop {
+                if q.shutdown {
+                    return;
+                }
+                if !q.items.is_empty() {
+                    break q.items.remove(0);
+                }
+                let _ = tx.send(IngestEvent::PlanComplete);
+                let (guard, _) = cvar
+                    .wait_timeout(q, std::time::Duration::from_millis(250))
+                    .unwrap_or_else(|e| e.into_inner());
+                q = guard;
+            }
+        };
+
+        // Panic boundary (spec §5.7): a panicking load degrades its file and
+        // the runner keeps working. Only a render-thread panic takes the app
+        // down.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let CandidateState::Ready(sentinel) = &item.candidate.state else {
+                return Err("candidate was not ready".to_string());
+            };
+            load_file(
+                &store,
+                &LoadRequest {
+                    dataset: &dataset,
+                    dataset_name: &dataset_name,
+                    csv_path: &item.candidate.csv_path,
+                    sentinel,
+                    slot: &item.slot,
+                },
+            )
+            .map_err(|e| e.to_string())
+        }));
+
+        let event = match outcome {
+            Ok(Ok(loaded)) => IngestEvent::Published {
+                dataset: dataset_name.clone(),
+                slot: item.slot.clone(),
+                gen_id: loaded.gen_id,
+                books: match &item.candidate.state {
+                    CandidateState::Ready(s) => s.books.clone(),
+                    _ => Vec::new(),
+                },
+                rows: loaded.rows,
+                health: loaded.health,
+            },
+            Ok(Err(reason)) => IngestEvent::Failed { slot: item.slot.clone(), reason },
+            Err(_) => IngestEvent::Failed {
+                slot: item.slot.clone(),
+                reason: "ingest task panicked".into(),
+            },
+        };
+        if tx.send(event).is_err() {
+            return; // receiver gone: nothing left to report to
+        }
+    }
+}
+
+/// Backfill items yield between files so current work is not starved. The
+/// queue re-sort in `submit` is what actually reorders; this exists so the
+/// intent is testable and named.
+pub fn is_preemptible(item: &WorkItem) -> bool {
+    item.priority == Priority::Backfill
+}
+```
+
+Add to `crates/geode-data/src/ingest/mod.rs`:
+
+```rust
+pub mod runner;
+
+pub use runner::{IngestEvent, IngestHandle, IngestRunner};
+```
+
+- [ ] **Step 4: Run to verify tests pass**
+
+Run: `cargo test -p geode-data runner`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Full suite, lint, commit**
+
+Run: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --check`
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): ingest runner with preemption and a panic boundary
+
+One thread owning the writer connection, working a priority-ordered
+queue that is re-sorted on every submit so a newly landed current file
+jumps ahead of remaining backfill. Preemption granularity is one file:
+loads in flight are never interrupted.
+
+A panicking or failing load degrades its own file and the run continues
+(spec §5.7) — tested by planting a nonexistent CSV mid-plan and asserting
+every other file still publishes.
+
+One thread rather than a pool is deliberate: DuckDB is single-writer so
+publishes serialize anyway, and whether parallel parsing helps is a
+benchmark question spec §5.6 declines to assume."
+```
+
+---
+
+**Remaining tasks (13–14) continue below.** Task 13 adds the retention
+sweeper and checkpoint scheduling; Task 14 the ingest benchmarks, the
+parse-parallelism measurement spec §5.6 defers to, and the CI caching change
+for the bundled DuckDB build.
