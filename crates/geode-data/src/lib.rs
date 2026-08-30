@@ -3,5 +3,6 @@
 //! no other crate opens files or sockets.
 
 pub mod health;
+pub mod ingest;
 pub mod source;
 pub mod store;
