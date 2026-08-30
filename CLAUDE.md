@@ -20,7 +20,8 @@ cargo test -p geode-demo-data same_seed                # single test by name fil
 cargo fmt --check                                      # format check (CI-enforced)
 cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warnings are errors)
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
-cargo bench -p geode-demo-data                         # run criterion benchmarks
+cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
+cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
 ```
 
 CI (`.github/workflows/ci.yml`) runs all four checks on **both macOS and Windows** — keep both platforms building.
