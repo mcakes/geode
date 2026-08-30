@@ -4053,9 +4053,7 @@ mod tests {
     /// release, and a subsequent unmodified press-drag-release must
     /// change nothing.
     #[gpui::test]
-    fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(cx: &mut gpui::TestAppContext) {
         let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
         let layout_before = shell.read_with(&cx, |shell, _| {
             shell.services.workspaces.active().tree().layout(Rect::UNIT)
@@ -4191,9 +4189,7 @@ mod tests {
     /// moves persist (session dirty) and further mouse moves resize
     /// nothing.
     #[gpui::test]
-    fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::TestAppContext) {
         let (mut cx, shell, _left, _right) = two_tile_drag_shell(cx);
 
         // Grab the divider between the two tiles and drag it left.

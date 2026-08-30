@@ -531,7 +531,10 @@ mod tests {
             }
             y += 10.0;
         }
-        assert!(checked > 8000, "sanity: the sweep actually covered the grid");
+        assert!(
+            checked > 8000,
+            "sanity: the sweep actually covered the grid"
+        );
     }
 
     /// The rect the core hands back is the one the highlight paints over:
