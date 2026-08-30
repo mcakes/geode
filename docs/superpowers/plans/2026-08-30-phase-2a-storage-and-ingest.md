@@ -1944,6 +1944,12 @@ Prepend to `crates/geode-data/src/store/ddl.rs`:
 //! generation column, no history predicate, size independent of retention.
 //! That is what keeps the requery budget reachable by construction, so the
 //! absence of `gen_id` from live is load-bearing, not an oversight.
+//!
+//! A grain's table carries its key columns plus the measures and attributes
+//! declared *at that grain*. A `Dimension` column outside every grain key
+//! therefore appears in no table at all — so anything worth displaying that
+//! is not itself a key (`business_date`, for one) must be declared as an
+//! `attribute` at the grain that owns it, not as a bare dimension.
 
 use geode_core::schema::{ColumnRole, DatasetSpec, Grain};
 
@@ -2601,6 +2607,17 @@ impl<'a> Catalog<'a> {
         self.sql(DDL)
     }
 
+    /// Reserve a file id *before* loading, so the `source_file_id` stamped
+    /// onto every data row matches the catalog entry recorded afterwards.
+    /// Without this the two are assigned independently and provenance joins
+    /// silently return nothing.
+    pub fn reserve_file_id(&self) -> Result<FileId, StoreError> {
+        let sql = "select nextval('file_generations_id')";
+        self.conn
+            .query_row(sql, [], |r| r.get(0))
+            .map_err(|source| StoreError::Sql { statement: sql.into(), source })
+    }
+
     /// Peek at the next generation id without consuming it.
     pub fn next_gen_id(&self) -> Result<i64, StoreError> {
         let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";
@@ -2609,16 +2626,22 @@ impl<'a> Catalog<'a> {
             .map_err(|source| StoreError::Sql { statement: sql.into(), source })
     }
 
+    /// `rec.file_id` of 0 means "assign one"; any other value is used as
+    /// given, which is how a load stamps its rows and its catalog entry with
+    /// the same id (see [`Catalog::reserve_file_id`]).
     pub fn record(&self, rec: &FileGeneration) -> Result<FileId, StoreError> {
         let (health, reason) = rec.health.to_parts();
         let sql = "insert into file_generations
-                   select nextval('file_generations_id'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   select case when ? = 0 then nextval('file_generations_id') else ? end,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                    returning file_id";
         let file_id: i64 = self
             .conn
             .query_row(
                 sql,
                 duckdb::params![
+                    rec.file_id,
+                    rec.file_id,
                     rec.dataset,
                     rec.slot,
                     rec.path.to_string_lossy().to_string(),
@@ -3649,6 +3672,11 @@ mod tests {
         use geode_core::config::{LayerDoc, merge_docs};
         let mut text = String::from(
             r#"
+[risk_snapshot.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
 [risk_snapshot.columns.book]
 type = "utf8"
 role = "dimension"
@@ -4024,7 +4052,10 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // pairs; collect any disagreements.
     let catalog = Catalog::new(conn);
     let gen_id = catalog.next_gen_id()?;
-    let file_id = gen_id; // provisional; the catalog assigns the real id below
+    // Reserve the file id up front so the source_file_id stamped onto every
+    // data row is the same id the catalog entry gets below. Assigning them
+    // independently would break every provenance join.
+    let file_id = catalog.reserve_file_id()?;
 
     let split = split_by_grain(
         conn,
@@ -4078,7 +4109,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     let meta = std::fs::metadata(req.csv_path)
         .map_err(|source| LoadError::Io { path: req.csv_path.to_path_buf(), source })?;
     let file_id = catalog.record(&FileGeneration {
-        file_id: 0,
+        file_id,
         dataset: req.dataset_name.to_string(),
         slot: req.slot.to_string(),
         path: req.csv_path.to_path_buf(),
@@ -5857,6 +5888,16 @@ is detected within a file by Task 8 but not across files; Task 9's test says
 so explicitly. That belongs with `instrument_ref` derivation, which has no
 upstream source yet (spec §3.5) and is the first thing Phase 2b should pick
 up.
+
+**Deliberately deferred to Phase 2b: ENUM dictionary encoding.** Spec §3.6
+requires dimension columns to be stored as DuckDB `ENUM` so §7.2's "interned
+at ingest" holds — a plain `VARCHAR` comes back as `StringArray`, not
+`Dictionary(UInt8, Utf8)`. Task 5 emits `VARCHAR`. Nothing in 2a reads a
+snapshot, so nothing here can measure the benefit, and the change carries a
+real cost (widening the ENUM type whenever a new dimension value appears).
+It moves to 2b, where the snapshot benchmarks can justify it. This is a
+stored-type change, so it needs a rebuild of the database rather than a
+migration — cheap, because the database is derived from the CSVs.
 
 **Blocked on real data, not on code** (spec §10): a real `.done` sample and
 a real CSV header. Tasks 3–4 are written so that being wrong about either
