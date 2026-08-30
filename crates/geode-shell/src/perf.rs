@@ -30,7 +30,7 @@ use std::time::Duration;
 /// overflow bucket and drives `max` instead of being mistaken for idleness.
 pub const IDLE_CUTOFF: Duration = Duration::from_millis(500);
 
-/// Upper bounds (exclusive ceiling of each bucket, in microseconds) of the
+/// Upper bounds (inclusive ceiling of each bucket, in microseconds) of the
 /// log-spaced buckets: 12 buckets per decade over 0.1ms → 100ms, i.e.
 /// `100µs * 10^((i+1)/12)` rounded to integer microseconds. A hardcoded
 /// table rather than runtime `powf` so recording is a pure integer binary
@@ -61,8 +61,10 @@ pub struct FrameHistogram {
     /// Largest recorded sample, in microseconds.
     max_micros: u64,
     /// Samples the caller discarded as idle gaps rather than recording
-    /// (bumped via [`Self::note_discarded_idle`]) — kept so the overlay
-    /// can be honest that gaps exist without letting them pollute `max`.
+    /// (bumped via [`Self::note_discarded_idle`]) — kept out of `max` so
+    /// idle time never reads as a slow frame. Today only the
+    /// profiling-gated `perf::dump` surfaces this count; the default
+    /// overlay does not show it.
     discarded_idle: u64,
 }
 
@@ -96,12 +98,12 @@ impl FrameHistogram {
         if n == 0 {
             return;
         }
-        // partition_point = index of the first bucket whose upper bound
-        // holds this sample (bounds are exclusive ceilings: a sample equal
-        // to a bound belongs to the *next* bucket, so bucket i covers
-        // (bound[i-1], bound[i]] ... i.e. `micros < bound[i]` fails while
-        // `micros >= bound[i]`; with `<=` reversed we get half-open on the
-        // low side). Concretely: 121µs lands in bucket 0, 122µs in bucket 1.
+        // partition_point over `b < micros` = index of the first bucket
+        // whose upper bound holds this sample. Bounds are INCLUSIVE
+        // ceilings: bucket i covers (bound[i-1], bound[i]], so a sample
+        // equal to a bound belongs to that bucket, not the next one.
+        // Concretely: 121µs lands in bucket 0, 122µs in bucket 1
+        // (`samples_land_in_the_documented_buckets` pins this).
         let idx = BUCKET_UPPER_BOUNDS_MICROS.partition_point(|&b| b < micros);
         if idx < NUM_BUCKETS {
             self.buckets[idx] = self.buckets[idx].saturating_add(n);

@@ -213,9 +213,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "keybindings::open", "Keyboard shortcuts", "Keyboard");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
-    // unlike the punctuation story above, so this spelling is real; free
-    // on both platforms and unclaimed by the builtin map, whose only other
-    // shift+letter chord is mod+shift+t). `perf::reset` is palette-only —
+    // unlike the punctuation story above, so this spelling is real, and no
+    // builtin binding claims it under the default mod). Known remap hazard,
+    // shared with every mod+letter chord (e.g. mod+h vs ctrl+h): under
+    // `keymap.mod = "ctrl"` this aliases onto `ctrl+shift+p`, and the
+    // matcher's last-exact-match rule lets it shadow the palette's second
+    // binding (ctrl+k still opens the palette). `perf::reset` is palette-only —
     // resetting counters is an occasional deliberate act, not muscle
     // memory worth a chord.
     action(
