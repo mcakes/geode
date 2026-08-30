@@ -44,12 +44,16 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     }
 }
 
+/// `probe` is the grain a finer-than-`grain` predicate is tested against.
+/// It must be a grain the dataset declares — only those have tables — so
+/// the caller passes the spine grain rather than assuming the finest.
 pub fn compile_scope(
     conn: &Connection,
     scope: &Scope,
     ds: &DatasetSpec,
     grain: Grain,
     dims: &DerivedDimensions,
+    probe: Grain,
 ) -> Result<ScopeSql, StoreError> {
     let mut direct: Vec<String> = Vec::new();
     let mut finer: Vec<String> = Vec::new();
@@ -131,7 +135,6 @@ pub fn compile_scope(
     // those columns exist. The finest grain always carries every key
     // column, so it is the safe target.
     if !finer.is_empty() {
-        let probe = Grain::UnderlyingPair;
         let join = grain
             .key_columns()
             .iter()
@@ -263,7 +266,15 @@ grain = "position"
 
     fn compile(scope: &Scope, grain: Grain) -> (ScopeSql, tempfile::TempDir, crate::store::Store) {
         let (dir, store) = store();
-        let sql = compile_scope(store.writer(), scope, &dataset(), grain, &dims()).unwrap();
+        let sql = compile_scope(
+            store.writer(),
+            scope,
+            &dataset(),
+            grain,
+            &dims(),
+            Grain::UnderlyingPair,
+        )
+        .unwrap();
         (sql, dir, store)
     }
 
@@ -326,6 +337,7 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
+            Grain::UnderlyingPair,
         )
         .unwrap();
         let b = compile_scope(
@@ -334,6 +346,7 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
+            Grain::UnderlyingPair,
         )
         .unwrap();
         let strip = |s: &ScopeSql| {
@@ -450,6 +463,7 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
+            Grain::UnderlyingPair,
         )
         .unwrap();
         let total: f64 = store

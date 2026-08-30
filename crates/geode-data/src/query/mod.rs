@@ -4,3 +4,6 @@
 pub mod scope_sql;
 
 pub use scope_sql::{ScopeSql, compile_scope};
+pub mod compile;
+
+pub use compile::{CompiledColumn, CompiledQuery, compile_view, depth_for_mask, mask_for_depth};
