@@ -28,3 +28,13 @@ toml_edit = "0.25.13"
 [dev-dependencies]
 tempfile = "3.27.0"
 gpui = { workspace = true, features = ["test-support"] }
+criterion = "0.8.2"
+
+# Criterion benches over the pure shell cores (spec §7.4). Kept in this
+# crate rather than a dedicated bench crate: criterion is a dev-dependency
+# only (zero cost to lib consumers), matching geode-demo-data's precedent.
+# harness = false + the lib's bench = false are the workspace-wide criterion
+# invariants (see CLAUDE.md).
+[[bench]]
+name = "shell_cores"
+harness = false
