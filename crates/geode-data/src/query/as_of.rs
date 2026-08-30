@@ -24,11 +24,16 @@ impl AsOf {
 
 /// `(batch, book, gen_id)` — the newest generation at or before `at`, for
 /// every partition that existed by then.
+///
+/// `book` is `Option` because ingest permits rows with no book: it reports
+/// them as a degradation rather than dropping them (spec §4.4), so a
+/// NULL-book partition is a real partition and time travel has to be able
+/// to name it. `retention.rs` handles the same hazard the same way.
 pub fn resolve_generations(
     conn: &Connection,
     archive_table: &str,
     at: DateTime<Utc>,
-) -> Result<Vec<(String, String, i64)>, StoreError> {
+) -> Result<Vec<(String, Option<String>, i64)>, StoreError> {
     let sql = format!(
         "select batch, book, gen_id from (
              select batch, book, gen_id, source_time,
@@ -49,18 +54,21 @@ pub fn resolve_generations(
         .query_map(duckdb::params![at], |r| {
             Ok((
                 r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(1)?,
                 r.get::<_, i64>(2)?,
             ))
         })
         .map_err(err)?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    // Propagated, not swallowed. Discarding a row here narrows the
+    // resolved generation set, which silently narrows the *result* — a
+    // query that answers with less data than it should and says nothing.
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
 /// A predicate selecting exactly those generations. Values come from the
 /// catalog, not from user input, so they are inlined as quoted literals;
 /// scope predicates, which do take user input, bind (spec §6.2).
-pub fn generation_predicate(generations: &[(String, String, i64)]) -> String {
+pub fn generation_predicate(generations: &[(String, Option<String>, i64)]) -> String {
     if generations.is_empty() {
         // Selecting nothing, not everything: a time before all history is
         // an empty result, never the whole archive.
@@ -69,10 +77,16 @@ pub fn generation_predicate(generations: &[(String, String, i64)]) -> String {
     generations
         .iter()
         .map(|(batch, book, generation)| {
+            // `book = '…'` cannot match a NULL book, so a partition with
+            // no book would be silently excluded from every historical
+            // answer while appearing in the live one.
+            let book_term = match book {
+                Some(b) => format!("book = '{}'", b.replace('\'', "''")),
+                None => "book is null".to_string(),
+            };
             format!(
-                "(batch = '{}' and book = '{}' and gen_id = {generation})",
+                "(batch = '{}' and {book_term} and gen_id = {generation})",
                 batch.replace('\'', "''"),
-                book.replace('\'', "''")
             )
         })
         .collect::<Vec<_>>()

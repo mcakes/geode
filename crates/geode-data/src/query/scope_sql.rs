@@ -82,9 +82,20 @@ pub fn compile_scope(
         });
     }
 
-    let mut direct: Vec<String> = Vec::new();
-    let mut finer: Vec<String> = Vec::new();
-    let mut params: Vec<Value> = Vec::new();
+    // Each clause carries its own bound values.
+    //
+    // Accumulating a flat `params` alongside the clause strings is what
+    // made this silently wrong before: params were pushed in *source*
+    // order, but the `exists(...)` wrapper holding every finer clause is
+    // emitted *last*, so a finer predicate followed by a direct one
+    // transposed their values onto each other's placeholders — a book
+    // filter and an underlying filter swapping, with no error. Keeping the
+    // values attached to the clause means the two orders cannot disagree:
+    // the params fall out of the emission order rather than being
+    // maintained in parallel with it.
+    type Clause = (String, Vec<Value>);
+    let mut direct: Vec<Clause> = Vec::new();
+    let mut finer: Vec<Clause> = Vec::new();
     let mut semi_dimensions: Vec<String> = Vec::new();
 
     // 1. Dimension selections: one bound varchar, split in SQL.
@@ -117,9 +128,10 @@ pub fn compile_scope(
                 semantics: ScopeSemantics::Direct,
             });
         }
-        params.push(Value::Text(values.join(SELECTION_DELIMITER)));
-        let clause =
-            format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))");
+        let clause = (
+            format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))"),
+            vec![Value::Text(values.join(SELECTION_DELIMITER))],
+        );
         if grain.key_columns().contains(&base.as_str()) {
             direct.push(clause);
         } else {
@@ -132,17 +144,18 @@ pub fn compile_scope(
     if let Some(text) = &scope.text {
         let pattern = format!("%{text}%");
         let mut terms = Vec::new();
+        let mut term_params = Vec::new();
         for col in ds.textual_columns() {
             // Only columns present at this grain; a textual column from a
             // finer grain would need its own semi-join, and the global
             // text filter is not worth that complexity (spec §4.1).
             if grain.key_columns().contains(&col.name.as_str()) {
                 terms.push(format!("\"{}\" ilike ?", col.name));
-                params.push(Value::Text(pattern.clone()));
+                term_params.push(Value::Text(pattern.clone()));
             }
         }
         if !terms.is_empty() {
-            direct.push(format!("({})", terms.join(" or ")));
+            direct.push((format!("({})", terms.join(" or ")), term_params));
         }
     }
 
@@ -156,7 +169,6 @@ pub fn compile_scope(
         // "positions that have…" when it is nothing of the kind.
         let is_finer = |c: &str| !grain.key_columns().contains(&dims.base_column(c));
         let mentions_finer = expr.columns().iter().any(|c| is_finer(c));
-        params.extend(expr_params);
         if mentions_finer {
             for c in expr.columns() {
                 let base = dims.base_column(c);
@@ -164,9 +176,9 @@ pub fn compile_scope(
                     semi_dimensions.push(base.to_string());
                 }
             }
-            finer.push(rendered);
+            finer.push((rendered, expr_params));
         } else {
-            direct.push(rendered);
+            direct.push((rendered, expr_params));
         }
     }
 
@@ -190,21 +202,42 @@ pub fn compile_scope(
         // from inside an as-of query mixes today's data into a historical
         // answer — and does it silently, because the numbers still look
         // like numbers (spec §6.5).
-        let mut where_terms = vec![join, finer.join(" and ")];
+        let mut where_terms = vec![
+            join,
+            finer
+                .iter()
+                .map(|(clause, _)| clause.clone())
+                .collect::<Vec<_>>()
+                .join(" and "),
+        ];
         if let Some(generations) = era.generations {
             where_terms.push(format!("({generations})"));
         }
-        direct.push(format!(
-            "exists (select 1 from {} probe where {})",
-            table_name(&ds.name, probe, era.kind),
-            where_terms.join(" and ")
+        // The wrapper is appended last, so its values follow every direct
+        // clause's — which is exactly what carrying them together gives.
+        let finer_params: Vec<Value> = finer.iter().flat_map(|(_, p)| p.clone()).collect();
+        direct.push((
+            format!(
+                "exists (select 1 from {} probe where {})",
+                table_name(&ds.name, probe, era.kind),
+                where_terms.join(" and ")
+            ),
+            finer_params,
         ));
     }
 
-    let predicate = if direct.is_empty() {
+    // One pass: the predicate and its values come out of the same
+    // iteration, so they cannot be in different orders.
+    let mut params: Vec<Value> = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
+    for (clause, clause_params) in direct {
+        clauses.push(clause);
+        params.extend(clause_params);
+    }
+    let predicate = if clauses.is_empty() {
         "true".to_string()
     } else {
-        direct.join(" and ")
+        clauses.join(" and ")
     };
 
     let semantics = if semi_dimensions.is_empty() {

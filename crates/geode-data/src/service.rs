@@ -100,11 +100,27 @@ impl DataService {
         };
         let catalog = Catalog::new(&self.conn);
         for dataset in &compiled.stalest_input {
-            provenance.datasets.push(Freshness {
-                dataset: dataset.clone(),
-                as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
-                generation: catalog.next_gen_id()?.saturating_sub(1),
-            });
+            // A historical result must not be labelled with today's
+            // freshness. `dataset_as_of` reads the live catalog and
+            // `next_gen_id` is the newest generation in the database, so
+            // both describe *now* — reporting them beside an as-of result
+            // inverts the very rule §5.4 exists for.
+            let freshness = match &as_of {
+                AsOf::Live => Freshness {
+                    dataset: dataset.clone(),
+                    as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
+                    generation: catalog.next_gen_id()?.saturating_sub(1),
+                },
+                AsOf::At(t) => Freshness {
+                    dataset: dataset.clone(),
+                    // The result is as of the requested instant; the
+                    // generation is per-partition, so no single number
+                    // describes it and inventing one would be worse.
+                    as_of: Some(t.to_rfc3339()),
+                    generation: 0,
+                },
+            };
+            provenance.datasets.push(freshness);
         }
 
         let grouping_len = compiled.grouping.len();

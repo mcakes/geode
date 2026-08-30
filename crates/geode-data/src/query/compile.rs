@@ -280,7 +280,16 @@ pub fn compile_view(
     // by ingest, so before the first load there are none and the cast
     // would be a hard error. Degrading to plain strings is correct — the
     // interning is an optimization, not a semantic.
-    let interned: Vec<&str> = {
+    //
+    // And only for live. The ENUMs are rebuilt from the *live* table on
+    // every ingest, so they carry today's values; an archived row holding
+    // a value that has since left live — a retired book, a closed LHU —
+    // cannot be cast through them, and the query fails outright with a
+    // conversion error. The era decides this, like every other table
+    // choice in this function.
+    let interned: Vec<&str> = if era.kind != TableKind::Live {
+        Vec::new()
+    } else {
         let existing = existing_enum_types(conn, &view.dataset)?;
         crate::store::ddl::dimension_columns(ds)
             .into_iter()
@@ -1114,6 +1123,157 @@ kind = "measure"
         let rows = run(&store, &q, &["row_depth", "delta01"]);
         let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
         assert_eq!(total[1], "None", "an unmapped desk selects nothing");
+    }
+
+    /// A deliberately hostile store: a NULL book, a NULL LHU, two
+    /// archived generations, a dimension value that exists only in
+    /// history, and derived ENUMs actually built from live.
+    ///
+    /// Every one of those is ordinary in the real feed and none of them
+    /// were in the original fixture, which is why three rounds of review
+    /// each found defects the suite could not see. Reviews find what the
+    /// fixture makes reachable.
+    fn hostile_fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let (dir, store) = fixture();
+        let conn = store.writer();
+        conn.execute_batch(
+            // Live: one NULL-book row and one NULL-LHU row alongside BK0.
+            "insert into risk_snapshot_position_live values
+               ('BK0',NULL,'P9','C', 5, 'b', 1, 1, now()),
+               (NULL,'L0','P8','C', 11, 'b', 1, 1, now());
+             insert into risk_snapshot_underlying_live values
+               ('BK0',NULL,'P9','C','I9','SPX', 3, 'b', 1, 1, now()),
+               (NULL,'L0','P8','C','I8','SPX', 6, 'b', 1, 1, now());
+             -- Archive: two generations of one partition, plus a
+             -- NULL-book partition, plus an LHU that has since retired.
+             insert into risk_snapshot_position_archive values
+               ('BK0','GONE','P1','C', 100, 'b', 1, 1,
+                TIMESTAMPTZ '2026-08-01 00:00:00Z'),
+               ('BK0','L0','P1','C', 200, 'b', 2, 2,
+                TIMESTAMPTZ '2026-08-10 00:00:00Z'),
+               (NULL,'L0','P8','C', 50, 'b', 3, 1,
+                TIMESTAMPTZ '2026-08-01 00:00:00Z');
+             insert into risk_snapshot_underlying_archive values
+               ('BK0','GONE','P1','C','I1','SPX', 40, 'b', 1, 1,
+                TIMESTAMPTZ '2026-08-01 00:00:00Z'),
+               ('BK0','L0','P1','C','I1','SPX', 80, 'b', 2, 2,
+                TIMESTAMPTZ '2026-08-10 00:00:00Z'),
+               (NULL,'L0','P8','C','I8','SPX', 20, 'b', 3, 1,
+                TIMESTAMPTZ '2026-08-01 00:00:00Z');",
+        )
+        .unwrap();
+        // Build the ENUMs the way ingest does — from live only. Only for
+        // columns this grain's table actually has; `underlying2_ref`
+        // lives at the pair grain.
+        for col in crate::store::ddl::dimension_columns(schema().dataset("risk_snapshot").unwrap())
+            .into_iter()
+            .filter(|c| Grain::Underlying.key_columns().contains(c))
+        {
+            crate::store::ddl::refresh_enum(
+                conn,
+                "risk_snapshot",
+                col,
+                &table_name("risk_snapshot", Grain::Underlying, TableKind::Live),
+            )
+            .unwrap();
+        }
+        (dir, store)
+    }
+
+    #[test]
+    fn as_of_survives_a_value_that_has_since_left_live() {
+        // The ENUMs are rebuilt from live on every ingest, so an archived
+        // row holding a retired value cannot be cast through them. This
+        // failed outright with a conversion error, not a wrong number.
+        let (_d, store) = hostile_fixture();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "lhu"]);
+        assert!(
+            rows.iter().any(|r| r[1] == "Some(\"GONE\")"),
+            "the retired LHU must still be readable in history: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_null_book_partition_is_not_dropped_from_history() {
+        // Ingest permits rows with no book — it reports them rather than
+        // dropping them — so a NULL-book partition is a real partition.
+        // `book = '…'` cannot match it, so every as-of query silently
+        // answered with less data than it had.
+        let (_d, store) = hostile_fixture();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(150.0)",
+            "100 from BK0 plus 50 from the NULL-book partition: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_finer_and_a_direct_predicate_bind_to_their_own_placeholders() {
+        // Scoping by book *and* underlying is the most ordinary thing a
+        // trader does. The finer predicate is emitted last, inside the
+        // semi-join wrapper, while its value was bound first — so the two
+        // values swapped, `book = 'SPX'` matched nothing, and the coarse
+        // measure came back blank beside a correct fine-grained one.
+        let (_d, store) = fixture();
+        let scope = Scope {
+            dimensions: vec![
+                // Finer than position grain: routed into the semi-join.
+                geode_core::scope::DimensionSelection {
+                    column: "underlying_ref".into(),
+                    values: vec!["SPX".into()],
+                },
+                // At position grain: stays direct, and is emitted first.
+                geode_core::scope::DimensionSelection {
+                    column: "book".into(),
+                    values: vec!["BK0".into()],
+                },
+            ],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[1], "Some(10.0)", "SPX's delta only: {rows:?}");
+        assert_eq!(
+            total[2], "Some(7.0)",
+            "the position's PnL must survive the semi-join: {rows:?}"
+        );
     }
 
     #[test]
