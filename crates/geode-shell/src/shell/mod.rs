@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, ScrollHandle,
-    Window, div, px,
+    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, MouseMoveEvent,
+    ScrollHandle, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
@@ -38,7 +38,10 @@ use crate::reload;
 use crate::session;
 use crate::theme;
 use crate::theme::ThemeService;
-use crate::tiling::{Rect, Workspaces, apply_workspace_action};
+use crate::tiling::{
+    DIVIDER_HIT_WIDTH, DividerAddress, DockSide, Orientation, Rect, Workspaces,
+    apply_workspace_action, divider_strips, dock_edge_strips,
+};
 use geode_core::config::{Config, LayerDoc};
 
 /// How often the background reload watcher polls the watched config
@@ -48,6 +51,15 @@ use geode_core::config::{Config, LayerDoc};
 /// thread, via the async entity handle (spec PHILOSOPHY.md: "nothing may
 /// stall the render thread").
 const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// gpui hover-group name shared by every divider strip (drag-splitters
+/// task): the strip is the group, its inner 2px line is the member that
+/// tints on `group_hover`. One shared name is correct — gpui resolves a
+/// `group_hover` against the *innermost enclosing* group's bounds during
+/// paint, so each strip's line only lights for its own strip (precedent:
+/// gpui-component's `ResizeHandle` shares the name "handle" across every
+/// handle the same way).
+const DIVIDER_GROUP: &str = "divider-strip";
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
@@ -65,6 +77,57 @@ pub struct ShellServices {
     /// in contexts with no writable user config dir (e.g. some test setups)
     /// — session persistence is then just skipped, never a panic.
     pub session_path: Option<PathBuf>,
+}
+
+/// What an in-flight divider drag is resizing (drag-splitters task): a
+/// divider inside the main tree, a divider inside one dock's tree, or a
+/// dock's frame edge. Tree dividers are named by the pure, stable
+/// [`DividerAddress`] captured at mouse-down — never a reference into the
+/// tree, because the tree can change between the mouse-down and the moves
+/// that apply the drag (`Tree::drag_divider` no-ops on a stale address).
+#[derive(Debug, Clone, PartialEq)]
+enum DividerDragTarget {
+    MainTree {
+        address: DividerAddress,
+    },
+    DockTree {
+        side: DockSide,
+        address: DividerAddress,
+    },
+    DockEdge {
+        side: DockSide,
+    },
+}
+
+/// An active divider drag, recorded by the strip's mouse-down and consumed
+/// by the full-window drag catcher's mouse-move/up (see `render`). Holds
+/// everything the position→ratio math needs so a mouse-move never has to
+/// re-derive layout outside the render pass's single geometry walk:
+/// `bounds` is the containing rect in *window* coordinates (the laid-out
+/// tree/dock rect for tree dividers, the whole content area for dock
+/// edges — mouse events arrive in window space, so the rect is stored
+/// pre-offset by the sidebar/toolbar chrome rather than converting every
+/// event), `axis` picks the resize cursor while dragging, and `moved`
+/// records whether any move actually changed the layout so mouse-up only
+/// dirties the session for a drag that resized something.
+#[derive(Debug, Clone, PartialEq)]
+struct DividerDrag {
+    target: DividerDragTarget,
+    bounds: Rect,
+    axis: Orientation,
+    moved: bool,
+}
+
+/// One paintable divider strip for the current frame, produced inside
+/// `render`'s single layout pass: the hit rect in surface coordinates
+/// (the strips are absolutely-positioned children of the tile surface),
+/// plus the ready-made [`DividerDrag`] ingredients its mouse-down
+/// captures.
+struct StripSpec {
+    rect: Rect,
+    axis: Orientation,
+    target: DividerDragTarget,
+    drag_bounds: Rect,
 }
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
@@ -224,6 +287,17 @@ pub struct ShellView {
     /// whole bug) — a fix that waited for the next keystroke to run would
     /// never run at all.
     pending_focus_restore: bool,
+    /// The in-flight divider drag, or `None` when no drag is active
+    /// (drag-splitters task). Set by a strip's mouse-down, advanced by the
+    /// full-window drag catcher's mouse-moves (live re-layout via the pure
+    /// drag verbs), and cleared by its mouse-up — which is also the point
+    /// the session goes dirty, so a drag-resize persists exactly like a
+    /// keyboard resize (coalesced onto the same ~500ms background flush).
+    /// Cancelled (top of `render`) whenever the palette or a modal opens
+    /// mid-drag, or a tree tile goes fullscreen — all three make the
+    /// dragged boundary invisible or unreachable, and silently resizing an
+    /// invisible layout would be a surprise on return.
+    divider_drag: Option<DividerDrag>,
     /// The toolbar's right-aligned filter field (Task 4). Deliberately
     /// inert — nothing reads its value; it becomes the global text filter
     /// (spec §4.1) in the data phase. Owned here (rather than built fresh
@@ -410,6 +484,7 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
             pending_focus_restore: false,
+            divider_drag: None,
             filter_input,
         }
     }
@@ -1079,6 +1154,47 @@ impl ShellView {
             }
         }
     }
+
+    /// Apply the active divider drag at a window-space cursor position
+    /// (drag-splitters task): route to the matching pure verb with the
+    /// geometry captured at mouse-down. Returns whether the layout
+    /// actually changed (a stale address or unchanged clamp result
+    /// doesn't), and records that in `moved` so mouse-up knows whether to
+    /// dirty the session. Pure math only — the caller notifies.
+    fn apply_divider_drag(&mut self, x: f32, y: f32) -> bool {
+        let Some(drag) = &self.divider_drag else {
+            return false;
+        };
+        let ws = self.services.workspaces.active_mut();
+        let changed = match &drag.target {
+            DividerDragTarget::MainTree { address } => {
+                ws.drag_main_divider(address, x, y, drag.bounds)
+            }
+            DividerDragTarget::DockTree { side, address } => {
+                ws.drag_dock_divider(*side, address, x, y, drag.bounds)
+            }
+            DividerDragTarget::DockEdge { side } => ws.drag_dock_edge(*side, x, y, drag.bounds),
+        };
+        if changed && let Some(drag) = &mut self.divider_drag {
+            drag.moved = true;
+        }
+        changed
+    }
+
+    /// End the active divider drag (mouse-up, wherever it lands). The
+    /// session goes dirty here — once per drag, not per move — and only
+    /// when the drag actually resized something, so a click-and-release
+    /// on a strip writes nothing. Mirrors how keyboard resizes persist:
+    /// the dirty flag coalesces onto the watcher's ~500ms background
+    /// flush, never a synchronous write on the UI thread.
+    fn finish_divider_drag(&mut self, cx: &mut Context<Self>) {
+        if let Some(drag) = self.divider_drag.take() {
+            if drag.moved {
+                self.session_dirty = true;
+            }
+            cx.notify();
+        }
+    }
 }
 
 impl Render for ShellView {
@@ -1096,6 +1212,31 @@ impl Render for ShellView {
         if self.pending_focus_restore {
             self.pending_focus_restore = false;
             self.focus_handle.focus(window, cx);
+        }
+
+        // Cancel an in-flight divider drag when the surface it was
+        // resizing is no longer the one on screen (drag-splitters task):
+        // the palette or a modal opened mid-drag (keyboard stays live
+        // during a drag — ctrl+k works with the button held), or a tree
+        // tile went fullscreen (mod+f likewise). All three hide the
+        // dragged boundary, and letting the drag keep mutating an
+        // invisible layout would be a surprise on return. Same
+        // consume-state-at-the-top-of-render precedent as
+        // `pending_focus_restore` just above: render is the one place
+        // every one of those paths reliably funnels through with the
+        // state fresh.
+        if self.divider_drag.is_some()
+            && (self.palette.is_some()
+                || self.modal.is_some()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .fullscreen()
+                    .is_some())
+        {
+            self.divider_drag = None;
         }
 
         // Apply the UI font size (see the `fontsize` module doc): the rem
@@ -1141,7 +1282,27 @@ impl Render for ShellView {
             Vec<(crate::tiling::TileId, Rect)>,
             Option<crate::tiling::TileId>,
         );
-        let (region, focused, tree_area, rects, dock_cells) = {
+        // Divider strips are painted (and their listeners armed) only
+        // while no overlay is up: the palette's click-catcher and the
+        // modal's backdrop both cover the whole window ABOVE the strips
+        // but without occluding them, so a live strip underneath would
+        // still take the same mouse-down that dismisses the overlay and
+        // start a drag from under it. Gating at paint time keeps the
+        // rule simple: strips exist exactly when the tiles they resize
+        // are the frontmost interactive surface.
+        let dividers_active = self.palette.is_none() && self.modal.is_none();
+        // Mouse events arrive in window coordinates while the tile
+        // geometry lives in surface coordinates (the surface starts below
+        // the toolbar, right of the sidebar) — the drag rects captured at
+        // mouse-down are pre-offset into window space so the per-move math
+        // never converts.
+        let to_window_space = |r: Rect| Rect {
+            x: r.x + sidebar::WIDTH,
+            y: r.y + toolbar_height,
+            w: r.w,
+            h: r.h,
+        };
+        let (region, focused, tree_area, rects, dock_cells, strips) = {
             let workspace = self.services.workspaces.active();
             let tree = workspace.tree();
             let (tree_area, dock_rects) = if tree.fullscreen().is_some() {
@@ -1149,6 +1310,52 @@ impl Render for ShellView {
             } else {
                 crate::tiling::dock_layout(workspace.docks(), area)
             };
+            // The frame's divider strips, from the same rects this pass
+            // just computed (drag-splitters task): the main tree's
+            // interior boundaries, each visible dock tree's interior
+            // boundaries, then the dock frame edges — edges last so they
+            // paint above a dock tree's own strips where the two meet at
+            // a corner (hit-testing follows paint order). `divider_strips`
+            // itself yields nothing for a fullscreen tree, and
+            // `dock_rects` is already empty then, so fullscreen suppresses
+            // every strip without a separate check here.
+            let mut strips: Vec<StripSpec> = Vec::new();
+            if dividers_active {
+                let tree_bounds = to_window_space(tree_area);
+                for s in divider_strips(tree, tree_area, DIVIDER_HIT_WIDTH) {
+                    strips.push(StripSpec {
+                        rect: s.rect,
+                        axis: s.orientation,
+                        target: DividerDragTarget::MainTree { address: s.address },
+                        drag_bounds: tree_bounds,
+                    });
+                }
+                for &(side, r) in &dock_rects {
+                    let dock_bounds = to_window_space(r);
+                    for s in
+                        divider_strips(workspace.docks().get(side).tree(), r, DIVIDER_HIT_WIDTH)
+                    {
+                        strips.push(StripSpec {
+                            rect: s.rect,
+                            axis: s.orientation,
+                            target: DividerDragTarget::DockTree {
+                                side,
+                                address: s.address,
+                            },
+                            drag_bounds: dock_bounds,
+                        });
+                    }
+                }
+                let area_bounds = to_window_space(area);
+                for e in dock_edge_strips(&dock_rects, DIVIDER_HIT_WIDTH) {
+                    strips.push(StripSpec {
+                        rect: e.rect,
+                        axis: e.orientation,
+                        target: DividerDragTarget::DockEdge { side: e.side },
+                        drag_bounds: area_bounds,
+                    });
+                }
+            }
             // Each visible dock carries its own tile layout plus its
             // tree's focused tile (the ring shows on the focused dock's
             // focused tile only — still at most one ring per workspace,
@@ -1166,6 +1373,7 @@ impl Render for ShellView {
                 tree_area,
                 tree.layout(tree_area),
                 dock_cells,
+                strips,
             )
         };
 
@@ -1353,6 +1561,76 @@ impl Render for ShellView {
             }
         }
 
+        // The divider strips (drag-splitters task), painted after — so
+        // above — every tile and dock cell: transparent hit areas
+        // `DIVIDER_HIT_WIDTH` wide centered on each draggable boundary,
+        // each carrying a 2px line that lights up `primary` on hover (and
+        // stays lit on the strip being dragged, whose cursor may be far
+        // away mid-drag). `.occlude()` is what makes a strip's mouse-down
+        // win over the click-to-focus listener of the tile edges it
+        // overlaps: an occluding hitbox removes everything painted below
+        // it from the hover chain, so the tile's own `on_mouse_down`
+        // (hover-gated by gpui) never fires — same mechanism
+        // gpui-component's `ResizeHandle` relies on. The mouse-down only
+        // *records* the drag; the moves are handled by the full-window
+        // drag catcher near the end of this method, because a fast drag
+        // leaves this thin strip immediately (the capture problem).
+        for (i, spec) in strips.into_iter().enumerate() {
+            let StripSpec {
+                rect: r,
+                axis,
+                target,
+                drag_bounds,
+            } = spec;
+            let is_active = self
+                .divider_drag
+                .as_ref()
+                .is_some_and(|drag| drag.target == target);
+            let line = div()
+                .group_hover(DIVIDER_GROUP, |s| s.bg(cx.theme().primary))
+                .when(is_active, |el| el.bg(cx.theme().primary))
+                .map(|el| match axis {
+                    Orientation::Horizontal => el.w(px(2.0)).h_full(),
+                    Orientation::Vertical => el.h(px(2.0)).w_full(),
+                });
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(r.x))
+                    .top(px(r.y))
+                    .w(px(r.w))
+                    .h(px(r.h))
+                    .occlude()
+                    .group(DIVIDER_GROUP)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .map(|el| match axis {
+                        Orientation::Horizontal => el.cursor_col_resize(),
+                        Orientation::Vertical => el.cursor_row_resize(),
+                    })
+                    // Test-only hook (no-op outside test builds), same
+                    // honest-limitation story as the empty hints above:
+                    // lets a `#[gpui::test]` confirm strips painted (or
+                    // didn't — fullscreen) via `debug_bounds`.
+                    .debug_selector(|| format!("divider-strip-{i}"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _event, _window, cx| {
+                            view.divider_drag = Some(DividerDrag {
+                                target: target.clone(),
+                                bounds: drag_bounds,
+                                axis,
+                                moved: false,
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(line),
+            );
+        }
+
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
@@ -1400,6 +1678,13 @@ impl Render for ShellView {
             .as_ref()
             .map(|modal| (modal.title.clone(), modal.build.clone()));
 
+        // Extracted ahead of the render chain like `modal` above: all the
+        // drag catcher below needs from the active drag is which resize
+        // cursor to show — the drag itself is applied through
+        // `apply_divider_drag`, which re-reads `self.divider_drag` per
+        // event.
+        let drag_axis = self.divider_drag.as_ref().map(|drag| drag.axis);
+
         v_flex()
             .size_full()
             .relative()
@@ -1410,6 +1695,70 @@ impl Render for ShellView {
             .child(toolbar)
             .child(body)
             .child(status_bar)
+            // The divider drag catcher (drag-splitters task): while a drag
+            // is active, a transparent full-window layer above the tiles
+            // and status bar (but below the palette/modal overlays, which
+            // cancel drags anyway — see the guard at the top of `render`)
+            // owns every mouse-move and mouse-up until the button is
+            // released. This is the capture mechanism: a fast drag leaves
+            // the thin strip immediately, and gpui's element-level
+            // `on_mouse_move` is hover-gated — but this layer's hitbox IS
+            // the whole window, so hover-gating is satisfied wherever the
+            // cursor goes (the div-composition equivalent of the
+            // window-level `window.on_mouse_event` listeners Zed's own
+            // pane-resize custom element registers in paint). `.occlude()`
+            // also suppresses tile hover/click behavior for the drag's
+            // duration, and the layer carries the axis resize cursor so
+            // the pointer keeps its col/row-resize shape even while it's
+            // off the strip — the same effect as Zed's
+            // `set_window_cursor_style` during a handle drag. Mouse-up out
+            // of the window (capture-phase `on_mouse_up_out`) and a move
+            // arriving with the button no longer pressed (a missed
+            // release) both end the drag too, so it can never get stuck.
+            .when_some(drag_axis, |el, axis| {
+                el.child(
+                    div()
+                        .id("divider-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .map(|el| match axis {
+                            Orientation::Horizontal => el.cursor_col_resize(),
+                            Orientation::Vertical => el.cursor_row_resize(),
+                        })
+                        .debug_selector(|| "divider-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            if event.pressed_button != Some(MouseButton::Left) {
+                                // The release happened where we
+                                // couldn't see it — treat the first
+                                // buttonless move as the mouse-up.
+                                view.finish_divider_drag(cx);
+                                return;
+                            }
+                            if view.apply_divider_drag(
+                                f32::from(event.position.x),
+                                f32::from(event.position.y),
+                            ) {
+                                cx.notify();
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        ),
+                )
+            })
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
@@ -2021,6 +2370,227 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
         (cx, shell)
+    }
+
+    /// End-to-end (drag-splitters task): a real press-drag-release on the
+    /// splitter between two tiles resizes the pair proportionally to
+    /// where the cursor was dropped, never touches tile focus (the strip
+    /// occludes the tile edges it overlaps, so the mouse-down that starts
+    /// the drag must NOT fire the tiles' click-to-focus), and dirties the
+    /// session exactly once, at mouse-up — not per move. The drop point is
+    /// deliberately far off the 8px strip: the moves land on the
+    /// full-window drag catcher, which is the whole capture mechanism
+    /// under test. Cursor appearance (col-resize) is NOT asserted —
+    /// gpui's `TestPlatform` records `set_cursor_style` into a private
+    /// field with no accessor at the pinned rev, so there is no honest way
+    /// to check it from a test.
+    #[gpui::test]
+    fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+
+        // Two tiles side by side, focus moved to the LEFT tile — so if
+        // the strip's mouse-down leaked through to the right tile under
+        // the boundary, click-to-focus would visibly move focus.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("alt-h");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_some(),
+            "the splitter strip should have painted between the two tiles"
+        );
+
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+        let focus_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().focused()
+        });
+
+        // Same chrome-offset math as `Render for ShellView` (and the
+        // click-to-focus test above): the divider sits at 50% of the tile
+        // area's width, offset by the sidebar/toolbar.
+        let (grab, drop) = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            let mid_y = toolbar_height + content_height / 2.0;
+            (
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.5), px(mid_y)),
+                gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            )
+        });
+
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().focused()
+            }),
+            focus_before,
+            "grabbing the splitter must not change tile focus"
+        );
+
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        let widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect::UNIT)
+                .iter()
+                .map(|(_, r)| r.w)
+                .collect()
+        });
+        assert!(
+            (widths[0] - 0.25).abs() < 1e-3 && (widths[1] - 0.75).abs() < 1e-3,
+            "dropping the divider at 25% should relayout the pair 25/75, got {widths:?}"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "moves alone must not dirty the session — only the release does"
+        );
+
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "releasing the drag should mark the session dirty (drag-resizes persist)"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "the drag should be over after mouse-up"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().focused()
+            }),
+            focus_before,
+            "a divider drag never changes tile focus"
+        );
+    }
+
+    /// End-to-end (drag-splitters task): dragging the left dock's frame
+    /// edge resizes the dock frame itself, live per move, pinning at
+    /// `DOCK_MAX_SIZE` when dragged past the clamp instead of failing —
+    /// the same press keeps working after crossing the limit.
+    #[gpui::test]
+    fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-["); // show the (empty) left dock
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+        let (tile_width, mid_y) = cx.update(|window, _| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (tile_width, toolbar_height + content_height / 2.0)
+        });
+        let dock_size = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+            shell.read_with(cx, |shell, _| {
+                shell
+                    .services
+                    .workspaces
+                    .active()
+                    .docks()
+                    .get(crate::tiling::DockSide::Left)
+                    .size()
+            })
+        };
+        assert!((dock_size(&shell, &cx) - crate::tiling::DOCK_DEFAULT_SIZE).abs() < 1e-4);
+
+        // Grab the dock's inner edge (at 25% of the content width) and
+        // drag it to 40%.
+        cx.simulate_mouse_down(
+            gpui::point(px(sidebar::WIDTH + tile_width * 0.25), px(mid_y)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.simulate_mouse_move(
+            gpui::point(px(sidebar::WIDTH + tile_width * 0.4), px(mid_y)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            (dock_size(&shell, &cx) - 0.40).abs() < 1e-3,
+            "dragging the edge to 40% should set the dock size to 0.40, got {}",
+            dock_size(&shell, &cx)
+        );
+
+        // Keep dragging far past the maximum: the size pins at the clamp.
+        cx.simulate_mouse_move(
+            gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            (dock_size(&shell, &cx) - crate::tiling::DOCK_MAX_SIZE).abs() < 1e-4,
+            "dragging past the clamp should stop at DOCK_MAX_SIZE, got {}",
+            dock_size(&shell, &cx)
+        );
+
+        cx.simulate_mouse_up(
+            gpui::point(px(sidebar::WIDTH + tile_width * 0.9), px(mid_y)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a dock-edge drag should persist like any resize"
+        );
+        assert!(
+            (dock_size(&shell, &cx) - crate::tiling::DOCK_MAX_SIZE).abs() < 1e-4,
+            "the release must not move the edge again"
+        );
+    }
+
+    /// Drag-splitters task: fullscreen already suppresses docks and tile
+    /// chrome, and the divider strips must follow — `mod+f` (alt+f here,
+    /// the test mod alias) makes the strips disappear and a second toggle
+    /// brings them back. Asserted via `debug_bounds` (presence of the
+    /// painted strip element), the same honest limitation as the hint
+    /// tests above.
+    #[gpui::test]
+    fn fullscreen_suppresses_divider_strips(cx: &mut gpui::TestAppContext) {
+        let (mut cx, _shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_some(),
+            "two tiles paint their splitter strip"
+        );
+
+        cx.simulate_keystrokes("alt-f");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_none(),
+            "a fullscreen tile has no visible boundaries — no strips"
+        );
+
+        cx.simulate_keystrokes("alt-f");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("divider-strip-0").is_some(),
+            "leaving fullscreen brings the strips back"
+        );
     }
 
     /// End-to-end: `ctrl+[` (`dock::toggle_left`) through gpui's real key
