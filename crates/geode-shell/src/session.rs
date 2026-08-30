@@ -50,15 +50,32 @@
 //! `config_version` bump; `from_toml` tolerates unknown keys in both
 //! directions): a `region` string (`"left"`/`"right"`/`"bottom"`; absent
 //! or `"main"` = focus in the main tree — only written when focus lives in
-//! a dock) and `[workspaces.N.docks.left/right/bottom]` tables carrying
-//! `tile` (int, optional), `visible` (bool), `size` (float 0.10..=0.50) —
-//! only written for docks that differ from the default (hidden, empty,
-//! default size). Dock corruption heals with a warning instead of failing
-//! the workspace: a duplicate `tile` claim (already in a tree or another
-//! dock, this workspace or any other) is dropped, a `region` pointing at a
-//! hidden/empty dock falls back to `Main`, and an out-of-range/NaN `size`
-//! resets to the default — see `Workspace::from_parts` /
-//! `Workspaces::from_parts` for the healing seams themselves.
+//! a dock) and `[workspaces.N.docks.left/right/bottom]` tables. The
+//! dock-trees task made each dock a full tiling tree, so a dock table now
+//! carries the *same* recursive node encoding a workspace does — an
+//! optional `focused` (int) plus an optional `[….node]` subtree (both via
+//! the shared `node_to_toml`/`node_from_toml`/`Tree::from_parts` seams) —
+//! alongside `visible` (bool) and `size` (float 0.10..=0.50); never a
+//! `fullscreen` (dock trees can't have one; a hostile file's claim is
+//! ignored with a warning). Only docks that differ from the default
+//! (hidden, empty, default size) are written at all.
+//!
+//! Legacy dock shape: the first dock-regions build (one tile per dock)
+//! wrote `tile = N` instead of a node subtree. That key still loads —
+//! healed into a single-leaf tree, silently (recorded choice: it's the
+//! expected output of the immediately-prior release, not corruption, so no
+//! warning; a file carrying BOTH `tile` and `node` picks the node and does
+//! warn, since no release ever wrote that shape).
+//!
+//! Dock corruption heals with a warning instead of failing the workspace
+//! (the docks are an adornment on the layout, never worth discarding the
+//! main tree over): a structurally invalid dock node drops that dock's
+//! tree, a duplicate tile claim (already in a main tree or an earlier dock
+//! tree, this workspace or any other) is removed from the dock's tree, a
+//! `region` pointing at a hidden/empty dock falls back to `Main`, and an
+//! out-of-range/NaN `size` resets to the default — see
+//! `Workspace::from_parts` / `Workspaces::from_parts` for the cross-tree
+//! healing seams themselves.
 //!
 //! Old session files written before this removal may still carry an
 //! `[extra]` table with a `theme_mode` key; `from_toml` never reads
@@ -141,10 +158,16 @@ pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
                 continue;
             }
             let mut dock_table = toml::Table::new();
-            if let Some(tile) = dock.tile() {
+            // Same recursive encoding as the workspace's own tree
+            // (dock-trees task); no `fullscreen` — dock trees never have
+            // one (see `Dock::from_parts`).
+            if let Some(node) = dock.tree().root() {
+                dock_table.insert("node".to_string(), node_to_toml(node));
+            }
+            if let Some(focused) = dock.tree().focused() {
                 dock_table.insert(
-                    "tile".to_string(),
-                    toml::Value::Integer(tile_id_to_i64(tile)),
+                    "focused".to_string(),
+                    toml::Value::Integer(tile_id_to_i64(focused)),
                 );
             }
             dock_table.insert("visible".to_string(), toml::Value::Boolean(dock.visible()));
@@ -338,19 +361,69 @@ fn parse_docks(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) 
             ));
             return Dock::default();
         };
-        let tile = match dock_table.get("tile") {
-            None => None,
-            Some(v) => match v.as_integer() {
-                Some(n) if n >= 0 => Some(TileId(n as u64)),
-                _ => {
+        // The dock's tree: a recursive `node` subtree (dock-trees task),
+        // or — legacy, from the first dock-regions build — a bare
+        // `tile = N` healed into a single-leaf tree (silently: it's the
+        // prior release's expected output, not corruption; carrying BOTH
+        // shapes is corruption-adjacent, so that picks the node and warns).
+        let node_value = dock_table.get("node");
+        let legacy_tile = dock_table.get("tile");
+        if node_value.is_some() && legacy_tile.is_some() {
+            warnings.push(format!(
+                "workspace {ix}: {} dock has both a node tree and a legacy tile key; \
+                 using the node tree",
+                region_side_name(side)
+            ));
+        }
+        let root = match node_value {
+            Some(nv) => match node_from_toml(nv) {
+                Ok(node) => Some(node),
+                Err(e) => {
                     warnings.push(format!(
-                        "workspace {ix}: {} dock tile {v} is not a non-negative integer; \
-                         dropping it",
+                        "workspace {ix}: {} dock node is invalid ({e}); dropping the dock's tree",
                         region_side_name(side)
                     ));
                     None
                 }
             },
+            None => match legacy_tile {
+                None => None,
+                Some(v) => match v.as_integer() {
+                    Some(n) if n >= 0 => Some(Node::Leaf(TileId(n as u64))),
+                    _ => {
+                        warnings.push(format!(
+                            "workspace {ix}: {} dock tile {v} is not a non-negative integer; \
+                             dropping it",
+                            region_side_name(side)
+                        ));
+                        None
+                    }
+                },
+            },
+        };
+        // Dock trees never have fullscreen — a hostile file's claim is
+        // ignored, not honored (`Dock::from_parts` enforces the invariant
+        // even if this warning path is somehow skipped).
+        if dock_table.get("fullscreen").is_some() {
+            warnings.push(format!(
+                "workspace {ix}: {} dock claims a fullscreen tile, but dock trees \
+                 cannot be fullscreen; ignoring it",
+                region_side_name(side)
+            ));
+        }
+        let focused = dock_table
+            .get("focused")
+            .and_then(|v| v.as_integer())
+            .map(|v| TileId(v.max(0) as u64));
+        let tree = match Tree::from_parts(root, focused, None) {
+            Ok(tree) => tree,
+            Err(e) => {
+                warnings.push(format!(
+                    "workspace {ix}: {} dock tree is invalid ({e}); dropping the dock's tree",
+                    region_side_name(side)
+                ));
+                Tree::default()
+            }
         };
         let visible = match dock_table.get("visible") {
             None => false,
@@ -388,7 +461,7 @@ fn parse_docks(ix: u8, value: Option<&toml::Value>, warnings: &mut Vec<String>) 
                 }
             }
         };
-        Dock::from_parts(tile, visible, size)
+        Dock::from_parts(tree, visible, size)
     };
     let left = parse_side(DockSide::Left);
     let right = parse_side(DockSide::Right);
@@ -1048,17 +1121,19 @@ mod tests {
         let _ = restored.active().tree().neighbor(Direction::Right);
     }
 
-    // --- docks (dock-regions task) ---------------------------------------
+    // --- docks (dock-regions task, trees per dock-trees task) ------------
 
     use crate::tiling::{DOCK_DEFAULT_SIZE, DockSide, FocusRegion};
 
-    /// One tile in the tree, one parked in a visible left dock (resized),
-    /// focus on the dock.
+    /// One tile in the tree, a *split* (two-tile) visible left dock
+    /// (resized), focus on the dock — dock-trees task: the fixture
+    /// exercises the recursive dock encoding, not just a single leaf.
     fn docked_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, &act("workspace::split_down"));
         apply_workspace_action(&mut ws, &act("workspace::resize_right"));
         ws
     }
@@ -1077,7 +1152,9 @@ mod tests {
         for side in DockSide::ALL {
             let b = before.docks().get(side);
             let a = after.docks().get(side);
-            assert_eq!(a.tile(), b.tile(), "{side:?}");
+            // The whole dock tree round-trips: structure, ratios, and
+            // focus memory (Tree derives PartialEq for exactly this).
+            assert_eq!(a.tree(), b.tree(), "{side:?}");
             assert_eq!(a.visible(), b.visible(), "{side:?}");
             assert!(
                 (a.size() - b.size()).abs() < 1e-4,
@@ -1086,6 +1163,11 @@ mod tests {
                 b.size()
             );
         }
+        assert_eq!(
+            before.docks().get(DockSide::Left).tree().tiles().len(),
+            2,
+            "fixture sanity: the dock really is a split tree"
+        );
         assert_eq!(
             after.tree().layout(crate::tiling::Rect::UNIT),
             before.tree().layout(crate::tiling::Rect::UNIT)
@@ -1114,8 +1196,9 @@ mod tests {
             .into_iter()
             .chain(restored.active().docks().tiles())
             .collect();
-        // Focus is restored into the left dock; splits are tree-only, so
-        // step back to Main first.
+        // Focus is restored into the left dock; step back to Main so the
+        // fresh split lands in the main tree (a dock-focused split would
+        // work too — same allocator — but Main keeps the assertion simple).
         apply_workspace_action(&mut restored, &act("workspace::focus_right"));
         apply_workspace_action(&mut restored, &act("workspace::split_right"));
         let new_id = restored
@@ -1151,10 +1234,10 @@ mod tests {
         }
         let (ws, warnings) = from_toml(&table).expect("a duplicate dock claim heals, not fails");
         assert!(
-            warnings.iter().any(|w| w.contains("dropping")),
+            warnings.iter().any(|w| w.contains("removing")),
             "{warnings:?}"
         );
-        assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
+        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
         assert_eq!(
             ws.active().region(),
@@ -1247,8 +1330,8 @@ mod tests {
         assert_eq!(ws.active().tree().fullscreen(), None);
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tile(),
-            Some(TileId(2))
+            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            vec![TileId(2)]
         );
     }
 
@@ -1291,11 +1374,11 @@ mod tests {
         let (ws, warnings) = from_toml(&table).unwrap();
         assert!(warnings.len() >= 2, "{warnings:?}");
         let left = ws.active().docks().get(DockSide::Left);
-        assert_eq!(left.tile(), None, "negative tile id dropped");
+        assert!(left.tree().is_empty(), "negative tile id dropped");
         assert!(!left.visible(), "non-bool visible heals to hidden");
         assert_eq!(
-            ws.active().docks().get(DockSide::Right).tile(),
-            Some(TileId(2))
+            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            vec![TileId(2)]
         );
     }
 
@@ -1315,8 +1398,210 @@ mod tests {
         assert_eq!(ws.active().region(), FocusRegion::Main);
         for side in DockSide::ALL {
             let dock = ws.active().docks().get(side);
-            assert_eq!(dock.tile(), None);
+            assert!(dock.tree().is_empty());
             assert!(!dock.visible());
         }
+    }
+
+    // --- dock trees (dock-trees task) -------------------------------------
+
+    #[test]
+    fn a_legacy_single_tile_dock_key_loads_as_a_single_leaf_tree() {
+        // The first dock-regions build wrote `tile = N`. It still loads —
+        // healed into a single-leaf tree with the tile focused, and
+        // *silently* (recorded choice: the prior release's own output is
+        // not corruption).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        std::fs::write(
+            &path,
+            "config_version = 1\nactive = 1\n\n[workspaces.1]\nfocused = 1\nregion = \"left\"\n\n\
+             [workspaces.1.node]\nkind = \"leaf\"\nid = 1\n\n\
+             [workspaces.1.docks.left]\ntile = 2\nvisible = true\nsize = 0.3\n",
+        )
+        .unwrap();
+        let (ws, warnings) = load(&path);
+        assert!(
+            warnings.is_empty(),
+            "legacy tile must load silently: {warnings:?}"
+        );
+        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(dock.tree().tiles(), vec![TileId(2)]);
+        assert_eq!(
+            dock.tree().focused(),
+            Some(TileId(2)),
+            "the healed single-leaf tree focuses its tile"
+        );
+        assert!(dock.visible());
+        assert!((dock.size() - 0.3).abs() < 1e-4);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+    }
+
+    #[test]
+    fn a_dock_with_both_node_and_legacy_tile_picks_the_node_with_a_warning() {
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            [docks.left]
+            tile = 9
+            visible = true
+            [docks.left.node]
+            kind = "leaf"
+            id = 2
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("legacy tile")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            vec![TileId(2)],
+            "the node tree wins; the legacy tile is ignored"
+        );
+    }
+
+    #[test]
+    fn a_dock_claiming_fullscreen_is_healed_with_a_warning() {
+        // Dock trees never have fullscreen — a hand-edited `fullscreen`
+        // key inside a dock table is ignored (warned), and the dock's
+        // tree loads without it.
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            [docks.bottom]
+            visible = true
+            focused = 3
+            fullscreen = 3
+            [docks.bottom.node]
+            kind = "leaf"
+            id = 3
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("fullscreen")),
+            "{warnings:?}"
+        );
+        let dock = ws.active().docks().get(DockSide::Bottom);
+        assert_eq!(dock.tree().tiles(), vec![TileId(3)]);
+        assert_eq!(dock.tree().fullscreen(), None);
+    }
+
+    #[test]
+    fn an_invalid_dock_node_drops_only_that_docks_tree() {
+        // A structurally invalid dock subtree (single-child split) heals
+        // to an empty dock with a warning — the workspace's main tree is
+        // never discarded over a dock (docks are an adornment).
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [docks.right]
+            visible = true
+            [docks.right.node]
+            kind = "split"
+            orientation = "horizontal"
+            ratios = [1.0]
+            [[docks.right.node.children]]
+            kind = "leaf"
+            id = 2
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).expect("a bad dock tree heals, never fails");
+        assert!(warnings.iter().any(|w| w.contains("dock")), "{warnings:?}");
+        assert!(ws.active().docks().get(DockSide::Right).tree().is_empty());
+        assert_eq!(
+            ws.active().tree().tiles(),
+            vec![TileId(1)],
+            "the main tree survives"
+        );
+    }
+
+    #[test]
+    fn duplicate_ids_across_dock_trees_and_the_main_tree_are_healed() {
+        // Tile 1 lives in the main tree AND workspace 1's left dock tree
+        // AND its right dock tree; tile 2 only in the right dock. The
+        // main tree wins, then first dock claim wins; the right dock
+        // keeps its unique tile.
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [docks.left]
+            visible = true
+            [docks.left.node]
+            kind = "leaf"
+            id = 1
+            [docks.right]
+            visible = true
+            [docks.right.node]
+            kind = "split"
+            orientation = "horizontal"
+            ratios = [0.5, 0.5]
+            [[docks.right.node.children]]
+            kind = "leaf"
+            id = 1
+            [[docks.right.node.children]]
+            kind = "leaf"
+            id = 2
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).unwrap();
+        assert_eq!(
+            warnings.iter().filter(|w| w.contains("removing")).count(),
+            2,
+            "{warnings:?}"
+        );
+        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
+        assert_eq!(
+            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            vec![TileId(2)]
+        );
+    }
+
+    #[test]
+    fn a_dangling_dock_focused_reference_heals_to_the_first_tile() {
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            [docks.left]
+            visible = true
+            focused = 999
+            [docks.left.node]
+            kind = "leaf"
+            id = 4
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, _) = from_toml(&table).unwrap();
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tree().focused(),
+            Some(TileId(4)),
+            "Tree::from_parts heals the dangling ref to None; Dock::from_parts \
+             then refocuses the first tile so the dock's verbs stay usable"
+        );
     }
 }

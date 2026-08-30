@@ -123,26 +123,40 @@ fn keystrokes_drive_the_docks() {
     press(&mut matcher, &mut ws, "ctrl+v");
     press(&mut matcher, &mut ws, "ctrl+v");
     press(&mut matcher, &mut ws, "ctrl+{");
-    assert!(ws.active().docks().get(DockSide::Left).tile().is_some());
+    assert!(!ws.active().docks().get(DockSide::Left).tree().is_empty());
     assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     assert_eq!(ws.active().tree().tiles().len(), 1);
 
-    // ctrl+? relocates it dock-to-dock (left → bottom).
+    // ctrl+h splits *inside* the focused dock (dock-trees task): the
+    // dock's tree gains a second, stacked tile through the same pipeline.
+    press(&mut matcher, &mut ws, "ctrl+h");
+    assert_eq!(
+        ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+        2
+    );
+    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+
+    // ctrl+? relocates the dock's focused tile dock-to-dock (left →
+    // bottom); the other tile stays in the still-visible left dock.
     press(&mut matcher, &mut ws, "ctrl+?");
-    assert_eq!(ws.active().docks().get(DockSide::Left).tile(), None);
-    assert!(ws.active().docks().get(DockSide::Bottom).tile().is_some());
+    assert_eq!(
+        ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+        1
+    );
+    assert!(ws.active().docks().get(DockSide::Left).visible());
+    assert!(!ws.active().docks().get(DockSide::Bottom).tree().is_empty());
     assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
 
-    // shift+up grows the focused bottom dock.
+    // shift+up grows the focused bottom dock (lone tile inside: no
+    // divider to move, so the press falls through to the frame).
     let before = ws.active().docks().get(DockSide::Bottom).size();
     press(&mut matcher, &mut ws, "shift+up");
     assert!(ws.active().docks().get(DockSide::Bottom).size() > before);
 
-    // ctrl+/ hides it (tile kept); ctrl+/ shows it again.
+    // ctrl+/ hides it (tree kept); ctrl+/ shows it again.
     press(&mut matcher, &mut ws, "ctrl+/");
     assert!(!ws.active().docks().get(DockSide::Bottom).visible());
-    assert!(ws.active().docks().get(DockSide::Bottom).tile().is_some());
-    assert_eq!(ws.active().region(), FocusRegion::Main);
+    assert!(!ws.active().docks().get(DockSide::Bottom).tree().is_empty());
     press(&mut matcher, &mut ws, "ctrl+/");
     assert!(ws.active().docks().get(DockSide::Bottom).visible());
 

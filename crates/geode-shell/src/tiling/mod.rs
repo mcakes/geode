@@ -2,10 +2,11 @@
 //! the single source of truth for workspace layout. Rendering (Phase 1b-ui)
 //! consumes [`Tree::layout`]; directional navigation uses the same geometry,
 //! so what you see is what hjkl navigates. No gpui here (spec §10.3).
-//! Dock-regions task: each workspace also carries three fixed dock slots
-//! ([`Docks`]) beside its tree, unified under [`Workspace`], whose verbs
-//! route by [`FocusRegion`]; [`docks::layout`] is the docks' counterpart to
-//! `Tree::layout`.
+//! Dock-regions task (generalized by dock-trees): each workspace also
+//! carries three fixed docks ([`Docks`]) beside its tree — each dock
+//! holding a full [`Tree`] of its own — unified under [`Workspace`], whose
+//! verbs route by [`FocusRegion`]; [`docks::layout`] carves the dock
+//! frames, and each visible dock's own `Tree::layout` places its tiles.
 
 mod docks;
 mod tree;

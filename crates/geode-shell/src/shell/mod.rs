@@ -1119,19 +1119,28 @@ impl Render for ShellView {
         let content_height =
             (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
 
-        // One layout pass for the whole surface (dock-regions task): the
-        // pure `tiling::dock_layout` carves the visible docks' pixel rects
-        // out of the content area, and `Tree::layout` — still called
-        // exactly once — partitions what's left. While a tree tile is
-        // fullscreen it covers the entire surface and the docks are not
-        // painted at all (the docks keep their state; they're just not
-        // part of the fullscreen picture).
+        // One layout pass for the whole surface (dock-regions task,
+        // generalized by dock-trees): the pure `tiling::dock_layout`
+        // carves the visible docks' pixel rects out of the content area,
+        // `Tree::layout` partitions what's left for the main tree, and
+        // each visible dock's rect feeds that dock's own `Tree::layout` —
+        // one geometry call per region (main + up to three visible docks),
+        // still a single pass overall. While a tree tile is fullscreen it
+        // covers the entire surface and the docks are not painted at all
+        // (the docks keep their state; they're just not part of the
+        // fullscreen picture).
         let area = Rect {
             x: 0.0,
             y: 0.0,
             w: tile_width,
             h: content_height,
         };
+        type DockCell = (
+            crate::tiling::DockSide,
+            Rect,
+            Vec<(crate::tiling::TileId, Rect)>,
+            Option<crate::tiling::TileId>,
+        );
         let (region, focused, tree_area, rects, dock_cells) = {
             let workspace = self.services.workspaces.active();
             let tree = workspace.tree();
@@ -1140,11 +1149,17 @@ impl Render for ShellView {
             } else {
                 crate::tiling::dock_layout(workspace.docks(), area)
             };
-            let dock_cells: Vec<(crate::tiling::DockSide, Rect, Option<crate::tiling::TileId>)> =
-                dock_rects
-                    .into_iter()
-                    .map(|(side, r)| (side, r, workspace.docks().get(side).tile()))
-                    .collect();
+            // Each visible dock carries its own tile layout plus its
+            // tree's focused tile (the ring shows on the focused dock's
+            // focused tile only — still at most one ring per workspace,
+            // region-gated below).
+            let dock_cells: Vec<DockCell> = dock_rects
+                .into_iter()
+                .map(|(side, r)| {
+                    let dock_tree = workspace.docks().get(side).tree();
+                    (side, r, dock_tree.layout(r), dock_tree.focused())
+                })
+                .collect();
             (
                 workspace.region(),
                 tree.focused(),
@@ -1158,9 +1173,10 @@ impl Render for ShellView {
         // tiles (a docked tile is the same kind of tile, just parked): 1px
         // inset, themed background, `primary` 2px ring on the one focused
         // tile, mono placeholder label. At most one tile per workspace
-        // shows the focused ring: the tree's focused tile only counts as
-        // focused while `region == Main`, a dock's tile only while focus
-        // actually lives in that dock.
+        // shows the focused ring: the main tree's focused tile only counts
+        // as focused while `region == Main`, and a dock tile only when
+        // focus lives in that dock AND the dock's own tree has it focused
+        // (dock-trees task — a dock holds many tiles, one ring).
         let tile_cell = |id: crate::tiling::TileId, r: Rect, is_focused: bool, cx: &App| {
             div()
                 .absolute()
@@ -1204,27 +1220,30 @@ impl Render for ShellView {
             // its own absolutely-positioned, internally-centered child
             // rather than turning the surface itself into a flex row.
             //
-            // State-aware (review nit): while a dock holds focus, splits
-            // are refused (a tree concept — `Workspaces::split_active`),
-            // so advertising ctrl+h/ctrl+v over the empty tree would be
-            // inert advice; name the move-back chord for the focused dock
-            // instead, in the same physical-key spelling the dock hints
-            // use (the user presses ctrl+shift+[; the binding is spelled
-            // `ctrl+{` — see BUILTIN_KEYMAP's doc comment).
+            // State-aware (review nit): while a dock holds focus, a split
+            // lands in the *dock's* tree (dock-trees task), so advertising
+            // ctrl+h/ctrl+v as the way to fill the empty main area would
+            // be misleading advice; name the move-back chord for the
+            // focused dock instead, in the same physical-key spelling the
+            // dock hints use (the user presses ctrl+shift+[; the binding
+            // is spelled `ctrl+{` — see BUILTIN_KEYMAP's doc comment).
+            // "the focused docked tile": a dock can hold several tiles
+            // now, and the chord moves exactly the one its tree has
+            // focused, one per press.
             let (hint, selector) = match region {
                 crate::tiling::FocusRegion::Main => {
                     ("ctrl+h / ctrl+v to open a tile", "empty-hint")
                 }
                 crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left) => (
-                    "ctrl+shift+[ moves the docked tile back here",
+                    "ctrl+shift+[ moves the focused docked tile back here",
                     "empty-hint-return-left",
                 ),
                 crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Right) => (
-                    "ctrl+shift+] moves the docked tile back here",
+                    "ctrl+shift+] moves the focused docked tile back here",
                     "empty-hint-return-right",
                 ),
                 crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Bottom) => (
-                    "ctrl+shift+/ moves the docked tile back here",
+                    "ctrl+shift+/ moves the focused docked tile back here",
                     "empty-hint-return-bottom",
                 ),
             };
@@ -1275,55 +1294,62 @@ impl Render for ShellView {
             }
         }
 
-        // The docks, painted with the identical chrome. An occupied dock
-        // is a tile like any other (click-to-focus included); a visible
-        // but empty dock renders a centered muted hint naming the
+        // The docks, painted with the identical chrome (dock-trees task:
+        // each visible dock lays its own tree's tiles into its frame —
+        // same `tile_cell`, click-to-focus included; a click focuses that
+        // tile *within* the dock's tree AND moves the region there). A
+        // visible but empty dock renders a centered muted hint naming the
         // *physical* keys that would move a tile into it (the user presses
         // ctrl+shift+[ even though the binding is spelled `ctrl+{` — see
         // BUILTIN_KEYMAP's doc comment).
-        for (side, r, tile) in dock_cells {
-            match tile {
-                Some(id) => {
-                    let is_focused = region == crate::tiling::FocusRegion::Dock(side);
-                    surface = surface.child(tile_cell(id, r, is_focused, cx).on_mouse_down(
+        for (side, r, dock_tiles, dock_focused) in dock_cells {
+            if !dock_tiles.is_empty() {
+                for (id, tr) in dock_tiles {
+                    let is_focused = region == crate::tiling::FocusRegion::Dock(side)
+                        && dock_focused == Some(id);
+                    surface = surface.child(tile_cell(id, tr, is_focused, cx).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, _event, _window, cx| {
-                            if view.services.workspaces.active_mut().focus_dock(side) {
+                            if view
+                                .services
+                                .workspaces
+                                .active_mut()
+                                .focus_dock_tile(side, id)
+                            {
                                 view.session_dirty = true;
                             }
                             cx.notify();
                         }),
                     ));
                 }
-                None => {
-                    let (hint, selector) = match side {
-                        crate::tiling::DockSide::Left => {
-                            ("ctrl+shift+[ moves a tile here", "dock-empty-hint-left")
-                        }
-                        crate::tiling::DockSide::Right => {
-                            ("ctrl+shift+] moves a tile here", "dock-empty-hint-right")
-                        }
-                        crate::tiling::DockSide::Bottom => {
-                            ("ctrl+shift+/ moves a tile here", "dock-empty-hint-bottom")
-                        }
-                    };
-                    surface = surface.child(
-                        div()
-                            .absolute()
-                            .left(px(r.x + 1.0))
-                            .top(px(r.y + 1.0))
-                            .w(px((r.w - 2.0).max(0.0)))
-                            .h(px((r.h - 2.0).max(0.0)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(cx.theme().background)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .text_color(cx.theme().muted_foreground)
-                            .child(div().debug_selector(|| selector.to_string()).child(hint)),
-                    );
-                }
+            } else {
+                let (hint, selector) = match side {
+                    crate::tiling::DockSide::Left => {
+                        ("ctrl+shift+[ moves a tile here", "dock-empty-hint-left")
+                    }
+                    crate::tiling::DockSide::Right => {
+                        ("ctrl+shift+] moves a tile here", "dock-empty-hint-right")
+                    }
+                    crate::tiling::DockSide::Bottom => {
+                        ("ctrl+shift+/ moves a tile here", "dock-empty-hint-bottom")
+                    }
+                };
+                surface = surface.child(
+                    div()
+                        .absolute()
+                        .left(px(r.x + 1.0))
+                        .top(px(r.y + 1.0))
+                        .w(px((r.w - 2.0).max(0.0)))
+                        .h(px((r.h - 2.0).max(0.0)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(div().debug_selector(|| selector.to_string()).child(hint)),
+                );
             }
         }
 
@@ -2079,7 +2105,7 @@ mod tests {
             let ws = shell.services.workspaces.active();
             assert!(ws.tree().is_empty(), "the tile should have left the tree");
             let dock = ws.docks().get(crate::tiling::DockSide::Left);
-            assert_eq!(dock.tile(), Some(tile));
+            assert_eq!(dock.tree().tiles(), vec![tile]);
             assert!(dock.visible(), "the dock auto-shows");
             assert_eq!(
                 ws.region(),
@@ -2099,8 +2125,56 @@ mod tests {
             assert_eq!(ws.tree().focused(), Some(tile));
             assert_eq!(ws.region(), crate::tiling::FocusRegion::Main);
             let dock = ws.docks().get(crate::tiling::DockSide::Left);
-            assert_eq!(dock.tile(), None);
+            assert!(dock.tree().is_empty());
             assert!(!dock.visible(), "the emptied dock auto-hides");
+        });
+    }
+
+    /// End-to-end (dock-trees task): splits work *inside* a focused dock
+    /// through gpui's real key pipeline. ctrl+v parks a tile via ctrl+{,
+    /// then a second ctrl+v splits within the dock's tree (the old
+    /// build refused this) — two tiles in the dock, session dirty — and
+    /// ctrl+shift+w closes one, leaving the dock visible with the
+    /// survivor.
+    #[gpui::test]
+    fn splits_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = dock_test_shell(cx);
+
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-{"); // tile → left dock, dock focused
+        shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+
+        cx.simulate_keystrokes("ctrl-v"); // split inside the dock
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            let dock = ws.docks().get(crate::tiling::DockSide::Left);
+            assert_eq!(
+                dock.tree().tiles().len(),
+                2,
+                "ctrl+v must split within the focused dock's tree"
+            );
+            assert_eq!(
+                ws.region(),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left)
+            );
+            assert!(ws.tree().is_empty(), "the main tree must stay untouched");
+            assert!(
+                shell.session_dirty,
+                "a dock-tree split must mark the session dirty"
+            );
+        });
+
+        cx.simulate_keystrokes("ctrl-shift-w"); // close the focused dock tile
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            let dock = ws.docks().get(crate::tiling::DockSide::Left);
+            assert_eq!(dock.tree().tiles().len(), 1);
+            assert!(dock.visible(), "a still-occupied dock must not auto-hide");
+            assert_eq!(
+                ws.region(),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left),
+                "focus stays in the dock while it has tiles"
+            );
         });
     }
 
@@ -2121,17 +2195,23 @@ mod tests {
                 !ws.tree().is_empty(),
                 "the unmatched keystroke must not have moved the tile"
             );
-            assert_eq!(ws.docks().get(crate::tiling::DockSide::Left).tile(), None);
+            assert!(
+                ws.docks()
+                    .get(crate::tiling::DockSide::Left)
+                    .tree()
+                    .is_empty()
+            );
         });
     }
 
-    /// Review nit: with the tree empty and the workspace's only tile
-    /// parked in a focused dock, the tree area must NOT show the
-    /// "ctrl+h / ctrl+v to open a tile" hint — splits are refused while a
-    /// dock holds focus, so that advice is inert there. It shows the
-    /// move-back hint for the focused dock instead (physical-key spelling,
-    /// like the dock hints). Same `debug_bounds` honesty limits as the
-    /// other hint tests: selectors, not text.
+    /// Review nit (re-grounded for dock-trees): with the tree empty and
+    /// the workspace's only tile parked in a focused dock, the tree area
+    /// must NOT show the "ctrl+h / ctrl+v to open a tile" hint — a
+    /// dock-focused split now lands in the *dock's* tree, so that advice
+    /// would not fill the empty main area. It shows the move-back hint for
+    /// the focused dock instead (physical-key spelling, like the dock
+    /// hints). Same `debug_bounds` honesty limits as the other hint tests:
+    /// selectors, not text.
     #[gpui::test]
     fn empty_tree_hint_is_state_aware_while_a_dock_holds_focus(cx: &mut gpui::TestAppContext) {
         let (mut cx, shell) = dock_test_shell(cx);
@@ -2157,7 +2237,7 @@ mod tests {
         assert_eq!(
             cx.debug_bounds("empty-hint"),
             None,
-            "the split hint must not paint while a dock holds focus (splits are refused there)"
+            "the split hint must not paint while a dock holds focus (a split lands in the dock)"
         );
 
         // Back in Main over the still-empty tree, the ordinary split hint
