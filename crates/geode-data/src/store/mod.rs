@@ -7,8 +7,10 @@
 
 pub mod catalog;
 pub mod ddl;
+pub mod publish;
 
 pub use catalog::{Catalog, FileGeneration, FileId};
+pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
 
 use duckdb::Connection;
 use geode_core::schema::DatasetSpec;
