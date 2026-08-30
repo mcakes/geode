@@ -870,10 +870,1048 @@ narrower layer can never widen what a coarser one allowed."
 
 ---
 
-**Remaining tasks (2–14) continue below.** Task 2 adds view definitions;
-Task 3 the declared hierarchy and the attribution rules; Tasks 4–6 the scope
-compiler, the grain-aware `ROLLUP` compiler, and joins; Task 7 the `Snapshot`
-type; Task 8 the ENUM interning carried over from 2a; Tasks 9–10 the query
-pool with cancellation and as-of routing; Task 11 the `DataService` facade;
-Task 12 the throwaway debug tile; Task 13 the §7.1 requery benchmarks; Task
-14 cross-file conflict detection.
+### Task 2: View definitions and derived dimensions
+
+**Files:**
+- Create: `crates/geode-core/src/view.rs`
+- Create: `crates/geode-core/src/dimensions.rs`
+- Modify: `crates/geode-core/src/lib.rs`
+- Modify: `crates/geode-core/src/config/merge.rs` (atomic doc list)
+
+**Interfaces:**
+- Consumes: `SchemaSpec`, `DatasetSpec`, `MergedDoc`, `Diagnostic`.
+- Produces: `ViewSpec { name, dataset, joins, columns, grouping, sort }`,
+  `JoinSpec { dataset, on }`, `ViewColumn::{Dimension, Measure, Derived}`,
+  `SortKey { column, descending }`, `ViewSpec::from_doc(&MergedDoc) ->
+  (Vec<ViewSpec>, Vec<Diagnostic>)`, `ViewSpec::validate(&SchemaSpec)`;
+  and `DerivedDimension { name, from, values }`, `DerivedDimensions`,
+  `DerivedDimensions::{from_doc, get, base_column, all}`. Tasks 3–6
+  consume both.
+
+**Why derived dimensions live beside views** (spec §6.8): `desk` is not in
+the source files. The config map that supplies it also declares `book →
+desk`, and that dependency is what makes grouping by desk *additive* in
+Task 3 — without it the rule sees a grouping column outside every grain key
+and blanks the top row of the most natural rollup.
+
+- [ ] **Step 1: Write the failing derived-dimension tests**
+
+Create `crates/geode-core/src/dimensions.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LayerDoc, merge_docs};
+
+    fn doc(text: &str) -> crate::config::MergedDoc {
+        merge_docs("dimensions", &[LayerDoc::builtin("dimensions", text).unwrap()])
+    }
+
+    const SAMPLE: &str = r#"
+[desk]
+from = "book"
+[desk.values]
+IDX_EXO_EU = ["BK000", "BK001"]
+IDX_EXO_US = ["BK003"]
+"#;
+
+    #[test]
+    fn parses_a_many_to_one_map() {
+        let (dims, diags) = DerivedDimensions::from_doc(&doc(SAMPLE));
+        assert!(diags.is_empty(), "{diags:?}");
+        let desk = dims.get("desk").expect("desk");
+        assert_eq!(desk.from, "book");
+        assert_eq!(desk.values.get("BK000").map(String::as_str), Some("IDX_EXO_EU"));
+        assert_eq!(desk.values.get("BK003").map(String::as_str), Some("IDX_EXO_US"));
+    }
+
+    #[test]
+    fn base_column_resolves_a_derived_dimension_to_its_source() {
+        let (dims, _) = DerivedDimensions::from_doc(&doc(SAMPLE));
+        // This is the functional dependency the attribution rule needs.
+        assert_eq!(dims.base_column("desk"), "book");
+        // A column that is not derived resolves to itself.
+        assert_eq!(dims.base_column("book"), "book");
+        assert_eq!(dims.base_column("lhu"), "lhu");
+    }
+
+    #[test]
+    fn a_book_mapped_to_two_desks_is_a_diagnostic() {
+        // Many-to-one, not many-to-many: otherwise `book` would not
+        // determine `desk` and grouping by desk could not be additive.
+        let (_dims, diags) = DerivedDimensions::from_doc(&doc(
+            "[desk]\nfrom = \"book\"\n[desk.values]\nA = [\"BK000\"]\nB = [\"BK000\"]\n",
+        ));
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("BK000"), "{}", diags[0].message);
+    }
+
+    #[test]
+    fn a_missing_from_clause_is_a_diagnostic() {
+        let (dims, diags) = DerivedDimensions::from_doc(&doc(
+            "[desk]\n[desk.values]\nA = [\"BK000\"]\n",
+        ));
+        assert!(dims.get("desk").is_none());
+        assert!(diags.iter().any(|d| d.message.contains("from")), "{diags:?}");
+    }
+
+    #[test]
+    fn an_empty_document_yields_no_dimensions() {
+        let (dims, diags) = DerivedDimensions::from_doc(&doc(""));
+        assert!(dims.all().next().is_none());
+        assert!(diags.is_empty());
+    }
+}
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-core dimensions`
+Expected: FAIL — `cannot find struct DerivedDimensions`.
+
+- [ ] **Step 3: Implement derived dimensions**
+
+Prepend to `crates/geode-core/src/dimensions.rs`:
+
+```rust
+//! Dimensions the desk groups by that are not in the source files
+//! (spec §6.8). `desk` is the standing case: the CSVs carry `book`, and
+//! which desk a book belongs to is desk knowledge kept in config.
+//!
+//! The `from` clause does two jobs. It says where the values come from,
+//! and it declares a functional dependency — `book` determines `desk` —
+//! which is what lets the attribution rule treat a desk-level rollup as
+//! additive rather than blanking it (§6.3).
+
+use crate::config::{Diagnostic, MergedDoc, Severity};
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedDimension {
+    pub name: String,
+    /// The column this is computed from. Must be a real dataset column.
+    pub from: String,
+    /// Source value -> derived value. Many-to-one by construction.
+    pub values: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct DerivedDimensions {
+    dims: Vec<DerivedDimension>,
+}
+
+impl DerivedDimensions {
+    pub fn get(&self, name: &str) -> Option<&DerivedDimension> {
+        self.dims.iter().find(|d| d.name == name)
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &DerivedDimension> {
+        self.dims.iter()
+    }
+
+    /// The column a grouping or scope column ultimately resolves to: a
+    /// derived dimension resolves to its source, anything else to itself.
+    /// The attribution rule (§6.3) compares base columns, which is how a
+    /// desk-level grouping counts as determined by `book`.
+    pub fn base_column<'a>(&'a self, column: &'a str) -> &'a str {
+        match self.get(column) {
+            Some(d) => &d.from,
+            None => column,
+        }
+    }
+
+    pub fn from_doc(doc: &MergedDoc) -> (DerivedDimensions, Vec<Diagnostic>) {
+        let mut out = DerivedDimensions::default();
+        let mut diags = Vec::new();
+
+        for (name, value) in &doc.value {
+            let bad = |m: String| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: format!("dimension '{name}': {m}"),
+            };
+            let Some(table) = value.as_table() else {
+                diags.push(bad("not a table".into()));
+                continue;
+            };
+            let Some(from) = table.get("from").and_then(|v| v.as_str()) else {
+                diags.push(bad("missing 'from'".into()));
+                continue;
+            };
+
+            let mut values: BTreeMap<String, String> = BTreeMap::new();
+            if let Some(map) = table.get("values").and_then(|v| v.as_table()) {
+                for (derived_value, sources) in map {
+                    let Some(list) = sources.as_array() else {
+                        diags.push(bad(format!("'{derived_value}' is not an array")));
+                        continue;
+                    };
+                    for source in list.iter().filter_map(|s| s.as_str()) {
+                        if let Some(existing) = values.get(source)
+                            && existing != derived_value
+                        {
+                            // Many-to-many would break the functional
+                            // dependency the additivity rule rests on.
+                            diags.push(bad(format!(
+                                "'{source}' is mapped to both '{existing}' and \
+                                 '{derived_value}'; the map must be many-to-one"
+                            )));
+                            continue;
+                        }
+                        values.insert(source.to_string(), derived_value.clone());
+                    }
+                }
+            }
+
+            out.dims.push(DerivedDimension {
+                name: name.clone(),
+                from: from.to_string(),
+                values,
+            });
+        }
+
+        (out, diags)
+    }
+}
+```
+
+Add to `crates/geode-core/src/lib.rs`:
+
+```rust
+pub mod dimensions;
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-core dimensions`
+Expected: PASS (5 tests).
+
+- [ ] **Step 5: Write the failing view tests**
+
+Create `crates/geode-core/src/view.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LayerDoc, merge_docs};
+    use crate::schema::SchemaSpec;
+
+    fn doc(text: &str) -> crate::config::MergedDoc {
+        merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()])
+    }
+
+    const SAMPLE: &str = r#"
+[desk_risk]
+dataset = "risk_snapshot"
+grouping = ["book", "lhu", "position_ref"]
+
+[[desk_risk.joins]]
+dataset = "instrument_ref"
+on = ["instrument_ref"]
+
+[[desk_risk.columns]]
+name = "book"
+kind = "dimension"
+
+[[desk_risk.columns]]
+name = "delta01"
+kind = "measure"
+
+[[desk_risk.columns]]
+name = "delta_per_vega"
+kind = "derived"
+sql = "delta01 / nullif(vega01, 0)"
+
+[[desk_risk.sort]]
+column = "delta01"
+descending = true
+"#;
+
+    fn schema() -> SchemaSpec {
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[risk_snapshot.columns.vega01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[instrument_ref.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[instrument_ref.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+"#;
+        let d = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&d).0
+    }
+
+    #[test]
+    fn parses_a_view_with_joins_columns_grouping_and_sort() {
+        let (views, diags) = ViewSpec::from_doc(&doc(SAMPLE));
+        assert!(diags.is_empty(), "{diags:?}");
+        let v = views.iter().find(|v| v.name == "desk_risk").expect("view");
+        assert_eq!(v.dataset, "risk_snapshot");
+        assert_eq!(v.grouping, vec!["book", "lhu", "position_ref"]);
+        assert_eq!(v.joins.len(), 1);
+        assert_eq!(v.joins[0].dataset, "instrument_ref");
+        assert_eq!(v.joins[0].on, vec!["instrument_ref"]);
+        assert_eq!(v.sort, vec![SortKey { column: "delta01".into(), descending: true }]);
+    }
+
+    #[test]
+    fn distinguishes_the_three_column_kinds() {
+        let (views, _) = ViewSpec::from_doc(&doc(SAMPLE));
+        let v = &views[0];
+        assert_eq!(
+            v.columns,
+            vec![
+                ViewColumn::Dimension { name: "book".into() },
+                ViewColumn::Measure { name: "delta01".into() },
+                ViewColumn::Derived {
+                    name: "delta_per_vega".into(),
+                    sql: "delta01 / nullif(vega01, 0)".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_derived_column_without_sql_is_a_diagnostic() {
+        let (_v, diags) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"d\"\n[[v.columns]]\nname = \"x\"\nkind = \"derived\"\n",
+        ));
+        assert!(diags.iter().any(|d| d.message.contains("sql")), "{diags:?}");
+    }
+
+    #[test]
+    fn validation_catches_unknown_columns_grouping_and_datasets() {
+        let (views, _) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"nosuch\"\ngrouping = [\"nocolumn\"]\n",
+        ));
+        let diags = views[0].validate(&schema());
+        assert!(diags.iter().any(|d| d.message.contains("nosuch")), "{diags:?}");
+    }
+
+    #[test]
+    fn a_well_formed_view_validates_clean() {
+        let (views, _) = ViewSpec::from_doc(&doc(SAMPLE));
+        let diags = views[0].validate(&schema());
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn measure_grains_reports_the_distinct_grains_the_view_touches() {
+        // The compiler builds one aggregate subquery per grain (§6.3), so
+        // this is what decides how many it emits.
+        let (views, _) = ViewSpec::from_doc(&doc(SAMPLE));
+        let ds = schema();
+        assert_eq!(
+            views[0].measure_grains(&ds),
+            vec![crate::schema::Grain::Underlying]
+        );
+    }
+}
+```
+
+- [ ] **Step 6: Run to verify it fails**
+
+Run: `cargo test -p geode-core view`
+Expected: FAIL — `cannot find struct ViewSpec`.
+
+- [ ] **Step 7: Implement `ViewSpec`**
+
+Prepend to `crates/geode-core/src/view.rs`:
+
+```rust
+//! View definitions (spec §5.1, §6.1): dataset, joins, columns, derived
+//! columns, grouping and sort, declared as config. Users create views
+//! through the UI or by writing config; both produce the same file
+//! (PHILOSOPHY §5).
+//!
+//! A view is data, not code — it names columns and expressions, and the
+//! compiler (geode-data) turns it into one statement.
+
+use crate::config::{Diagnostic, MergedDoc, Severity};
+use crate::schema::{ColumnRole, Grain, SchemaSpec};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinSpec {
+    pub dataset: String,
+    /// Join key columns, declared in schema config (spec §5.4).
+    pub on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewColumn {
+    Dimension { name: String },
+    Measure { name: String },
+    /// A SQL expression over other columns of the same view.
+    Derived { name: String, sql: String },
+}
+
+impl ViewColumn {
+    pub fn name(&self) -> &str {
+        match self {
+            ViewColumn::Dimension { name }
+            | ViewColumn::Measure { name }
+            | ViewColumn::Derived { name, .. } => name,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortKey {
+    pub column: String,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ViewSpec {
+    pub name: String,
+    pub dataset: String,
+    pub joins: Vec<JoinSpec>,
+    pub columns: Vec<ViewColumn>,
+    /// Ordered: each prefix is one level of the rollup tree (§6.3).
+    pub grouping: Vec<String>,
+    pub sort: Vec<SortKey>,
+}
+
+impl ViewSpec {
+    /// Distinct grains of the measures this view selects, coarse first.
+    /// The compiler emits one aggregate subquery per grain.
+    pub fn measure_grains(&self, schema: &SchemaSpec) -> Vec<Grain> {
+        let Some(ds) = schema.dataset(&self.dataset) else {
+            return Vec::new();
+        };
+        let mut out: Vec<Grain> = self
+            .columns
+            .iter()
+            .filter_map(|c| match c {
+                ViewColumn::Measure { name } => ds.column(name),
+                _ => None,
+            })
+            .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))
+            .filter_map(|c| c.grain())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    pub fn validate(&self, schema: &SchemaSpec) -> Vec<Diagnostic> {
+        let mut diags = Vec::new();
+        let bad = |m: String| Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!("view '{}': {m}", self.name),
+        };
+
+        let Some(ds) = schema.dataset(&self.dataset) else {
+            diags.push(bad(format!("unknown dataset '{}'", self.dataset)));
+            return diags;
+        };
+
+        for j in &self.joins {
+            if schema.dataset(&j.dataset).is_none() {
+                diags.push(bad(format!("join names unknown dataset '{}'", j.dataset)));
+            }
+        }
+
+        // A derived column may reference other view columns, so only
+        // dimension and measure columns are checked against the schema.
+        for c in &self.columns {
+            match c {
+                ViewColumn::Derived { .. } => {}
+                other => {
+                    if ds.column(other.name()).is_none()
+                        && !self.joins.iter().any(|j| {
+                            schema
+                                .dataset(&j.dataset)
+                                .is_some_and(|d| d.column(other.name()).is_some())
+                        })
+                    {
+                        diags.push(bad(format!("unknown column '{}'", other.name())));
+                    }
+                }
+            }
+        }
+
+        for g in &self.grouping {
+            if ds.column(g).is_none() {
+                diags.push(bad(format!("grouping names unknown column '{g}'")));
+            }
+        }
+
+        diags
+    }
+
+    pub fn from_doc(doc: &MergedDoc) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
+        let mut out = Vec::new();
+        let mut diags = Vec::new();
+
+        for (name, value) in &doc.value {
+            let bad = |m: String| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: format!("view '{name}': {m}"),
+            };
+            let Some(table) = value.as_table() else {
+                diags.push(bad("not a table".into()));
+                continue;
+            };
+
+            let mut view = ViewSpec {
+                name: name.clone(),
+                dataset: table
+                    .get("dataset")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                ..ViewSpec::default()
+            };
+            if view.dataset.is_empty() {
+                diags.push(bad("missing 'dataset'".into()));
+            }
+
+            view.grouping = table
+                .get("grouping")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(joins) = table.get("joins").and_then(|v| v.as_array()) {
+                for j in joins.iter().filter_map(|v| v.as_table()) {
+                    let Some(dataset) = j.get("dataset").and_then(|v| v.as_str()) else {
+                        diags.push(bad("join missing 'dataset'".into()));
+                        continue;
+                    };
+                    view.joins.push(JoinSpec {
+                        dataset: dataset.to_string(),
+                        on: j
+                            .get("on")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+
+            if let Some(cols) = table.get("columns").and_then(|v| v.as_array()) {
+                for c in cols.iter().filter_map(|v| v.as_table()) {
+                    let Some(col_name) = c.get("name").and_then(|v| v.as_str()) else {
+                        diags.push(bad("column missing 'name'".into()));
+                        continue;
+                    };
+                    let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("measure");
+                    let column = match kind {
+                        "dimension" => ViewColumn::Dimension {
+                            name: col_name.to_string(),
+                        },
+                        "measure" => ViewColumn::Measure {
+                            name: col_name.to_string(),
+                        },
+                        "derived" => match c.get("sql").and_then(|v| v.as_str()) {
+                            Some(sql) => ViewColumn::Derived {
+                                name: col_name.to_string(),
+                                sql: sql.to_string(),
+                            },
+                            None => {
+                                diags.push(bad(format!(
+                                    "derived column '{col_name}' has no 'sql'"
+                                )));
+                                continue;
+                            }
+                        },
+                        other => {
+                            diags.push(bad(format!(
+                                "column '{col_name}' has unknown kind '{other}'"
+                            )));
+                            continue;
+                        }
+                    };
+                    view.columns.push(column);
+                }
+            }
+
+            if let Some(sorts) = table.get("sort").and_then(|v| v.as_array()) {
+                for s in sorts.iter().filter_map(|v| v.as_table()) {
+                    let Some(column) = s.get("column").and_then(|v| v.as_str()) else {
+                        diags.push(bad("sort entry missing 'column'".into()));
+                        continue;
+                    };
+                    view.sort.push(SortKey {
+                        column: column.to_string(),
+                        descending: s
+                            .get("descending")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    });
+                }
+            }
+
+            out.push(view);
+        }
+
+        (out, diags)
+    }
+}
+```
+
+Add to `crates/geode-core/src/lib.rs`:
+
+```rust
+pub mod view;
+```
+
+In `crates/geode-core/src/config/merge.rs`, add `dimensions` to the atomic
+doc list so a derived dimension is overridden whole-object by name, like
+views and datasets already are:
+
+```rust
+fn atomic_depth(doc_name: &str) -> Option<u32> {
+    match doc_name {
+        "views" | "layouts" | "groupings" | "scopes" | "datasets" | "sources"
+        | "dimensions" => Some(1),
+        _ => None,
+    }
+}
+```
+
+- [ ] **Step 8: Run to verify it passes**
+
+Run: `cargo test -p geode-core view`
+Expected: PASS (6 tests).
+
+- [ ] **Step 9: Lint, format, commit**
+
+Run: `cargo fmt && cargo clippy -p geode-core --all-targets -- -D warnings && cargo test -p geode-core`
+
+```bash
+git add crates/geode-core
+git commit -m "feat(core): view definitions and derived dimensions
+
+Views are config: dataset, joins, columns (dimension, measure, derived
+SQL), grouping and sort. measure_grains reports the distinct grains a
+view touches, which is what decides how many aggregate subqueries the
+compiler emits.
+
+Derived dimensions supply columns the source files lack — desk, from a
+config-maintained book mapping. The 'from' clause also declares the
+functional dependency book -> desk, which is what makes a desk-level
+rollup additive rather than blank (spec §6.8). A book mapped to two desks
+is a diagnostic, because many-to-many would break that dependency."
+```
+
+---
+
+### Task 3: Attribution and scope semantics
+
+**Files:**
+- Create: `crates/geode-core/src/attribution.rs`
+- Modify: `crates/geode-core/src/schema/grain.rs`
+- Modify: `crates/geode-core/src/lib.rs`
+
+**Interfaces:**
+- Consumes: `Grain`, `DerivedDimensions`.
+- Produces: `Grain::identity_columns() -> &'static [&'static str]`,
+  `Attribution::{Additive, DeterminedNonAdditive, NonAttributable}`,
+  `ScopeSemantics::{Direct, SemiJoined}`, and
+  `attribution_of(grain, grouping, &DerivedDimensions) -> Attribution`.
+  Tasks 5 and 7 carry the results into SQL and onto the snapshot.
+
+**The rule** (spec §6.3). Split the grouping tuple `G` into the columns the
+measure's key determines (`A`) and those it does not (`E`), resolving each
+through `DerivedDimensions::base_column` first:
+
+- **Additive** iff `E` is empty — every measure row falls in exactly one
+  group, so summing is correct and children total to their parent.
+- **DeterminedNonAdditive** iff `A` pins the grain's identity columns — the
+  group names one entity, so the value is real, but it repeats across the
+  sibling groups that `E` creates.
+- **NonAttributable** otherwise — the number would belong to an ancestor
+  row, not this one.
+
+**`counterparty` needs no special handling.** It is a key column but not an
+identity column: a position spans counterparties, so counterparty
+subdivides a position's rows rather than naming it, and summing across it
+is ordinary aggregation — the same thing a book-level row does to the
+positions inside it.
+
+- [ ] **Step 1: Write the failing identity-column test**
+
+Add to the test module in `crates/geode-core/src/schema/grain.rs`:
+
+```rust
+    #[test]
+    fn identity_columns_name_the_entity_not_the_whole_key() {
+        // The entity a measure belongs to. `book`/`lhu` are containers and
+        // `counterparty` subdivides a position, so none of them identify.
+        assert_eq!(Grain::Position.identity_columns(), &["position_ref"]);
+        assert_eq!(Grain::Instrument.identity_columns(), &["instrument_ref"]);
+        assert_eq!(
+            Grain::Underlying.identity_columns(),
+            &["instrument_ref", "underlying_ref"]
+        );
+        assert_eq!(
+            Grain::UnderlyingPair.identity_columns(),
+            &["instrument_ref", "underlying_ref", "underlying2_ref"]
+        );
+
+        // Identity is always a subset of the key.
+        for g in Grain::ALL {
+            for c in g.identity_columns() {
+                assert!(g.key_columns().contains(c), "{g:?} / {c}");
+            }
+        }
+    }
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cargo test -p geode-core identity_columns`
+Expected: FAIL — `no method named identity_columns`.
+
+- [ ] **Step 3: Implement `identity_columns`**
+
+In `crates/geode-core/src/schema/grain.rs`, add the constants beside the
+existing key constants and the method inside `impl Grain`:
+
+```rust
+const ID_POSITION: [&str; 1] = ["position_ref"];
+const ID_INSTRUMENT: [&str; 1] = ["instrument_ref"];
+const ID_UNDERLYING: [&str; 2] = ["instrument_ref", "underlying_ref"];
+const ID_PAIR: [&str; 3] = ["instrument_ref", "underlying_ref", "underlying2_ref"];
+```
+
+```rust
+    /// The columns naming the entity a measure belongs to — a subset of
+    /// the key. `book` and `lhu` are containers, and `counterparty`
+    /// subdivides a position rather than naming it, so none of them
+    /// identify. This is what decides `DeterminedNonAdditive` (spec §6.3).
+    pub fn identity_columns(self) -> &'static [&'static str] {
+        match self {
+            Grain::Position => &ID_POSITION,
+            Grain::Instrument => &ID_INSTRUMENT,
+            Grain::Underlying => &ID_UNDERLYING,
+            Grain::UnderlyingPair => &ID_PAIR,
+        }
+    }
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `cargo test -p geode-core grain`
+Expected: PASS (3 tests).
+
+- [ ] **Step 5: Write the failing attribution tests**
+
+Create `crates/geode-core/src/attribution.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LayerDoc, merge_docs};
+    use crate::dimensions::DerivedDimensions;
+    use crate::schema::Grain;
+
+    fn dims() -> DerivedDimensions {
+        let text = r#"
+[desk]
+from = "book"
+[desk.values]
+IDX_EXO_EU = ["BK000", "BK001"]
+"#;
+        let doc = merge_docs("dimensions", &[LayerDoc::builtin("dimensions", text).unwrap()]);
+        DerivedDimensions::from_doc(&doc).0
+    }
+
+    fn attribution(grain: Grain, grouping: &[&str]) -> Attribution {
+        let g: Vec<String> = grouping.iter().map(|s| s.to_string()).collect();
+        attribution_of(grain, &g, &dims())
+    }
+
+    #[test]
+    fn the_specs_worked_example_reads_additive_blank_determined() {
+        // spec §6.3: grouping lhu > underlying > position, trading PnL,
+        // which is position grain. Each level is a prefix of the grouping.
+        assert_eq!(
+            attribution(Grain::Position, &["lhu"]),
+            Attribution::Additive,
+            "level 1: every position sits in exactly one LHU"
+        );
+        assert_eq!(
+            attribution(Grain::Position, &["lhu", "underlying_ref"]),
+            Attribution::NonAttributable,
+            "level 2: a position has several underlyings"
+        );
+        assert_eq!(
+            attribution(Grain::Position, &["lhu", "underlying_ref", "position_ref"]),
+            Attribution::DeterminedNonAdditive,
+            "level 3: the position is named, but repeats across underlyings"
+        );
+    }
+
+    #[test]
+    fn greeks_are_additive_at_every_level_of_that_same_grouping() {
+        // Underlying-grain measures have no mismatch with this grouping.
+        for level in [
+            &["lhu"][..],
+            &["lhu", "underlying_ref"],
+            &["lhu", "underlying_ref", "position_ref"],
+        ] {
+            assert_eq!(
+                attribution(Grain::Underlying, level),
+                Attribution::Additive,
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_derived_dimension_is_additive_through_its_source_column() {
+        // desk is not a key column, but book determines it (spec §6.8), so
+        // every position sits in exactly one desk.
+        assert_eq!(
+            attribution(Grain::Position, &["desk"]),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution(Grain::Underlying, &["desk", "book"]),
+            Attribution::Additive
+        );
+    }
+
+    #[test]
+    fn an_undeclared_outside_column_is_not_attributable() {
+        // Without a declared dependency the compiler cannot know a
+        // position sits in exactly one of these.
+        assert_eq!(
+            attribution(Grain::Position, &["region"]),
+            Attribution::NonAttributable
+        );
+    }
+
+    #[test]
+    fn grouping_by_an_instrument_attribute_cannot_attribute_position_pnl() {
+        // A position's legs may carry different model codes.
+        assert_eq!(
+            attribution(Grain::Position, &["book", "model_code"]),
+            Attribution::NonAttributable
+        );
+        // Adding the position back makes it determined, not additive.
+        assert_eq!(
+            attribution(Grain::Position, &["book", "model_code", "position_ref"]),
+            Attribution::DeterminedNonAdditive
+        );
+    }
+
+    #[test]
+    fn an_empty_grouping_is_additive_for_every_grain() {
+        // The grand total. Nothing outside the key, so nothing to break.
+        for g in Grain::ALL {
+            assert_eq!(attribution(g, &[]), Attribution::Additive, "{g:?}");
+        }
+    }
+
+    #[test]
+    fn counterparty_never_needs_special_handling() {
+        // It is a key column, so grouping by it is additive; omitting it
+        // just sums across it, which is ordinary aggregation.
+        assert_eq!(
+            attribution(Grain::Position, &["book", "counterparty"]),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution(Grain::Position, &["book", "position_ref"]),
+            Attribution::Additive
+        );
+    }
+
+    #[test]
+    fn scope_semantics_names_the_dimensions_applied_by_membership() {
+        let direct = ScopeSemantics::Direct;
+        assert!(direct.is_direct());
+        let semi = ScopeSemantics::SemiJoined {
+            dimensions: vec!["underlying_ref".into()],
+        };
+        assert!(!semi.is_direct());
+        assert_eq!(semi.dimensions(), &["underlying_ref".to_string()]);
+    }
+}
+```
+
+- [ ] **Step 6: Run to verify it fails**
+
+Run: `cargo test -p geode-core attribution`
+Expected: FAIL — `cannot find function attribution_of`.
+
+- [ ] **Step 7: Implement the rules**
+
+Prepend to `crates/geode-core/src/attribution.rs`:
+
+```rust
+//! Whether a measure can be summed at a given grouping level, and how a
+//! scope predicate reached it (spec §6.3).
+//!
+//! Both are decidable from the schema alone — no data is consulted — which
+//! is why they live in core beside the grain vocabulary rather than in the
+//! compiler.
+
+use crate::dimensions::DerivedDimensions;
+use crate::schema::Grain;
+
+/// Whether a measure's value at one grouping level can be summed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attribution {
+    /// Every measure row belongs to exactly one group. Children total to
+    /// their parent.
+    Additive,
+    /// The group names one entity, so the value is real — but it repeats
+    /// across sibling groups and must never be totalled.
+    DeterminedNonAdditive,
+    /// The value would belong to an ancestor row, not this one. NULL.
+    NonAttributable,
+}
+
+/// How a scope predicate was applied to a measure's grain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScopeSemantics {
+    /// Every predicate names a column present at this grain.
+    Direct,
+    /// Some predicate names a finer column, applied as a membership test:
+    /// "positions that have SPX risk", not "the SPX share".
+    SemiJoined { dimensions: Vec<String> },
+}
+
+impl ScopeSemantics {
+    pub fn is_direct(&self) -> bool {
+        matches!(self, ScopeSemantics::Direct)
+    }
+
+    pub fn dimensions(&self) -> &[String] {
+        match self {
+            ScopeSemantics::Direct => &[],
+            ScopeSemantics::SemiJoined { dimensions } => dimensions,
+        }
+    }
+}
+
+/// Decide a measure's attribution at one grouping level.
+///
+/// `grouping` is the prefix of the view's grouping tuple for this level,
+/// so a three-level tree calls this three times with growing slices.
+pub fn attribution_of(
+    grain: Grain,
+    grouping: &[String],
+    dims: &DerivedDimensions,
+) -> Attribution {
+    let key = grain.key_columns();
+
+    // Resolve derived dimensions to their source before testing: `desk`
+    // counts as `book`, which is what makes a desk rollup additive.
+    let base: Vec<&str> = grouping
+        .iter()
+        .map(|c| dims.base_column(c.as_str()))
+        .collect();
+
+    // A = determined by the measure's key, E = everything else.
+    let extra: Vec<&&str> = base.iter().filter(|c| !key.contains(c)).collect();
+    if extra.is_empty() {
+        return Attribution::Additive;
+    }
+
+    // Not additive. Does what *is* attributable still name the entity?
+    let attributable: Vec<&&str> = base.iter().filter(|c| key.contains(c)).collect();
+    let names_entity = grain
+        .identity_columns()
+        .iter()
+        .all(|id| attributable.iter().any(|c| **c == *id));
+
+    if names_entity {
+        Attribution::DeterminedNonAdditive
+    } else {
+        Attribution::NonAttributable
+    }
+}
+```
+
+Add to `crates/geode-core/src/lib.rs`:
+
+```rust
+pub mod attribution;
+```
+
+- [ ] **Step 8: Run to verify it passes**
+
+Run: `cargo test -p geode-core attribution`
+Expected: PASS (8 tests).
+
+- [ ] **Step 9: Lint, format, commit**
+
+Run: `cargo fmt && cargo clippy -p geode-core --all-targets -- -D warnings && cargo test -p geode-core`
+
+```bash
+git add crates/geode-core
+git commit -m "feat(core): attribution and scope semantics
+
+Whether a measure can be summed at a grouping level, decided from the
+schema alone. Split the grouping into columns the measure's key
+determines and columns it does not: nothing left over is Additive; the
+grain's identity columns still pinned is DeterminedNonAdditive; neither
+is NonAttributable.
+
+Tested against spec §6.3's own worked example, which must read additive,
+blank, determined down the three levels of lhu > underlying > position.
+
+counterparty needs no special handling: it is a key column but not an
+identity column, so summing across it is ordinary aggregation. Derived
+dimensions resolve to their source column first, which is what makes a
+desk-level rollup additive."
+```
+
+---
+
+**Remaining tasks (4–14) continue below.** Tasks 4–6 build the scope
+compiler, the grain-aware `ROLLUP` compiler, and joins; Task 7 the
+`Snapshot` type; Task 8 the ENUM interning carried over from 2a; Tasks 9–10
+the query pool with cancellation and as-of routing; Task 11 the
+`DataService` facade; Task 12 the throwaway debug tile; Task 13 the §7.1
+requery benchmarks; Task 14 cross-file conflict detection.
