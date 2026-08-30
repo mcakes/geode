@@ -1203,6 +1203,31 @@ impl Render for ShellView {
             // whole surface — visible docks keep their columns), so it is
             // its own absolutely-positioned, internally-centered child
             // rather than turning the surface itself into a flex row.
+            //
+            // State-aware (review nit): while a dock holds focus, splits
+            // are refused (a tree concept — `Workspaces::split_active`),
+            // so advertising ctrl+h/ctrl+v over the empty tree would be
+            // inert advice; name the move-back chord for the focused dock
+            // instead, in the same physical-key spelling the dock hints
+            // use (the user presses ctrl+shift+[; the binding is spelled
+            // `ctrl+{` — see BUILTIN_KEYMAP's doc comment).
+            let (hint, selector) = match region {
+                crate::tiling::FocusRegion::Main => {
+                    ("ctrl+h / ctrl+v to open a tile", "empty-hint")
+                }
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left) => (
+                    "ctrl+shift+[ moves the docked tile back here",
+                    "empty-hint-return-left",
+                ),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Right) => (
+                    "ctrl+shift+] moves the docked tile back here",
+                    "empty-hint-return-right",
+                ),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Bottom) => (
+                    "ctrl+shift+/ moves the docked tile back here",
+                    "empty-hint-return-bottom",
+                ),
+            };
             surface = surface.child(
                 div()
                     .absolute()
@@ -1221,9 +1246,9 @@ impl Render for ShellView {
                             // — gpui's test API has no way to inspect painted text
                             // content itself, so this is the closest honest check
                             // available for "the hint painted".
-                            .debug_selector(|| "empty-hint".to_string())
+                            .debug_selector(|| selector.to_string())
                             .text_color(cx.theme().muted_foreground)
-                            .child("ctrl+h / ctrl+v to open a tile"),
+                            .child(hint),
                     ),
             );
         } else {
@@ -2098,6 +2123,57 @@ mod tests {
             );
             assert_eq!(ws.docks().get(crate::tiling::DockSide::Left).tile(), None);
         });
+    }
+
+    /// Review nit: with the tree empty and the workspace's only tile
+    /// parked in a focused dock, the tree area must NOT show the
+    /// "ctrl+h / ctrl+v to open a tile" hint — splits are refused while a
+    /// dock holds focus, so that advice is inert there. It shows the
+    /// move-back hint for the focused dock instead (physical-key spelling,
+    /// like the dock hints). Same `debug_bounds` honesty limits as the
+    /// other hint tests: selectors, not text.
+    #[gpui::test]
+    fn empty_tree_hint_is_state_aware_while_a_dock_holds_focus(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell) = dock_test_shell(cx);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-{"); // only tile → left dock, tree empty, dock focused
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        shell.read_with(&cx, |shell, _| {
+            let ws = shell.services.workspaces.active();
+            assert!(ws.tree().is_empty(), "sanity: the tree emptied");
+            assert_eq!(
+                ws.region(),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left)
+            );
+        });
+
+        let return_hint = cx.debug_bounds("empty-hint-return-left");
+        assert!(
+            return_hint.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+            "the dock-focused empty tree should paint the move-back hint, got {return_hint:?}"
+        );
+        assert_eq!(
+            cx.debug_bounds("empty-hint"),
+            None,
+            "the split hint must not paint while a dock holds focus (splits are refused there)"
+        );
+
+        // Back in Main over the still-empty tree, the ordinary split hint
+        // returns (region falls back to the dock being the only occupant —
+        // so go through move-back, then close, leaving a truly empty
+        // Main-focused workspace).
+        cx.simulate_keystrokes("ctrl-{"); // tile returns to the tree
+        cx.simulate_keystrokes("ctrl-shift-w"); // close it: empty workspace, Main
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let split_hint = cx.debug_bounds("empty-hint");
+        assert!(
+            split_hint.is_some_and(|b| b.size.width > px(0.0)),
+            "with Main focused the ordinary split hint returns, got {split_hint:?}"
+        );
     }
 
     /// End-to-end geometry: with a tile parked in the left dock and one in

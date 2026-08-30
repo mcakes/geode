@@ -297,7 +297,21 @@ impl Workspace {
                 self.tree.exit_fullscreen();
                 match self.docks.get(side).tile() {
                     Some(displaced) => {
-                        self.tree.replace_leaf(moved, displaced);
+                        // `moved` is the tree's focused tile (a leaf by
+                        // definition) and `displaced` lives only in the
+                        // dock (one-place-per-TileId invariant), so this
+                        // cannot fail; the debug_assert keeps the swap
+                        // honest if that invariant ever broke — a silent
+                        // false here followed by `set_tile(Some(moved))`
+                        // below would drop the displaced tile and
+                        // duplicate the moved one (review nit: match the
+                        // defensive posture of the dock arms below).
+                        let replaced = self.tree.replace_leaf(moved, displaced);
+                        debug_assert!(
+                            replaced,
+                            "swap leaf-replacement failed: {moved:?} not a leaf or \
+                             {displaced:?} already in the tree"
+                        );
                     }
                     None => {
                         self.tree.remove_focused();
@@ -386,6 +400,31 @@ impl Workspace {
                 "focus region points at the {side:?} dock, which is hidden or empty; falling back"
             ));
             ws.region = ws.fallback_region();
+        }
+        // Fullscreen-on-the-tree while focus lives in a dock is a
+        // contradiction no live path can produce (fullscreen blocks focus
+        // from crossing into docks, and `toggle_fullscreen` is a no-op
+        // while dock-focused) but a hand-edited session file can claim
+        // both — restored as-is it would render the fullscreen tile with
+        // no focus ring anywhere and leave mod+f dead until focus returned
+        // inward. Heal by clearing fullscreen and keeping the dock focus
+        // the file asked for (review should-fix). Checked after the
+        // region heal above so it only fires when the dock focus actually
+        // survives — a region that fell back to `Main` may keep its
+        // fullscreen, an ordinary state.
+        //
+        // `Workspaces::from_parts`'s cross-workspace pass cannot
+        // reintroduce this combination: its healing only ever drops dock
+        // claims and moves regions *toward* `Main` (and a fullscreen tree
+        // is by definition non-empty, so its fallback is always `Main`),
+        // so this local heal is the single seam that needs the check.
+        if matches!(ws.region, FocusRegion::Dock(_)) && ws.tree.fullscreen().is_some() {
+            warnings.push(
+                "fullscreen is set while focus is in a dock (contradictory); \
+                 clearing fullscreen"
+                    .to_string(),
+            );
+            ws.tree.exit_fullscreen();
         }
         (ws, warnings)
     }
@@ -997,6 +1036,49 @@ mod tests {
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(ws.docks().get(DockSide::Right).tile(), None);
         assert_eq!(ws.tree().tiles(), vec![TileId(1)]);
+    }
+
+    #[test]
+    fn workspace_from_parts_clears_fullscreen_when_a_dock_holds_focus() {
+        // Review should-fix: fullscreen-on-the-tree plus focus-in-a-dock is
+        // unreachable live (mod+f is a no-op while dock-focused; focus
+        // can't cross into docks under fullscreen) but a hand-edited
+        // session file can claim both. Restored as-is it renders the
+        // fullscreen tile with no focus ring anywhere and mod+f dead. The
+        // heal keeps the dock focus the user asked for and clears
+        // fullscreen, with a warning.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.toggle_fullscreen();
+        assert_eq!(tree.fullscreen(), Some(TileId(1)));
+        let mut docks = Docks::default();
+        docks.get_mut(DockSide::Left).set_tile(Some(TileId(2)));
+        docks.get_mut(DockSide::Left).set_visible(true);
+        let (ws, warnings) = Workspace::from_parts(tree, docks, FocusRegion::Dock(DockSide::Left));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("fullscreen"), "{warnings:?}");
+        assert_eq!(
+            ws.region(),
+            FocusRegion::Dock(DockSide::Left),
+            "the dock focus the file asked for is kept"
+        );
+        assert_eq!(
+            ws.tree().fullscreen(),
+            None,
+            "fullscreen must be cleared so the docks paint and mod+f works"
+        );
+    }
+
+    #[test]
+    fn workspace_from_parts_keeps_fullscreen_while_main_holds_focus() {
+        // The heal must only fire on the contradictory combination —
+        // fullscreen with Main focus is an ordinary, reachable state.
+        let mut tree = Tree::default();
+        tree.split(TileId(1), Orientation::Horizontal);
+        tree.toggle_fullscreen();
+        let (ws, warnings) = Workspace::from_parts(tree, Docks::default(), FocusRegion::Main);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(ws.tree().fullscreen(), Some(TileId(1)));
     }
 
     #[test]

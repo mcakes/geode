@@ -1215,6 +1215,44 @@ mod tests {
     }
 
     #[test]
+    fn from_toml_clears_fullscreen_when_the_region_is_a_focusable_dock() {
+        // Review should-fix: a hand-edited file claiming tree fullscreen
+        // AND focus in a visible occupied dock — contradictory (unreachable
+        // live: fullscreen blocks focus from entering docks, and mod+f is
+        // a no-op while dock-focused). Heals by clearing fullscreen and
+        // keeping the dock focus, with a warning.
+        let mut table = to_toml(&Workspaces::new());
+        let ws1: toml::Table = r#"
+            focused = 1
+            fullscreen = 1
+            region = "left"
+            [node]
+            kind = "leaf"
+            id = 1
+            [docks.left]
+            tile = 2
+            visible = true
+            size = 0.25
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let (ws, warnings) = from_toml(&table).expect("the contradictory combo heals, never fails");
+        assert!(
+            warnings.iter().any(|w| w.contains("fullscreen")),
+            "{warnings:?}"
+        );
+        assert_eq!(ws.active().tree().fullscreen(), None);
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(
+            ws.active().docks().get(DockSide::Left).tile(),
+            Some(TileId(2))
+        );
+    }
+
+    #[test]
     fn from_toml_heals_an_unknown_region_string_to_main() {
         let mut table = to_toml(&Workspaces::new());
         let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
