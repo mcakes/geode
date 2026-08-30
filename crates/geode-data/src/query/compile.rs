@@ -44,8 +44,6 @@ pub struct CompiledColumn {
 pub struct CompiledQuery {
     pub sql: String,
     pub params: Vec<Value>,
-    /// Temp tables the scope compiler created; the caller drops them.
-    pub temp_tables: Vec<String>,
     pub grouping: Vec<String>,
     pub columns: Vec<CompiledColumn>,
     /// Every dataset the query reads. A joined view is as stale as its
@@ -113,7 +111,6 @@ pub fn compile_view(
     let n = view.grouping.len();
     let group_cols = quoted(&view.grouping);
     let mut params: Vec<Value> = Vec::new();
-    let mut temp_tables: Vec<String> = Vec::new();
     let mut ctes: Vec<String> = Vec::new();
     let mut selects: Vec<String> = Vec::new();
     let mut joins: Vec<String> = Vec::new();
@@ -150,7 +147,6 @@ pub fn compile_view(
     };
     let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, spine_grain)?;
     params.extend(spine_scope.params.clone());
-    temp_tables.extend(spine_scope.temp_tables.clone());
 
     if n == 0 {
         // No grouping columns: the tree is a single grand-total row. The
@@ -160,7 +156,6 @@ pub fn compile_view(
         ctes.push("spine as (select 0 as depth_mask)".to_string());
         // The spine's own scope params are unused in this shape.
         params.clear();
-        temp_tables.extend(spine_scope.temp_tables.clone());
     } else {
         ctes.push(format!(
             "spine as (select {select}, grouping({group}) as depth_mask \
@@ -214,7 +209,6 @@ pub fn compile_view(
     for grain in view.measure_grains(schema) {
         let alias = format!("agg_{}", grain.table());
         let grain_scope = compile_scope(conn, scope, ds, grain, dims, spine_grain)?;
-        temp_tables.extend(grain_scope.temp_tables.clone());
 
         // Only the grouping columns this grain actually has.
         let own: Vec<String> = view
@@ -406,7 +400,6 @@ pub fn compile_view(
     Ok(CompiledQuery {
         sql,
         params,
-        temp_tables,
         grouping: view.grouping.clone(),
         columns,
         stalest_input,

@@ -320,6 +320,30 @@ fn distinct_books(conn: &duckdb::Connection) -> Result<(Vec<String>, usize), Sto
 pub(crate) mod tests_support {
     use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
 
+    /// The spec §6.3 tree view over the fixture dataset: lhu >
+    /// underlying > position, one measure at underlying grain and one at
+    /// position grain.
+    pub(crate) fn tree_view() -> geode_core::view::ViewSpec {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu", "underlying_ref", "position_ref"]
+[[tree.columns]]
+name = "delta01"
+kind = "measure"
+[[tree.columns]]
+name = "daily_trading_pnl"
+kind = "measure"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        geode_core::view::ViewSpec::from_doc(&doc)
+            .0
+            .into_iter()
+            .next()
+            .unwrap()
+    }
+
     /// The same fixture the load tests use: a populated store with the
     /// schema applied and catalog tables created, plus a generated source
     /// directory. Both TempDirs are returned so the caller keeps them alive.

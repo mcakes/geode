@@ -181,10 +181,6 @@ fn worker(conn: duckdb::Connection, queue: Arc<(Mutex<Queue>, Condvar)>, tx: Sen
             q.pending.get(&req.view).is_some_and(|(pid, _)| *pid > id)
         };
 
-        for t in &req.compiled.temp_tables {
-            let _ = conn.execute_batch(&format!("drop table if exists {t}"));
-        }
-
         if stale {
             continue;
         }
@@ -243,7 +239,6 @@ mod tests {
         CompiledQuery {
             sql: sql.to_string(),
             params: Vec::new(),
-            temp_tables: Vec::new(),
             grouping: Vec::new(),
             columns: vec![geode_core::snapshot::ColumnMeta {
                 name: "v".into(),

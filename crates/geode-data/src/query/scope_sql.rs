@@ -20,11 +20,10 @@ use geode_core::attribution::ScopeSemantics;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::{DatasetSpec, Grain};
 use geode_core::scope::{Expr, Literal, Scope};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Unique temp-table names within a process, so two concurrent
-/// compilations on different connections never collide by name.
-static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+/// Values are joined with this before binding and split back in SQL. A
+/// control character no dimension value can contain.
+const SELECTION_DELIMITER: &str = "\u{1f}";
 
 #[derive(Debug, Clone)]
 pub struct ScopeSql {
@@ -33,22 +32,15 @@ pub struct ScopeSql {
     /// Bound in order; the predicate carries `?` placeholders.
     pub params: Vec<Value>,
     pub semantics: ScopeSemantics,
-    /// Temp tables created on the connection, for the caller to drop.
-    pub temp_tables: Vec<String>,
-}
-
-fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
-    move |source| StoreError::Sql {
-        statement: statement.to_string(),
-        source,
-    }
 }
 
 /// `probe` is the grain a finer-than-`grain` predicate is tested against.
 /// It must be a grain the dataset declares — only those have tables — so
 /// the caller passes the spine grain rather than assuming the finest.
 pub fn compile_scope(
-    conn: &Connection,
+    // Kept so the signature does not change when a predicate kind needs
+    // the connection again; nothing does today.
+    _conn: &Connection,
     scope: &Scope,
     ds: &DatasetSpec,
     grain: Grain,
@@ -58,32 +50,17 @@ pub fn compile_scope(
     let mut direct: Vec<String> = Vec::new();
     let mut finer: Vec<String> = Vec::new();
     let mut params: Vec<Value> = Vec::new();
-    let mut temp_tables: Vec<String> = Vec::new();
     let mut semi_dimensions: Vec<String> = Vec::new();
 
-    // 1. Dimension selections: temp table + semi-join.
+    // 1. Dimension selections: one bound varchar, split in SQL.
     for sel in &scope.dimensions {
         if sel.values.is_empty() {
             continue;
         }
         let base = dims.base_column(&sel.column).to_string();
-        let table = format!(
-            "scope_{}_{}",
-            base.replace(|c: char| !c.is_alphanumeric(), "_"),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        );
-        let create = format!("create temp table {table}(v varchar)");
-        conn.execute_batch(&create).map_err(sql_err(&create))?;
-        {
-            let mut app = conn.appender(&table).map_err(sql_err(&create))?;
-            for v in &sel.values {
-                app.append_row(duckdb::params![v])
-                    .map_err(sql_err(&create))?;
-            }
-        }
-        temp_tables.push(table.clone());
-
-        let clause = format!("\"{base}\" in (select v from {table})");
+        params.push(Value::Text(sel.values.join(SELECTION_DELIMITER)));
+        let clause =
+            format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))");
         if grain.key_columns().contains(&base.as_str()) {
             direct.push(clause);
         } else {
@@ -166,7 +143,6 @@ pub fn compile_scope(
         predicate,
         params,
         semantics,
-        temp_tables,
     })
 }
 
@@ -287,9 +263,10 @@ grain = "position"
     }
 
     #[test]
-    fn a_dimension_selection_becomes_a_temp_table_semi_join() {
-        // duckdb-rs cannot bind a list, and this keeps the statement text
-        // stable regardless of how many books are selected (spec §6.2).
+    fn a_dimension_selection_binds_one_value_and_splits_it_in_sql() {
+        // duckdb-rs cannot bind a list, and a temp table would be
+        // connection-local — compilation and execution happen on
+        // different connections (spec §6.2).
         let scope = Scope {
             dimensions: vec![DimensionSelection {
                 column: "book".into(),
@@ -297,19 +274,9 @@ grain = "position"
             }],
             ..Scope::default()
         };
-        let (sql, _d, store) = compile(&scope, Grain::Underlying);
-        assert!(sql.predicate.contains("select v from"), "{}", sql.predicate);
-        assert_eq!(sql.temp_tables.len(), 1);
-
-        let n: i64 = store
-            .writer()
-            .query_row(
-                &format!("select count(*) from {}", sql.temp_tables[0]),
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(n, 2, "both selected values were staged");
+        let (sql, _d, _s) = compile(&scope, Grain::Underlying);
+        assert!(sql.predicate.contains("string_split"), "{}", sql.predicate);
+        assert_eq!(sql.params.len(), 1, "one bound value, not one per book");
     }
 
     #[test]
@@ -349,18 +316,11 @@ grain = "position"
             Grain::UnderlyingPair,
         )
         .unwrap();
-        let strip = |s: &ScopeSql| {
-            let mut text = s.predicate.clone();
-            for t in &s.temp_tables {
-                text = text.replace(t.as_str(), "<temp>");
-            }
-            text
-        };
         assert_eq!(
-            strip(&a),
-            strip(&b),
+            a.predicate, b.predicate,
             "a cacheable plan requires stable text"
         );
+        assert_eq!(a.params.len(), b.params.len(), "one param either way");
         drop(dir);
     }
 

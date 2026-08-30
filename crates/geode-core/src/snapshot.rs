@@ -12,7 +12,6 @@
 
 use crate::attribution::{Attribution, ScopeSemantics};
 use arrow::array::{Array, Float64Array, Int64Array, StringArray};
-use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 
 #[derive(Debug, Clone)]
@@ -50,6 +49,63 @@ impl Provenance {
     }
 }
 
+/// Concatenate batches, keeping a shared dictionary shared.
+///
+/// Arrow's `concat` *appends* dictionaries rather than noticing that two
+/// batches carry the same one, so after a handful of 2048-row batches the
+/// merged dictionary outgrows the 8-bit key space and the keys overflow.
+/// Every batch of one query carries the same derived ENUM, so its keys
+/// can simply be concatenated against the one dictionary — correct, and
+/// cheaper than merging.
+fn concat_preserving_dictionaries(
+    batches: &[RecordBatch],
+) -> Result<RecordBatch, arrow::error::ArrowError> {
+    use arrow::array::{ArrayRef, DictionaryArray, UInt8Array};
+    use arrow::datatypes::{DataType, UInt8Type};
+
+    let schema = batches[0].schema();
+    if batches.len() == 1 {
+        return Ok(batches[0].clone());
+    }
+
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
+    for (i, field) in schema.fields().iter().enumerate() {
+        let slices: Vec<&dyn Array> = batches.iter().map(|b| b.column(i).as_ref()).collect();
+
+        let dictionary_of_u8 = matches!(
+            field.data_type(),
+            DataType::Dictionary(k, _) if **k == DataType::UInt8
+        );
+        if dictionary_of_u8 {
+            let dicts: Vec<&DictionaryArray<UInt8Type>> = slices
+                .iter()
+                .filter_map(|a| a.as_any().downcast_ref::<DictionaryArray<UInt8Type>>())
+                .collect();
+            if dicts.len() == slices.len()
+                && dicts
+                    .iter()
+                    .all(|d| d.values().as_ref() == dicts[0].values().as_ref())
+            {
+                let keys: Vec<&dyn Array> = dicts.iter().map(|d| d.keys() as &dyn Array).collect();
+                let merged = arrow::compute::concat(&keys)?;
+                let merged = merged
+                    .as_any()
+                    .downcast_ref::<UInt8Array>()
+                    .expect("concat of UInt8 keys")
+                    .clone();
+                columns.push(std::sync::Arc::new(DictionaryArray::<UInt8Type>::try_new(
+                    merged,
+                    dicts[0].values().clone(),
+                )?));
+                continue;
+            }
+        }
+        columns.push(arrow::compute::concat(&slices)?);
+    }
+
+    RecordBatch::try_new(schema, columns)
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     batch: Option<RecordBatch>,
@@ -68,7 +124,7 @@ impl Snapshot {
     ) -> Result<Snapshot, arrow::error::ArrowError> {
         let batch = match batches.first() {
             None => None,
-            Some(first) => Some(concat_batches(&first.schema(), &batches)?),
+            Some(_) => Some(concat_preserving_dictionaries(&batches)?),
         };
         Ok(Snapshot {
             batch,
