@@ -2239,7 +2239,12 @@ dependencies = [
 name = "geode-data"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "geode-core",
+ "geode-demo-data",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
