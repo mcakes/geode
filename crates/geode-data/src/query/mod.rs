@@ -10,3 +10,6 @@ pub use compile::{CompiledColumn, CompiledQuery, compile_view, depth_for_mask, m
 pub mod as_of;
 
 pub use as_of::{AsOf, generation_predicate, resolve_generations};
+pub mod pool;
+
+pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
