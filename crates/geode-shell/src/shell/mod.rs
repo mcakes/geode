@@ -1259,6 +1259,35 @@ impl ShellView {
             return;
         }
 
+        // Escape ends an in-flight drag of either kind before the matcher
+        // ever sees the keystroke (post-merge review BUG 2) — the keyboard
+        // is documented hot mid-drag, and Escape is the universal "abort
+        // the transient thing" key everywhere else in the shell (modal
+        // above, palette in `handle_palette_key`), so it belongs to the
+        // drag while one is running. Slotted here deliberately: below the
+        // modal/palette branches (while either overlay is open, Escape
+        // keeps meaning "close the overlay" — any drag was already
+        // cancelled when the overlay opened, save the one-frame window
+        // the render-top guard closes at the next paint) and above
+        // `matcher.press` (a drag-ending Escape must not also feed a
+        // pending sequence or dispatch a binding). The two drag kinds end
+        // per their own recorded semantics, and both cover the
+        // armed-but-inactive state too:
+        // - tile drag: CANCEL — nothing was applied, so ending it applies
+        //   and persists nothing;
+        // - divider drag: FINISH, not revert (recorded decision) — its
+        //   resizes were applied live, cancel means "stop tracking the
+        //   mouse", never "undo", so `cancel_divider_drag` keeps them and
+        //   dirties the session exactly like a mouse-up finish would.
+        if event.keystroke.key == "escape"
+            && (self.tile_drag.is_some() || self.divider_drag.is_some())
+        {
+            self.cancel_tile_drag();
+            self.cancel_divider_drag();
+            cx.notify();
+            return;
+        }
+
         let Some(keystroke) = keystroke else {
             return;
         };
@@ -3992,6 +4021,129 @@ mod tests {
                 .focused()),
             Some(right),
             "the plain click focused the tile it landed on (click-to-focus intact)"
+        );
+    }
+
+    /// Post-merge review BUG 2: Escape mid-tile-drag cancels the drag —
+    /// nothing applied when the (now targetless) release lands, nothing
+    /// persisted, and the keystroke never reaches the matcher.
+    #[gpui::test]
+    fn escape_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+        let layout_before = shell.read_with(&cx, |shell, _| {
+            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        });
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        let drop = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .tile_drag
+                .as_ref()
+                .is_some_and(|drag| drag.active)),
+            "sanity: the drag is active before Escape"
+        );
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "Escape mid-drag must cancel the tile drag"
+        );
+
+        cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell.services.workspaces.active().tree().layout(Rect::UNIT)
+            }),
+            layout_before,
+            "the release after the Escape cancel applies nothing"
+        );
+        assert!(
+            !shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "a cancelled tile drag persists nothing"
+        );
+    }
+
+    /// Post-merge review BUG 2 (armed-but-inactive arm): Escape also
+    /// clears a drag that never crossed the movement threshold, so the
+    /// release afterwards is a plain unarmed release.
+    #[gpui::test]
+    fn escape_clears_an_armed_but_inactive_tile_drag(cx: &mut gpui::TestAppContext) {
+        let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_some()));
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "Escape must clear an armed-but-inactive drag too"
+        );
+    }
+
+    /// Post-merge review BUG 2 (divider consistency, recorded decision):
+    /// Escape mid-divider-drag ENDS the drag — finish, not revert,
+    /// because a divider drag's resizes were already applied live and
+    /// cancel means "stop tracking the mouse", never "undo". Applied
+    /// moves persist (session dirty) and further mouse moves resize
+    /// nothing.
+    #[gpui::test]
+    fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, _left, _right) = two_tile_drag_shell(cx);
+
+        // Grab the divider between the two tiles and drag it left.
+        let strip = cx
+            .debug_bounds("divider-strip-0")
+            .expect("two tiles paint their splitter strip");
+        let grab = strip.center();
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
+        assert!(shell.read_with(&cx, |shell, _| shell.divider_drag.is_some()));
+        let target = gpui::point(grab.x - px(100.0), grab.y);
+        cx.simulate_mouse_move(target, MouseButton::Left, gpui::Modifiers::none());
+        let widths_after_move: Vec<f32> = shell.read_with(&cx, |shell, _| {
+            shell
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect::UNIT)
+                .into_iter()
+                .map(|(_, r)| r.w)
+                .collect()
+        });
+
+        cx.simulate_keystrokes("escape");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "Escape mid-divider-drag must end the drag"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.session_dirty),
+            "the applied resize persists (finish, not revert)"
+        );
+
+        // Further moves with the button still (nominally) held must no
+        // longer resize anything — the drag is over.
+        let farther = gpui::point(grab.x - px(200.0), grab.y);
+        cx.simulate_mouse_move(farther, MouseButton::Left, gpui::Modifiers::none());
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| {
+                shell
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .layout(Rect::UNIT)
+                    .into_iter()
+                    .map(|(_, r)| r.w)
+                    .collect::<Vec<f32>>()
+            }),
+            widths_after_move,
+            "no further tracking after Escape ended the divider drag"
         );
     }
 
