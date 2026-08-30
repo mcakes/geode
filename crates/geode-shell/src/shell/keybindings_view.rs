@@ -5,7 +5,13 @@
 //! category — never the invisible action id, see [`searchable_text`] —
 //! selection jumps live to matches from the anchor; `enter` commits,
 //! `escape` restores the anchor, `n`/`shift+n` repeat with wrap — see
-//! [`press_while_finding`]/[`repeat_find`]), and editable in place — `space`/`enter`/a click on the
+//! [`press_while_finding`]/[`repeat_find`] — or, when `[ui] find_style =
+//! "fzf"` (`ShellView::find_style`, see `vimfind::FindStyle`), an
+//! fzf-style *filter*: the same `/` session instead narrows the rendered
+//! list to matching rows, every edit re-selects the first match, bare
+//! `up`/`down` step through the matches (clamped), `enter` picks the row
+//! and starts rebind listening, `escape` restores the anchor — see
+//! [`press_while_finding_fzf`]/[`filter_matches`]), and editable in place — `space`/`enter`/a click on the
 //! already-selected row starts "listening" for a new binding; every
 //! keystroke while listening appends to a pending sequence (multi-keystroke
 //! bindings, e.g. `"g g"`, are supported); `enter` commits it, `escape`
@@ -64,7 +70,7 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
 use crate::keymap_edit::{Displacement, Rebind, apply_rebind};
 use crate::palette;
-use crate::vimfind::{FindDirection, FindResult, VimFind, find_match, match_range};
+use crate::vimfind::{FindDirection, FindResult, FindStyle, VimFind, find_match, match_range};
 use crate::vimnav::{self, NavResult, VimListNav};
 
 use super::ShellView;
@@ -345,6 +351,105 @@ pub fn press_while_finding(state: &mut KeybindingsState, texts: &[String], ks: &
     }
 }
 
+/// The row indices whose searchable text contains `query` — the fzf
+/// counterpart of [`find_match`]'s single jump target: the same
+/// case-insensitive substring semantics, but *all* matches, in row order,
+/// for [`build`] to render as the narrowed list while an fzf session is
+/// active. An empty query filters nothing (every index), so a
+/// just-started session shows the full list until the first character
+/// lands.
+pub fn filter_matches(texts: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..texts.len()).collect();
+    }
+    let needle = query.to_lowercase();
+    (0..texts.len())
+        .filter(|&ix| texts[ix].to_lowercase().contains(&needle))
+        .collect()
+}
+
+/// Feed one keystroke to an ACTIVE find session in **fzf** style
+/// (`[ui] find_style = "fzf"`) — the sibling of [`press_while_finding`],
+/// kept separate so the vim path stays byte-for-byte untouched. Query
+/// editing is still [`VimFind::press`] exactly as in vim mode
+/// (backspace-past-start cancels, stray chords are swallowed, ...); what
+/// differs is everything around it:
+///
+/// - every query edit resets the selection to the FIRST match (fzf's
+///   idiom — the filtered list re-anchors at its top), parking on the
+///   anchor when nothing matches (moot while no rows render, but
+///   deterministic);
+/// - bare `up`/`down` step the selection through the matches, clamped at
+///   the ends (no wrap) — intercepted here, *before* `VimFind::press`
+///   would swallow them as non-printable (vim mode leaves them to it);
+/// - bare `enter` picks: with at least one match the session ends
+///   (`VimFind::press` sees the enter, so an empty query's Cancel and a
+///   non-empty one's Commit both close it), the anchor is dropped,
+///   selection stays on the picked row, and `listening` starts
+///   immediately — the same state a `space` press on that row produces.
+///   With ZERO matches the enter never reaches `VimFind::press` at all:
+///   nothing happens and the session stays active (there is no row to
+///   pick, so listening must not start);
+/// - `escape`/backspace-past-start cancel and restore the anchor, exactly
+///   as vim mode does.
+///
+/// The caller guarantees `state.find.is_active()` and swallows the
+/// keystroke regardless of outcome, same contract as
+/// [`press_while_finding`].
+pub fn press_while_finding_fzf(state: &mut KeybindingsState, texts: &[String], ks: &Keystroke) {
+    let bare = ks.mods == Modifiers::NONE;
+
+    if bare && (ks.key == "up" || ks.key == "down") {
+        let query = state.find.query().unwrap_or("");
+        let matches = filter_matches(texts, query);
+        let Some(pos) = matches.iter().position(|&ix| ix == state.selected) else {
+            // Selection off the match list only happens with zero matches
+            // (edits and arrows both keep it on one otherwise) — nothing
+            // to step through.
+            return;
+        };
+        let new_pos = match ks.key.as_str() {
+            "up" => pos.saturating_sub(1),
+            _ => (pos + 1).min(matches.len() - 1),
+        };
+        state.selected = matches[new_pos];
+        return;
+    }
+
+    if bare && ks.key == "enter" {
+        let query = state.find.query().unwrap_or("");
+        if filter_matches(texts, query).is_empty() {
+            return;
+        }
+        // Commit (non-empty query) or Cancel (empty query) — either way
+        // the session is over; the distinction only matters to vim mode's
+        // `n`/`N`, which fzf mode never consults.
+        state.find.press(ks);
+        state.find_anchor = None;
+        state.listening = Some(Vec::new());
+        return;
+    }
+
+    match state.find.press(ks) {
+        FindResult::Updated => {
+            let anchor = state.find_anchor.unwrap_or(state.selected);
+            let query = state.find.query().unwrap_or("");
+            state.selected = filter_matches(texts, query)
+                .first()
+                .copied()
+                .unwrap_or(anchor);
+        }
+        FindResult::Cancel => {
+            if let Some(anchor) = state.find_anchor.take() {
+                state.selected = anchor;
+            }
+        }
+        // Commit is unreachable (bare enter is intercepted above);
+        // Ignored (a stray chord) changes nothing.
+        FindResult::Commit | FindResult::Ignored => {}
+    }
+}
+
 /// The query whose matches the rows should highlight: the live one while
 /// a find session is editing (updating with every keystroke), else the
 /// last committed one — vim `hlsearch`: matches stay lit for `n`/`N`
@@ -474,6 +579,7 @@ fn handle_key(
 ) -> bool {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let user_dir = shell.user_dir.clone();
+    let find_style = shell.find_style;
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
     };
@@ -502,9 +608,23 @@ fn handle_key(
     // ignores, so stray chords can't leak into list nav mid-search).
     if state.find.is_active() {
         let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-        press_while_finding(state, &texts, ks);
-        let selected = state.selected;
-        shell.keybindings_scroll.scroll_to_item(selected);
+        match find_style {
+            FindStyle::Vim => press_while_finding(state, &texts, ks),
+            FindStyle::Fzf => press_while_finding_fzf(state, &texts, ks),
+        }
+        // Scroll within whatever list is actually rendered: fzf's
+        // narrowed match list while its session is still active (the
+        // selection's POSITION among the matches, since `build` renders
+        // only those), the full row list otherwise.
+        let scroll_ix = if find_style == FindStyle::Fzf && state.find.is_active() {
+            filter_matches(&texts, state.find.query().unwrap_or(""))
+                .iter()
+                .position(|&ix| ix == state.selected)
+                .unwrap_or(0)
+        } else {
+            state.selected
+        };
+        shell.keybindings_scroll.scroll_to_item(scroll_ix);
         cx.notify();
         return true;
     }
@@ -515,7 +635,12 @@ fn handle_key(
         cx.notify();
         return true;
     }
-    if ks.key == "n"
+    // `n`/`shift+n` repeat-find is vim-mode-only (fzf has no committed
+    // query to repeat — its sessions end by picking or cancelling); in
+    // fzf mode these presses simply fall through to whatever they'd do
+    // without a committed query, i.e. list nav's NotNav.
+    if find_style == FindStyle::Vim
+        && ks.key == "n"
         && (ks.mods == Modifiers::NONE
             || ks.mods
                 == Modifiers {
@@ -677,17 +802,33 @@ fn build(
     let chip_bg = theme.muted;
     let hl_query = highlight_query(state);
 
+    // While an fzf find session is active (`[ui] find_style = "fzf"`) the
+    // list renders ONLY the matching rows — the filter idiom, vs. vim
+    // mode's all-rows jump model. Safe to filter the render list because
+    // row click handlers are keyed by `ActionId`, not position; the
+    // `debug_selector` index stays the row's index in the FULL list
+    // either way, so a row keeps its identity across filtering. Vim mode
+    // (and both modes outside a session) renders everything.
+    let fzf_session = shell.find_style == FindStyle::Fzf && state.find.is_active();
+    let visible: Vec<usize> = if fzf_session {
+        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+        filter_matches(&texts, state.find.query().unwrap_or(""))
+    } else {
+        (0..rows.len()).collect()
+    };
+
     let mut list = v_flex()
         .id("keybindings-list")
         .w(px(WIDTH))
         .h(px(
-            (rows.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            (visible.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.keybindings_scroll)
         .debug_selector(|| "keybindings-list".to_string());
 
-    for (i, row) in rows.iter().enumerate() {
+    for &i in &visible {
+        let row = &rows[i];
         let is_selected = i == state.selected;
         let is_listening = is_selected && state.listening.is_some();
 
@@ -761,6 +902,21 @@ fn build(
         list = list.child(row_el);
     }
 
+    if fzf_session && visible.is_empty() {
+        // Zero matches: one muted line where the rows would be — the same
+        // muted treatment "unbound" gets, so an empty filter reads as a
+        // state, not a rendering glitch. Enter is inert here
+        // (`press_while_finding_fzf`); the session stays live for editing.
+        list = list.child(
+            div()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .child("no matches"),
+        );
+    }
+
     // Keystroke chips for the footer hints — the same [`key_chip`]
     // rendering the rows use, so key names in helper text look like the
     // keys they mean. A chip renders exactly one keystroke, so multi-key
@@ -816,14 +972,28 @@ fn build(
                 chip("ctrl+b"),
                 sep("page"),
             ]))
-            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-                chip("/"),
-                sep("find,"),
-                chip("n"),
-                sep("/"),
-                chip("shift+n"),
-                sep("next"),
-            ]))
+            // Row 2 follows the configured find style: vim's jump/repeat
+            // vocabulary, or fzf's filter/move/pick one.
+            .child(match shell.find_style {
+                FindStyle::Vim => h_flex().gap_1().items_center().flex_wrap().children(vec![
+                    chip("/"),
+                    sep("find,"),
+                    chip("n"),
+                    sep("/"),
+                    chip("shift+n"),
+                    sep("next"),
+                ]),
+                FindStyle::Fzf => h_flex().gap_1().items_center().flex_wrap().children(vec![
+                    chip("/"),
+                    sep("filter,"),
+                    chip("up"),
+                    sep("/"),
+                    chip("down"),
+                    sep("move,"),
+                    chip("enter"),
+                    sep("pick"),
+                ]),
+            })
             .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
                 chip("space"),
                 sep("/"),
@@ -1358,5 +1528,152 @@ mod tests {
         press_while_finding(&mut state, &texts, &shift("f"));
         assert_eq!(state.find.query(), Some("F"));
         assert_eq!(state.selected, 1, "'F' still matches 'Focus left'");
+    }
+
+    // -- fzf mode (`[ui] find_style = "fzf"`) -----------------------------
+
+    #[test]
+    fn filter_matches_is_case_insensitive_and_empty_query_returns_all() {
+        let texts = find_texts();
+        assert_eq!(
+            filter_matches(&texts, ""),
+            vec![0, 1, 2, 3],
+            "an empty query filters nothing — every row stays visible"
+        );
+        assert_eq!(filter_matches(&texts, "FOCUS"), vec![1, 3]);
+        assert_eq!(filter_matches(&texts, "palette"), vec![2]);
+        assert_eq!(filter_matches(&texts, "zzz"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn fzf_query_edits_reset_selection_to_the_first_match() {
+        let texts = find_texts();
+        let mut state = finding_state(2);
+        press_while_finding_fzf(&mut state, &texts, &key("f"));
+        assert_eq!(
+            state.selected, 1,
+            "the FIRST 'f...' match, not the nearest to the anchor — fzf \
+             resets to the top of the filtered list on every edit"
+        );
+        press_while_finding_fzf(&mut state, &texts, &key("z"));
+        assert_eq!(
+            state.selected, 2,
+            "'fz' matches nothing — selection parks on the anchor (moot \
+             while nothing renders, but deterministic)"
+        );
+        press_while_finding_fzf(&mut state, &texts, &key("backspace"));
+        assert_eq!(state.selected, 1, "back to 'f', back to the first match");
+    }
+
+    #[test]
+    fn fzf_arrows_step_within_the_matches_and_clamp_at_the_ends() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding_fzf(&mut state, &texts, &key(k));
+        }
+        assert_eq!(state.selected, 1, "'focus' matches rows 1 and 3");
+        press_while_finding_fzf(&mut state, &texts, &key("down"));
+        assert_eq!(state.selected, 3);
+        press_while_finding_fzf(&mut state, &texts, &key("down"));
+        assert_eq!(state.selected, 3, "clamped at the last match, no wrap");
+        press_while_finding_fzf(&mut state, &texts, &key("up"));
+        assert_eq!(state.selected, 1);
+        press_while_finding_fzf(&mut state, &texts, &key("up"));
+        assert_eq!(state.selected, 1, "clamped at the first match, no wrap");
+        assert!(state.find.is_active(), "arrows never end the session");
+    }
+
+    #[test]
+    fn fzf_enter_picks_ends_the_session_and_starts_listening() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding_fzf(&mut state, &texts, &key(k));
+        }
+        press_while_finding_fzf(&mut state, &texts, &key("down"));
+        press_while_finding_fzf(&mut state, &texts, &key("enter"));
+        assert!(!state.find.is_active(), "enter ends the session");
+        assert_eq!(state.selected, 3, "selection lands on the picked row");
+        assert_eq!(state.find_anchor, None);
+        assert_eq!(
+            state.listening,
+            Some(Vec::new()),
+            "picking a row starts rebind listening immediately — the same \
+             state as pressing space on it"
+        );
+    }
+
+    #[test]
+    fn fzf_enter_with_zero_matches_does_nothing_and_stays_active() {
+        let texts = find_texts();
+        let mut state = finding_state(1);
+        for k in ["z", "z", "z"] {
+            press_while_finding_fzf(&mut state, &texts, &key(k));
+        }
+        press_while_finding_fzf(&mut state, &texts, &key("enter"));
+        assert!(
+            state.find.is_active(),
+            "enter on an empty match set must keep the session alive"
+        );
+        assert_eq!(
+            state.listening, None,
+            "and must NOT start listening — there is no row to rebind"
+        );
+        assert_eq!(state.find.query(), Some("zzz"), "the query survives too");
+    }
+
+    #[test]
+    fn fzf_enter_on_an_empty_query_picks_the_selected_row() {
+        // `/` then enter with nothing typed: every row matches the empty
+        // query, so enter picks whatever is selected (the anchor row) —
+        // functionally the same as pressing space on it directly.
+        let texts = find_texts();
+        let mut state = finding_state(2);
+        press_while_finding_fzf(&mut state, &texts, &key("enter"));
+        assert!(!state.find.is_active());
+        assert_eq!(state.selected, 2);
+        assert_eq!(state.listening, Some(Vec::new()));
+    }
+
+    #[test]
+    fn fzf_escape_cancels_and_restores_the_anchor() {
+        let texts = find_texts();
+        let mut state = finding_state(2);
+        press_while_finding_fzf(&mut state, &texts, &key("f"));
+        assert_eq!(state.selected, 1);
+        press_while_finding_fzf(&mut state, &texts, &key("escape"));
+        assert!(!state.find.is_active());
+        assert_eq!(state.selected, 2, "escape restores the anchor selection");
+        assert_eq!(state.listening, None, "cancel never starts listening");
+    }
+
+    #[test]
+    fn fzf_backspace_past_the_start_cancels_and_restores_the_anchor() {
+        let texts = find_texts();
+        let mut state = finding_state(2);
+        press_while_finding_fzf(&mut state, &texts, &key("f"));
+        press_while_finding_fzf(&mut state, &texts, &key("backspace"));
+        assert!(
+            state.find.is_active(),
+            "one backspace only empties the query"
+        );
+        press_while_finding_fzf(&mut state, &texts, &key("backspace"));
+        assert!(
+            !state.find.is_active(),
+            "backspace past the start abandons the session, same as vim mode"
+        );
+        assert_eq!(state.selected, 2);
+    }
+
+    #[test]
+    fn fzf_stray_chords_are_swallowed_without_moving_the_selection() {
+        let texts = find_texts();
+        let mut state = finding_state(0);
+        press_while_finding_fzf(&mut state, &texts, &key("f"));
+        assert_eq!(state.selected, 1);
+        press_while_finding_fzf(&mut state, &texts, &ctrl("d"));
+        assert_eq!(state.selected, 1, "a modified keystroke changes nothing");
+        assert!(state.find.is_active());
     }
 }
