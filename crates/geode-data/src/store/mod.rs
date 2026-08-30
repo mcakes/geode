@@ -5,7 +5,10 @@
 //! connections on the same database (spec §5.3). No in-memory mirror: a
 //! dual store doubles the coherency surface for a win nothing has measured.
 
+pub mod catalog;
 pub mod ddl;
+
+pub use catalog::{Catalog, FileGeneration, FileId};
 
 use duckdb::Connection;
 use geode_core::schema::DatasetSpec;
