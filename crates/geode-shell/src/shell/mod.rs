@@ -262,7 +262,8 @@ pub struct ShellView {
     /// makes Escape close it and swallows every other shell chord while
     /// it's open. Unlike `palette`, nothing here is per-frame scroll state
     /// to track alongside it — a modal's content owns whatever internal
-    /// state it needs (e.g. the settings composite's own search input).
+    /// state it needs (the two list dialogs' own state lives in the
+    /// sibling `keybindings`/`settings` fields below).
     modal: Option<dialog::ShellModal>,
     /// The open keybinding dialog's own pure state (Part B), or `None` when
     /// closed/never opened. Set fresh by [`keybindings_view::open`] each
@@ -283,6 +284,20 @@ pub struct ShellView {
     /// per open, driven by `keybindings_view`'s selection-change paths via
     /// `ScrollHandle::scroll_to_item`).
     keybindings_scroll: ScrollHandle,
+    /// The open settings dialog's own pure state (the settings-dialog
+    /// rewrite: the keybinding dialog's pattern applied to settings —
+    /// selection, `vimnav` accumulator, `/` find session), or `None` when
+    /// closed/never opened. Set fresh by [`settings_view::open`] each time
+    /// and read/mutated by that module's `build` closure and
+    /// [`dialog::ModalKeyHandler`], exactly the `keybindings` field's own
+    /// contract two fields up — including holding no `gpui` types, for the
+    /// same unit-testability reason. Replaces the composite-era arrangement
+    /// where the settings modal kept no `ShellView` state at all (the
+    /// gpui-component `Settings` composite owned its own).
+    settings: Option<settings_view::SettingsState>,
+    /// Scroll state for the open settings dialog's row list — the
+    /// `keybindings_scroll` split, one dialog over.
+    settings_scroll: ScrollHandle,
     /// Scroll state for the open palette's results list, tracked across
     /// frames the same way `filter_input`'s `Entity<InputState>` is
     /// (`gpui::ScrollHandle` is a cheap `Clone` — `Rc<RefCell<..>>` — but a
@@ -598,6 +613,8 @@ impl ShellView {
             modal: None,
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
+            settings: None,
+            settings_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
             palette_input,
             desk_dir,
@@ -868,12 +885,14 @@ impl ShellView {
             self.services.theme.toggle_mode(cx);
             self.persist_theme(cx);
         } else if action.0 == "settings::open" {
-            // Task 5: the real settings dialog (gpui-component's `setting`
-            // module, wrapped in Geode's own instant modal chrome — Task 9
-            // redesign, see `dialog`'s module doc). Reachable via `ctrl+,`,
-            // the palette, and the sidebar profile icon. Goes through
-            // `dialog::open_shell_dialog` (Task 9) via `settings_view::open`
-            // itself, so it gets the crate's uniform open-time hygiene.
+            // The settings dialog (settings-dialog rewrite: the keybinding
+            // dialog's keyboard-driven row-list pattern, home-rolled —
+            // `settings_view`'s module doc has the full story; the
+            // gpui-component `Settings` composite is gone). Reachable via
+            // `ctrl+,`, the palette, and the sidebar profile icon. Goes
+            // through `dialog::open_shell_dialog_with_key` via
+            // `settings_view::open` itself, so it gets the crate's uniform
+            // open-time hygiene plus first refusal on every keystroke.
             settings_view::open(self, window, cx);
         } else if action.0 == "keybindings::open" {
             // Part B: the keybinding dialog itself (vimnav.rs +
@@ -6751,36 +6770,18 @@ mod tests {
         );
     }
 
-    /// Review fix round: the module doc's "an Escape inside a focused
-    /// gpui-component `Input` propagates and reaches our root handler"
-    /// claim (`handle_key_down`'s modal branch doc comment) was previously
-    /// only argued by analogy with the filter input — this drives the
-    /// actual path it's about: the settings modal's own search field
-    /// (`Settings`' sidebar header, `crates/ui/src/setting/settings.rs`
-    /// pinned checkout).
-    ///
-    /// Focused via a real mouse click, not a direct `FocusHandle` set (the
-    /// way `escape_in_the_filter_input_returns_focus_to_the_shell_root`
-    /// focuses `ShellView`'s own `filter_input`) — there is no public way
-    /// to reach that route here: the search field's `Entity<InputState>`
-    /// lives on `SettingsState`, `pub(super)` in the pinned gpui-component
-    /// checkout and reachable only from inside that crate's own `setting`
-    /// module, not from this crate at all. The click point is derived from
-    /// `debug_bounds("settings-content")` (a test-only hook added to
-    /// `settings_view::open`'s own content wrapper) plus a small fixed
-    /// offset into that wrapper's top-left corner — where the sidebar's
-    /// `Input::new(&search_input)` header sits, ahead of the page list —
-    /// rather than a hand-guessed absolute screen position, so the test
-    /// tracks the modal's real on-screen placement instead of duplicating
-    /// its layout math. The offset itself (24px right, 24px down) is an
-    /// estimate from the pinned checkout's own spacing (`Sidebar::header`'s
-    /// `.p_2()` plus the input control's own internal padding) landing
-    /// inside the input's visible box, not a value derived from any
-    /// `Input`-internal layout this crate can read — its correctness is
-    /// exactly what this test's own first assertion (focus actually left
-    /// the shell root) checks.
+    /// The settings-dialog rewrite's replacement for the composite-era
+    /// "escape from the focused settings search input closes the modal"
+    /// test: the new dialog has no input entity (and no focus of its own)
+    /// at all — `/` opens a find session owned by the modal's own key
+    /// handler instead. The escape contract it must honor is the
+    /// keybinding dialog's: escape MID-SESSION cancels the session and
+    /// restores the anchor selection WITHOUT closing the modal (the
+    /// handler consumes it, so `handle_key_down`'s escape fallback never
+    /// runs), and only a bare escape with nothing pending falls through
+    /// and closes the modal — real keystrokes, end to end.
     #[gpui::test]
-    fn escape_from_the_focused_settings_search_input_closes_the_modal(
+    fn escape_cancels_a_settings_find_session_before_closing_the_modal(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(gpui_component::init);
@@ -6806,53 +6807,229 @@ mod tests {
                 .downcast::<ShellView>()
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
-        let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
 
         cx.simulate_keystrokes("ctrl-,");
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
             "sanity: ctrl-, should have opened the settings modal"
         );
-        assert!(
-            cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
-            "sanity: the shell root should still hold focus right after the \
-             modal opens — nothing auto-focuses the search input"
-        );
 
-        let content_bounds = cx
-            .debug_bounds("settings-content")
-            .expect("the settings content wrapper should have painted bounds to click inside");
-        let search_input_point = gpui::point(
-            content_bounds.origin.x + px(24.0),
-            content_bounds.origin.y + px(24.0),
-        );
-
-        cx.simulate_mouse_down(
-            search_input_point,
-            MouseButton::Left,
-            gpui::Modifiers::none(),
-        );
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
+        // `/key` jumps to the one Keyboard-category row (Find style,
+        // index 3) — proving the session is live and moved the selection.
+        cx.simulate_keystrokes("/ k e y");
+        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().expect("dialog open");
+            (state.selected, state.find.is_active())
         });
+        assert_eq!(
+            (selected, find_active),
+            (3, true),
+            "sanity: '/key' should have jumped to the Find style row with \
+             the session still live"
+        );
+
+        cx.simulate_keystrokes("escape");
+        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().expect("dialog open");
+            (state.selected, state.find.is_active())
+        });
+        assert_eq!(
+            (selected, find_active),
+            (0, false),
+            "escape mid-session should cancel the find and restore the \
+             anchor selection"
+        );
         assert!(
-            !cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
-            "clicking the settings search input should have moved focus off \
-             the shell root and onto the input — if this fails, the click \
-             point's offset likely missed the input's actual painted bounds"
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "escape mid-session must NOT close the modal"
         );
 
         cx.simulate_keystrokes("escape");
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_none()),
-            "escape typed into the focused settings search input should \
-             still have reached ShellView::handle_key_down's modal branch \
-             and closed the modal — the same propagation \
-             escape_in_the_filter_input_returns_focus_to_the_shell_root \
-             documents for the toolbar filter field"
+            "escape with no session pending should fall through and close \
+             the modal"
+        );
+    }
+
+    /// `h`/`l` (and the arrow aliases) step the selected settings row's
+    /// value through the live setter cores, end to end through real
+    /// keystrokes: `j j` moves the selection to the Font size row, `l`
+    /// steps Medium → Large, `h h` steps back down to Small, and `right`
+    /// proves the arrow alias — asserting `ShellView::font_size` itself,
+    /// so what's proven is the wiring from key dispatch through
+    /// `settings_view`'s `step` to shell state (the pure stepping
+    /// semantics, wrap included, are `settings_view::tests`').
+    #[gpui::test]
+    fn h_and_l_step_a_settings_row_and_apply_the_setter(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-,");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: ctrl-, should have opened the settings modal"
+        );
+
+        // j j: Theme (0) → Dark mode (1) → Font size (2).
+        cx.simulate_keystrokes("j j");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .settings
+                .as_ref()
+                .expect("dialog open")
+                .selected),
+            2,
+            "sanity: selection should sit on the Font size row"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Medium,
+            "sanity: the test shell starts at the Medium default"
+        );
+
+        cx.simulate_keystrokes("l");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Large,
+            "l should step the Font size row's value forward"
+        );
+
+        cx.simulate_keystrokes("h h");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Small,
+            "h h should step back down through Medium to Small"
+        );
+
+        cx.simulate_keystrokes("right");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Medium,
+            "right should alias l and step forward again"
+        );
+    }
+
+    /// The settings dialog honors `[ui] find_style = "fzf"` end to end:
+    /// `/find` filters the painted list down to the one matching row
+    /// (Find style — a non-matching row is genuinely not painted
+    /// mid-session), and `enter` picks: the session ends, the full list
+    /// returns to the frame, and the selection stays on the picked row
+    /// with the modal still open. Unlike the keybinding dialog's pick,
+    /// nothing further starts — the settings counterpart of
+    /// `fzf_find_filters_and_enter_picks_through_real_keystrokes`.
+    #[gpui::test]
+    fn settings_fzf_find_filters_rows_and_enter_picks(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+
+        let mut services = test_services();
+        services.config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let root = window.root(&mut cx).unwrap();
+        let shell = root.read_with(&cx, |root, _cx| {
+            root.view()
+                .clone()
+                .downcast::<ShellView>()
+                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        });
+
+        cx.simulate_keystrokes("ctrl-,");
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "sanity: ctrl-, should have opened the settings modal"
+        );
+
+        // "find" matches only the Find style row (index 3) — by title,
+        // since searchable text is title + category, never value labels.
+        cx.simulate_keystrokes("/ f i n d");
+        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().expect("dialog open");
+            (state.selected, state.find.is_active())
+        });
+        assert_eq!(
+            (selected, find_active),
+            (3, true),
+            "the fzf query should re-select its one match with the \
+             session live"
+        );
+
+        // Mid-session draw: only the matching row paints.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("settings-row-3").is_some(),
+            "the matching Find style row should be painted during the \
+             fzf session"
+        );
+        assert!(
+            cx.debug_bounds("settings-row-0").is_none(),
+            "the non-matching Theme row must NOT be painted while the \
+             fzf filter narrows the list"
+        );
+
+        cx.simulate_keystrokes("enter");
+        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().expect("dialog open");
+            (state.selected, state.find.is_active())
+        });
+        assert_eq!(
+            (selected, find_active),
+            (3, false),
+            "enter should pick: session over, selection on the picked row"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
+            "an fzf pick must leave the modal open"
+        );
+
+        // The full list is back after the pick.
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("settings-row-0").is_some(),
+            "the full list (Theme row included) should paint again once \
+             the session ends"
         );
     }
 
@@ -6970,25 +7147,22 @@ mod tests {
         );
     }
 
-    /// Reproduction for the content-collapse regression: `settings_open_
-    /// opens_the_modal` only proves the backdrop/panel/title chrome
-    /// painted with non-zero bounds — every one of those is painted
-    /// directly by `dialog::render_modal` itself, so it stays green even
-    /// if the `Settings` composite nested inside the panel (theme
-    /// dropdown, dark-mode switch, keyboard group) renders at zero
-    /// height. This test checks the thing that test doesn't: the content
-    /// wrapper `settings_view::open` tags with `debug_selector("settings-
-    /// content")` must paint with a real, multi-field height (not just a
-    /// non-zero sliver), and the modal must have painted meaningfully more
-    /// quads than its chrome alone (backdrop + panel bg/border + title
-    /// text + close button is a small, fixed handful — a fully laid out
-    /// Settings composite paints far more: sidebar background, search
-    /// input, page/menu row, two group boxes, a dropdown control, a
-    /// switch, several labels).
+    /// Content-collapse guard, retargeted at the home-rolled dialog:
+    /// `settings_open_opens_the_modal` only proves the backdrop/panel/
+    /// title chrome painted with non-zero bounds — all painted directly by
+    /// `dialog::render_modal` itself, so it would stay green even if the
+    /// row list nested inside the panel rendered at zero height (the exact
+    /// failure mode the old gpui-component `Settings` composite hit when
+    /// its percentage-height root met a parent with no definite height).
+    /// This test checks the thing that test doesn't: the row list
+    /// (`debug_selector("settings-list")`) must paint at its full derived
+    /// height — `settings_view` has four rows (Theme, Dark mode, Font
+    /// size, Find style), each `ROW_HEIGHT` (44px) tall — and every one of
+    /// those rows must itself have painted bounds.
     ///
     /// Uses `WindowOptions::default()`, same as every other modal test in
     /// this file — gpui's own `default_bounds` gives that a realistic
-    /// 1536x1095 test window, not a cramped one, so this collapse is not
+    /// 1536x1095 test window, not a cramped one, so a collapse here is not
     /// an artifact of an unrealistically small test viewport.
     #[gpui::test]
     fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContext) {
@@ -7016,8 +7190,6 @@ mod tests {
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
 
-        let quads_before = cx.update(|window, _cx| window.painted_quads().len());
-
         // settings::open is bound to ctrl+, (rebound from mod+, in commit
         // 87aa731; this test merged in concurrently and carried the old key).
         cx.simulate_keystrokes("ctrl-,");
@@ -7026,35 +7198,34 @@ mod tests {
         });
         assert!(
             shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: alt-, should have opened the settings modal"
+            "sanity: ctrl-, should have opened the settings modal"
         );
 
-        let content_bounds = cx
-            .debug_bounds("settings-content")
-            .expect("the settings content wrapper should have painted bounds");
+        let list_bounds = cx
+            .debug_bounds("settings-list")
+            .expect("the settings row list should have painted bounds");
         assert!(
-            content_bounds.size.height >= px(200.0),
-            "the settings content wrapper should paint tall enough to hold \
-             the Appearance/Keyboard groups (dropdown, switch, labels) — \
-             got {:?}. A collapse to a sliver height here means the Settings \
-             composite's own root (which demands `size_full`, pinned \
-             checkout `crates/ui/src/resizable/panel.rs`'s \
-             `ResizablePanelGroup::render`) resolved its percentage height \
-             against a parent with no definite height of its own.",
-            content_bounds.size
+            list_bounds.size.height >= px(4.0 * 44.0),
+            "the settings row list should paint at its full four-row height \
+             (4 × ROW_HEIGHT = 176px) — got {:?}. A sliver here means the \
+             list collapsed inside the modal panel instead of laying out \
+             its rows.",
+            list_bounds.size
         );
-
-        let quads_after = cx.update(|window, _cx| window.painted_quads().len());
-        let modal_quads = quads_after - quads_before;
-        assert!(
-            modal_quads >= 20,
-            "opening the settings modal should paint far more than just its \
-             chrome (backdrop + panel + title row + close button) — the \
-             Settings composite's own sidebar/search/groups/fields should \
-             contribute the bulk of it. Chrome alone paints only a handful \
-             of quads; got {modal_quads} total for the whole modal, which \
-             reads as chrome-only (collapsed content)."
-        );
+        // debug_bounds takes &'static str, so the four selectors are spelled
+        // out rather than formatted.
+        for selector in [
+            "settings-row-0",
+            "settings-row-1",
+            "settings-row-2",
+            "settings-row-3",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} should have painted bounds (Theme, Dark mode, \
+                 Font size, Find style rows must all lay out)"
+            );
+        }
     }
 
     /// `settings_view::set_theme`/`set_dark_mode` are the exact handlers the

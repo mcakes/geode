@@ -223,6 +223,18 @@ impl VimFind {
         self.editing.as_ref().map(|q| format!("/{q}"))
     }
 
+    /// The query whose matches a caller's rows should highlight: the live
+    /// one while a session is editing (updating with every keystroke), else
+    /// the last committed one — vim `hlsearch`: matches stay lit for
+    /// `n`/`N` until the dialog closes (dialog state is fresh per open;
+    /// there is no `:noh`). `None` when neither exists or the live query is
+    /// still empty. Promoted from `keybindings_view::highlight_query`
+    /// (settings-dialog rewrite) — it only ever read this struct's own two
+    /// fields, so it was always this type's method in disguise.
+    pub fn highlight_query(&self) -> Option<&str> {
+        self.query().or(self.last_query()).filter(|q| !q.is_empty())
+    }
+
     /// Feed one keystroke to the active session (see the module doc for
     /// the full key table). While no session is active every keystroke is
     /// [`FindResult::Ignored`] — callers gate on [`Self::is_active`].
@@ -309,6 +321,208 @@ pub fn find_match(
         ix = (ix + step) % len;
     }
     None
+}
+
+// ---------------------------------------------------------------------
+// Shared session drivers (extracted from `keybindings_view` by the
+// settings-dialog rewrite): the press-by-press semantics of an ACTIVE
+// find session, over a caller's `(selection, anchor)` pair. Both dialogs
+// — keybindings and settings — hold a `VimFind` + `selected: usize` +
+// `find_anchor: Option<usize>` and delegate every mid-session keystroke
+// here; only what *picking* a row means differs (keybindings starts
+// rebind listening, settings just keeps the selection), which is why
+// [`press_while_finding_fzf`] reports an [`FzfOutcome`] for the caller to
+// interpret instead of taking a callback. The fields are three `&mut`
+// parameters rather than a trait or a shared struct: both callers keep
+// their own state types (each with dialog-specific extras alongside), and
+// a borrow of exactly the three fields involved is the whole contract.
+// ---------------------------------------------------------------------
+
+/// Feed one keystroke to an ACTIVE find session in **vim** style and move
+/// `selected` per the outcome: an incremental jump from the anchor on
+/// every query edit (first match at-or-after the anchor, wrapping; back
+/// to the anchor when the query is empty or matches nothing — vim
+/// `incsearch`), anchor restore on cancel, anchor cleared (selection
+/// stays) on commit. The caller guarantees `find.is_active()` and
+/// swallows the keystroke regardless of outcome.
+pub fn press_while_finding(
+    find: &mut VimFind,
+    selected: &mut usize,
+    find_anchor: &mut Option<usize>,
+    texts: &[String],
+    ks: &Keystroke,
+) {
+    match find.press(ks) {
+        FindResult::Updated => {
+            let anchor = find_anchor.unwrap_or(*selected);
+            *selected = find
+                .query()
+                .filter(|q| !q.is_empty())
+                .and_then(|q| find_match(texts, anchor, FindDirection::Forward, q))
+                .unwrap_or(anchor);
+        }
+        FindResult::Commit => {
+            *find_anchor = None;
+        }
+        FindResult::Cancel => {
+            if let Some(anchor) = find_anchor.take() {
+                *selected = anchor;
+            }
+        }
+        FindResult::Ignored => {}
+    }
+}
+
+/// Repeat the last committed find in `dir` (`n`/`N`), excluding the
+/// current row so every press advances (wrapping). Returns false — the
+/// keystroke was not a find repeat — when nothing was ever committed;
+/// with a committed query but no match anywhere, the selection just stays
+/// (still handled: `n` after a stale query must not fall through to
+/// anything else).
+pub fn repeat_find(
+    find: &VimFind,
+    selected: &mut usize,
+    texts: &[String],
+    dir: FindDirection,
+) -> bool {
+    let Some(query) = find.last_query() else {
+        return false;
+    };
+    if texts.is_empty() {
+        return true;
+    }
+    let start = match dir {
+        FindDirection::Forward => (*selected + 1) % texts.len(),
+        FindDirection::Backward => (*selected + texts.len() - 1) % texts.len(),
+    };
+    if let Some(ix) = find_match(texts, start, dir, query) {
+        *selected = ix;
+    }
+    true
+}
+
+/// The row indices whose searchable text contains `query` — the fzf
+/// counterpart of [`find_match`]'s single jump target: the same
+/// case-insensitive substring semantics, but *all* matches, in row order,
+/// for a dialog's render pass to paint as the narrowed list while an fzf
+/// session is active. An empty query filters nothing (every index), so a
+/// just-started session shows the full list until the first character
+/// lands.
+pub fn filter_matches(texts: &[String], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..texts.len()).collect();
+    }
+    let needle = query.to_lowercase();
+    (0..texts.len())
+        .filter(|&ix| texts[ix].to_lowercase().contains(&needle))
+        .collect()
+}
+
+/// What one keystroke did to an active **fzf**-style session — the pick
+/// seam [`press_while_finding_fzf`]'s two callers interpret differently
+/// (see the section comment above): the driver itself has no idea what a
+/// dialog does with a picked row, only that one was picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FzfOutcome {
+    /// The session continues: a query edit (selection re-anchored to the
+    /// first match), an arrow step within the matches, a swallowed stray
+    /// chord — or a bare `enter` on ZERO matches, which is deliberately
+    /// inert (there is no row to pick, so nothing may end the session).
+    Continue,
+    /// A bare `enter` picked the currently selected row: the session is
+    /// over, the anchor is dropped, and `selected` stays on the picked
+    /// row. The caller decides what picking *means* beyond that.
+    Picked,
+    /// The session was cancelled (`escape`, or backspace past the start of
+    /// the query); the anchor selection has already been restored.
+    Cancelled,
+}
+
+/// Feed one keystroke to an ACTIVE find session in **fzf** style
+/// (`[ui] find_style = "fzf"`) — the sibling of [`press_while_finding`],
+/// kept separate so the vim path stays byte-for-byte untouched. Query
+/// editing is still [`VimFind::press`] exactly as in vim mode
+/// (backspace-past-start cancels, stray chords are swallowed, ...); what
+/// differs is everything around it:
+///
+/// - every query edit resets the selection to the FIRST match (fzf's
+///   idiom — the filtered list re-anchors at its top), parking on the
+///   anchor when nothing matches (moot while no rows render, but
+///   deterministic);
+/// - bare `up`/`down` step the selection through the matches, clamped at
+///   the ends (no wrap) — intercepted here, *before* [`VimFind::press`]
+///   would swallow them as non-printable (vim mode leaves them to it);
+/// - bare `enter` picks: with at least one match the session ends
+///   ([`VimFind::press`] sees the enter, so an empty query's Cancel and a
+///   non-empty one's Commit both close it), the anchor is dropped,
+///   selection stays on the picked row, and [`FzfOutcome::Picked`] tells
+///   the caller to do whatever picking means in its dialog. With ZERO
+///   matches the enter never reaches [`VimFind::press`] at all: nothing
+///   happens and the session stays active;
+/// - `escape`/backspace-past-start cancel and restore the anchor, exactly
+///   as vim mode does.
+///
+/// The caller guarantees `find.is_active()` and swallows the keystroke
+/// regardless of outcome, same contract as [`press_while_finding`].
+pub fn press_while_finding_fzf(
+    find: &mut VimFind,
+    selected: &mut usize,
+    find_anchor: &mut Option<usize>,
+    texts: &[String],
+    ks: &Keystroke,
+) -> FzfOutcome {
+    let bare = ks.mods == Modifiers::NONE;
+
+    if bare && (ks.key == "up" || ks.key == "down") {
+        let query = find.query().unwrap_or("");
+        let matches = filter_matches(texts, query);
+        let Some(pos) = matches.iter().position(|&ix| ix == *selected) else {
+            // Selection off the match list only happens with zero matches
+            // (edits and arrows both keep it on one otherwise) — nothing
+            // to step through.
+            return FzfOutcome::Continue;
+        };
+        let new_pos = match ks.key.as_str() {
+            "up" => pos.saturating_sub(1),
+            _ => (pos + 1).min(matches.len() - 1),
+        };
+        *selected = matches[new_pos];
+        return FzfOutcome::Continue;
+    }
+
+    if bare && ks.key == "enter" {
+        let query = find.query().unwrap_or("");
+        if filter_matches(texts, query).is_empty() {
+            return FzfOutcome::Continue;
+        }
+        // Commit (non-empty query) or Cancel (empty query) — either way
+        // the session is over; the distinction only matters to vim mode's
+        // `n`/`N`, which fzf mode never consults.
+        find.press(ks);
+        *find_anchor = None;
+        return FzfOutcome::Picked;
+    }
+
+    match find.press(ks) {
+        FindResult::Updated => {
+            let anchor = find_anchor.unwrap_or(*selected);
+            let query = find.query().unwrap_or("");
+            *selected = filter_matches(texts, query)
+                .first()
+                .copied()
+                .unwrap_or(anchor);
+            FzfOutcome::Continue
+        }
+        FindResult::Cancel => {
+            if let Some(anchor) = find_anchor.take() {
+                *selected = anchor;
+            }
+            FzfOutcome::Cancelled
+        }
+        // Commit is unreachable (bare enter is intercepted above);
+        // Ignored (a stray chord) changes nothing.
+        FindResult::Commit | FindResult::Ignored => FzfOutcome::Continue,
+    }
 }
 
 /// The byte range of the first case-insensitive occurrence of `query` in
@@ -518,6 +732,260 @@ mod tests {
         let text = "ÉCLAIR";
         let range = match_range(text, "éclair").expect("should match");
         assert_eq!(range, 0..text.len());
+    }
+
+    // -- the shared session drivers (extracted from keybindings_view) ------
+    //
+    // These tests moved here with the code they pin (the settings-dialog
+    // rewrite promoted the session-press semantics out of
+    // `keybindings_view` so both dialogs share one driver); the
+    // keybindings-specific halves — what *picking* means there (rebind
+    // listening starts), searchable-text philosophy — stayed behind in
+    // `keybindings_view::tests`, exercised through its thin wrappers.
+
+    /// A session mid-flight: `find` started, anchor saved at `selected` —
+    /// the exact state a caller is in right after handling `/`.
+    fn session(selected: usize) -> (VimFind, usize, Option<usize>) {
+        let mut find = VimFind::new();
+        find.start();
+        (find, selected, Some(selected))
+    }
+
+    fn drive_texts() -> Vec<String> {
+        texts(&[
+            "Close tile Workspace",
+            "Focus left Workspace",
+            "Toggle palette Palette",
+            "Focus right Workspace",
+        ])
+    }
+
+    #[test]
+    fn vim_driver_jumps_from_the_anchor_and_restores_on_no_match() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(0);
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        assert_eq!(sel, 1, "first 'f...' match at/after the anchor");
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("z"));
+        assert_eq!(sel, 0, "'fz' matches nothing — back to the anchor");
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("backspace"));
+        assert_eq!(sel, 1, "back to 'f', back to the match");
+    }
+
+    #[test]
+    fn vim_driver_commit_keeps_the_match_and_escape_restores_the_anchor() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(0);
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("enter"));
+        assert_eq!(sel, 1);
+        assert_eq!(anchor, None, "commit drops the anchor");
+        assert!(!find.is_active());
+
+        let (mut find, mut sel, mut anchor) = session(0);
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        assert_eq!(sel, 1);
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("escape"));
+        assert_eq!(sel, 0, "escape restores the anchor selection");
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn shared_repeat_find_advances_with_wrap_in_both_directions() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(1);
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key(k));
+        }
+        press_while_finding(&mut find, &mut sel, &mut anchor, &t, &key("enter"));
+        assert_eq!(sel, 1);
+
+        assert!(repeat_find(&find, &mut sel, &t, FindDirection::Forward));
+        assert_eq!(sel, 3);
+        assert!(repeat_find(&find, &mut sel, &t, FindDirection::Forward));
+        assert_eq!(sel, 1, "forward repeat wraps past the end");
+        assert!(repeat_find(&find, &mut sel, &t, FindDirection::Backward));
+        assert_eq!(sel, 3, "backward repeat wraps past the start");
+    }
+
+    #[test]
+    fn shared_repeat_find_without_a_committed_query_is_not_handled() {
+        let t = drive_texts();
+        let find = VimFind::new();
+        let mut sel = 0;
+        assert!(
+            !repeat_find(&find, &mut sel, &t, FindDirection::Forward),
+            "a bare n with nothing committed must fall through to list nav"
+        );
+        assert_eq!(sel, 0);
+    }
+
+    #[test]
+    fn filter_matches_is_case_insensitive_and_empty_query_returns_all() {
+        let t = drive_texts();
+        assert_eq!(
+            filter_matches(&t, ""),
+            vec![0, 1, 2, 3],
+            "an empty query filters nothing — every row stays visible"
+        );
+        assert_eq!(filter_matches(&t, "FOCUS"), vec![1, 3]);
+        assert_eq!(filter_matches(&t, "palette"), vec![2]);
+        assert_eq!(filter_matches(&t, "zzz"), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn fzf_driver_query_edits_reset_selection_to_the_first_match() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(2);
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        assert_eq!(outcome, FzfOutcome::Continue);
+        assert_eq!(
+            sel, 1,
+            "the FIRST 'f...' match, not the nearest to the anchor — fzf \
+             resets to the top of the filtered list on every edit"
+        );
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("z"));
+        assert_eq!(
+            sel, 2,
+            "'fz' matches nothing — selection parks on the anchor (moot \
+             while nothing renders, but deterministic)"
+        );
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("backspace"));
+        assert_eq!(sel, 1, "back to 'f', back to the first match");
+    }
+
+    #[test]
+    fn fzf_driver_arrows_step_within_the_matches_and_clamp_at_the_ends() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(0);
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key(k));
+        }
+        assert_eq!(sel, 1, "'focus' matches rows 1 and 3");
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("down"));
+        assert_eq!(sel, 3);
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("down"));
+        assert_eq!(sel, 3, "clamped at the last match, no wrap");
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("up"));
+        assert_eq!(sel, 1);
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("up"));
+        assert_eq!(sel, 1, "clamped at the first match, no wrap");
+        assert!(find.is_active(), "arrows never end the session");
+    }
+
+    #[test]
+    fn fzf_driver_enter_picks_and_ends_the_session() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(0);
+        for k in ["f", "o", "c", "u", "s"] {
+            press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key(k));
+        }
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("down"));
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("enter"));
+        assert_eq!(outcome, FzfOutcome::Picked);
+        assert!(!find.is_active(), "enter ends the session");
+        assert_eq!(sel, 3, "selection lands on the picked row");
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn fzf_driver_enter_with_zero_matches_is_inert_and_stays_active() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(1);
+        for k in ["z", "z", "z"] {
+            press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key(k));
+        }
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("enter"));
+        assert_eq!(
+            outcome,
+            FzfOutcome::Continue,
+            "enter on an empty match set must not report a pick"
+        );
+        assert!(
+            find.is_active(),
+            "enter on an empty match set must keep the session alive"
+        );
+        assert_eq!(find.query(), Some("zzz"), "the query survives too");
+    }
+
+    #[test]
+    fn fzf_driver_enter_on_an_empty_query_picks_the_selected_row() {
+        // `/` then enter with nothing typed: every row matches the empty
+        // query, so enter picks whatever is selected (the anchor row).
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(2);
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("enter"));
+        assert_eq!(outcome, FzfOutcome::Picked);
+        assert!(!find.is_active());
+        assert_eq!(sel, 2);
+        assert_eq!(anchor, None);
+    }
+
+    #[test]
+    fn fzf_driver_escape_cancels_and_restores_the_anchor() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(2);
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        assert_eq!(sel, 1);
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("escape"));
+        assert_eq!(outcome, FzfOutcome::Cancelled);
+        assert!(!find.is_active());
+        assert_eq!(sel, 2, "escape restores the anchor selection");
+    }
+
+    #[test]
+    fn fzf_driver_backspace_past_the_start_cancels_and_restores_the_anchor() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(2);
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("backspace"));
+        assert!(find.is_active(), "one backspace only empties the query");
+        let outcome =
+            press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("backspace"));
+        assert_eq!(outcome, FzfOutcome::Cancelled);
+        assert!(
+            !find.is_active(),
+            "backspace past the start abandons the session, same as vim mode"
+        );
+        assert_eq!(sel, 2);
+    }
+
+    #[test]
+    fn fzf_driver_stray_chords_are_swallowed_without_moving_the_selection() {
+        let t = drive_texts();
+        let (mut find, mut sel, mut anchor) = session(0);
+        press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &key("f"));
+        assert_eq!(sel, 1);
+        let outcome = press_while_finding_fzf(&mut find, &mut sel, &mut anchor, &t, &ctrl("d"));
+        assert_eq!(outcome, FzfOutcome::Continue);
+        assert_eq!(sel, 1, "a modified keystroke changes nothing");
+        assert!(find.is_active());
+    }
+
+    #[test]
+    fn highlight_query_prefers_the_live_query_then_the_committed_one() {
+        let mut find = VimFind::new();
+        assert_eq!(find.highlight_query(), None);
+
+        find.start();
+        find.press(&key("a"));
+        find.press(&key("enter"));
+        assert_eq!(find.highlight_query(), Some("a"), "committed query");
+        find.start();
+        assert_eq!(
+            find.highlight_query(),
+            None,
+            "an active-but-empty session must blank the highlight, not \
+             show the stale committed query"
+        );
+        find.press(&key("b"));
+        assert_eq!(find.highlight_query(), Some("b"), "live query wins");
+        find.press(&key("escape"));
+        assert_eq!(
+            find.highlight_query(),
+            Some("a"),
+            "after cancel the committed query lights up again for n/N"
+        );
     }
 
     // -- FindStyle (`[ui] find_style`) --------------------------------
