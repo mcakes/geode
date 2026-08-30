@@ -2295,18 +2295,29 @@ impl Render for ShellView {
                         })
                         .debug_selector(|| "divider-drag-catcher".to_string())
                         .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            if event.pressed_button != Some(MouseButton::Left) {
-                                // The release happened where we
-                                // couldn't see it — treat the first
-                                // buttonless move as the mouse-up.
-                                view.finish_divider_drag(cx);
-                                return;
-                            }
-                            if view.apply_divider_drag(
-                                f32::from(event.position.x),
-                                f32::from(event.position.y),
-                            ) {
-                                cx.notify();
+                            // Post-merge review BUG 4 (platform-uniform
+                            // rule, shared with the tile catcher below —
+                            // see its comment for the verified platform
+                            // evidence): only a BUTTONLESS move is the
+                            // lost-release finish; a move reporting a
+                            // non-Left button is a chorded second button
+                            // and is ignored entirely.
+                            match event.pressed_button {
+                                None => {
+                                    // The release happened where we
+                                    // couldn't see it — treat the first
+                                    // buttonless move as the mouse-up.
+                                    view.finish_divider_drag(cx);
+                                }
+                                Some(MouseButton::Left) => {
+                                    if view.apply_divider_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                    ) {
+                                        cx.notify();
+                                    }
+                                }
+                                Some(_) => {}
                             }
                         }))
                         .on_mouse_up(
@@ -2366,16 +2377,42 @@ impl Render for ShellView {
                         .cursor_grabbing()
                         .debug_selector(|| "tile-drag-catcher".to_string())
                         .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
-                            if event.pressed_button != Some(MouseButton::Left) {
-                                view.cancel_tile_drag();
-                                cx.notify();
-                                return;
+                            // Post-merge review BUG 4 (recorded decision +
+                            // platform evidence): the old
+                            // `pressed_button != Some(Left)` test made
+                            // this catcher platform-divergent. macOS
+                            // translates NSRightMouseDragged /
+                            // NSOtherMouseDragged into MouseMoveEvents
+                            // whose `pressed_button` is that button
+                            // (`gpui_macos/src/events.rs`, the
+                            // `*MouseDragged` arm — buttonNumber mapped
+                            // verbatim, no left-first normalization), so
+                            // pressing a second button mid-drag CANCELLED
+                            // here; Windows' WM_MOUSEMOVE translation
+                            // (`gpui_windows/src/events.rs`,
+                            // `handle_mouse_move_msg`) checks MK_LBUTTON
+                            // first, so the same chord SURVIVED there.
+                            // Unified rule: only a BUTTONLESS move is the
+                            // lost-release cancel (every platform reports
+                            // `None` once all buttons are up); a move
+                            // reporting a non-Left button is a chorded
+                            // second press and is IGNORED — it neither
+                            // advances the drag (its position belongs to
+                            // another button's stream) nor cancels it.
+                            match event.pressed_button {
+                                None => {
+                                    view.cancel_tile_drag();
+                                    cx.notify();
+                                }
+                                Some(MouseButton::Left) => {
+                                    view.update_tile_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                        cx,
+                                    );
+                                }
+                                Some(_) => {}
                             }
-                            view.update_tile_drag(
-                                f32::from(event.position.x),
-                                f32::from(event.position.y),
-                                cx,
-                            );
                         }))
                         .on_mouse_up(
                             MouseButton::Left,
@@ -4224,6 +4261,96 @@ mod tests {
             "the release after the cancel applies nothing"
         );
         assert!(!shell.read_with(&cx, |shell, _| shell.session_dirty));
+    }
+
+    /// Post-merge review BUG 4: platform-uniform chorded-button handling.
+    /// macOS delivers a right/middle-dragged event as a MouseMoveEvent
+    /// with `pressed_button: Some(Right/Middle)` (gpui_macos events.rs
+    /// translates NSRightMouseDragged/NSOtherMouseDragged verbatim, no
+    /// left-first normalization), so before the fix a chorded second
+    /// button CANCELLED a mid-flight tile drag on macOS while Windows
+    /// (whose WM_MOUSEMOVE translation checks MK_LBUTTON first) let it
+    /// survive. The unified rule: a non-Left-button move is IGNORED
+    /// (neither advances nor cancels); only a buttonless move is the
+    /// lost-release cancel.
+    #[gpui::test]
+    fn a_chorded_second_button_move_mid_drag_neither_cancels_nor_advances(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
+
+        let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+        cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+        let over = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
+        cx.simulate_mouse_move(over, MouseButton::Left, gpui::Modifiers::none());
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .tile_drag
+                .as_ref()
+                .is_some_and(|drag| drag.active)),
+            "sanity: the drag is active"
+        );
+
+        // A chorded right-button move (the macOS NSRightMouseDragged
+        // shape) at a DIFFERENT position: the drag must survive AND not
+        // track it (ignored entirely).
+        let elsewhere = main_tile_point(&mut cx, &shell, right, 0.9, 0.9);
+        cx.simulate_mouse_move(elsewhere, MouseButton::Right, gpui::Modifiers::none());
+        shell.read_with(&cx, |shell, _| {
+            let drag = shell
+                .tile_drag
+                .as_ref()
+                .expect("a chorded second-button move must not cancel the drag");
+            assert_eq!(
+                drag.cursor,
+                (f32::from(over.x), f32::from(over.y)),
+                "an ignored move must not advance the drag's cursor either"
+            );
+        });
+
+        // A buttonless move IS the lost-release signal: cancel.
+        cx.simulate_mouse_move(elsewhere, None, gpui::Modifiers::none());
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
+            "a buttonless move (lost release) must cancel the drag"
+        );
+    }
+
+    /// Post-merge review BUG 4, divider side: the divider catcher had the
+    /// same `pressed_button != Some(Left)` branch, so a chorded second
+    /// button FINISHED an in-flight divider drag on macOS. Same unified
+    /// rule: non-Left moves are ignored, buttonless moves finish.
+    #[gpui::test]
+    fn a_chorded_second_button_move_mid_divider_drag_does_not_finish_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut cx, shell, _left, _right) = two_tile_drag_shell(cx);
+        let strip = cx
+            .debug_bounds("divider-strip-0")
+            .expect("two tiles paint their splitter strip");
+        let grab = strip.center();
+        cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
+        assert!(shell.read_with(&cx, |shell, _| shell.divider_drag.is_some()));
+
+        cx.simulate_mouse_move(
+            gpui::point(grab.x - px(50.0), grab.y),
+            MouseButton::Right,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_some()),
+            "a chorded second-button move must not finish the divider drag"
+        );
+
+        cx.simulate_mouse_move(
+            gpui::point(grab.x - px(50.0), grab.y),
+            None,
+            gpui::Modifiers::none(),
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
+            "a buttonless move (lost release) must finish the divider drag"
+        );
     }
 
     /// Review fix 4: the which-key hint paints a solid panel with no
