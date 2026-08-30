@@ -1155,11 +1155,1092 @@ same value and canonicalization has something real to collapse."
 
 ---
 
-**Remaining tasks (3–14) continue in this document.** Task 3 emits the
-source directory (CSVs plus JSON sentinels, including a book split across
-two files, a file carrying two books, a CSV with no sentinel yet, and
-deliberate instrument-attribute disagreements). Tasks 4–9 build sentinel
-parsing, the store, the catalog, the publish transaction, the grain split,
-and the load pipeline. Tasks 10–12 build discovery, the priority ladder,
-and the ingest runner. Tasks 13–14 add the retention sweeper and the ingest
-benchmarks.
+### Task 3: Demo data — emit a realistic source directory
+
+**Files:**
+- Create: `crates/geode-demo-data/src/emit.rs`
+- Modify: `crates/geode-demo-data/src/lib.rs`
+- Modify: `crates/geode-demo-data/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `RiskBatch`, `generate` from Task 2.
+- Produces: `EmitOptions`, `EmittedFile { csv_path, sentinel_path, books,
+  rows, columns }`, `EmittedDirectory { files: Vec<EmittedFile> }`, and
+  `emit_directory(&RiskBatch, &EmitOptions) -> std::io::Result<EmittedDirectory>`.
+  Every ingest test from Task 9 onward builds its fixture with this.
+
+**Why this shape.** The awkwardness is the point (spec §9.1): a book split
+across two files, a file carrying two books, a CSV whose sentinel has not
+landed, files missing optional columns, and an instrument whose attributes
+disagree between books. Every one of those is a behaviour the ingest code
+must handle, and generating them is far cheaper than hand-maintaining
+fixture files — which §7.4 forbids anyway.
+
+- [ ] **Step 1: Add the serde dependency**
+
+In `crates/geode-demo-data/Cargo.toml`, add to `[dependencies]`:
+
+```toml
+serde_json = "1.0.151"
+```
+
+- [ ] **Step 2: Write the failing emit tests**
+
+Add to `crates/geode-demo-data/src/lib.rs`, inside the existing
+`mod tests`:
+
+```rust
+    #[test]
+    fn emits_csvs_and_sentinels_with_the_awkward_cases() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+
+        assert!(out.files.len() >= 4, "expected several files");
+
+        // A book split across two files.
+        let split: Vec<_> = out
+            .files
+            .iter()
+            .filter(|f| f.books == vec!["BK000".to_string()])
+            .collect();
+        assert_eq!(split.len(), 2, "BK000 must be split across two files");
+
+        // A file carrying more than one book.
+        assert!(
+            out.files.iter().any(|f| f.books.len() > 1),
+            "expected a multi-book file"
+        );
+
+        // Exactly one CSV without a sentinel (readiness: pending).
+        let pending: Vec<_> = out.files.iter().filter(|f| f.sentinel_path.is_none()).collect();
+        assert_eq!(pending.len(), 1);
+
+        // Optional columns absent from at least one file.
+        assert!(
+            out.files.iter().any(|f| !f.columns.iter().any(|c| c == "Skew01")),
+            "expected a file missing an optional column"
+        );
+
+        for f in &out.files {
+            assert!(f.csv_path.exists());
+            if let Some(s) = &f.sentinel_path {
+                assert!(s.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn sentinel_json_carries_source_time_and_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(5_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+        let f = out.files.iter().find(|f| f.sentinel_path.is_some()).unwrap();
+        let text = std::fs::read_to_string(f.sentinel_path.as_ref().unwrap()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+        assert!(v["as_of"].as_str().unwrap().starts_with("20"));
+        assert_eq!(v["row_count"].as_u64().unwrap() as usize, f.rows);
+        let cols: Vec<String> = v["columns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cols, f.columns);
+        assert!(cols.contains(&"Delta01".to_string()), "source spelling, not snake_case");
+        assert!(cols.contains(&"Delta01_USD".to_string()));
+    }
+
+    #[test]
+    fn csv_row_count_matches_the_sentinel() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(5_000));
+        let out = emit_directory(&batch, &EmitOptions::new(dir.path())).unwrap();
+        for f in &out.files {
+            let text = std::fs::read_to_string(&f.csv_path).unwrap();
+            assert_eq!(text.lines().count(), f.rows + 1, "{:?}", f.csv_path);
+        }
+    }
+
+    #[test]
+    fn conflicting_instrument_attributes_are_planted() {
+        let dir = tempfile::tempdir().unwrap();
+        let batch = generate(&cfg(20_000));
+        let opts = EmitOptions::new(dir.path());
+        let out = emit_directory(&batch, &opts).unwrap();
+        assert!(
+            !out.conflicting_instruments.is_empty(),
+            "the fixture must plant at least one attribute disagreement"
+        );
+    }
+```
+
+Add `tempfile = "3.27.0"` to `[dev-dependencies]` in
+`crates/geode-demo-data/Cargo.toml`, and add to the top of `lib.rs`:
+
+```rust
+mod emit;
+
+pub use emit::{EmitOptions, EmittedDirectory, EmittedFile, emit_directory};
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `cargo test -p geode-demo-data emit`
+Expected: FAIL — unresolved module `emit`.
+
+- [ ] **Step 4: Implement the emitter**
+
+Create `crates/geode-demo-data/src/emit.rs`:
+
+```rust
+//! Writes a realistic source directory: per-book CSVs in the source's own
+//! column spelling, each with a `.done` JSON sentinel (spec §5.3).
+//!
+//! No quoting or escaping: every string column draws from fixed, comma-free
+//! vocabularies. Revisit if a vocabulary ever grows free-form values.
+
+use crate::model::RiskBatch;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
+/// Canonical name -> the spelling the source file uses.
+const SOURCE_NAMES: &[(&str, &str)] = &[
+    ("business_date", "BusinessDate"),
+    ("book", "Book"),
+    ("lhu", "LHU"),
+    ("position_ref", "PositionRef"),
+    ("instrument_ref", "InstrumentRef"),
+    ("underlying_ref", "Underlying1Ref"),
+    ("underlying2_ref", "Underlying2Ref"),
+    ("counterparty", "Counterparty"),
+    ("strike", "Strike"),
+    ("expiry", "Expiry"),
+    ("currency", "Currency"),
+    ("model_code", "ModelCode"),
+    ("delta01", "Delta01"),
+    ("delta02", "Delta02"),
+    ("delta05", "Delta05"),
+    ("gamma01", "Gamma01"),
+    ("gamma02", "Gamma02"),
+    ("gamma05", "Gamma05"),
+    ("vega01", "Vega01"),
+    ("normalized_vega01", "NormalizedVega01"),
+    ("skew01", "Skew01"),
+    ("rho010", "Rho010"),
+    ("rho_rfr010", "RhoRFR010"),
+    ("rho_ois010", "RhoOIS010"),
+    ("cross_gamma02", "CrossGamma02"),
+    ("cross_gamma05", "CrossGamma05"),
+    ("npv", "NPV"),
+    ("daily_pnl", "DailyPNL"),
+    ("daily_m2m_pnl", "DailyM2MPNL"),
+    ("daily_fx_pnl", "DailyFXPNL"),
+    ("clean_theta_business_day", "CleanThetaBusinessDay"),
+    ("realized_theta", "RealizedTheta"),
+    ("daily_trading_pnl", "DailyTradingPNL"),
+    ("sc", "SC"),
+];
+
+/// Measures that also get an FX-converted `_USD` twin (spec §3.4).
+const USD_TWINS: &[&str] = &[
+    "delta01", "delta02", "delta05", "gamma01", "gamma02", "gamma05", "vega01",
+    "normalized_vega01", "skew01", "rho010", "rho_rfr010", "rho_ois010",
+    "cross_gamma02", "cross_gamma05", "clean_theta_business_day", "realized_theta",
+];
+
+/// Optional columns omitted from some files, so §3.6's tolerance is
+/// exercised by fixtures (not every book is run with every greek).
+const OMITTED_FROM_SOME_FILES: &[&str] = &["skew01", "rho_ois010"];
+
+fn source_name(canonical: &str) -> &'static str {
+    SOURCE_NAMES
+        .iter()
+        .find(|(c, _)| *c == canonical)
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| panic!("no source spelling for '{canonical}'"))
+}
+
+pub struct EmitOptions {
+    pub root: PathBuf,
+    /// Base timestamp; each file's `as_of` is offset from this so per-book
+    /// freshness differs, which is what the §4.5 rollup is tested against.
+    pub as_of_base: String,
+    /// Omit the sentinel for one file, making it "pending" (spec §5.2).
+    pub leave_one_pending: bool,
+}
+
+impl EmitOptions {
+    pub fn new(root: impl Into<PathBuf>) -> EmitOptions {
+        EmitOptions {
+            root: root.into(),
+            as_of_base: "2026-08-30T07:00:00Z".to_string(),
+            leave_one_pending: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EmittedFile {
+    pub csv_path: PathBuf,
+    /// `None` when the sentinel was deliberately withheld.
+    pub sentinel_path: Option<PathBuf>,
+    pub books: Vec<String>,
+    pub rows: usize,
+    /// Source-spelled column headers, in file order.
+    pub columns: Vec<String>,
+    pub as_of: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct EmittedDirectory {
+    pub files: Vec<EmittedFile>,
+    /// Instruments whose attributes were deliberately made to disagree
+    /// between files, for the §3.5 conflict detector.
+    pub conflicting_instruments: Vec<String>,
+}
+
+/// Group row indices into files: most books get one file, `BK000` is split
+/// across two, and `BK001`+`BK002` share one.
+fn file_assignments(batch: &RiskBatch) -> BTreeMap<String, Vec<usize>> {
+    let mut by_file: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut split_toggle = false;
+    for i in 0..batch.len() {
+        let book = &batch.book[i];
+        let date = &batch.business_date[i];
+        let key = match book.as_str() {
+            "BK000" => {
+                split_toggle = !split_toggle;
+                format!("risk_{date}_BK000_part{}", if split_toggle { 1 } else { 2 })
+            }
+            "BK001" | "BK002" => format!("risk_{date}_BK001_BK002"),
+            other => format!("risk_{date}_{other}"),
+        };
+        by_file.entry(key).or_default().push(i);
+    }
+    by_file
+}
+
+pub fn emit_directory(
+    batch: &RiskBatch,
+    opts: &EmitOptions,
+) -> std::io::Result<EmittedDirectory> {
+    std::fs::create_dir_all(&opts.root)?;
+    let assignments = file_assignments(batch);
+    let mut files = Vec::new();
+    let mut conflicting_instruments = Vec::new();
+
+    for (idx, (stem, rows)) in assignments.iter().enumerate() {
+        // Every third file omits the optional columns.
+        let omit: &[&str] = if idx % 3 == 2 { OMITTED_FROM_SOME_FILES } else { &[] };
+        let columns = header_columns(omit);
+
+        // Plant an attribute disagreement in the second file: the same
+        // instrument gets a different model code than elsewhere.
+        let plant_conflict = idx == 1;
+
+        let csv_path = opts.root.join(format!("{stem}.csv"));
+        let mut out = std::io::BufWriter::new(std::fs::File::create(&csv_path)?);
+        writeln!(out, "{}", columns.join(","))?;
+
+        for &i in rows {
+            let mut fields: Vec<String> = Vec::with_capacity(columns.len());
+            for canonical in canonical_columns(omit) {
+                fields.push(field_value(batch, i, &canonical, plant_conflict));
+            }
+            if plant_conflict && !conflicting_instruments.contains(&batch.instrument_ref[i]) {
+                conflicting_instruments.push(batch.instrument_ref[i].clone());
+            }
+            writeln!(out, "{}", fields.join(","))?;
+        }
+        out.flush()?;
+
+        let mut books: Vec<String> =
+            rows.iter().map(|&i| batch.book[i].clone()).collect();
+        books.sort_unstable();
+        books.dedup();
+
+        // Stagger source times so per-book freshness differs.
+        let as_of = format!(
+            "2026-08-30T{:02}:{:02}:00Z",
+            7 + (idx as u32 % 8),
+            (idx as u32 * 7) % 60
+        );
+
+        let withhold = opts.leave_one_pending && idx == assignments.len() - 1;
+        let sentinel_path = if withhold {
+            None
+        } else {
+            let p = opts.root.join(format!("{stem}.csv.done"));
+            let doc = serde_json::json!({
+                "dataset": "risk_snapshot",
+                "as_of": as_of,
+                "business_date": batch.business_date[rows[0]],
+                "books": books,
+                "row_count": rows.len(),
+                "columns": columns,
+            });
+            std::fs::write(&p, serde_json::to_string_pretty(&doc)?)?;
+            Some(p)
+        };
+
+        files.push(EmittedFile {
+            csv_path,
+            sentinel_path,
+            books,
+            rows: rows.len(),
+            columns,
+            as_of,
+        });
+    }
+
+    Ok(EmittedDirectory { files, conflicting_instruments })
+}
+
+fn canonical_columns(omit: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in RiskBatch::IDENTITY {
+        out.push((*name).to_string());
+    }
+    for group in [
+        RiskBatch::UNDERLYING_MEASURES,
+        RiskBatch::PAIR_MEASURES,
+        RiskBatch::INSTRUMENT_MEASURES,
+        RiskBatch::POSITION_MEASURES,
+    ] {
+        for name in group {
+            if omit.contains(name) {
+                continue;
+            }
+            out.push((*name).to_string());
+            if USD_TWINS.contains(name) {
+                out.push(format!("{name}__usd"));
+            }
+        }
+    }
+    out
+}
+
+fn header_columns(omit: &[&str]) -> Vec<String> {
+    canonical_columns(omit)
+        .iter()
+        .map(|c| match c.strip_suffix("__usd") {
+            Some(base) => format!("{}_USD", source_name(base)),
+            None => source_name(c).to_string(),
+        })
+        .collect()
+}
+
+fn field_value(batch: &RiskBatch, i: usize, canonical: &str, plant_conflict: bool) -> String {
+    if let Some(base) = canonical.strip_suffix("__usd") {
+        // Deterministic FX factor, so the twin is reproducible.
+        return format!("{:.6}", batch.measure(base)[i] * 1.08);
+    }
+    match canonical {
+        "strike" => format!("{:.2}", batch.strike[i]),
+        "model_code" if plant_conflict => "CONFLICT".to_string(),
+        name if RiskBatch::IDENTITY.contains(&name) => batch.identity(name)[i].clone(),
+        name => format!("{:.6}", batch.measure(name)[i]),
+    }
+}
+```
+
+- [ ] **Step 5: Run to verify tests pass**
+
+Run: `cargo test -p geode-demo-data`
+Expected: PASS (10 tests).
+
+- [ ] **Step 6: Lint and commit**
+
+Run: `cargo clippy -p geode-demo-data --all-targets -- -D warnings && cargo fmt --check`
+
+```bash
+git add crates/geode-demo-data
+git commit -m "feat(demo-data): emit a realistic source directory
+
+CSVs in the source's own column spelling with _USD twins, each paired
+with a .done JSON sentinel carrying source time and expected columns.
+
+Generates the awkward cases the ingest code must survive (spec §9.1): a
+book split across two files, a file carrying two books, one CSV whose
+sentinel has not landed, files missing optional greeks, staggered source
+times so per-book freshness differs, and a planted instrument-attribute
+disagreement for the conflict detector."
+```
+
+---
+
+### Task 4: Sentinel parsing
+
+**Files:**
+- Create: `crates/geode-data/src/source/mod.rs`
+- Create: `crates/geode-data/src/source/sentinel.rs`
+- Modify: `crates/geode-data/src/lib.rs`
+- Modify: `crates/geode-data/Cargo.toml`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks.
+- Produces: `Sentinel { as_of: OffsetDateTime-like String, columns: Vec<String>,
+  books: Vec<String>, row_count: Option<usize>, dataset: Option<String> }`,
+  `SentinelError`, and `parse_sentinel(&str) -> Result<Sentinel, SentinelError>`.
+  Task 9 (load) and Task 10 (discovery) both consume this.
+
+**Design constraint (spec §5.3):** only two fields are required — source time
+and the column list. Everything unrecognised is ignored. The production shape
+is an open question (spec §10.1), so the parser must not break when it
+differs from the mock in any other respect.
+
+- [ ] **Step 1: Add dependencies**
+
+In `crates/geode-data/Cargo.toml`:
+
+```toml
+[dependencies]
+geode-core.workspace = true
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+time = { version = "0.3.44", features = ["parsing", "formatting", "macros"] }
+
+[dev-dependencies]
+geode-demo-data = { path = "../geode-demo-data" }
+tempfile = "3.27.0"
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `crates/geode-data/src/source/sentinel.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: &str = r#"{
+        "dataset": "risk_snapshot",
+        "as_of": "2026-08-30T14:32:05Z",
+        "business_date": "2026-08-30",
+        "books": ["BK003", "BK011"],
+        "row_count": 184203,
+        "columns": ["Book", "LHU", "Delta01"]
+    }"#;
+
+    #[test]
+    fn parses_the_documented_shape() {
+        let s = parse_sentinel(FULL).unwrap();
+        assert_eq!(s.columns, vec!["Book", "LHU", "Delta01"]);
+        assert_eq!(s.books, vec!["BK003", "BK011"]);
+        assert_eq!(s.row_count, Some(184_203));
+        assert_eq!(s.dataset.as_deref(), Some("risk_snapshot"));
+        assert_eq!(s.as_of.to_string(), "2026-08-30 14:32:05.0 +00:00:00");
+    }
+
+    #[test]
+    fn requires_only_as_of_and_columns() {
+        let s = parse_sentinel(r#"{"as_of":"2026-08-30T14:32:05Z","columns":["A"]}"#).unwrap();
+        assert_eq!(s.columns, vec!["A"]);
+        assert!(s.books.is_empty());
+        assert_eq!(s.row_count, None);
+    }
+
+    #[test]
+    fn ignores_unrecognised_fields() {
+        let text = r#"{
+            "as_of": "2026-08-30T14:32:05Z",
+            "columns": ["A"],
+            "producer": "riskrun",
+            "nested": {"anything": [1, 2, 3]}
+        }"#;
+        assert!(parse_sentinel(text).is_ok());
+    }
+
+    #[test]
+    fn missing_required_fields_name_what_is_missing() {
+        let e = parse_sentinel(r#"{"columns":["A"]}"#).unwrap_err();
+        assert!(e.to_string().contains("as_of"), "{e}");
+        let e = parse_sentinel(r#"{"as_of":"2026-08-30T14:32:05Z"}"#).unwrap_err();
+        assert!(e.to_string().contains("columns"), "{e}");
+    }
+
+    #[test]
+    fn malformed_json_and_bad_timestamps_are_errors_not_panics() {
+        assert!(parse_sentinel("not json").is_err());
+        assert!(parse_sentinel(r#"{"as_of":"yesterday","columns":["A"]}"#).is_err());
+    }
+
+    #[test]
+    fn accepts_an_offset_other_than_utc() {
+        let s = parse_sentinel(r#"{"as_of":"2026-08-30T14:32:05+02:00","columns":["A"]}"#).unwrap();
+        assert_eq!(s.as_of.offset().whole_hours(), 2);
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `cargo test -p geode-data sentinel`
+Expected: FAIL — `cannot find function parse_sentinel`.
+
+- [ ] **Step 4: Implement the parser**
+
+Prepend to `crates/geode-data/src/source/sentinel.rs`:
+
+```rust
+//! The `.done` sentinel (spec §5.3). Permissive by contract: only source
+//! time and the expected column list are required, every unrecognised field
+//! is ignored, and a missing required field is a health error naming the
+//! file rather than a failure to ingest anything at all.
+//!
+//! The production shape is an open question (spec §10.1); this parser is
+//! written so that only those two fields need to survive being wrong.
+
+use serde::Deserialize;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sentinel {
+    /// Authoritative source time: orders generations, drives as-of, and
+    /// decides what is "most recent" (spec §4.4). Never file mtime.
+    pub as_of: OffsetDateTime,
+    /// Column spelling as it appears in the CSV header.
+    pub columns: Vec<String>,
+    pub books: Vec<String>,
+    pub row_count: Option<usize>,
+    pub dataset: Option<String>,
+    pub business_date: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum SentinelError {
+    Json(serde_json::Error),
+    MissingField(&'static str),
+    BadTimestamp { value: String, source: time::error::Parse },
+}
+
+impl std::fmt::Display for SentinelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SentinelError::Json(e) => write!(f, "sentinel is not valid JSON: {e}"),
+            SentinelError::MissingField(name) => {
+                write!(f, "sentinel is missing required field '{name}'")
+            }
+            SentinelError::BadTimestamp { value, source } => {
+                write!(f, "sentinel 'as_of' value '{value}' is not RFC 3339: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SentinelError {}
+
+/// Only the fields we understand; `serde` ignores the rest by default.
+#[derive(Deserialize)]
+struct Raw {
+    as_of: Option<String>,
+    columns: Option<Vec<String>>,
+    #[serde(default)]
+    books: Vec<String>,
+    row_count: Option<usize>,
+    dataset: Option<String>,
+    business_date: Option<String>,
+}
+
+pub fn parse_sentinel(text: &str) -> Result<Sentinel, SentinelError> {
+    let raw: Raw = serde_json::from_str(text).map_err(SentinelError::Json)?;
+    let as_of_str = raw.as_of.ok_or(SentinelError::MissingField("as_of"))?;
+    let as_of = OffsetDateTime::parse(&as_of_str, &Rfc3339)
+        .map_err(|source| SentinelError::BadTimestamp { value: as_of_str, source })?;
+    let columns = raw.columns.ok_or(SentinelError::MissingField("columns"))?;
+    Ok(Sentinel {
+        as_of,
+        columns,
+        books: raw.books,
+        row_count: raw.row_count,
+        dataset: raw.dataset,
+        business_date: raw.business_date,
+    })
+}
+```
+
+- [ ] **Step 5: Wire the module up**
+
+Create `crates/geode-data/src/source/mod.rs`:
+
+```rust
+//! Sources: configured origins of data (spec §5.1). A source is an adapter
+//! plus a list of directory globs, a refresh interval, a readiness
+//! strategy, a priority, and a column map.
+
+pub mod sentinel;
+
+pub use sentinel::{Sentinel, SentinelError, parse_sentinel};
+```
+
+Replace the body of `crates/geode-data/src/lib.rs` below its doc comment
+with:
+
+```rust
+pub mod source;
+```
+
+- [ ] **Step 6: Run to verify tests pass**
+
+Run: `cargo test -p geode-data`
+Expected: PASS (6 tests).
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): permissive .done sentinel parsing
+
+Requires only source time and the expected column list, ignores every
+unrecognised field, and names the missing field when a required one is
+absent. The production sentinel shape is still an open question (spec
+§10.1), so only those two fields need to survive being wrong.
+
+Source time comes from the sentinel and never from file mtime, which any
+copy or restore corrupts (spec §4.4)."
+```
+
+---
+
+### Task 5: The store — persistent database and generated DDL
+
+**Files:**
+- Create: `crates/geode-data/src/store/mod.rs`
+- Create: `crates/geode-data/src/store/ddl.rs`
+- Modify: `crates/geode-data/src/lib.rs`
+- Modify: `crates/geode-data/Cargo.toml`
+
+**Interfaces:**
+- Consumes: `geode_core::schema::{SchemaSpec, DatasetSpec, Grain, ColumnRole}`
+  from Task 1.
+- Produces: `Store::open(path) -> Result<Store, StoreError>`,
+  `Store::writer() -> &Connection`, `Store::reader() -> Result<Connection, StoreError>`,
+  `Store::apply_schema(&DatasetSpec) -> Result<(), StoreError>`, and
+  `ddl::create_table_sql(&DatasetSpec, Grain) -> String`. Tasks 6–9 build on
+  these.
+
+**Verified against a real build:** `Connection::open` on a path gives a
+persistent database; `try_clone()` yields a second connection on the same
+database; the §4.3 publish transaction runs in ~3ms.
+
+- [ ] **Step 1: Add the duckdb dependency**
+
+In `crates/geode-data/Cargo.toml` `[dependencies]`:
+
+```toml
+duckdb = { version = "1.10505.0", features = ["bundled"] }
+```
+
+Note for the implementer: the first build compiles DuckDB from C++ source
+and takes minutes (measured 127s wall / 1382s CPU on an M-series Mac). It is
+cached thereafter.
+
+- [ ] **Step 2: Write the failing DDL tests**
+
+Create `crates/geode-data/src/store/ddl.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+
+    fn dataset() -> geode_core::schema::DatasetSpec {
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[risk_snapshot.columns.daily_trading_pnl]
+type = "f64"
+role = "measure"
+grain = "position"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0.dataset("risk_snapshot").unwrap().clone()
+    }
+
+    #[test]
+    fn live_table_carries_the_grain_key_and_its_measures_only() {
+        let sql = create_table_sql(&dataset(), Grain::Position, TableKind::Live);
+        assert!(sql.contains("measures_position_live"), "{sql}");
+        assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
+        assert!(sql.contains("\"daily_trading_pnl\" DOUBLE"), "{sql}");
+        // A finer grain's key column must not appear at position grain.
+        assert!(!sql.contains("underlying_ref"), "{sql}");
+        // Nor a measure declared at another grain.
+        assert!(!sql.contains("delta01"), "{sql}");
+        // Live carries no generation column (spec §4.2).
+        assert!(!sql.contains("gen_id"), "{sql}");
+    }
+
+    #[test]
+    fn live_carries_source_file_id_as_the_replacement_key() {
+        let sql = create_table_sql(&dataset(), Grain::Underlying, TableKind::Live);
+        assert!(sql.contains("\"source_file_id\" BIGINT"), "{sql}");
+    }
+
+    #[test]
+    fn archive_adds_gen_id_and_source_time() {
+        let sql = create_table_sql(&dataset(), Grain::Underlying, TableKind::Archive);
+        assert!(sql.contains("measures_underlying_archive"), "{sql}");
+        assert!(sql.contains("\"gen_id\" BIGINT"), "{sql}");
+        assert!(sql.contains("\"source_time\" TIMESTAMP WITH TIME ZONE"), "{sql}");
+    }
+}
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `cargo test -p geode-data ddl`
+Expected: FAIL — `cannot find function create_table_sql`.
+
+- [ ] **Step 4: Implement DDL generation**
+
+Prepend to `crates/geode-data/src/store/ddl.rs`:
+
+```rust
+//! Table DDL generated from the declared schema (spec §4.2). One live and
+//! one archive table per grain present in the dataset.
+//!
+//! Live carries exactly the current rows for every file partition: no
+//! generation column, no history predicate, size independent of retention.
+//! That is what keeps the requery budget reachable by construction, so the
+//! absence of `gen_id` from live is load-bearing, not an oversight.
+
+use geode_core::schema::{ColumnRole, DatasetSpec, Grain};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    Live,
+    Archive,
+}
+
+impl TableKind {
+    pub fn suffix(self) -> &'static str {
+        match self {
+            TableKind::Live => "_live",
+            TableKind::Archive => "_archive",
+        }
+    }
+}
+
+pub fn table_name(grain: Grain, kind: TableKind) -> String {
+    format!("{}{}", grain.table(), kind.suffix())
+}
+
+pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
+    let mut cols: Vec<String> = Vec::new();
+
+    for key in grain.key_columns() {
+        let ty = ds
+            .column(key)
+            .map(|c| c.ty.sql())
+            .unwrap_or("VARCHAR");
+        cols.push(format!("  \"{key}\" {ty}"));
+    }
+
+    // Pair grain carries no extra dimensions beyond its key; other grains
+    // carry the dimensions declared for them.
+    for c in ds.columns.iter() {
+        let keep = match c.role {
+            ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
+            ColumnRole::Key | ColumnRole::Dimension => false,
+        };
+        if keep {
+            cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));
+        }
+    }
+
+    cols.push("  \"source_file_id\" BIGINT".to_string());
+    if kind == TableKind::Archive {
+        cols.push("  \"gen_id\" BIGINT".to_string());
+        cols.push("  \"source_time\" TIMESTAMP WITH TIME ZONE".to_string());
+    }
+
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
+        table_name(grain, kind),
+        cols.join(",\n")
+    )
+}
+```
+
+- [ ] **Step 5: Run to verify DDL tests pass**
+
+Run: `cargo test -p geode-data ddl`
+Expected: PASS (3 tests).
+
+- [ ] **Step 6: Write the failing store tests**
+
+Create `crates/geode-data/src/store/mod.rs` with only this test module:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opens_a_persistent_database_that_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("geode.duckdb");
+        {
+            let store = Store::open(&path).unwrap();
+            store
+                .writer()
+                .execute_batch("create table probe(x integer); insert into probe values (7);")
+                .unwrap();
+        }
+        assert!(path.exists(), "database file must be on disk");
+        let store = Store::open(&path).unwrap();
+        let x: i32 = store
+            .writer()
+            .query_row("select x from probe", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(x, 7, "data must survive reopen (spec §2.1)");
+    }
+
+    #[test]
+    fn readers_are_independent_connections_on_the_same_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch("create table probe(x integer); insert into probe values (1),(2);")
+            .unwrap();
+        let reader = store.reader().unwrap();
+        let n: i64 = reader.query_row("select count(*) from probe", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn apply_schema_creates_live_and_archive_per_declared_grain() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&super::ddl::tests_support::sample_dataset()).unwrap();
+
+        let tables: Vec<String> = {
+            let conn = store.writer();
+            let mut stmt = conn
+                .prepare("select table_name from information_schema.tables order by table_name")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        for expected in [
+            "measures_position_live",
+            "measures_position_archive",
+            "measures_underlying_live",
+            "measures_underlying_archive",
+        ] {
+            assert!(tables.contains(&expected.to_string()), "missing {expected}: {tables:?}");
+        }
+    }
+
+    #[test]
+    fn apply_schema_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = super::ddl::tests_support::sample_dataset();
+        store.apply_schema(&ds).unwrap();
+        store.apply_schema(&ds).unwrap();
+    }
+}
+```
+
+In `crates/geode-data/src/store/ddl.rs`, add a shared fixture the store
+tests can reuse (this replaces the private `dataset()` helper — move its
+body here and have the ddl tests call it):
+
+```rust
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::{DatasetSpec, SchemaSpec};
+
+    pub(crate) fn sample_dataset() -> DatasetSpec {
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+[risk_snapshot.columns.daily_trading_pnl]
+type = "f64"
+role = "measure"
+grain = "position"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0.dataset("risk_snapshot").unwrap().clone()
+    }
+}
+```
+
+- [ ] **Step 7: Run to verify it fails**
+
+Run: `cargo test -p geode-data store`
+Expected: FAIL — `cannot find struct Store`.
+
+- [ ] **Step 8: Implement the store**
+
+Prepend to `crates/geode-data/src/store/mod.rs`:
+
+```rust
+//! The store: one persistent DuckDB database that is the system of record
+//! (spec §4.1). History survives relaunch and CSV ingest is paid once.
+//!
+//! One dedicated writer connection serves ingest; readers are independent
+//! connections on the same database (spec §5.3). No in-memory mirror: a
+//! dual store doubles the coherency surface for a win nothing has measured.
+
+pub mod ddl;
+
+use duckdb::Connection;
+use geode_core::schema::DatasetSpec;
+use std::path::{Path, PathBuf};
+
+use ddl::TableKind;
+
+#[derive(Debug)]
+pub enum StoreError {
+    Open { path: PathBuf, source: duckdb::Error },
+    Sql { statement: String, source: duckdb::Error },
+}
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StoreError::Open { path, source } => {
+                write!(f, "opening database at {}: {source}", path.display())
+            }
+            StoreError::Sql { statement, source } => {
+                write!(f, "executing `{statement}`: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+pub struct Store {
+    writer: Connection,
+    path: PathBuf,
+}
+
+impl Store {
+    pub fn open(path: impl AsRef<Path>) -> Result<Store, StoreError> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let writer = Connection::open(&path)
+            .map_err(|source| StoreError::Open { path: path.clone(), source })?;
+        Ok(Store { writer, path })
+    }
+
+    /// The single writer connection. DuckDB is single-writer/multi-reader,
+    /// so every publish transaction serializes through this (spec §5.6).
+    pub fn writer(&self) -> &Connection {
+        &self.writer
+    }
+
+    /// A fresh read connection on the same database, for the query pool.
+    pub fn reader(&self) -> Result<Connection, StoreError> {
+        self.writer
+            .try_clone()
+            .map_err(|source| StoreError::Open { path: self.path.clone(), source })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Create the live and archive tables for every grain the dataset
+    /// declares measures at. Idempotent.
+    pub fn apply_schema(&self, ds: &DatasetSpec) -> Result<(), StoreError> {
+        for grain in ds.grains() {
+            for kind in [TableKind::Live, TableKind::Archive] {
+                let sql = ddl::create_table_sql(ds, grain, kind);
+                self.writer
+                    .execute_batch(&sql)
+                    .map_err(|source| StoreError::Sql { statement: sql, source })?;
+            }
+        }
+        Ok(())
+    }
+}
+```
+
+Add to `crates/geode-data/src/lib.rs`:
+
+```rust
+pub mod store;
+```
+
+- [ ] **Step 9: Run the full data suite**
+
+Run: `cargo test -p geode-data && cargo clippy -p geode-data --all-targets -- -D warnings`
+Expected: PASS (13 tests), no warnings.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add crates/geode-data
+git commit -m "feat(data): persistent store with schema-generated DDL
+
+One DuckDB file as the system of record (spec §4.1), a dedicated writer
+connection, and independent reader connections via try_clone. Live and
+archive tables are generated per declared grain: live carries the grain
+key, its own measures and source_file_id but no generation column, which
+is what keeps its size independent of retention (spec §4.2)."
+```
+
+---
+
+**Remaining tasks (6–14) continue below.** Task 6 adds the `file_generations`
+catalog and freshness rollup; Task 7 the publish transaction and backfill
+guard; Task 8 the grain split and conflict detection; Task 9 the per-file
+load pipeline. Tasks 10–12 add discovery, the priority ladder, and the
+ingest runner with its panic boundary. Tasks 13–14 add the retention sweeper
+and the ingest benchmarks.
