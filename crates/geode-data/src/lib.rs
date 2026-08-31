@@ -4,5 +4,9 @@
 
 pub mod health;
 pub mod ingest;
+pub mod query;
+pub mod service;
 pub mod source;
 pub mod store;
+
+pub use service::{DataService, DataServiceConfig};

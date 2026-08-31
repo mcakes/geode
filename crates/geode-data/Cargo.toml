@@ -27,3 +27,7 @@ tempfile = "3.27.0"
 [[bench]]
 name = "ingest"
 harness = false
+
+[[bench]]
+name = "query"
+harness = false

@@ -37,6 +37,11 @@ const K_PAIR: [&str; 7] = [
     "underlying2_ref",
 ];
 
+const ID_POSITION: [&str; 1] = ["position_ref"];
+const ID_INSTRUMENT: [&str; 1] = ["instrument_ref"];
+const ID_UNDERLYING: [&str; 2] = ["instrument_ref", "underlying_ref"];
+const ID_PAIR: [&str; 3] = ["instrument_ref", "underlying_ref", "underlying2_ref"];
+
 impl Grain {
     pub const ALL: [Grain; 4] = [
         Grain::Position,
@@ -51,6 +56,51 @@ impl Grain {
             Grain::Instrument => &K_INSTRUMENT,
             Grain::Underlying => &K_UNDERLYING,
             Grain::UnderlyingPair => &K_PAIR,
+        }
+    }
+
+    /// The key columns that carry their *dimension* meaning at this grain
+    /// — the ones a view may group or scope by directly.
+    ///
+    /// Every grain except the pair grain carries all of its key. The pair
+    /// grain's `underlying_ref` and `underlying2_ref` are the canonicalized
+    /// `(least, greatest)` of a pair (spec §3.3): a different column
+    /// wearing the same name. Treating them as the underlying dimension is
+    /// silently wrong in both directions — grouping the pair table by
+    /// `underlying_ref` shows only the underlying that sorts first in each
+    /// pair, and a scope `underlying_ref = 'SPX'` applied to it misses every
+    /// pair where SPX sorts second. On a worst-of over NDX/RUT/SPX that is
+    /// every pair. Spec §6.3 says the same thing from the attribution side:
+    /// cross gamma is non-attributable at an underlying-level grouping.
+    pub fn dimension_key_columns(self) -> &'static [&'static str] {
+        match self {
+            Grain::UnderlyingPair => &K_INSTRUMENT,
+            other => other.key_columns(),
+        }
+    }
+
+    /// The columns naming the entity a measure belongs to — a subset of
+    /// the key. `book` and `lhu` are containers, and `counterparty`
+    /// subdivides a position rather than naming it, so none of them
+    /// identify. This is what decides `DeterminedNonAdditive` (spec §6.3).
+    pub fn identity_columns(self) -> &'static [&'static str] {
+        match self {
+            Grain::Position => &ID_POSITION,
+            Grain::Instrument => &ID_INSTRUMENT,
+            Grain::Underlying => &ID_UNDERLYING,
+            Grain::UnderlyingPair => &ID_PAIR,
+        }
+    }
+
+    /// Short name used to build per-dataset table names. Table names must
+    /// carry the dataset too: two datasets can declare columns at the same
+    /// grain, and a grain-only name would silently make them share a table.
+    pub fn short(self) -> &'static str {
+        match self {
+            Grain::Position => "position",
+            Grain::Instrument => "instrument",
+            Grain::Underlying => "underlying",
+            Grain::UnderlyingPair => "underlying_pair",
         }
     }
 
@@ -104,6 +154,47 @@ mod tests {
         ] {
             assert!(fine.key_columns().starts_with(coarse.key_columns()));
             assert!(coarse < fine, "Ord must read coarse < fine");
+        }
+    }
+
+    #[test]
+    fn identity_columns_name_the_entity_not_the_whole_key() {
+        // The entity a measure belongs to. `book`/`lhu` are containers and
+        // `counterparty` subdivides a position, so none of them identify.
+        assert_eq!(Grain::Position.identity_columns(), &["position_ref"]);
+        assert_eq!(Grain::Instrument.identity_columns(), &["instrument_ref"]);
+        assert_eq!(
+            Grain::Underlying.identity_columns(),
+            &["instrument_ref", "underlying_ref"]
+        );
+        assert_eq!(
+            Grain::UnderlyingPair.identity_columns(),
+            &["instrument_ref", "underlying_ref", "underlying2_ref"]
+        );
+
+        // Identity is always a subset of the key.
+        for g in Grain::ALL {
+            for c in g.identity_columns() {
+                assert!(g.key_columns().contains(c), "{g:?} / {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_pair_grain_does_not_carry_the_underlying_dimension() {
+        // `underlying_ref` on the pair table is `least(u1, u2)`, not the
+        // underlying: a view must never group or scope the pair table by it.
+        assert_eq!(
+            Grain::UnderlyingPair.dimension_key_columns(),
+            Grain::Instrument.key_columns()
+        );
+        for g in [Grain::Position, Grain::Instrument, Grain::Underlying] {
+            assert_eq!(g.dimension_key_columns(), g.key_columns(), "{g:?}");
+        }
+        // Dimension keys are always a prefix of the key, so the join key
+        // between any two grains is the shorter list.
+        for g in Grain::ALL {
+            assert!(g.key_columns().starts_with(g.dimension_key_columns()));
         }
     }
 

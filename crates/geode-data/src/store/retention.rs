@@ -41,6 +41,7 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 
 pub fn sweep(
     conn: &Connection,
+    dataset: &str,
     grains: &[Grain],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
@@ -48,7 +49,7 @@ pub fn sweep(
     let mut report = SweepReport::default();
 
     for grain in grains {
-        let archive = table_name(*grain, TableKind::Archive);
+        let archive = table_name(dataset, *grain, TableKind::Archive);
 
         if !policy.is_empty() {
             let before: i64 = {
@@ -74,12 +75,18 @@ pub fn sweep(
             // `NOT IN` evaluate to UNKNOWN for every row, so one archived
             // row with a NULL book would silently disable retention
             // forever. `is not distinct from` keeps NULL keys matchable.
+            //
+            // Ties on `source_time` break on `gen_id`, newest first — the
+            // same order `as_of.rs` resolves by, so the generation time
+            // travel would pick is never the one retention evicts. A
+            // corrected republish makes such ties ordinary (§4.4).
             let sql = format!(
                 "delete from {archive} a where not exists (
                      select 1 from (
                          select batch, book, gen_id, source_time,
                                 row_number() over (
-                                    partition by batch, book order by source_time desc
+                                    partition by batch, book
+                                    order by source_time desc, gen_id desc
                                 ) as rn
                          from (select distinct batch, book, gen_id, source_time from {archive})
                      ) k
@@ -138,7 +145,7 @@ mod tests {
         store
             .writer()
             .execute_batch(
-                "create table measures_position_archive(
+                "create table risk_snapshot_position_archive(
                      book varchar, batch varchar, gen_id bigint,
                      source_time timestamp with time zone);",
             )
@@ -153,7 +160,7 @@ mod tests {
                 store
                     .writer()
                     .execute(
-                        "insert into measures_position_archive values (?, ?, ?, ?)",
+                        "insert into risk_snapshot_position_archive values (?, ?, ?, ?)",
                         duckdb::params![
                             batch,
                             batch,
@@ -169,9 +176,11 @@ mod tests {
     fn remaining(store: &Store) -> i64 {
         store
             .writer()
-            .query_row("select count(*) from measures_position_archive", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select count(*) from risk_snapshot_position_archive",
+                [],
+                |r| r.get(0),
+            )
             .unwrap()
     }
 
@@ -185,6 +194,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -209,6 +219,7 @@ mod tests {
         };
         sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -228,6 +239,7 @@ mod tests {
         };
         sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -248,6 +260,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -262,6 +275,7 @@ mod tests {
         fill(&store, 5);
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
@@ -276,6 +290,7 @@ mod tests {
         let (_d, store) = fixture();
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),
@@ -297,13 +312,14 @@ mod tests {
         store
             .writer()
             .execute(
-                "insert into measures_position_archive values (NULL, NULL, 99, ?)",
+                "insert into risk_snapshot_position_archive values (NULL, NULL, 99, ?)",
                 duckdb::params![ts("2026-08-30T01:00:00Z")],
             )
             .unwrap();
 
         let report = sweep(
             store.writer(),
+            "risk_snapshot",
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),
@@ -322,6 +338,45 @@ mod tests {
             7,
             "3 generations per real partition, plus the NULL partition's own"
         );
+    }
+
+    #[test]
+    fn a_tie_on_source_time_keeps_the_generation_as_of_would_pick() {
+        // Two generations at one instant (a corrected republish, §4.4):
+        // keep-one must keep the newer gen_id, the one `as_of.rs`
+        // resolves to, or time travel points at an evicted generation.
+        let (_d, store) = fixture();
+        for _ in 0..10 {
+            store
+                .writer()
+                .execute_batch(
+                    "delete from risk_snapshot_position_archive;
+                     insert into risk_snapshot_position_archive values
+                       ('BK000', 'BK000', 1, '2026-08-30T07:00:00Z'),
+                       ('BK000', 'BK000', 2, '2026-08-30T07:00:00Z');",
+                )
+                .unwrap();
+            sweep(
+                store.writer(),
+                "risk_snapshot",
+                &[Grain::Position],
+                &RetentionPolicy {
+                    keep_generations: Some(1),
+                    keep_age: None,
+                },
+                ts("2026-08-31T00:00:00Z"),
+            )
+            .unwrap();
+            let kept: i64 = store
+                .writer()
+                .query_row(
+                    "select gen_id from risk_snapshot_position_archive",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(kept, 2, "the correction survives, every time");
+        }
     }
 
     #[test]

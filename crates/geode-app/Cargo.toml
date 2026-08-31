@@ -23,3 +23,6 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
+# The throwaway data probe (spec §7) is the one place the shell and the
+# data layer meet — see src/probe.rs. Goes when the blotter lands.
+geode-data = { path = "../geode-data" }

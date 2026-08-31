@@ -29,8 +29,73 @@ impl TableKind {
     }
 }
 
-pub fn table_name(grain: Grain, kind: TableKind) -> String {
-    format!("{}{}", grain.table(), kind.suffix())
+/// Table names carry the dataset, not just the grain.
+///
+/// Two datasets can declare columns at the same grain — `risk_snapshot`
+/// and `instrument_ref` both have instrument-grain columns — and a
+/// grain-only name would make `CREATE TABLE IF NOT EXISTS` silently give
+/// the second dataset the first one's table, with the wrong columns.
+pub fn table_name(dataset: &str, grain: Grain, kind: TableKind) -> String {
+    format!("{dataset}_{}{}", grain.short(), kind.suffix())
+}
+
+/// The ENUM type name for a dimension column of a dataset.
+pub fn enum_type_name(dataset: &str, column: &str) -> String {
+    format!("{dataset}_{column}_enum")
+}
+
+/// Dimension columns whose values are worth interning (spec §3.6). Keys
+/// like `position_ref` are high-cardinality and would make a useless
+/// dictionary, so only `Dimension` columns qualify.
+pub fn dimension_columns(ds: &DatasetSpec) -> Vec<&str> {
+    ds.columns
+        .iter()
+        .filter(|c| matches!(c.role, ColumnRole::Dimension))
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// Rebuild a dimension's ENUM type from the values currently live.
+///
+/// **Storage stays `VARCHAR`; the ENUM is derived and used only for a
+/// query-time cast.** DuckDB 1.10505 has no `ALTER TYPE ... ADD VALUE`,
+/// so an ENUM *column* could only be widened by dropping and recreating
+/// the type — which means rewriting every table that uses it, the first
+/// time a new book appears. Deriving the type instead keeps the
+/// dictionary encoding §7.2 wants (the cast makes `query_arrow` return
+/// `Dictionary(UInt8, Utf8)`) at the cost of one cheap rebuild per
+/// ingest, and no table ever moves.
+///
+/// Returns the number of distinct values the type now carries.
+pub fn refresh_enum(
+    conn: &duckdb::Connection,
+    dataset: &str,
+    column: &str,
+    live_table: &str,
+) -> Result<usize, crate::store::StoreError> {
+    let name = enum_type_name(dataset, column);
+    // Nothing references the type — columns are VARCHAR — so dropping is
+    // free and never touches stored data.
+    let sql = format!(
+        "drop type if exists {name};
+         create type {name} as enum (
+             select distinct \"{column}\"::varchar from {live_table}
+             where \"{column}\" is not null
+         );"
+    );
+    conn.execute_batch(&sql)
+        .map_err(|source| crate::store::StoreError::Sql {
+            statement: sql,
+            source,
+        })?;
+
+    let count = format!("select count(*) from (select unnest(enum_range(NULL::{name})))");
+    conn.query_row(&count, [], |r| r.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(|source| crate::store::StoreError::Sql {
+            statement: count,
+            source,
+        })
 }
 
 pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
@@ -71,7 +136,7 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 
     format!(
         "CREATE TABLE IF NOT EXISTS {} (\n{}\n);",
-        table_name(grain, kind),
+        table_name(&ds.name, grain, kind),
         cols.join(",\n")
     )
 }
@@ -127,13 +192,33 @@ mod tests {
     #[test]
     fn live_table_carries_the_grain_key_and_its_measures_only() {
         let sql = create_table_sql(&sample_dataset(), Grain::Position, TableKind::Live);
-        assert!(sql.contains("measures_position_live"), "{sql}");
+        assert!(sql.contains("risk_snapshot_position_live"), "{sql}");
         assert!(sql.contains("\"book\" VARCHAR"), "{sql}");
         assert!(sql.contains("\"daily_trading_pnl\" DOUBLE"), "{sql}");
         // A finer grain's key column must not appear at position grain.
         assert!(!sql.contains("underlying_ref"), "{sql}");
         // Nor a measure declared at another grain.
         assert!(!sql.contains("delta01"), "{sql}");
+    }
+
+    #[test]
+    fn two_datasets_sharing_a_grain_get_separate_tables() {
+        // risk_snapshot and instrument_ref both have instrument-grain
+        // columns. A grain-only table name would make CREATE TABLE IF NOT
+        // EXISTS silently give the second one the first's table, with the
+        // wrong columns — a data bug with no symptom until a query.
+        assert_eq!(
+            table_name("risk_snapshot", Grain::Instrument, TableKind::Live),
+            "risk_snapshot_instrument_live"
+        );
+        assert_eq!(
+            table_name("instrument_ref", Grain::Instrument, TableKind::Live),
+            "instrument_ref_instrument_live"
+        );
+        assert_ne!(
+            table_name("risk_snapshot", Grain::Instrument, TableKind::Live),
+            table_name("instrument_ref", Grain::Instrument, TableKind::Live)
+        );
     }
 
     #[test]
@@ -175,7 +260,7 @@ mod tests {
     #[test]
     fn archive_adds_gen_id_and_source_time() {
         let sql = create_table_sql(&sample_dataset(), Grain::Underlying, TableKind::Archive);
-        assert!(sql.contains("measures_underlying_archive"), "{sql}");
+        assert!(sql.contains("risk_snapshot_underlying_archive"), "{sql}");
         assert!(sql.contains("\"gen_id\" BIGINT"), "{sql}");
         assert!(
             sql.contains("\"source_time\" TIMESTAMP WITH TIME ZONE"),

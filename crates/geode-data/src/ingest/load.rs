@@ -34,7 +34,11 @@ pub struct LoadOutcome {
     pub gen_id: i64,
     pub rows: usize,
     pub health: Health,
+    /// Disagreement *within* this file.
     pub conflicts: Vec<Conflict>,
+    /// Disagreement between this file and everything already loaded — a
+    /// different signal, so it is kept apart rather than merged in.
+    pub cross_file: Vec<crate::store::AttributeConflict>,
     pub missing_optional: Vec<String>,
     pub missing_required: Vec<String>,
     /// Source columns the schema does not declare. Not stored — the declared
@@ -175,11 +179,16 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             ),
         }));
     }
+    // Rows with no book are kept and reported rather than dropped, so they
+    // are a partition of their own — one the publish has to replace, or
+    // every republish of this batch appends another copy of them to live.
     let partitions: Vec<Partition> = books
         .iter()
+        .map(|book| Some(book.clone()))
+        .chain((unattributed_rows > 0).then_some(None))
         .map(|book| Partition {
             batch: req.batch.to_string(),
-            book: book.clone(),
+            book,
         })
         .collect();
 
@@ -198,6 +207,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         published.push(publish_file(
             conn,
             &PublishRequest {
+                dataset: req.dataset_name.to_string(),
                 grain: *grain,
                 staging_table: staging_table.clone(),
                 partitions: partitions.clone(),
@@ -208,7 +218,31 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         )?);
     }
 
-    // 5. Record the generation.
+    // 5. Rebuild the dimension ENUM types from what is now live, so the
+    // query path can cast to them and get dictionary-encoded columns
+    // (spec §3.6). Storage stays VARCHAR — see `refresh_enum` for why.
+    for col in crate::store::ddl::dimension_columns(req.dataset) {
+        // Refresh from the coarsest table carrying the column, which is
+        // the smallest scan that sees every value.
+        let Some(grain) = geode_core::schema::Grain::ALL
+            .iter()
+            .find(|g| g.key_columns().contains(&col) && split.staged.iter().any(|(s, _)| s == *g))
+        else {
+            continue;
+        };
+        crate::store::ddl::refresh_enum(
+            conn,
+            req.dataset_name,
+            col,
+            &crate::store::ddl::table_name(
+                req.dataset_name,
+                *grain,
+                crate::store::ddl::TableKind::Live,
+            ),
+        )?;
+    }
+
+    // 6. Record the generation.
     let mut degradations: Vec<String> = Vec::new();
     if !missing_required.is_empty() {
         degradations.push(format!(
@@ -255,12 +289,22 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         health: health.clone(),
     })?;
 
+    // 7. Cross-file disagreement, recorded per load so diagnostics can
+    // show a trend (spec §3.5). Read after publishing, because it is the
+    // whole live table that has to agree, not this file.
+    let mut cross_file = Vec::new();
+    for grain in req.dataset.grains() {
+        cross_file.extend(catalog.attribute_conflicts(req.dataset_name, req.dataset, grain)?);
+    }
+    catalog.record_attribute_conflicts(req.dataset_name, &cross_file, Utc::now())?;
+
     Ok(LoadOutcome {
         file_id,
         gen_id,
         rows: rows as usize,
         health,
         conflicts: split.conflicts,
+        cross_file,
         missing_optional,
         missing_required,
         extra_columns,
@@ -294,6 +338,30 @@ fn distinct_books(conn: &duckdb::Connection) -> Result<(Vec<String>, usize), Sto
 #[cfg(test)]
 pub(crate) mod tests_support {
     use geode_demo_data::{EmitOptions, GeneratorConfig, emit_directory, generate};
+
+    /// The spec §6.3 tree view over the fixture dataset: lhu >
+    /// underlying > position, one measure at underlying grain and one at
+    /// position grain.
+    pub(crate) fn tree_view() -> geode_core::view::ViewSpec {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu", "underlying_ref", "position_ref"]
+[[tree.columns]]
+name = "delta01"
+kind = "measure"
+[[tree.columns]]
+name = "daily_trading_pnl"
+kind = "measure"
+"#;
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        geode_core::view::ViewSpec::from_doc(&doc)
+            .0
+            .into_iter()
+            .next()
+            .unwrap()
+    }
 
     /// The same fixture the load tests use: a populated store with the
     /// schema applied and catalog tables created, plus a generated source
@@ -336,6 +404,7 @@ mod tests {
     use super::*;
     use crate::health::Health;
     use crate::store::Store;
+    use geode_core::schema::Grain;
 
     pub(crate) fn schema() -> geode_core::schema::DatasetSpec {
         use geode_core::config::{LayerDoc, merge_docs};
@@ -472,7 +541,7 @@ source_name = "ModelCode"
         assert_eq!(out.rows, file.rows);
         assert_eq!(out.health, Health::Ok);
 
-        let live = count(&f, "measures_position_live");
+        let live = count(&f, "risk_snapshot_position_live");
         assert!(
             live > 0 && live < file.rows as i64,
             "position grain must collapse rows: {live} from {}",
@@ -496,7 +565,7 @@ source_name = "ModelCode"
             "optional absence is expected, not a warning"
         );
         assert_eq!(out.missing_optional, vec!["skew01".to_string()]);
-        let nulls = count(&f, "measures_underlying_live where skew01 is null");
+        let nulls = count(&f, "risk_snapshot_underlying_live where skew01 is null");
         assert!(nulls > 0);
     }
 
@@ -567,14 +636,243 @@ source_name = "ModelCode"
         );
     }
 
+    /// Rewrite every value of one CSV column, leaving the rest intact.
+    fn rewrite_column(csv: &str, header: &str, value: &str) -> String {
+        let mut lines = csv.lines();
+        let head = lines.next().expect("header");
+        let at = head
+            .split(',')
+            .position(|h| h == header)
+            .expect("column present");
+        let mut out = String::from(head);
+        for line in lines {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            fields[at] = value;
+            out.push('\n');
+            out.push_str(&fields.join(","));
+        }
+        out
+    }
+
+    /// Blank one CSV column on every other data row, leaving the rest intact.
+    fn blank_alternate_rows(csv: &str, header: &str) -> String {
+        let mut lines = csv.lines();
+        let head = lines.next().expect("header");
+        let at = head
+            .split(',')
+            .position(|h| h == header)
+            .expect("column present");
+        let mut out = String::from(head);
+        for (i, line) in lines.enumerate() {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            if i % 2 == 0 {
+                fields[at] = "";
+            }
+            out.push('\n');
+            out.push_str(&fields.join(","));
+        }
+        out
+    }
+
+    #[test]
+    fn republishing_a_file_with_bookless_rows_does_not_accumulate_them() {
+        // Rows with no book are kept and reported (§4.4), which makes them
+        // live data in a partition of their own. That partition has to be
+        // replaced on republish like any other, or every republish of the
+        // batch appends another copy and the desk total drifts upward.
+        let f = fixture();
+        let file = ready_file(&f);
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let twin = file.csv_path.with_file_name("risk_20260830_blank.csv");
+        std::fs::write(&twin, blank_alternate_rows(&text, "Book")).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let mut sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+
+        let bookless = |f: &Fixture| -> i64 {
+            f.store
+                .writer()
+                .query_row(
+                    "select count(*) from risk_snapshot_position_live where book is null",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let load_twin = |sentinel: &crate::source::Sentinel| {
+            load_file(
+                &f.store,
+                &LoadRequest {
+                    dataset: &f.ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &twin,
+                    sentinel,
+                    batch: "blank",
+                },
+            )
+            .unwrap()
+        };
+
+        let first = load_twin(&sentinel);
+        assert!(
+            matches!(&first.health, Health::Degraded { reason } if reason.contains("no book")),
+            "{:?}",
+            first.health
+        );
+        let after_first = bookless(&f);
+        assert!(after_first > 0, "the bookless rows must be live");
+        let live_after_first = count(&f, "risk_snapshot_position_live");
+
+        // A corrected republish of the same batch, an hour later.
+        sentinel.as_of += chrono::Duration::hours(1);
+        load_twin(&sentinel);
+        assert_eq!(
+            bookless(&f),
+            after_first,
+            "the bookless partition is replaced, not appended to"
+        );
+        assert_eq!(
+            count(&f, "risk_snapshot_position_live"),
+            live_after_first,
+            "live holds exactly one generation of the batch"
+        );
+    }
+
+    #[test]
+    fn the_same_instrument_disagreeing_across_files_is_recorded() {
+        // 2a detects disagreement within a file. Instruments are reused
+        // across books, and those books' files are written at different
+        // times, so cross-file disagreement is the common case (spec §3.5).
+        let f = fixture();
+        let file = ready_file(&f);
+        load(&f, file);
+
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let one_file = cat
+            .attribute_conflicts("risk_snapshot", &f.ds, Grain::Instrument)
+            .unwrap();
+        assert!(
+            !one_file.iter().any(|c| c.column == "model_code"),
+            "one file's rows dedup to one value per instrument: {one_file:?}"
+        );
+
+        // The same instruments again under a different batch, carrying a
+        // different model code — a separate partition, so both survive in
+        // live and the disagreement only exists *between* the files.
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let twin = file.csv_path.with_file_name("risk_20260830_twin.csv");
+        std::fs::write(&twin, rewrite_column(&text, "ModelCode", "ZZZZ")).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+        load_file(
+            &f.store,
+            &LoadRequest {
+                dataset: &f.ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &twin,
+                sentinel: &sentinel,
+                batch: "twin",
+            },
+        )
+        .unwrap();
+
+        let conflicts = cat
+            .attribute_conflicts("risk_snapshot", &f.ds, Grain::Instrument)
+            .unwrap();
+        let model = conflicts
+            .iter()
+            .find(|c| c.column == "model_code")
+            .unwrap_or_else(|| panic!("model_code disagreement missed: {conflicts:?}"));
+        assert!(model.entities > 0);
+    }
+
+    #[test]
+    fn conflict_counts_are_recorded_so_diagnostics_can_show_a_trend() {
+        // A single reading says little; a column that conflicts on every
+        // load is evidence its declared grain is wrong (spec §3.4).
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let observed = vec![crate::store::AttributeConflict {
+            grain: Grain::Instrument,
+            column: "model_code".into(),
+            entities: 3,
+        }];
+        cat.record_attribute_conflicts("risk_snapshot", &observed, Utc::now())
+            .unwrap();
+        cat.record_attribute_conflicts("risk_snapshot", &observed, Utc::now())
+            .unwrap();
+        let history = cat.attribute_conflict_history("risk_snapshot").unwrap();
+        assert_eq!(history.len(), 2, "each load appends: {history:?}");
+        assert_eq!(history[0].1.entities, 3);
+    }
+
+    #[test]
+    fn dimension_columns_come_back_dictionary_encoded() {
+        // This is what §7.2's "interned at ingest" actually requires: a
+        // plain VARCHAR returns StringArray, and the renderer would have
+        // to compare strings per cell.
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let conn = f.store.writer();
+        let mut stmt = conn
+            .prepare(
+                "select book::risk_snapshot_book_enum
+                 from risk_snapshot_position_live limit 10",
+            )
+            .unwrap();
+        let batches: Vec<duckdb::arrow::record_batch::RecordBatch> =
+            stmt.query_arrow([]).unwrap().collect();
+        assert!(
+            matches!(
+                batches[0].schema().field(0).data_type(),
+                duckdb::arrow::datatypes::DataType::Dictionary(_, _)
+            ),
+            "got {:?}",
+            batches[0].schema().field(0).data_type()
+        );
+    }
+
+    #[test]
+    fn a_new_dimension_value_does_not_need_a_table_rewrite() {
+        // DuckDB has no ALTER TYPE ADD VALUE, so an ENUM *column* could
+        // only grow by rewriting every table. The type is derived instead:
+        // refreshing it after a load is a metadata operation.
+        let f = fixture();
+        load(&f, ready_file(&f));
+        let before = crate::store::ddl::refresh_enum(
+            f.store.writer(),
+            "risk_snapshot",
+            "book",
+            "risk_snapshot_position_live",
+        )
+        .unwrap();
+        f.store
+            .writer()
+            .execute_batch(
+                "create temp table one as
+                     select * from risk_snapshot_position_live limit 1;
+                 update one set book = 'BK999';
+                 insert into risk_snapshot_position_live select * from one;",
+            )
+            .unwrap();
+        let after = crate::store::ddl::refresh_enum(
+            f.store.writer(),
+            "risk_snapshot",
+            "book",
+            "risk_snapshot_position_live",
+        )
+        .unwrap();
+        assert_eq!(after, before + 1, "the new book joined the type");
+    }
+
     #[test]
     fn reloading_the_same_batch_replaces_rather_than_accumulates() {
         let f = fixture();
         let file = ready_file(&f);
         let first = load(&f, file);
-        let before = count(&f, "measures_underlying_live");
+        let before = count(&f, "risk_snapshot_underlying_live");
         let second = load(&f, file);
-        let after = count(&f, "measures_underlying_live");
+        let after = count(&f, "risk_snapshot_underlying_live");
         assert_eq!(before, after, "live must not accumulate across reloads");
         assert!(second.gen_id > first.gen_id);
 
@@ -588,7 +886,7 @@ source_name = "ModelCode"
             "the reload must replace live, not be filed as history: {:?}",
             second.published
         );
-        let archived = count(&f, "measures_underlying_archive");
+        let archived = count(&f, "risk_snapshot_underlying_archive");
         assert_eq!(
             archived, before,
             "the superseded generation must have moved to archive"
@@ -600,7 +898,7 @@ source_name = "ModelCode"
         let f = fixture();
         let file = ready_file(&f);
         load(&f, file);
-        let before = count(&f, "measures_underlying_live");
+        let before = count(&f, "risk_snapshot_underlying_live");
 
         let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
         let sentinel = crate::source::parse_sentinel(&text).unwrap();
@@ -616,7 +914,7 @@ source_name = "ModelCode"
             },
         );
         assert!(err.is_err());
-        let after = count(&f, "measures_underlying_live");
+        let after = count(&f, "risk_snapshot_underlying_live");
         assert_eq!(before, after, "spec §5.7: a failed load never clobbers");
     }
 

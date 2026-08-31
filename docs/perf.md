@@ -156,3 +156,91 @@ produces. They are independent, and cold start wants both.
 Not yet gated in CI. The §7.4 regression gate wants a stored criterion
 baseline and a generous threshold; these numbers are the first baseline
 worth storing.
+
+## Phase 2b: requery benchmarks (`cargo bench -p geode-data -- query_`)
+
+`benches/query.rs`, over the generated source directory, ingested through
+the real pipeline and queried through `DataService` — submit to snapshot,
+which is §7.1's end-to-end path minus the paint. Same machine as the 2a
+table above.
+
+| View | Result rows | 100k ingested | 1M ingested |
+|---|---|---|---|
+| `tree`, scoped to 3 books | 7.7k / 74.7k | 8.2 ms | **23.9 ms** |
+| `tree`, scoped, bounded to depth 2 | 121 | 5.7 ms | **10.8 ms** |
+| `shallow` (book only), scoped | 4 | 4.3 ms | **6.0 ms** |
+| `tree`, all 20 books | 40.4k / 398k | 16.6 ms | **69.9 ms** |
+| `tree`, unscoped | 40.4k / 398k | 15.2 ms | **66.1 ms** |
+| `tree`, unscoped, bounded to depth 2 | 121 | 7.5 ms | **10.3 ms** |
+
+Re-measured after the correctness fixes in `a7a1cb0`, which cost a few
+percent: each per-grain aggregate now carries its own level and the join
+matches on it, so a NULL in a grouping column cannot fan the tree out.
+Result-row counts are unchanged, which is the invariant that matters —
+the fixes changed which rows are correct, not how many there are.
+
+`tree` is `lhu > underlying_ref > position_ref` across three measure
+grains — the shape a blotter actually runs, not a bare `select`.
+
+**The §7.1 <50ms contract holds for every shape the blotter actually
+submits.** Latency tracks *result* size, not input size: 398k rows in
+66 ms is roughly 6M rows/sec across the Arrow boundary, so neither the
+engine nor the grain-split join is the constraint. The two rows that miss
+the budget are the unbounded ones, and they miss it for exactly that
+reason.
+
+### Why the depth bound exists
+
+The compiler originally emitted one `ROLLUP` covering *every* level, so a
+fully collapsed tree still materialized its leaves: a trader looking at
+80 LHU rows paid for 398,085. `compile_view` now takes a `max_depth` and
+emits `GROUPING SETS` over `0..=max_depth` instead. The caller passes one
+more level than is expanded, so a single-step expand is already in the
+snapshot and only a deeper one costs a requery — expand and collapse stay
+pure UI within the bound (§6.3), which was the point of the single
+statement in the first place.
+
+The unscoped million-row tree is the case that shows what it buys:
+**66.1 ms → 10.3 ms, and 398,085 result rows → 121.** The scan is
+identical; only the result changed. That second number matters as much as
+the first, because gpui-component's `DataTable` virtualizes by *index* —
+its `TableDelegate` is asked for row `i` — so the blotter has to flatten
+the tree into a visible-row list itself, and that walk is proportional to
+what was materialized, not to what is on screen. An unbounded query would
+put a 398k-row walk on the frame budget to paint 80 rows.
+
+Not gated in CI yet; these are the first stored baselines for the query
+path.
+
+### Re-measured after the round-5 correctness fixes
+
+Same machine, same fixture, same harness. **The result-row counts changed,
+and that is the finding**, not the latency:
+
+| View | Result rows before → after | 1M before → after |
+|---|---|---|
+| `tree`, scoped to 3 books | 74,689 → **136,868** | 23.9 ms → 31.2 ms |
+| `tree`, scoped, bounded to depth 2 | 121 → 133 | 10.8 ms → 11.7 ms |
+| `shallow` (book only), scoped | 4 → 4 | 6.0 ms → 5.9 ms |
+| `tree`, all 20 books | 398,085 → **729,466** | 69.9 ms → 99.2 ms |
+| `tree`, unscoped | 398,085 → **729,466** | 66.1 ms → 96.1 ms |
+| `tree`, unscoped, bounded to depth 2 | 121 → 133 | 10.3 ms → 11.4 ms |
+
+The fixture declares the pair grain, so the compiler's spine was the
+`measures_underlying_pair` table — whose `underlying_ref` is the *lesser*
+of a canonical pair (§3.3), not the underlying. The underlying level of
+the tree therefore only ever showed the underlying that sorted first in
+each pair, and everything beneath the others was absent while still
+counting in the totals. The rows that appeared are the rows that were
+missing: **about 45% of the tree.** Latency moved with the row count and
+nothing else — 136,868 rows in 31 ms is a better per-row rate than
+74,689 in 24 ms was — so the §7.1 <50ms contract still holds for every
+shape the blotter submits, and the two unbounded rows miss it as they did
+before, for the same reason.
+
+The spine is now assembled from the per-grain aggregates (each is
+referenced twice in the statement: once by the spine, once by the join)
+rather than scanned from one table. DuckDB handled the double reference
+within budget; `as materialized` on the aggregate CTEs is the lever if a
+future view shape does not. The depth-0 full scan is gone: the grand-total
+row is a constant.

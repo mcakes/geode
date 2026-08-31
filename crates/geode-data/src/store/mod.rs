@@ -10,7 +10,7 @@ pub mod ddl;
 pub mod publish;
 pub mod retention;
 
-pub use catalog::{Catalog, FileGeneration, FileId};
+pub use catalog::{AttributeConflict, Catalog, FileGeneration, FileId};
 pub use publish::{Partition, PublishOutcome, PublishRequest, publish_file};
 pub use retention::{RetentionPolicy, SweepReport, checkpoint, sweep};
 
@@ -157,10 +157,10 @@ mod tests {
             rows.map(|r| r.unwrap()).collect()
         };
         for expected in [
-            "measures_position_live",
-            "measures_position_archive",
-            "measures_underlying_live",
-            "measures_underlying_archive",
+            "risk_snapshot_position_live",
+            "risk_snapshot_position_archive",
+            "risk_snapshot_underlying_live",
+            "risk_snapshot_underlying_archive",
         ] {
             assert!(
                 tables.contains(&expected.to_string()),
