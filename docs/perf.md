@@ -226,6 +226,30 @@ and that is the finding**, not the latency:
 | `tree`, unscoped | 398,085 → **729,466** | 66.1 ms → 96.1 ms |
 | `tree`, unscoped, bounded to depth 2 | 121 → 133 | 10.3 ms → 11.4 ms |
 
+### Re-measured after the Phase 3 prerequisites branch
+
+`compile.rs` now emits `ORDER BY` for every view, not only those declaring
+a sort, so every result is sorted by depth plus the grouping columns.
+Result-row counts are identical to the round-5 column above (136,868 /
+729,466 / 133 / 4), which is what makes the comparison meaningful:
+
+| View | 1M round 5 → now |
+|---|---|
+| `tree`, scoped to 3 books (136,868 rows) | 31.2 ms → 32.0 ms |
+| `tree`, scoped, bounded to depth 2 (133) | 11.7 ms → 8.3 ms |
+| `shallow` / regroup (4) | 5.9 ms → 4.0 ms |
+| `tree`, all 20 books (729,466) | 99.2 ms → 76.7 ms |
+| `tree`, unscoped (729,466) | 96.1 ms → 75.9 ms |
+| `tree`, unscoped, bounded to depth 2 (133) | 11.4 ms → 7.9 ms |
+
+**No regression, and §7.1 still holds for every shape the blotter
+submits** — the bounded and scoped rows are 4–32 ms. The one row that
+moved against the sort is the scoped 136k tree, +0.8 ms. Sorting cannot
+make a query faster, so read the improvements as a quieter machine rather
+than as an effect of the change; the honest reading of this table is "the
+sort is not measurable next to run-to-run variance", which is what the
+row counts predict — the bounded shapes sort 133 rows.
+
 The fixture declares the pair grain, so the compiler's spine was the
 `measures_underlying_pair` table — whose `underlying_ref` is the *lesser*
 of a canonical pair (§3.3), not the underlying. The underlying level of

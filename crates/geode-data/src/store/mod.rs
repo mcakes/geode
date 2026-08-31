@@ -30,6 +30,10 @@ pub enum StoreError {
         statement: String,
         source: duckdb::Error,
     },
+    /// A query worker thread could not be started. Reported rather than
+    /// panicked, so the pool can shut down the workers it already spawned
+    /// instead of leaving them detached.
+    SpawnWorker { source: std::io::Error },
 }
 
 impl std::fmt::Display for StoreError {
@@ -40,6 +44,9 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::Sql { statement, source } => {
                 write!(f, "executing `{statement}`: {source}")
+            }
+            StoreError::SpawnWorker { source } => {
+                write!(f, "starting a query worker: {source}")
             }
         }
     }

@@ -28,13 +28,20 @@ pub struct DataServiceConfig {
 
 pub struct DataService {
     config: DataServiceConfig,
+    /// Field order is drop order, and it is load-bearing here. `QueryPool`
+    /// joins its workers in `Drop`, and those workers hold read
+    /// connections to this database — so the pool must be dropped, and the
+    /// workers joined, before the connections they read through and the
+    /// store that owns the database handle. Listing `_store` first (as
+    /// this did) closed the database while workers were still running on
+    /// it.
+    pool: QueryPool,
+    results: Receiver<QueryResult>,
+    /// A dedicated connection for compilation and catalog reads.
+    conn: duckdb::Connection,
     /// The store stays owned here so the database outlives the pool's
     /// connections. Never used to run a view query.
     _store: Store,
-    /// A dedicated connection for compilation and catalog reads.
-    conn: duckdb::Connection,
-    pool: QueryPool,
-    results: Receiver<QueryResult>,
 }
 
 impl DataService {

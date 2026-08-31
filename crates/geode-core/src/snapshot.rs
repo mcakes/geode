@@ -51,17 +51,29 @@ impl Provenance {
 
 /// Concatenate batches, keeping a shared dictionary shared.
 ///
-/// Arrow's `concat` *appends* dictionaries rather than noticing that two
-/// batches carry the same one, so after a handful of 2048-row batches the
-/// merged dictionary outgrows the 8-bit key space and the keys overflow.
-/// Every batch of one query carries the same derived ENUM, so its keys
-/// can simply be concatenated against the one dictionary — correct, and
-/// cheaper than merging.
+/// Every batch of one query carries the same derived ENUM, so its keys can
+/// simply be concatenated against that one dictionary rather than
+/// unified — cheaper, and it keeps the codes stable, which is what §7.2
+/// lets a renderer compare and group on.
+///
+/// **This is an optimization, not a correctness guard.** An earlier
+/// comment here claimed Arrow's `concat` appends dictionaries rather than
+/// noticing two batches share one, and that the merged dictionary
+/// therefore outgrows the 8-bit key space and the keys overflow. Measured
+/// against arrow 58.4.0, that is not what happens: concatenating 40
+/// batches of a 200-value dictionary yields a 200-entry dictionary at
+/// UInt8, and 300 stays 300 at UInt16 — `concat` unifies. Where the union
+/// genuinely cannot fit the key type (disjoint 200-value dictionaries at
+/// UInt8) it returns `Err("Dictionary key bigger than the key type")`,
+/// which `from_batches` propagates and the pool reports as a failed query.
+/// So the fallback below is safe, and removing this fast path would cost
+/// speed rather than correctness. Re-measure before trusting either
+/// claim across an arrow upgrade.
 fn concat_preserving_dictionaries(
     batches: &[RecordBatch],
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
-    use arrow::array::{ArrayRef, DictionaryArray, UInt8Array};
-    use arrow::datatypes::{DataType, UInt8Type};
+    use arrow::array::ArrayRef;
+    use arrow::datatypes::{DataType, UInt8Type, UInt16Type};
 
     let schema = batches[0].schema();
     if batches.len() == 1 {
@@ -72,38 +84,114 @@ fn concat_preserving_dictionaries(
     for (i, field) in schema.fields().iter().enumerate() {
         let slices: Vec<&dyn Array> = batches.iter().map(|b| b.column(i).as_ref()).collect();
 
-        let dictionary_of_u8 = matches!(
-            field.data_type(),
-            DataType::Dictionary(k, _) if **k == DataType::UInt8
-        );
-        if dictionary_of_u8 {
-            let dicts: Vec<&DictionaryArray<UInt8Type>> = slices
-                .iter()
-                .filter_map(|a| a.as_any().downcast_ref::<DictionaryArray<UInt8Type>>())
-                .collect();
-            if dicts.len() == slices.len()
-                && dicts
-                    .iter()
-                    .all(|d| d.values().as_ref() == dicts[0].values().as_ref())
-            {
-                let keys: Vec<&dyn Array> = dicts.iter().map(|d| d.keys() as &dyn Array).collect();
-                let merged = arrow::compute::concat(&keys)?;
-                let merged = merged
-                    .as_any()
-                    .downcast_ref::<UInt8Array>()
-                    .expect("concat of UInt8 keys")
-                    .clone();
-                columns.push(std::sync::Arc::new(DictionaryArray::<UInt8Type>::try_new(
-                    merged,
-                    dicts[0].values().clone(),
-                )?));
-                continue;
+        // Both key widths, because the width follows the vocabulary size
+        // rather than the schema — see `dict_column`.
+        let shared = match field.data_type() {
+            DataType::Dictionary(k, _) if **k == DataType::UInt8 => {
+                concat_shared_dictionary::<UInt8Type>(&slices)
             }
+            DataType::Dictionary(k, _) if **k == DataType::UInt16 => {
+                concat_shared_dictionary::<UInt16Type>(&slices)
+            }
+            _ => None,
+        };
+        if let Some(merged) = shared {
+            columns.push(merged?);
+            continue;
         }
         columns.push(arrow::compute::concat(&slices)?);
     }
 
     RecordBatch::try_new(schema, columns)
+}
+
+/// Concatenate dictionary arrays that all share one dictionary, by
+/// concatenating their keys against it.
+///
+/// `None` when the slices are not all dictionaries of this key width, or
+/// do not share a dictionary — the caller then falls back to Arrow's own
+/// `concat`, which is correct but merges the dictionaries.
+fn concat_shared_dictionary<K: arrow::datatypes::ArrowDictionaryKeyType>(
+    slices: &[&dyn Array],
+) -> Option<Result<arrow::array::ArrayRef, arrow::error::ArrowError>> {
+    use arrow::array::{ArrayRef, DictionaryArray, PrimitiveArray};
+
+    let dicts: Vec<&DictionaryArray<K>> = slices
+        .iter()
+        .filter_map(|a| a.as_any().downcast_ref::<DictionaryArray<K>>())
+        .collect();
+    if dicts.len() != slices.len()
+        || !dicts
+            .iter()
+            .all(|d| d.values().as_ref() == dicts[0].values().as_ref())
+    {
+        return None;
+    }
+
+    let keys: Vec<&dyn Array> = dicts.iter().map(|d| d.keys() as &dyn Array).collect();
+    let merged = match arrow::compute::concat(&keys) {
+        Ok(m) => m,
+        Err(e) => return Some(Err(e)),
+    };
+    // Concatenating keys of one width yields that width; anything else
+    // would be an Arrow bug rather than a data condition.
+    let merged = merged.as_any().downcast_ref::<PrimitiveArray<K>>()?.clone();
+    Some(
+        DictionaryArray::<K>::try_new(merged, dicts[0].values().clone())
+            .map(|d| std::sync::Arc::new(d) as ArrayRef),
+    )
+}
+
+/// Per-row dictionary codes, at whichever width the data uses.
+///
+/// The width is not a schema decision: DuckDB sizes an ENUM's key to its
+/// vocabulary, so the same logical dimension is UInt8 in a small fixture
+/// and UInt16 once its value list passes 255. Callers that only compare
+/// and group can use [`Self::code`] and stay width-agnostic; the raw
+/// slices are exposed for bulk work that wants the narrower type.
+#[derive(Debug, Clone, Copy)]
+pub enum DictCodes<'a> {
+    U8(&'a [u8]),
+    U16(&'a [u16]),
+}
+
+impl DictCodes<'_> {
+    pub fn len(&self) -> usize {
+        match self {
+            DictCodes::U8(c) => c.len(),
+            DictCodes::U16(c) => c.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The code at `row`, widened. `None` past the end.
+    ///
+    /// A code is present for every row including NULL ones, where it is
+    /// arbitrary; only [`Snapshot::dict_value`] consults the null bitmap.
+    pub fn code(&self, row: usize) -> Option<usize> {
+        match self {
+            DictCodes::U8(c) => c.get(row).map(|v| *v as usize),
+            DictCodes::U16(c) => c.get(row).map(|v| *v as usize),
+        }
+    }
+}
+
+/// One cell of a dictionary array, resolved to its string, honouring both
+/// the key null bitmap and the dictionary's own.
+fn dictionary_cell<K: arrow::datatypes::ArrowDictionaryKeyType>(
+    d: &arrow::array::DictionaryArray<K>,
+    row: usize,
+) -> Option<&str> {
+    use arrow::datatypes::ArrowNativeType;
+    if row >= d.len() || d.is_null(row) {
+        return None;
+    }
+    let values = d.values().as_any().downcast_ref::<StringArray>()?;
+    let code = d.keys().value(row).as_usize();
+    (code < values.len() && !values.is_null(code)).then(|| values.value(code))
 }
 
 #[derive(Debug)]
@@ -158,6 +246,14 @@ impl Snapshot {
 
     /// Zero-copy over the whole column. `None` when absent or not f64 —
     /// never a panic, because a view can name a column the data lacks.
+    ///
+    /// **This is the raw value buffer and cannot express a NULL.** Arrow
+    /// stores a blanked cell as an arbitrary value (in practice 0.0) plus a
+    /// cleared bit in a separate null bitmap, which this slice does not
+    /// carry. Use it for bulk numeric work where the caller has already
+    /// established the column has no nulls; anything rendering a cell must
+    /// go through [`Self::f64_value`], or a cell the compiler deliberately
+    /// blanked will read back as a real zero.
     pub fn f64_column(&self, name: &str) -> Option<&[f64]> {
         Some(
             self.column(name)?
@@ -167,6 +263,27 @@ impl Snapshot {
         )
     }
 
+    /// One numeric cell. `None` when the column is absent or not f64, the
+    /// row is past the end, **or the value is NULL**.
+    ///
+    /// NULL and 0.0 are different answers and the difference is the whole
+    /// of §6.3. A measure is blanked outright where it is
+    /// `NonAttributable` — cross gamma at an underlying-level grouping
+    /// belongs to no single underlying — and a renderer that cannot tell
+    /// the two apart prints a confident zero where the honest answer is
+    /// "this number does not belong to this row".
+    pub fn f64_value(&self, name: &str, row: usize) -> Option<f64> {
+        let values = self.column(name)?.as_any().downcast_ref::<Float64Array>()?;
+        (row < values.len() && !values.is_null(row)).then(|| values.value(row))
+    }
+
+    /// Zero-copy over the whole column, **only when it is exactly Int64**.
+    ///
+    /// DuckDB picks the narrowest integer that fits, so a computed column
+    /// often arrives narrower: `row_depth` is `Int32`. Use
+    /// [`Self::i64_value`] unless the width is known, or this returns
+    /// `None` for a column that is plainly an integer. Carries no null
+    /// bitmap, for the same reason [`Self::f64_column`] does not.
     pub fn i64_column(&self, name: &str) -> Option<&[i64]> {
         Some(
             self.column(name)?
@@ -174,6 +291,42 @@ impl Snapshot {
                 .downcast_ref::<Int64Array>()?
                 .values(),
         )
+    }
+
+    /// One integer cell, at whatever width it arrived in, widened to i64.
+    /// `None` when the column is absent or not an integer, the row is past
+    /// the end, or the value is NULL.
+    ///
+    /// The width is DuckDB's choice, not the schema's: it emits the
+    /// narrowest type that fits, so `row_depth` — a small computed
+    /// integer — comes back `Int32` while a declared `i64` column comes
+    /// back `Int64`. Matching only `Int64` made every real result's depth
+    /// unreadable while every fixture built on `Int64Array` passed.
+    pub fn i64_value(&self, name: &str, row: usize) -> Option<i64> {
+        use arrow::array::PrimitiveArray;
+        use arrow::datatypes::{
+            Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+        };
+        let arr = self.column(name)?;
+
+        macro_rules! read_at_width {
+            ($t:ty) => {
+                if let Some(a) = arr.as_any().downcast_ref::<PrimitiveArray<$t>>() {
+                    if row >= a.len() || a.is_null(row) {
+                        return None;
+                    }
+                    return i64::try_from(a.value(row)).ok();
+                }
+            };
+        }
+        read_at_width!(Int64Type);
+        read_at_width!(Int32Type);
+        read_at_width!(Int16Type);
+        read_at_width!(Int8Type);
+        read_at_width!(UInt32Type);
+        read_at_width!(UInt16Type);
+        read_at_width!(UInt8Type);
+        None
     }
 
     /// Strings are returned as the Arrow array: offsets make a `&[&str]`
@@ -185,15 +338,27 @@ impl Snapshot {
     /// A dictionary-encoded dimension column: per-row codes plus the
     /// shared value dictionary. The renderer compares and formats on the
     /// codes rather than the strings (spec §7.2).
-    pub fn dict_column(&self, name: &str) -> Option<(&[u8], &StringArray)> {
+    ///
+    /// Both key widths are matched, because the width is a property of the
+    /// data rather than the schema: DuckDB sizes an ENUM's key to its
+    /// vocabulary, UInt8 up to 255 values and UInt16 above (verified: 200
+    /// → UInt8, 300 → UInt16). Matching only UInt8 made every dimension
+    /// with a real underlying list fall through this *and* `str_column`
+    /// and render blank.
+    ///
+    /// The codes carry no null bitmap, so a rolled-up cell is an arbitrary
+    /// code here. Use [`Self::dict_value`] to read one cell for display.
+    pub fn dict_column(&self, name: &str) -> Option<(DictCodes<'_>, &StringArray)> {
         use arrow::array::DictionaryArray;
-        use arrow::datatypes::UInt8Type;
-        let arr = self
-            .column(name)?
-            .as_any()
-            .downcast_ref::<DictionaryArray<UInt8Type>>()?;
-        let values = arr.values().as_any().downcast_ref::<StringArray>()?;
-        Some((arr.keys().values(), values))
+        use arrow::datatypes::{UInt8Type, UInt16Type};
+        let arr = self.column(name)?;
+        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
+            let values = d.values().as_any().downcast_ref::<StringArray>()?;
+            return Some((DictCodes::U8(d.keys().values()), values));
+        }
+        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?;
+        let values = d.values().as_any().downcast_ref::<StringArray>()?;
+        Some((DictCodes::U16(d.keys().values()), values))
     }
 
     /// One string cell, or `None` when the column is absent, the value is
@@ -210,10 +375,38 @@ impl Snapshot {
     /// One dictionary-encoded cell, resolved to its string. The codes are
     /// what comparisons and grouping should use (spec §7.2); this is for
     /// display.
+    ///
+    /// `None` for a NULL cell. The key array's null bitmap is the only
+    /// thing distinguishing "this row has no value for this dimension"
+    /// from dictionary entry 0 — read through the raw codes instead and
+    /// the grand-total row, which belongs to no book, displays a real book
+    /// name.
     pub fn dict_value(&self, name: &str, row: usize) -> Option<&str> {
-        let (codes, dict) = self.dict_column(name)?;
-        let code = *codes.get(row)? as usize;
-        (code < dict.len() && !dict.is_null(code)).then(|| dict.value(code))
+        use arrow::array::DictionaryArray;
+        use arrow::datatypes::{UInt8Type, UInt16Type};
+        let arr = self.column(name)?;
+        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
+            return dictionary_cell(d, row);
+        }
+        dictionary_cell(
+            arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?,
+            row,
+        )
+    }
+
+    /// One dimension cell as text, whatever encoding it arrived in.
+    ///
+    /// A column's encoding depends on the *era*, not only on the schema:
+    /// the live path interns dimensions as DuckDB ENUMs and gets
+    /// dictionary-encoded columns back, while an as-of read skips the
+    /// interning and produces plain strings (§6.5). `ColumnMeta` does not
+    /// record which, so a caller that picks an accessor by column name
+    /// reads a value in one era and `None` in the other, with no signal
+    /// that anything changed. Anything rendering a dimension should come
+    /// through here rather than choose for itself.
+    pub fn text_value(&self, name: &str, row: usize) -> Option<&str> {
+        self.dict_value(name, row)
+            .or_else(|| self.str_value(name, row))
     }
 
     /// How many grouping columns are present on this row — 0 is the grand
@@ -221,7 +414,7 @@ impl Snapshot {
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
     /// with how deep the query was told to materialize.
     pub fn depth_of_row(&self, row: usize) -> Option<usize> {
-        let depth = *self.i64_column("row_depth")?.get(row)?;
+        let depth = self.i64_value("row_depth", row)?;
         usize::try_from(depth)
             .ok()
             .filter(|d| *d <= self.grouping_len)
@@ -234,6 +427,61 @@ pub enum TestColumn {
     F64(Vec<Option<f64>>),
     I64(Vec<i64>),
     Str(Vec<Option<&'static str>>),
+    /// Dictionary-encoded, the shape a live ENUM column arrives in. The
+    /// key width follows DuckDB's own rule — UInt8 up to 255 distinct
+    /// values, UInt16 above — so a fixture that crosses the cliff
+    /// exercises what a real underlying list does.
+    Dict(Vec<Option<String>>),
+}
+
+/// Build a dictionary column the way DuckDB would: distinct values in
+/// first-seen order, keys sized to the vocabulary, NULL cells carrying a
+/// cleared key bit rather than a code.
+#[cfg(any(test, feature = "test-support"))]
+fn dictionary_fixture(
+    cells: &[Option<String>],
+) -> (arrow::datatypes::DataType, arrow::array::ArrayRef) {
+    use arrow::array::{ArrayRef, DictionaryArray, UInt8Array, UInt16Array};
+    use arrow::datatypes::{DataType, UInt8Type, UInt16Type};
+    use std::sync::Arc;
+
+    let mut distinct: Vec<&str> = Vec::new();
+    for c in cells.iter().flatten() {
+        if !distinct.contains(&c.as_str()) {
+            distinct.push(c.as_str());
+        }
+    }
+    let values = Arc::new(StringArray::from(distinct.clone()));
+    let code_of = |s: &str| {
+        distinct
+            .iter()
+            .position(|d| *d == s)
+            .expect("every non-null cell is interned above")
+    };
+
+    if distinct.len() <= u8::MAX as usize {
+        let keys: UInt8Array = cells
+            .iter()
+            .map(|c| c.as_deref().map(|s| code_of(s) as u8))
+            .collect();
+        (
+            DataType::Dictionary(Box::new(DataType::UInt8), Box::new(DataType::Utf8)),
+            Arc::new(
+                DictionaryArray::<UInt8Type>::try_new(keys, values).expect("fixture dictionary"),
+            ) as ArrayRef,
+        )
+    } else {
+        let keys: UInt16Array = cells
+            .iter()
+            .map(|c| c.as_deref().map(|s| code_of(s) as u16))
+            .collect();
+        (
+            DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
+            Arc::new(
+                DictionaryArray::<UInt16Type>::try_new(keys, values).expect("fixture dictionary"),
+            ) as ArrayRef,
+        )
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -249,27 +497,20 @@ impl Snapshot {
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
 
-        let fields: Vec<Field> = columns
+        let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns
             .iter()
             .map(|(meta, values)| {
-                let ty = match values {
-                    TestColumn::F64(_) => DataType::Float64,
-                    TestColumn::I64(_) => DataType::Int64,
-                    TestColumn::Str(_) => DataType::Utf8,
+                let (ty, array): (DataType, ArrayRef) = match values {
+                    TestColumn::F64(v) => {
+                        (DataType::Float64, Arc::new(Float64Array::from(v.clone())))
+                    }
+                    TestColumn::I64(v) => (DataType::Int64, Arc::new(Int64Array::from(v.clone()))),
+                    TestColumn::Str(v) => (DataType::Utf8, Arc::new(StringArray::from(v.clone()))),
+                    TestColumn::Dict(v) => dictionary_fixture(v),
                 };
-                Field::new(&meta.name, ty, true)
+                (Field::new(&meta.name, ty, true), array)
             })
-            .collect();
-        let arrays: Vec<ArrayRef> = columns
-            .iter()
-            .map(|(_, values)| -> ArrayRef {
-                match values {
-                    TestColumn::F64(v) => Arc::new(Float64Array::from(v.clone())),
-                    TestColumn::I64(v) => Arc::new(Int64Array::from(v.clone())),
-                    TestColumn::Str(v) => Arc::new(StringArray::from(v.clone())),
-                }
-            })
-            .collect();
+            .unzip();
         let meta = columns.into_iter().map(|(m, _)| m).collect();
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .expect("fixture columns must be the same length");
@@ -351,6 +592,58 @@ mod tests {
         let s = snapshot();
         assert!(s.f64_column("nonesuch").is_none());
         assert!(s.f64_column("book").is_none(), "wrong type must not panic");
+        assert!(s.f64_value("nonesuch", 0).is_none());
+        assert!(
+            s.f64_value("book", 0).is_none(),
+            "wrong type must not panic"
+        );
+    }
+
+    #[test]
+    fn a_null_measure_reads_as_none_not_zero() {
+        // The compiler blanks a measure where it is NonAttributable
+        // (§6.3). Arrow stores that as a cleared null bit over an
+        // arbitrary payload, so the distinction lives in the bitmap and
+        // nowhere else.
+        let s = Snapshot::for_tests(
+            vec![(
+                ColumnMeta {
+                    name: "cross_gamma".into(),
+                    attribution_by_depth: vec![Attribution::NonAttributable, Attribution::Additive],
+                    scope_semantics: ScopeSemantics::Direct,
+                },
+                TestColumn::F64(vec![None, Some(0.0), Some(2.5)]),
+            )],
+            1,
+        );
+        assert_eq!(s.f64_value("cross_gamma", 0), None, "NULL is not 0.0");
+        assert_eq!(
+            s.f64_value("cross_gamma", 1),
+            Some(0.0),
+            "a real zero is still a number"
+        );
+        assert_eq!(s.f64_value("cross_gamma", 2), Some(2.5));
+        assert_eq!(s.f64_value("cross_gamma", 99), None, "past the end");
+    }
+
+    #[test]
+    fn the_raw_value_buffer_cannot_express_the_null_that_f64_value_reports() {
+        // Pins *why* f64_value has to exist: delete it and route a
+        // renderer back through f64_column, and this is the value it sees
+        // for a deliberately blanked cell.
+        let s = Snapshot::for_tests(
+            vec![(
+                ColumnMeta {
+                    name: "cross_gamma".into(),
+                    attribution_by_depth: vec![Attribution::NonAttributable],
+                    scope_semantics: ScopeSemantics::Direct,
+                },
+                TestColumn::F64(vec![None]),
+            )],
+            1,
+        );
+        assert_eq!(s.f64_column("cross_gamma").unwrap()[0], 0.0);
+        assert_eq!(s.f64_value("cross_gamma", 0), None);
     }
 
     #[test]
@@ -370,6 +663,143 @@ mod tests {
             Attribution::Additive
         );
         assert!(s.meta("nonesuch").is_none());
+    }
+
+    fn dim(name: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+        }
+    }
+
+    #[test]
+    fn depth_is_read_at_whatever_integer_width_it_arrives_in() {
+        // DuckDB emits the narrowest integer that fits, and `row_depth` is
+        // small, so a real result carries Int32. Every fixture here built
+        // it as Int64, so `depth_of_row` returned None for every row of
+        // every real query and nothing noticed — a renderer treats that as
+        // depth 0 and reads the wrong attribution for the whole tree.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_depth", DataType::Int32, true),
+            Field::new("wide", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::Int32Array::from(vec![Some(0), Some(2), None])),
+                Arc::new(Int64Array::from(vec![Some(7), Some(8), Some(9)])),
+            ],
+        )
+        .unwrap();
+        let s = Snapshot::from_batches(
+            vec![batch],
+            vec![dim("row_depth"), dim("wide")],
+            2,
+            Provenance::default(),
+        )
+        .unwrap();
+
+        assert_eq!(s.depth_of_row(0), Some(0));
+        assert_eq!(s.depth_of_row(1), Some(2));
+        assert_eq!(s.depth_of_row(2), None, "a NULL depth is not depth 0");
+        assert_eq!(s.i64_value("row_depth", 1), Some(2), "Int32 is readable");
+        assert_eq!(s.i64_value("wide", 0), Some(7), "Int64 still is");
+        assert_eq!(
+            s.i64_column("row_depth"),
+            None,
+            "the zero-copy slice is Int64-only, which is why i64_value exists"
+        );
+    }
+
+    #[test]
+    fn a_rolled_up_dimension_cell_is_none_not_the_first_dictionary_entry() {
+        // The grand total belongs to no book. The key array's null bitmap
+        // is the only thing saying so — the code underneath it is
+        // arbitrary, and reading it directly names a real book.
+        let s = Snapshot::for_tests(
+            vec![(
+                dim("book"),
+                TestColumn::Dict(vec![Some("BK000".into()), None]),
+            )],
+            1,
+        );
+        assert_eq!(s.dict_value("book", 0), Some("BK000"));
+        assert_eq!(s.dict_value("book", 1), None, "the total carries no book");
+        assert_eq!(s.dict_value("book", 99), None, "past the end");
+    }
+
+    #[test]
+    fn a_dimension_past_the_255_value_cliff_reads_at_either_width() {
+        // Above 255 distinct values the keys widen to UInt16. Matching
+        // only UInt8 made such a column fall through dict_column *and*
+        // str_column and render blank.
+        let wide: Vec<Option<String>> = (0..300).map(|i| Some(format!("U{i:04}"))).collect();
+        let narrow: Vec<Option<String>> = (0..200).map(|i| Some(format!("U{i:04}"))).collect();
+
+        let s = Snapshot::for_tests(vec![(dim("underlying_ref"), TestColumn::Dict(wide))], 1);
+        assert_eq!(s.dict_value("underlying_ref", 299), Some("U0299"));
+        assert!(matches!(
+            s.dict_column("underlying_ref").unwrap().0,
+            DictCodes::U16(_)
+        ));
+
+        let s = Snapshot::for_tests(vec![(dim("underlying_ref"), TestColumn::Dict(narrow))], 1);
+        assert_eq!(s.dict_value("underlying_ref", 199), Some("U0199"));
+        assert!(matches!(
+            s.dict_column("underlying_ref").unwrap().0,
+            DictCodes::U8(_)
+        ));
+    }
+
+    #[test]
+    fn a_dimension_reads_the_same_under_either_era_encoding() {
+        // Live interns dimensions as ENUMs; an as-of read does not. The
+        // column type therefore depends on the era while ColumnMeta does
+        // not record it, so a renderer must not choose an accessor itself.
+        let live = Snapshot::for_tests(
+            vec![(
+                dim("book"),
+                TestColumn::Dict(vec![Some("BK000".into()), None]),
+            )],
+            1,
+        );
+        let historical = Snapshot::for_tests(
+            vec![(dim("book"), TestColumn::Str(vec![Some("BK000"), None]))],
+            1,
+        );
+        for (era, s) in [("live", &live), ("as-of", &historical)] {
+            assert_eq!(s.text_value("book", 0), Some("BK000"), "{era}");
+            assert_eq!(s.text_value("book", 1), None, "{era}: rolled up");
+            assert_eq!(s.text_value("book", 99), None, "{era}: past the end");
+        }
+    }
+
+    #[test]
+    fn dictionary_batches_concatenate_at_either_key_width() {
+        // The concat path special-cased UInt8. A wide dimension arriving
+        // as several 2048-row batches has to survive it too.
+        for distinct in [200usize, 300] {
+            let cells: Vec<Option<String>> =
+                (0..distinct).map(|i| Some(format!("U{i:04}"))).collect();
+            let (ty, array) = dictionary_fixture(&cells);
+            let schema = Arc::new(Schema::new(vec![Field::new("underlying_ref", ty, true)]));
+            let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+            let s = Snapshot::from_batches(
+                vec![batch.clone(), batch],
+                vec![dim("underlying_ref")],
+                1,
+                Provenance::default(),
+            )
+            .unwrap();
+            assert_eq!(s.rows(), distinct * 2, "{distinct}: both batches");
+            let last = distinct * 2 - 1;
+            assert_eq!(
+                s.dict_value("underlying_ref", last),
+                Some(format!("U{:04}", distinct - 1).as_str()),
+                "{distinct}: the second batch's last value"
+            );
+        }
     }
 
     #[test]
