@@ -1,2 +1,7 @@
 /target
 .claude/worktrees/
+
+# A separate checkout that happens to live here, not part of this
+# workspace. Ignored so `git add -A` cannot commit it as an embedded
+# repository — which it silently did once.
+/gpuchart/
