@@ -3,6 +3,35 @@
 Work that Phase 2b deliberately left undone, scoped for a branch to be
 taken **before** the blotter. Written 2026-08-31 at `9c03941`.
 
+## Status (2026-08-31, branch `worktree-phase-3-prerequisites`)
+
+**The three blockers are done, and so is all of §2.** Still open: §3
+(`gen_id` sequence), §4 (validation wiring), and every §5 item except the
+`ORDER BY` one. Those are unchanged and still worth doing.
+
+Two things this branch found that were not in the list below:
+
+- **`depth_of_row` returned `None` for every real query result.** DuckDB
+  emits the narrowest integer that fits, so `row_depth` arrives as
+  `Int32`, and `i64_column` only matched `Int64`. The probe does
+  `depth_of_row(row).unwrap_or(0)`, so every row was treated as the grand
+  total and read `attribution_by_depth[0]` — the `NonAttributable` and
+  `DeterminedNonAdditive` markers were wrong for the whole tree. Invisible
+  because every fixture built depth with `TestColumn::I64`. Fixed with
+  `i64_value`, which reads any width. **This is the same class as §1: an
+  accessor tested against a fixture rather than against what DuckDB
+  produces. Assume there are more, and check any accessor that names a
+  concrete Arrow type.**
+- **The comment on `concat_preserving_dictionaries` was wrong.** It
+  claimed arrow's `concat` appends dictionaries and overflows the 8-bit
+  key space. Measured at arrow 58.4.0 it unifies them, and where the union
+  genuinely will not fit it returns an error rather than corrupting. The
+  fast path is an optimization, not a correctness guard; the comment now
+  says so and records the measurement.
+
+The mutation harness was corrupting the source tree and is fixed —
+see the note at the end of this file before running it.
+
 Phase 2b was five review rounds of correctness work on the *query* path.
 Everything below is the *read* path — how a `Snapshot` is consumed — plus
 two durability items. None of it blocks Phase 2b, and all of it blocks a
@@ -34,13 +63,33 @@ items — is real but does not stop the blotter being built correctly. Fix
 them when the surrounding code is already open.
 
 **Before starting any of it:** run `zsh scripts/mutation-check.sh` to
-confirm the 27 existing entries still pass, and add an entry for each
+confirm the existing entries still pass, and add an entry for each
 behaviour you change. Five review rounds of evidence say a green suite
 here proves very little on its own.
 
-## 1. `Snapshot` cannot express a null (blocks the blotter)
+**The harness had a defect that corrupted the source tree**, fixed on this
+branch. It backed every file up to a single hardcoded `/tmp/mutate.bak`
+and `set -e` aborted before restoring, so an interrupted run left its
+mutation in the tree — one was found uncommitted at the start of this
+branch — and two concurrent runs restored each other's backup over the
+wrong file, leaving one checkout with the contents of `scope_sql.rs`
+inside `compile.rs`. It now uses a per-run backup, a lock per checkout,
+and a trap that restores on any exit. `run_mutation` also takes the
+package whose tests should see the mutation (a `geode-core` mutation
+checked with `-p geode-data` reports "caught" on unrelated tests), and
+the script takes a substring to run a subset while iterating.
 
-`geode-core/src/snapshot.rs`.
+**Commit before you mutate.** Restoring a mutated file with `git checkout`
+discards uncommitted work along with it.
+
+## 1. `Snapshot` cannot express a null (blocks the blotter) — DONE
+
+`geode-core/src/snapshot.rs`. All four bullets fixed. `f64_value` and
+`text_value` are the accessors a renderer should use; `f64_column` and
+`i64_column` are documented as bulk paths that cannot express a NULL.
+The era question was answered by making the accessors era-agnostic
+(`text_value` reads a dimension under either encoding) rather than by
+recording the encoding in `ColumnMeta`.
 
 - **`f64_column` discards the null bitmap.** It returns `.values()`, the
   raw buffer. Every cell the compiler deliberately blanks —
@@ -64,9 +113,18 @@ here proves very little on its own.
   signal. Either record the encoding in `ColumnMeta` or make the
   accessors era-agnostic.
 
-## 2. The query pool is not panic-safe (blocks a long-running session)
+## 2. The query pool is not panic-safe (blocks a long-running session) — DONE
 
-`geode-data/src/query/pool.rs`.
+`geode-data/src/query/pool.rs`. Every bullet fixed. The pool takes the
+per-request work as a function pointer so a test can inject a panicking
+one; there is no SQL that makes `run_one` panic, and panic-safety is the
+property most worth testing here.
+
+Two of these have no mutation entry, deliberately: allocating the id
+under the lock, and holding the lock across the stale check and the send.
+Both are races whose mutation is only observable on an interleaving a
+test cannot force, so an entry would report `SURVIVED` whether the code
+is right or wrong. They are argued in comments at the site instead.
 
 - A panic in `run_one` leaves the view's entry in `running` forever,
   permanently wedging that view and silently shrinking the pool. Remove
@@ -111,9 +169,12 @@ silently groups by the wrong one; that should be a load-time diagnostic.
 
 ## 5. Smaller, but real
 
-- `compile.rs` emits no `ORDER BY` when `view.sort` is empty, so
-  "shallowest first, parent before children" does not actually hold —
-  the blotter's flatten walk assumes it.
+- ~~`compile.rs` emits no `ORDER BY` when `view.sort` is empty~~ **DONE.**
+  Depth now always leads the order, with the grouping columns following as
+  tie-breakers so the order is total — otherwise two runs of one query can
+  interleave a depth's rows differently and a tile that requeries on a
+  timer reshuffles rows that did not change. Measured before the fix: the
+  grand total came back at position 54 of 125.
 - Derived view columns are unconditionally `Additive`/`Direct`; an
   expression over a `NonAttributable` or `SemiJoined` measure carries a
   wrong marker. Take the meet of the referenced columns' attributions.
