@@ -277,6 +277,13 @@ impl Snapshot {
         (row < values.len() && !values.is_null(row)).then(|| values.value(row))
     }
 
+    /// Zero-copy over the whole column, **only when it is exactly Int64**.
+    ///
+    /// DuckDB picks the narrowest integer that fits, so a computed column
+    /// often arrives narrower: `row_depth` is `Int32`. Use
+    /// [`Self::i64_value`] unless the width is known, or this returns
+    /// `None` for a column that is plainly an integer. Carries no null
+    /// bitmap, for the same reason [`Self::f64_column`] does not.
     pub fn i64_column(&self, name: &str) -> Option<&[i64]> {
         Some(
             self.column(name)?
@@ -284,6 +291,42 @@ impl Snapshot {
                 .downcast_ref::<Int64Array>()?
                 .values(),
         )
+    }
+
+    /// One integer cell, at whatever width it arrived in, widened to i64.
+    /// `None` when the column is absent or not an integer, the row is past
+    /// the end, or the value is NULL.
+    ///
+    /// The width is DuckDB's choice, not the schema's: it emits the
+    /// narrowest type that fits, so `row_depth` — a small computed
+    /// integer — comes back `Int32` while a declared `i64` column comes
+    /// back `Int64`. Matching only `Int64` made every real result's depth
+    /// unreadable while every fixture built on `Int64Array` passed.
+    pub fn i64_value(&self, name: &str, row: usize) -> Option<i64> {
+        use arrow::array::PrimitiveArray;
+        use arrow::datatypes::{
+            Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+        };
+        let arr = self.column(name)?;
+
+        macro_rules! read_at_width {
+            ($t:ty) => {
+                if let Some(a) = arr.as_any().downcast_ref::<PrimitiveArray<$t>>() {
+                    if row >= a.len() || a.is_null(row) {
+                        return None;
+                    }
+                    return i64::try_from(a.value(row)).ok();
+                }
+            };
+        }
+        read_at_width!(Int64Type);
+        read_at_width!(Int32Type);
+        read_at_width!(Int16Type);
+        read_at_width!(Int8Type);
+        read_at_width!(UInt32Type);
+        read_at_width!(UInt16Type);
+        read_at_width!(UInt8Type);
+        None
     }
 
     /// Strings are returned as the Arrow array: offsets make a `&[&str]`
@@ -371,7 +414,7 @@ impl Snapshot {
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
     /// with how deep the query was told to materialize.
     pub fn depth_of_row(&self, row: usize) -> Option<usize> {
-        let depth = *self.i64_column("row_depth")?.get(row)?;
+        let depth = self.i64_value("row_depth", row)?;
         usize::try_from(depth)
             .ok()
             .filter(|d| *d <= self.grouping_len)
@@ -628,6 +671,45 @@ mod tests {
             attribution_by_depth: vec![Attribution::Additive; 2],
             scope_semantics: ScopeSemantics::Direct,
         }
+    }
+
+    #[test]
+    fn depth_is_read_at_whatever_integer_width_it_arrives_in() {
+        // DuckDB emits the narrowest integer that fits, and `row_depth` is
+        // small, so a real result carries Int32. Every fixture here built
+        // it as Int64, so `depth_of_row` returned None for every row of
+        // every real query and nothing noticed — a renderer treats that as
+        // depth 0 and reads the wrong attribution for the whole tree.
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("row_depth", DataType::Int32, true),
+            Field::new("wide", DataType::Int64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(arrow::array::Int32Array::from(vec![Some(0), Some(2), None])),
+                Arc::new(Int64Array::from(vec![Some(7), Some(8), Some(9)])),
+            ],
+        )
+        .unwrap();
+        let s = Snapshot::from_batches(
+            vec![batch],
+            vec![dim("row_depth"), dim("wide")],
+            2,
+            Provenance::default(),
+        )
+        .unwrap();
+
+        assert_eq!(s.depth_of_row(0), Some(0));
+        assert_eq!(s.depth_of_row(1), Some(2));
+        assert_eq!(s.depth_of_row(2), None, "a NULL depth is not depth 0");
+        assert_eq!(s.i64_value("row_depth", 1), Some(2), "Int32 is readable");
+        assert_eq!(s.i64_value("wide", 0), Some(7), "Int64 still is");
+        assert_eq!(
+            s.i64_column("row_depth"),
+            None,
+            "the zero-copy slice is Int64-only, which is why i64_value exists"
+        );
     }
 
     #[test]

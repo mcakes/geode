@@ -1980,6 +1980,93 @@ kind = "measure"
     }
 
     #[test]
+    fn a_blanked_cross_gamma_is_still_blank_after_the_snapshot_boundary() {
+        // The companion to the test above, and the gap between them was
+        // the defect. That one proves the *compiler* emits NULL, reading
+        // through DuckDB's own row API. This one proves a module can still
+        // tell, reading through `Snapshot` — which is the only way a
+        // module ever sees a result. `f64_column` returns the raw Arrow
+        // value buffer, so the cell §6.3 deliberately blanked arrived as a
+        // confident 0.0: the rule was implemented in the compiler and
+        // discarded one layer up, with every compiler test still green.
+        use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
+
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let batches: Vec<_> = stmt
+            .query_arrow(duckdb::params_from_iter(q.params.iter()))
+            .unwrap()
+            .collect();
+        let meta: Vec<ColumnMeta> = q
+            .columns
+            .iter()
+            .map(|c| ColumnMeta {
+                name: c.name.clone(),
+                attribution_by_depth: c.attribution_by_depth.clone(),
+                scope_semantics: c.scope_semantics.clone(),
+            })
+            .collect();
+        // DuckDB emits `row_depth` as Int32, not Int64. Pinned here
+        // because the whole test turns on the snapshot being able to read
+        // it: matching only Int64 made depth_of_row return None for every
+        // real result while every Int64-based fixture passed.
+        assert_eq!(
+            format!(
+                "{:?}",
+                batches[0]
+                    .schema()
+                    .field_with_name("row_depth")
+                    .unwrap()
+                    .data_type()
+            ),
+            "Int32"
+        );
+        let snap =
+            Snapshot::from_batches(batches, meta, v.grouping.len(), Provenance::default()).unwrap();
+
+        let mut blanked = 0;
+        for row in 0..snap.rows() {
+            let depth = snap.depth_of_row(row).expect("every row carries a depth");
+            match snap.f64_value("cross_gamma02", row) {
+                None => {
+                    assert!(
+                        depth >= 2,
+                        "row {row} at depth {depth} is blank but should carry the pair total"
+                    );
+                    blanked += 1;
+                }
+                Some(v) => {
+                    assert!(
+                        depth < 2,
+                        "row {row} at depth {depth} reads {v} where §6.3 blanked it"
+                    );
+                    assert_eq!(v, 3.0, "row {row}");
+                }
+            }
+        }
+        assert!(
+            blanked >= 4,
+            "the fixture must actually contain blanked rows, or this asserts nothing: {blanked}"
+        );
+    }
+
+    #[test]
     fn a_measure_predicate_is_evaluated_at_the_measures_own_grain() {
         // `delta01 > 5` from position grain: the probe has to be the
         // underlying table, where the column is. Probing the spine's

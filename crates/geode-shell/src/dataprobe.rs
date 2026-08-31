@@ -73,8 +73,10 @@ fn cell_text(snap: &Snapshot, column: &str, row: usize) -> Option<String> {
     if snap.f64_column(column).is_some() {
         return snap.f64_value(column, row).map(|v| format!("{v:.2}"));
     }
-    if let Some(values) = snap.i64_column(column) {
-        return values.get(row).map(|v| v.to_string());
+    // Also per-cell, and width-agnostic: DuckDB emits the narrowest
+    // integer that fits, so `row_depth` arrives as Int32 rather than Int64.
+    if let Some(v) = snap.i64_value(column, row) {
+        return Some(v.to_string());
     }
     // Dimension columns come back dictionary-encoded on the live path and
     // as plain strings under as-of (spec §6.5, §7.2). `text_value` reads

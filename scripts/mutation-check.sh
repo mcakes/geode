@@ -325,6 +325,18 @@ run_mutation "probe: a blanked cell renders blank, not 0.00" \
   'return snap.f64_column(column)?.get(row).map(|v| format!("{v:.2}"));' \
   geode-shell
 
+run_mutation "snapshot: depth reads at DuckDB's own integer width" \
+  crates/geode-core/src/snapshot.rs \
+  '        read_at_width!(Int64Type);
+        read_at_width!(Int32Type);' \
+  '        read_at_width!(Int64Type);' \
+  geode-core
+
+run_mutation "snapshot: depth reads at DuckDB's own width, end to end" \
+  crates/geode-core/src/snapshot.rs \
+  '        let depth = self.i64_value("row_depth", row)?;' \
+  '        let depth = *self.i64_column("row_depth")?.get(row)?;'
+
 run_mutation "snapshot: a rolled-up dimension cell is null" \
   crates/geode-core/src/snapshot.rs \
   'if row >= d.len() || d.is_null(row) {' \
