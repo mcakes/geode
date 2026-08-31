@@ -237,8 +237,18 @@ mod tests {
     fn a_tie_on_source_time_resolves_to_the_newest_gen_id_every_time() {
         // A corrected republish keeps its source time (§4.4), so two
         // generations of one partition share an instant. Without a
-        // tiebreak the window function's pick was whichever row came
-        // back first — both were observed across twenty runs.
+        // tiebreak the window function's pick is whichever row came back
+        // first.
+        //
+        // Eight tied generations, not two, and the winner is the one
+        // inserted *first*. The loop below is nearly free as a detector on
+        // its own: the plan is deterministic within a process, so twenty
+        // iterations sample the same answer twenty times rather than
+        // twenty times independently. What makes this catch the missing
+        // tiebreak is the fixture — an unordered pick takes the scan's
+        // first row, which here is the lowest `gen_id`, so the wrong
+        // answer is wrong every time instead of half the time. Measured:
+        // with two rows the mutation survived two runs in three.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         store
@@ -249,7 +259,13 @@ mod tests {
                      source_time timestamp with time zone);
                  insert into risk_snapshot_position_archive values
                    ('BK000', 'b', 1, '2026-08-30T07:00:00Z'),
-                   ('BK000', 'b', 2, '2026-08-30T07:00:00Z');",
+                   ('BK000', 'b', 2, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 3, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 4, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 5, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 6, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 7, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 8, '2026-08-30T07:00:00Z');",
             )
             .unwrap();
         for _ in 0..20 {
@@ -260,7 +276,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(gens.len(), 1);
-            assert_eq!(gens[0].gen_id, 2, "the correction wins, deterministically");
+            assert_eq!(gens[0].gen_id, 8, "the correction wins, deterministically");
         }
     }
 

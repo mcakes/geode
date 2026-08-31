@@ -14,8 +14,18 @@
 # vocabulary, and treat a SURVIVED line as a missing test rather than a
 # curiosity.
 #
-# Two entries (the source-time tie-breaks) are caught probabilistically:
-# the defect is nondeterminism, and the tests loop twenty times.
+# The two source-time tie-break entries were described as "caught
+# probabilistically, because the tests loop twenty times". Measured, that
+# reasoning was wrong: the query plan is deterministic within a process,
+# so twenty iterations sample one answer twenty times rather than twenty
+# times independently. The as-of entry survived two runs in three.
+#
+# What fixes it is the fixture, not the loop. Eight tied generations
+# instead of two, with the winner inserted first, makes an unordered pick
+# land on the wrong row every time rather than half the time: 4/4 caught
+# after, 1/3 before. The retention entry measured 3/3 as it stood and was
+# left alone. Neither is probabilistic now — treat a SURVIVED on either as
+# a real finding.
 #
 # This script edits tracked source files in place and restores them
 # afterwards, so it takes three precautions.
