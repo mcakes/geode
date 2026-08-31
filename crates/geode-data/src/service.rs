@@ -109,14 +109,14 @@ impl DataService {
         for dataset in &compiled.stalest_input {
             // A historical result must not be labelled with today's
             // freshness. `dataset_as_of` reads the live catalog and
-            // `next_gen_id` is the newest generation in the database, so
+            // `latest_gen_id` is the newest generation in the database, so
             // both describe *now* — reporting them beside an as-of result
             // inverts the very rule §5.4 exists for.
             let freshness = match &as_of {
                 AsOf::Live => Freshness {
                     dataset: dataset.clone(),
                     as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
-                    generation: catalog.next_gen_id()?.saturating_sub(1),
+                    generation: catalog.latest_gen_id()?,
                 },
                 AsOf::At(_) => Freshness {
                     dataset: dataset.clone(),

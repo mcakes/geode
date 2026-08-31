@@ -140,7 +140,10 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // 3. Split by grain, deduplicating coarse measures and canonicalizing
     // pairs; collect any disagreements.
     let catalog = Catalog::new(conn);
-    let gen_id = catalog.next_gen_id()?;
+    // Reserved, not peeked: this id is stamped onto the published rows
+    // before the catalog row exists, and if the record below never happens
+    // the id must still be spent rather than handed to the next load.
+    let gen_id = catalog.reserve_gen_id()?;
     // Reserve the file id up front so the source_file_id stamped onto every
     // data row is the same id the catalog entry gets below. Assigning them
     // independently would break every provenance join.

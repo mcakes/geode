@@ -184,6 +184,18 @@ run_mutation "provenance: stalest partition, not newest" \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
+# ---- generation id allocation (spec §4.3)
+
+run_mutation "catalog: a gen_id is reserved, not peeked" \
+  crates/geode-data/src/store/catalog.rs \
+  "        let sql = \"select nextval('file_generations_gen_id')\";" \
+  '        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";'
+
+run_mutation "catalog: the gen_id sequence starts above existing generations" \
+  crates/geode-data/src/store/catalog.rs \
+  'let start = self.latest_gen_id()? + 1;' \
+  'let start = 1;'
+
 # ---- the grain vocabulary (spec §3.3, §6.3)
 
 run_mutation "vocabulary: pair grain does not carry the underlying dimension" \
