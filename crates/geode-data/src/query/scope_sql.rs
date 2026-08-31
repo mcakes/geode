@@ -163,11 +163,27 @@ pub fn compile_scope(
     if let Some(expr) = &scope.expression {
         let mut expr_params = Vec::new();
         let rendered = render_expr(expr, &mut expr_params, dims)?;
-        // Against the *base* column: a derived dimension over a key column
-        // is a direct predicate, and treating it as finer would route it
-        // through a pointless self-semi-join and badge the result
-        // "positions that have…" when it is nothing of the kind.
-        let is_finer = |c: &str| !grain.key_columns().contains(&dims.base_column(c));
+        // "Finer" means the column lives at a finer grain — not merely
+        // that it is absent from this grain's *key*. A measure or
+        // attribute declared at this grain is on this very table, so it
+        // is a direct predicate; routing it through a semi-join badges
+        // the result "positions that have…" when it is nothing of the
+        // kind, and leaves the column as an unqualified outer reference
+        // that would silently rebind if the probe grain ever carried a
+        // column of the same name.
+        let is_finer = |c: &str| {
+            let base = dims.base_column(c);
+            if grain.key_columns().contains(&base) {
+                return false;
+            }
+            // Declared at this grain — a measure or attribute of it.
+            match ds.column(base).and_then(|col| col.grain()) {
+                Some(g) => g != grain,
+                // Not declared at any grain (a plain dimension), so it is
+                // finer exactly when it is not a key column here.
+                None => true,
+            }
+        };
         let mentions_finer = expr.columns().iter().any(|c| is_finer(c));
         if mentions_finer {
             for c in expr.columns() {

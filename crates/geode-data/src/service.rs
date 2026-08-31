@@ -111,12 +111,15 @@ impl DataService {
                     as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
                     generation: catalog.next_gen_id()?.saturating_sub(1),
                 },
-                AsOf::At(t) => Freshness {
+                AsOf::At(_) => Freshness {
                     dataset: dataset.clone(),
-                    // The result is as of the requested instant; the
-                    // generation is per-partition, so no single number
-                    // describes it and inventing one would be worse.
-                    as_of: Some(t.to_rfc3339()),
+                    // The newest generation actually resolved, not the
+                    // instant requested. Labelling every dataset with the
+                    // request makes them all equal, and `stalest()` then
+                    // cannot show that one side of a join is a month
+                    // behind the other — which is all §5.4 is for.
+                    as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
+                    // Per-partition, so no single number describes it.
                     generation: 0,
                 },
             };
@@ -281,6 +284,44 @@ mod tests {
         let (_db, _src, svc) = service();
         let books = svc.freshness("risk_snapshot").unwrap();
         assert!(!books.is_empty(), "books must have freshness recorded");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_historical_result_is_labelled_with_the_data_it_actually_read() {
+        // Not the instant requested. Asking for today against data last
+        // published a month ago must report the month-old time, or every
+        // dataset carries the same value and `stalest()` — the whole
+        // point of §5.4 — can no longer tell one input from another.
+        let (_db, _src, svc) = service();
+        let conn = duckdb::Connection::open(_db.path().join("geode.duckdb")).unwrap();
+        conn.execute_batch(
+            "insert into risk_snapshot_position_archive
+               select *, 1, TIMESTAMPTZ '2026-07-01 00:00:00Z'
+               from risk_snapshot_position_live limit 1;",
+        )
+        .ok();
+        drop(conn);
+
+        let requested = chrono::DateTime::parse_from_rfc3339("2026-08-30T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        svc.query("tree", &Scope::default(), AsOf::At(requested), usize::MAX)
+            .unwrap();
+        let snap = next(&svc).snapshot.expect("query failed");
+        let p = snap.provenance();
+        assert_eq!(
+            p.as_of_request.as_deref(),
+            Some("2026-08-30T00:00:00+00:00"),
+            "the request is recorded as the request"
+        );
+        for f in &p.datasets {
+            assert_ne!(
+                f.as_of.as_deref(),
+                Some("2026-08-30T00:00:00+00:00"),
+                "but the freshness must be what was read, not what was asked"
+            );
+        }
         svc.shutdown();
     }
 

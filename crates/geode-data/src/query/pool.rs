@@ -254,6 +254,7 @@ mod tests {
             })
             .collect(),
             stalest_input: Vec::new(),
+            resolved_as_of: Default::default(),
         }
     }
 

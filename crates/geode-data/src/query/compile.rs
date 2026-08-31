@@ -37,6 +37,12 @@ pub struct CompiledQuery {
     /// stalest input (spec §5.4), and the caller cannot compute that
     /// without knowing which datasets were touched.
     pub stalest_input: Vec<String>,
+    /// For an as-of query, the newest generation actually resolved per
+    /// dataset. The *requested* instant is not the answer: asking for
+    /// today against data last published a month ago must report the
+    /// month-old time, or §5.4's stalest-input rule reports nothing at
+    /// all because every dataset carries the same requested value.
+    pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
 fn quoted(cols: &[String]) -> Vec<String> {
@@ -210,11 +216,30 @@ pub fn compile_view(
     })?;
     // Same statement shape, different tables (spec §6.5). Only the as-of
     // path pays for history; live carries no generation predicate at all.
+    // Every archive table the dataset has, not just the spine's. A
+    // generation is a file and a file publishes every grain, but a
+    // partition can be missing from one grain while present at another —
+    // resolving from one grain would drop those partitions from every
+    // grain's answer (see `resolve_generations`).
+    let archives_of = |dataset: &str, ds: &geode_core::schema::DatasetSpec| -> Vec<String> {
+        ds.grains()
+            .into_iter()
+            .map(|g| table_name(dataset, g, TableKind::Archive))
+            .collect()
+    };
+    let mut resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>> =
+        std::collections::BTreeMap::new();
     let (kind_for_joins, gen_pred) = match as_of {
         crate::query::as_of::AsOf::Live => (TableKind::Live, None),
         crate::query::as_of::AsOf::At(t) => {
-            let archive = table_name(&view.dataset, spine_grain, TableKind::Archive);
-            let gens = crate::query::as_of::resolve_generations(conn, &archive, *t)?;
+            let gens = crate::query::as_of::resolve_generations(
+                conn,
+                &archives_of(&view.dataset, ds),
+                *t,
+            )?;
+            if let Some(newest) = gens.iter().map(|g| g.source_time).max() {
+                resolved_as_of.insert(view.dataset.clone(), newest);
+            }
             (
                 TableKind::Archive,
                 Some(crate::query::as_of::generation_predicate(&gens)),
@@ -532,8 +557,16 @@ pub fn compile_view(
                 // Each dataset has its own generations, so the spine's
                 // predicate does not apply here. Without this a
                 // historical join reads every archived generation at once.
-                let archive = table_name(&join.dataset, joined_grain, TableKind::Archive);
-                let gens = crate::query::as_of::resolve_generations(conn, &archive, *t)?;
+                // Across all of the joined dataset's grains, for the same
+                // reason the spine resolves across all of its own.
+                let gens = crate::query::as_of::resolve_generations(
+                    conn,
+                    &archives_of(&join.dataset, joined_ds),
+                    *t,
+                )?;
+                if let Some(newest) = gens.iter().map(|g| g.source_time).max() {
+                    resolved_as_of.insert(join.dataset.clone(), newest);
+                }
                 Some(crate::query::as_of::generation_predicate(&gens))
             }
         };
@@ -633,6 +666,7 @@ pub fn compile_view(
         grouping: view.grouping.clone(),
         columns,
         stalest_input,
+        resolved_as_of,
     })
 }
 
@@ -1152,6 +1186,11 @@ kind = "measure"
                ('BK0','L0','P1','C', 200, 'b', 2, 2,
                 TIMESTAMPTZ '2026-08-10 00:00:00Z'),
                (NULL,'L0','P8','C', 50, 'b', 3, 1,
+                TIMESTAMPTZ '2026-08-01 00:00:00Z'),
+               -- A partition with history at the position grain and none
+               -- at the underlying grain: a cash-only book. Ordinary, and
+               -- invisible to a generation set resolved from one grain.
+               ('BK7','L7','P7','C', 900, 'cash', 4, 1,
                 TIMESTAMPTZ '2026-08-01 00:00:00Z');
              insert into risk_snapshot_underlying_archive values
                ('BK0','GONE','P1','C','I1','SPX', 40, 'b', 1, 1,
@@ -1229,8 +1268,183 @@ kind = "measure"
         let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
         let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
         assert_eq!(
-            total[1], "Some(150.0)",
-            "100 from BK0 plus 50 from the NULL-book partition: {rows:?}"
+            total[1], "Some(1050.0)",
+            "100 from BK0, 50 from the NULL-book partition, 900 from the \
+             cash-only one: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_partition_with_history_at_only_one_grain_is_not_dropped() {
+        // A generation is a file and a file publishes every grain, but a
+        // partition can exist at one grain and not another — a cash-only
+        // book has no underlying rows. Resolving the generation set from
+        // the spine grain alone deleted those partitions from every
+        // grain's answer, silently.
+        let (_d, store) = hostile_fixture();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+        // The spine is the underlying grain, which has no rows for the
+        // cash-only book — but its position-grain measure still belongs
+        // in the total.
+        let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(1050.0)",
+            "the cash-only book's 900 must be in the total: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_as_of_semi_join_filters_the_probe_by_generation() {
+        // The probe reads the archive, so without a generation predicate
+        // it sees *every* archived generation at once — a semi-join that
+        // matches on data the caller cannot see. The two archived
+        // generations differ in `underlying_ref`'s neighbourhood, so a
+        // probe that ignores generations admits the wrong one.
+        let (_d, store) = hostile_fixture();
+        store
+            .writer()
+            .execute_batch(
+                // Generation 2 (2026-08-10) introduces RUT; generation 1
+                // has only SPX. A query as of 08-05 must not see RUT.
+                // Same key as the gen-1 position row ('GONE'), so the
+                // only thing that can exclude it is the generation filter.
+                "insert into risk_snapshot_underlying_archive values
+                   ('BK0','GONE','P1','C','I1','RUT', 5, 'b', 2, 2,
+                    TIMESTAMPTZ '2026-08-10 00:00:00Z');",
+            )
+            .unwrap();
+
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["RUT".into()],
+            }],
+            ..Scope::default()
+        };
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "None",
+            "RUT did not exist yet at 08-05, so nothing qualifies: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_measure_predicate_is_direct_not_semi_joined() {
+        // "Not a key column at this grain" is not "finer". A measure
+        // declared at this grain is on this very table, so filtering on
+        // it is direct — badging it SemiJoined tells the trader
+        // "positions that have…" about a filter that is nothing of the
+        // kind, which inverts §6.3's attribution contract on screen.
+        let (_d, store) = fixture();
+        let ds = schema();
+        let sql = crate::query::scope_sql::compile_scope(
+            store.writer(),
+            &Scope {
+                expression: Some(geode_core::scope::parse_expr("daily_trading_pnl > 0.5").unwrap()),
+                ..Scope::default()
+            },
+            ds.dataset("risk_snapshot").unwrap(),
+            Grain::Position,
+            &DerivedDimensions::default(),
+            Grain::Underlying,
+            crate::query::scope_sql::Era::live(),
+        )
+        .unwrap();
+        assert_eq!(
+            sql.semantics,
+            ScopeSemantics::Direct,
+            "a measure at this grain is a direct filter: {}",
+            sql.predicate
+        );
+        assert!(
+            !sql.predicate.contains("exists"),
+            "and needs no semi-join: {}",
+            sql.predicate
+        );
+    }
+
+    #[test]
+    fn a_derived_dimension_predicate_is_direct_not_semi_joined() {
+        // Same rule through the derived-dimension path: `desk` resolves
+        // to `book`, which is a key column here, so it is direct.
+        let (_d, store) = fixture();
+        let ds = schema();
+        let sql = crate::query::scope_sql::compile_scope(
+            store.writer(),
+            &Scope {
+                expression: Some(geode_core::scope::parse_expr("desk = 'EU'").unwrap()),
+                ..Scope::default()
+            },
+            ds.dataset("risk_snapshot").unwrap(),
+            Grain::Position,
+            &desks(),
+            Grain::Underlying,
+            crate::query::scope_sql::Era::live(),
+        )
+        .unwrap();
+        assert_eq!(sql.semantics, ScopeSemantics::Direct, "{}", sql.predicate);
+        assert!(sql.predicate.contains("\"book\""), "{}", sql.predicate);
+    }
+
+    #[test]
+    fn excluding_an_unmapped_derived_value_keeps_everything() {
+        // `desk != 'NOWHERE'` excludes nothing, because no book maps to
+        // it. The negated-empty branch must yield `true`, not `false` —
+        // the difference between the whole desk and an empty screen.
+        let (_d, store) = fixture();
+        let ds = schema();
+        let compile = |text: &str| {
+            crate::query::scope_sql::compile_scope(
+                store.writer(),
+                &Scope {
+                    expression: Some(geode_core::scope::parse_expr(text).unwrap()),
+                    ..Scope::default()
+                },
+                ds.dataset("risk_snapshot").unwrap(),
+                Grain::Position,
+                &desks(),
+                Grain::Underlying,
+                crate::query::scope_sql::Era::live(),
+            )
+            .unwrap()
+            .predicate
+        };
+        assert!(
+            compile("desk != 'NOWHERE'").contains("true"),
+            "excluding nothing keeps everything: {}",
+            compile("desk != 'NOWHERE'")
+        );
+        assert!(
+            compile("desk = 'NOWHERE'").contains("false"),
+            "selecting nothing keeps nothing: {}",
+            compile("desk = 'NOWHERE'")
         );
     }
 
