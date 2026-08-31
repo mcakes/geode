@@ -8269,9 +8269,9 @@ mod tests {
 
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(14.0),
-            "sanity: with no [ui] font_size configured, medium (14px — one \
-             step below gpui's own 16px rem default, per the fontsize \
+            px(12.0),
+            "sanity: with no [ui] font_size configured, medium (12px — well \
+             below gpui's own 16px rem default, per the fontsize \
              module doc) must be in effect after the first render"
         );
 
@@ -8288,8 +8288,8 @@ mod tests {
         });
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(16.0),
-            "the render after set_font_size(Large) should apply 16px as the \
+            px(14.0),
+            "the render after set_font_size(Large) should apply 14px as the \
              window rem size"
         );
     }
@@ -8335,8 +8335,8 @@ mod tests {
         });
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(16.0),
-            "ctrl+= should have applied Large's 16px rem size"
+            px(14.0),
+            "ctrl+= should have applied Large's 14px rem size"
         );
 
         cx.simulate_keystrokes("ctrl-=");
@@ -8360,8 +8360,8 @@ mod tests {
         });
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(12.0),
-            "two decreases from Large should land on Small's 12px rem size"
+            px(10.0),
+            "two decreases from Large should land on Small's 10px rem size"
         );
     }
 
@@ -8395,8 +8395,8 @@ mod tests {
 
         assert_eq!(
             cx.update(|window, _cx| window.rem_size()),
-            px(12.0),
-            "[ui] font_size = \"small\" should render at a 12px rem size \
+            px(10.0),
+            "[ui] font_size = \"small\" should render at a 10px rem size \
              from the very first frame"
         );
     }
