@@ -159,12 +159,12 @@ run_mutation "as-of: predicate names the source time" \
   "and source_time = '{}'::timestamptz)" \
   "and '{}' is not null)"
 
-run_mutation "as-of: source-time tie breaks on gen_id (probabilistic)" \
+run_mutation "as-of: source-time tie breaks on gen_id" \
   crates/geode-data/src/query/as_of.rs \
   'order by source_time desc, gen_id desc' \
   'order by source_time desc'
 
-run_mutation "retention: source-time tie breaks on gen_id (probabilistic)" \
+run_mutation "retention: source-time tie breaks on gen_id" \
   crates/geode-data/src/store/retention.rs \
   'order by source_time desc, gen_id desc' \
   'order by source_time desc'
