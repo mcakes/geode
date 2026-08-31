@@ -1,0 +1,35 @@
+# The view the probe queries — it takes the first one declared.
+#
+# `lhu > underlying_ref > position_ref` across four measure grains is the
+# shape a blotter actually runs, and the one the requery benchmarks
+# measure (docs/perf.md). The probe bounds materialization to depth 2, so
+# the tree stays small enough to read.
+#
+# `cross_gamma02` is here on purpose. It is a pair-grain measure, so at
+# the underlying level it belongs to no single underlying and the
+# compiler emits NULL rather than a number (spec §6.3). Those cells must
+# paint blank; a "0.00" there is a quantity the data does not claim.
+
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu", "underlying_ref", "position_ref"]
+
+[[tree.columns]]
+name = "delta01"
+kind = "measure"
+
+[[tree.columns]]
+name = "gamma01"
+kind = "measure"
+
+[[tree.columns]]
+name = "cross_gamma02"
+kind = "measure"
+
+[[tree.columns]]
+name = "npv"
+kind = "measure"
+
+[[tree.columns]]
+name = "daily_trading_pnl"
+kind = "measure"

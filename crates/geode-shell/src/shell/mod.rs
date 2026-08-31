@@ -2673,6 +2673,19 @@ impl Render for ShellView {
                         .debug_selector(|| "tile-drag-ghost".to_string()),
                 )
             })
+            // The throwaway data probe (spec §7), painted above the tiles
+            // but *below* the palette, the modal and which-key.
+            //
+            // Unlike the perf overlay — small, top-right, and painted above
+            // everything so it can measure the layers it sits over — this
+            // panel is full-window and opaque. Painted last it covered the
+            // palette completely, so the one route to `data::toggle_probe`
+            // that does not need the keybinding was invisible: the palette
+            // was open and taking keys, and nothing on screen said so. A
+            // diagnostic must not be able to hide the way out of itself.
+            .when(self.data_probe, |el| {
+                el.child(crate::dataprobe::render(&self.probe, toolbar_height, cx))
+            })
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
@@ -2782,12 +2795,6 @@ impl Render for ShellView {
             // `perf_overlay`'s module doc for why that's deliberate).
             .when(self.perf_overlay, |el| {
                 el.child(perf_overlay::render(&self.perf, toolbar_height, cx))
-            })
-            // The throwaway data probe (spec §7), painted on the same
-            // overlay layer and under the same rules: no timer, no forced
-            // frames, repaints when a new snapshot notifies.
-            .when(self.data_probe, |el| {
-                el.child(crate::dataprobe::render(&self.probe, toolbar_height, cx))
             })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so

@@ -90,6 +90,33 @@ fn setup(config: &Config) -> Option<Setup> {
     // means there is nothing to probe. `dimensions` is optional — a
     // config with no derived dimensions is an ordinary config, not a
     // reason to disable the probe.
+    //
+    // Said out loud, because the silence was the whole problem: with
+    // GEODE_PROBE_DIR set and no datasets.toml, this returned `None`,
+    // `start` was never called, and the tile sat on "no query has returned
+    // yet" for the life of the session with nothing anywhere saying why.
+    let missing: Vec<&str> = ["datasets", "views"]
+        .into_iter()
+        .filter(|doc| config.doc(doc).is_none())
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "[probe] GEODE_PROBE_DIR is set but the config has no {}. \
+             The probe needs {} in GEODE_DESK_CONFIG (or the user config \
+             directory) and will stay idle without them.",
+            missing
+                .iter()
+                .map(|d| format!("`{d}`"))
+                .collect::<Vec<_>>()
+                .join(" or "),
+            missing
+                .iter()
+                .map(|d| format!("{d}.toml"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+        );
+        return None;
+    }
     let (schema, schema_warnings) = SchemaSpec::from_doc(config.doc("datasets")?);
     let (views, view_warnings) = ViewSpec::from_doc(config.doc("views")?);
     let (dimensions, dimension_warnings) = match config.doc("dimensions") {
@@ -104,7 +131,10 @@ fn setup(config: &Config) -> Option<Setup> {
         eprintln!("[probe] warning: {warning}");
     }
 
-    let view = views.first()?;
+    let Some(view) = views.first() else {
+        eprintln!("[probe] views.toml declares no views, so there is nothing to query");
+        return None;
+    };
     let dataset = view.dataset.clone();
     if schema.dataset(&dataset).is_none() {
         eprintln!(
