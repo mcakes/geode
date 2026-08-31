@@ -17,26 +17,90 @@
 # Two entries (the source-time tie-breaks) are caught probabilistically:
 # the defect is nondeterminism, and the tests loop twenty times.
 #
+# This script edits tracked source files in place and restores them
+# afterwards, so it takes three precautions.
+#
+#   * The backup path is unique per run. A single shared /tmp path let two
+#     concurrent runs restore each other's backup over the wrong file, and
+#     one checkout ended up with the contents of scope_sql.rs inside
+#     compile.rs.
+#   * A lock directory serialises runs against the same checkout, because
+#     two runs mutating the same files cannot both be meaningful anyway.
+#   * A trap restores the file in flight however the script exits, so an
+#     interrupt or a stale anchor cannot leave a mutation in the tree. An
+#     earlier abort did exactly that, and the mutation was found committed
+#     to a working tree days later.
+#
 # Usage: zsh scripts/mutation-check.sh   (from the repo root)
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
+# One run at a time per checkout. mkdir is atomic, which is the whole
+# requirement, and it needs no flock binary.
+lock="$(git rev-parse --git-dir)/mutation-check.lock"
+if ! mkdir "$lock" 2>/dev/null; then
+  echo "another mutation-check is running in this checkout ($lock)" >&2
+  echo "if that is stale: rmdir $lock" >&2
+  exit 1
+fi
+
+bak="$(mktemp -t mutate-bak)"
+log="$(mktemp -t mutate-log)"
+in_flight=""
+
+# Restore whatever is mutated right now, however we leave.
+restore() {
+  if [[ -n "$in_flight" ]]; then
+    cp "$bak" "$in_flight"
+    in_flight=""
+  fi
+}
+cleanup() {
+  restore
+  rm -f "$bak" "$log"
+  rmdir "$lock" 2>/dev/null || true
+}
+# A signal handler that merely returns lets the script carry on to the next
+# mutation, which is not what anyone pressing ctrl-C means. Each signal
+# handler restores and then exits; EXIT alone would not stop the run.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
+
+# run_mutation <name> <file> <from> <to> [package]
+#
+# `package` is the crate whose lib tests should see the mutation, and
+# defaults to geode-data. It matters: a mutation in geode-core guarded only
+# by a geode-core test is invisible to `-p geode-data`, so the entry would
+# report "caught" on the strength of unrelated tests, or "SURVIVED" while a
+# perfectly good test sits one crate away. Name the crate that holds the
+# test, not the crate that holds the code.
 run_mutation() {
-  local name="$1" file="$2" from="$3" to="$4"
-  cp "$file" /tmp/mutate.bak
-  python3 - "$file" "$from" "$to" <<'PY'
+  local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}"
+  cp "$file" "$bak"
+  in_flight="$file"
+  local rc=0
+  python3 - "$file" "$from" "$to" <<'PY' || rc=$?
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
 if sys.argv[2] not in s:
     print("ANCHOR-MISSING"); sys.exit(3)
 p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
 PY
-  if cargo test -p geode-data --lib >/tmp/mutate.log 2>&1; then
+  if (( rc != 0 )); then
+    # A stale anchor is a finding in its own right: the mutation no longer
+    # names live code. It is not a reason to abort mid-run with the tree
+    # half-mutated.
+    echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
+    restore
+    return 0
+  fi
+  if cargo test -p "$pkg" --lib >"$log" 2>&1; then
     echo "SURVIVED  $name  <-- no test sees this"
   else
     echo "caught    $name"
   fi
-  cp /tmp/mutate.bak "$file"
+  restore
 }
 
 # ---- as-of routing (spec §6.5)
@@ -183,3 +247,17 @@ run_mutation "ingest: the bookless partition is published" \
   crates/geode-data/src/ingest/load.rs \
   '.chain((unattributed_rows > 0).then_some(None))' \
   '.chain(None)'
+
+# ---- the snapshot read path (spec §6.6, §6.3)
+
+run_mutation "snapshot: a null measure is not zero" \
+  crates/geode-core/src/snapshot.rs \
+  '(row < values.len() && !values.is_null(row)).then(|| values.value(row))' \
+  '(row < values.len()).then(|| values.value(row))' \
+  geode-core
+
+run_mutation "probe: a blanked cell renders blank, not 0.00" \
+  crates/geode-shell/src/dataprobe.rs \
+  'return snap.f64_value(column, row).map(|v| format!("{v:.2}"));' \
+  'return snap.f64_column(column)?.get(row).map(|v| format!("{v:.2}"));' \
+  geode-shell

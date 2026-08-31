@@ -67,8 +67,11 @@ impl ProbeState {
 /// measure is blanked outright where it is `NonAttributable`, so "no text"
 /// is a normal outcome rather than a lookup failure.
 fn cell_text(snap: &Snapshot, column: &str, row: usize) -> Option<String> {
-    if let Some(values) = snap.f64_column(column) {
-        return values.get(row).map(|v| format!("{v:.2}"));
+    // Per-cell, not over `f64_column`: the raw value buffer cannot express
+    // a NULL, so a measure blanked as `NonAttributable` would render as
+    // "0.00" — a number the data does not claim (spec §6.3).
+    if snap.f64_column(column).is_some() {
+        return snap.f64_value(column, row).map(|v| format!("{v:.2}"));
     }
     if let Some(values) = snap.i64_column(column) {
         return values.get(row).map(|v| v.to_string());
@@ -319,6 +322,32 @@ mod tests {
         let s = snapshot();
         assert_eq!(cell_text(&s, "nonesuch", 0), None);
         assert_eq!(cell_text(&s, "delta01", 99), None);
+    }
+
+    #[test]
+    fn a_measure_blanked_as_non_attributable_renders_blank_not_zero() {
+        // Cross gamma at an underlying-level grouping belongs to no single
+        // underlying, so the compiler emits NULL rather than a number
+        // (spec §6.3). Rendering that as "0.00" states a quantity the data
+        // does not claim — and the row beside it carries a real 0.0, which
+        // must still render.
+        let s = Snapshot::for_tests(
+            vec![(
+                meta(
+                    "cross_gamma",
+                    vec![Attribution::NonAttributable, Attribution::Additive],
+                    ScopeSemantics::Direct,
+                ),
+                TestColumn::F64(vec![None, Some(0.0)]),
+            )],
+            1,
+        );
+        assert_eq!(cell_text(&s, "cross_gamma", 0), None, "NULL is not 0.00");
+        assert_eq!(
+            cell_text(&s, "cross_gamma", 1).as_deref(),
+            Some("0.00"),
+            "a real zero still renders"
+        );
     }
 
     #[test]

@@ -158,6 +158,14 @@ impl Snapshot {
 
     /// Zero-copy over the whole column. `None` when absent or not f64 —
     /// never a panic, because a view can name a column the data lacks.
+    ///
+    /// **This is the raw value buffer and cannot express a NULL.** Arrow
+    /// stores a blanked cell as an arbitrary value (in practice 0.0) plus a
+    /// cleared bit in a separate null bitmap, which this slice does not
+    /// carry. Use it for bulk numeric work where the caller has already
+    /// established the column has no nulls; anything rendering a cell must
+    /// go through [`Self::f64_value`], or a cell the compiler deliberately
+    /// blanked will read back as a real zero.
     pub fn f64_column(&self, name: &str) -> Option<&[f64]> {
         Some(
             self.column(name)?
@@ -165,6 +173,20 @@ impl Snapshot {
                 .downcast_ref::<Float64Array>()?
                 .values(),
         )
+    }
+
+    /// One numeric cell. `None` when the column is absent or not f64, the
+    /// row is past the end, **or the value is NULL**.
+    ///
+    /// NULL and 0.0 are different answers and the difference is the whole
+    /// of §6.3. A measure is blanked outright where it is
+    /// `NonAttributable` — cross gamma at an underlying-level grouping
+    /// belongs to no single underlying — and a renderer that cannot tell
+    /// the two apart prints a confident zero where the honest answer is
+    /// "this number does not belong to this row".
+    pub fn f64_value(&self, name: &str, row: usize) -> Option<f64> {
+        let values = self.column(name)?.as_any().downcast_ref::<Float64Array>()?;
+        (row < values.len() && !values.is_null(row)).then(|| values.value(row))
     }
 
     pub fn i64_column(&self, name: &str) -> Option<&[i64]> {
@@ -351,6 +373,55 @@ mod tests {
         let s = snapshot();
         assert!(s.f64_column("nonesuch").is_none());
         assert!(s.f64_column("book").is_none(), "wrong type must not panic");
+        assert!(s.f64_value("nonesuch", 0).is_none());
+        assert!(s.f64_value("book", 0).is_none(), "wrong type must not panic");
+    }
+
+    #[test]
+    fn a_null_measure_reads_as_none_not_zero() {
+        // The compiler blanks a measure where it is NonAttributable
+        // (§6.3). Arrow stores that as a cleared null bit over an
+        // arbitrary payload, so the distinction lives in the bitmap and
+        // nowhere else.
+        let s = Snapshot::for_tests(
+            vec![(
+                ColumnMeta {
+                    name: "cross_gamma".into(),
+                    attribution_by_depth: vec![Attribution::NonAttributable, Attribution::Additive],
+                    scope_semantics: ScopeSemantics::Direct,
+                },
+                TestColumn::F64(vec![None, Some(0.0), Some(2.5)]),
+            )],
+            1,
+        );
+        assert_eq!(s.f64_value("cross_gamma", 0), None, "NULL is not 0.0");
+        assert_eq!(
+            s.f64_value("cross_gamma", 1),
+            Some(0.0),
+            "a real zero is still a number"
+        );
+        assert_eq!(s.f64_value("cross_gamma", 2), Some(2.5));
+        assert_eq!(s.f64_value("cross_gamma", 99), None, "past the end");
+    }
+
+    #[test]
+    fn the_raw_value_buffer_cannot_express_the_null_that_f64_value_reports() {
+        // Pins *why* f64_value has to exist: delete it and route a
+        // renderer back through f64_column, and this is the value it sees
+        // for a deliberately blanked cell.
+        let s = Snapshot::for_tests(
+            vec![(
+                ColumnMeta {
+                    name: "cross_gamma".into(),
+                    attribution_by_depth: vec![Attribution::NonAttributable],
+                    scope_semantics: ScopeSemantics::Direct,
+                },
+                TestColumn::F64(vec![None]),
+            )],
+            1,
+        );
+        assert_eq!(s.f64_column("cross_gamma").unwrap()[0], 0.0);
+        assert_eq!(s.f64_value("cross_gamma", 0), None);
     }
 
     #[test]
