@@ -70,12 +70,12 @@ fn keystrokes_drive_the_tiling_tree() {
             .is_some()
     );
 
-    // Move-tile is the direct ctrl+shift+arrow binding
-    // (ctrl+shift+left = workspace::move_left), same pipeline. (The builtin
+    // Move-tile is the direct ctrl+alt+arrow binding
+    // (ctrl+alt+left = workspace::move_left), same pipeline. (The builtin
     // keymap has no sequence bindings anymore; sequence matching itself is
     // covered by keymap_integration's desk-layer "g g" binding.)
     let layout_before = ws.active().tree().layout(Rect::UNIT);
-    press(&mut matcher, &mut ws, "ctrl+shift+left");
+    press(&mut matcher, &mut ws, "ctrl+alt+left");
     assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
 
     // mod+e: toggle the focused tile's parent split orientation — geometry

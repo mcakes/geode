@@ -219,7 +219,7 @@ impl Workspace {
         }
     }
 
-    /// Move-tile (`ctrl+shift+arrows`), region-aware (dock-trees task):
+    /// Move-tile (`ctrl+alt+arrows`), region-aware (dock-trees task):
     /// swap with the geometric neighbor within whichever tree holds focus
     /// — the main tree while `Main` is focused, the focused dock's own
     /// tree otherwise. A directional move never crosses regions: at the

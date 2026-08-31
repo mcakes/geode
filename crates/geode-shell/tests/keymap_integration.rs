@@ -57,9 +57,9 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
         matcher.press(&keymap, ks("mod+j"), &stack),
         MatchResult::Matched(ActionId("workspace::focus_down".into()))
     );
-    // Move-tile is the direct ctrl+shift+arrow binding.
+    // Move-tile is the direct ctrl+alt+arrow binding.
     assert_eq!(
-        matcher.press(&keymap, ks("ctrl+shift+down"), &stack),
+        matcher.press(&keymap, ks("ctrl+alt+down"), &stack),
         MatchResult::Matched(ActionId("workspace::move_down".into()))
     );
     // Desk-added sequence: pending, then match.

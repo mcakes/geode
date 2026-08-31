@@ -11,9 +11,10 @@ use geode_core::config::Config;
 /// the primary modifier, replacing the Phase 1c `ctrl+w h/j/k/l` chords).
 /// Not `ctrl+arrows`: macOS binds those to Mission Control/Spaces
 /// system-wide and swallows the events before any app sees them.
-/// Move-tile is `ctrl+shift+arrows` and resize is `shift+arrows` (user
-/// direction, retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window
-/// prefix and `shift+h/j/k/l`) — the builtin keymap now has no sequence
+/// Move-tile is `ctrl+alt+arrows` (user direction, superseding the earlier
+/// `ctrl+shift+arrows`) and resize is `shift+arrows` (user direction,
+/// retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window prefix and
+/// `shift+h/j/k/l`) — the builtin keymap now has no sequence
 /// bindings at all; sequences remain a first-class engine feature for
 /// desk/user layers. Splits follow vim's own mnemonics —
 /// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
@@ -38,9 +39,10 @@ use geode_core::config::Config;
 /// as the shifted character with the shift modifier *cleared* — a real
 /// `KeyDownEvent` for shift+[ arrives as key `{`, `shift: false`, so a
 /// `"ctrl+shift+["` binding would never match anything. (Letters are the
-/// opposite: a shifted letter stays the letter + shift modifier, so
-/// letter chords like `ctrl+shift+arrows`' letter analogs would be bound
-/// with the modifier spelled out.) The e2e dock tests dispatch `ctrl-{`
+/// opposite: a shifted letter stays the letter + shift modifier, so a
+/// shifted-letter chord would be bound with the modifier spelled out —
+/// as would a shifted *arrow*, which is why `shift+arrows` resize binds
+/// shift as a modifier.) The e2e dock tests dispatch `ctrl-{`
 /// through gpui's real pipeline to pin this shape.
 ///
 /// Close-tile is `ctrl+w` (user direction — the browser/vim close idiom;
@@ -53,10 +55,10 @@ context = "workspace"
 "mod+j" = "workspace::focus_down"
 "mod+k" = "workspace::focus_up"
 "mod+l" = "workspace::focus_right"
-"ctrl+shift+left" = "workspace::move_left"
-"ctrl+shift+down" = "workspace::move_down"
-"ctrl+shift+up" = "workspace::move_up"
-"ctrl+shift+right" = "workspace::move_right"
+"ctrl+alt+left" = "workspace::move_left"
+"ctrl+alt+down" = "workspace::move_down"
+"ctrl+alt+up" = "workspace::move_up"
+"ctrl+alt+right" = "workspace::move_right"
 "shift+left" = "workspace::resize_left"
 "shift+down" = "workspace::resize_down"
 "shift+up" = "workspace::resize_up"
