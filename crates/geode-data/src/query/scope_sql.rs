@@ -10,10 +10,13 @@
 //! stable regardless of selection size, so the prepared plan stays
 //! cacheable, which was the temp table's other reason for existing.
 //!
-//! A predicate naming a column that does not exist at the requested grain
-//! becomes a semi-join against the grain where it does, and the result is
-//! marked `SemiJoined`: "positions that have SPX risk" is not "the SPX
-//! share of the position" (spec §6.3).
+//! A predicate naming a column this grain's table does not carry is
+//! evaluated against the grain that does, as a membership test on the
+//! keys the two grains share. When those keys do not pin the other
+//! grain's entity the result is marked `SemiJoined`: "positions that have
+//! SPX risk" is not "the SPX share of the position" (spec §6.3). When they
+//! do — an instrument attribute tested from underlying grain — the
+//! predicate is functionally determined and stays `Direct`.
 
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
@@ -54,11 +57,171 @@ impl Era<'_> {
             generations: None,
         }
     }
+
+    /// The relation a query reads for one grain under this era.
+    ///
+    /// Live reads the live table and nothing else. As-of reads the archive
+    /// **and** live: the generation a partition holds *now* is in live and
+    /// nowhere else, so a query as of any moment after that generation was
+    /// published — including "as of an hour ago" for a book that refreshed
+    /// this morning — has to find it there. Reading the archive alone
+    /// answers such a query with the partition's *previous* generation, or
+    /// with nothing at all for a partition published only once, and says
+    /// nothing either way. The generation predicate is what keeps the two
+    /// sides from both contributing; live carries `gen_id` and
+    /// `source_time` precisely so it can be filtered the same way (§4.2).
+    pub fn relation(&self, dataset: &str, grain: Grain) -> String {
+        match self.kind {
+            TableKind::Live => table_name(dataset, grain, TableKind::Live),
+            TableKind::Archive => format!(
+                "(select * from {} union all select * from {})",
+                table_name(dataset, grain, TableKind::Archive),
+                table_name(dataset, grain, TableKind::Live)
+            ),
+        }
+    }
 }
 
-/// `probe` is the grain a finer-than-`grain` predicate is tested against.
-/// It must be a grain the dataset declares — only those have tables — so
-/// the caller passes the spine grain rather than assuming the finest.
+/// Whether `column` can be evaluated on `grain`'s own rows: a dimension
+/// key it carries, or a measure or attribute declared at it.
+fn evaluable_at(ds: &DatasetSpec, dims: &DerivedDimensions, grain: Grain, column: &str) -> bool {
+    let base = dims.base_column(column);
+    grain.dimension_key_columns().contains(&base)
+        || ds.column(base).and_then(|c| c.grain()) == Some(grain)
+}
+
+/// Where a clause over `columns` is evaluated when compiling at `grain`.
+///
+/// `Ok(None)` means on this grain's own rows. `Ok(Some(g))` names another
+/// declared grain that carries every column, to be reached by a
+/// membership test; the coarsest such grain is chosen because it is the
+/// smallest table. A clause no single grain can evaluate is an error at
+/// compile time rather than a binder error inside the pool: the caller
+/// can split it into top-level `and` terms, each of which routes alone.
+fn route(
+    ds: &DatasetSpec,
+    dims: &DerivedDimensions,
+    grain: Grain,
+    columns: &[&str],
+) -> Result<Option<Grain>, StoreError> {
+    let unknown = |column: &str, why: &str| StoreError::Sql {
+        statement: format!("scope predicate on '{column}'"),
+        source: duckdb::Error::InvalidParameterName(format!(
+            "'{column}' {why} in dataset '{}'",
+            ds.name
+        )),
+    };
+    for c in columns {
+        let base = dims.base_column(c);
+        let carried = Grain::ALL
+            .iter()
+            .any(|g| g.dimension_key_columns().contains(&base));
+        match ds.column(base) {
+            None if !carried => return Err(unknown(c, "is not a column")),
+            Some(col) if col.grain().is_none() && !carried => {
+                return Err(unknown(
+                    c,
+                    "is not carried as a dimension by any grain, so it cannot be scoped",
+                ));
+            }
+            _ => {}
+        }
+    }
+    if columns.iter().all(|c| evaluable_at(ds, dims, grain, c)) {
+        return Ok(None);
+    }
+    ds.grains()
+        .into_iter()
+        .find(|g| *g != grain && columns.iter().all(|c| evaluable_at(ds, dims, *g, c)))
+        .map(Some)
+        .ok_or_else(|| StoreError::Sql {
+            statement: format!("scope predicate on {columns:?}"),
+            source: duckdb::Error::InvalidParameterName(format!(
+                "no single grain of dataset '{}' carries every column in {columns:?}; \
+                 write predicates on columns of different grains as separate \
+                 top-level `and` terms",
+                ds.name
+            )),
+        })
+}
+
+/// The keys `grain` and `probe` share — the coarser one's dimension keys.
+fn shared_keys(grain: Grain, probe: Grain) -> Vec<&'static str> {
+    grain
+        .dimension_key_columns()
+        .iter()
+        .copied()
+        .filter(|k| probe.dimension_key_columns().contains(k))
+        .collect()
+}
+
+/// Whether reaching `probe` from `grain` is a membership test rather than
+/// a lookup: the shared keys do not pin the probe grain's entity, so the
+/// predicate says "has a row that…" rather than selecting the row itself.
+fn is_membership(grain: Grain, probe: Grain) -> bool {
+    let keys = shared_keys(grain, probe);
+    !probe.identity_columns().iter().all(|id| keys.contains(id))
+}
+
+/// `exists (…)` testing `inner` against `probe`'s rows for the same keys.
+///
+/// `is not distinct from`, not `=`: the key columns are matching rows of
+/// the *same* entity, so a NULL here is a real value on both sides rather
+/// than a rolled-up placeholder. Plain equality would make a position with
+/// no LHU fail its own semi-join, and the row would still be present
+/// carrying a coarse measure of NULL — visibly inconsistent rather than
+/// merely absent.
+///
+/// The probe reads the same era as its caller. Reading live from inside
+/// an as-of query mixes today's data into a historical answer — and does
+/// it silently, because the numbers still look like numbers (spec §6.5).
+fn membership(ds: &DatasetSpec, grain: Grain, probe: Grain, era: Era<'_>, inner: &str) -> String {
+    let join = shared_keys(grain, probe)
+        .iter()
+        .map(|k| format!("probe.\"{k}\" is not distinct from base.\"{k}\""))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    let mut terms = vec![join, inner.to_string()];
+    if let Some(generations) = era.generations {
+        terms.push(format!("({generations})"));
+    }
+    format!(
+        "exists (select 1 from {} probe where {})",
+        era.relation(&ds.name, probe),
+        terms.join(" and ")
+    )
+}
+
+/// `%text%` with LIKE's own wildcards escaped, so a trader typing `50_`
+/// or `100%` searches for those characters rather than for anything.
+/// Paired with `escape '\'` in the predicate.
+fn like_pattern(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('%');
+    for ch in text.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
+}
+
+/// Top-level `and` terms, each routed on its own so a scope mixing
+/// grains — `underlying_ref = 'SPX' and strike > 100` — compiles.
+fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+    match expr {
+        Expr::And(a, b) => {
+            let mut out = conjuncts(a);
+            out.extend(conjuncts(b));
+            out
+        }
+        other => vec![other],
+    }
+}
+
+/// Compile the scope for the rows of `grain`, under `era`.
 pub fn compile_scope(
     // Kept so the signature does not change when a predicate kind needs
     // the connection again; nothing does today.
@@ -67,19 +230,19 @@ pub fn compile_scope(
     ds: &DatasetSpec,
     grain: Grain,
     dims: &DerivedDimensions,
-    probe: Grain,
     era: Era<'_>,
 ) -> Result<ScopeSql, StoreError> {
+    let nothing = || ScopeSql {
+        predicate: "false".to_string(),
+        params: Vec::new(),
+        semantics: ScopeSemantics::Direct,
+    };
     // A contradiction selects nothing, and must say so in SQL. Returning
     // early matters: the contradicted dimension has already been dropped
     // from `dimensions`, so compiling the rest would produce a predicate
     // that is *wider* than either layer asked for (see `Scope::and_then`).
     if scope.impossible {
-        return Ok(ScopeSql {
-            predicate: "false".to_string(),
-            params: Vec::new(),
-            semantics: ScopeSemantics::Direct,
-        });
+        return Ok(nothing());
     }
 
     // Each clause carries its own bound values.
@@ -94,9 +257,47 @@ pub fn compile_scope(
     // the params fall out of the emission order rather than being
     // maintained in parallel with it.
     type Clause = (String, Vec<Value>);
-    let mut direct: Vec<Clause> = Vec::new();
-    let mut finer: Vec<Clause> = Vec::new();
-    let mut semi_dimensions: Vec<String> = Vec::new();
+    struct Routing {
+        /// Clauses evaluated on this grain's own rows, in source order.
+        direct: Vec<Clause>,
+        /// Clauses reached through another grain, in source order;
+        /// grouped by grain at emission so each probe is one `exists`.
+        probed: Vec<(Grain, Clause)>,
+        semi_dimensions: Vec<String>,
+    }
+    // Route one clause. The dimensions applied by membership are the
+    // columns this grain does not itself carry.
+    fn place(
+        r: &mut Routing,
+        ds: &DatasetSpec,
+        dims: &DerivedDimensions,
+        grain: Grain,
+        columns: &[&str],
+        clause: Clause,
+    ) -> Result<(), StoreError> {
+        match route(ds, dims, grain, columns)? {
+            None => r.direct.push(clause),
+            Some(probe) => {
+                if is_membership(grain, probe) {
+                    for c in columns {
+                        let base = dims.base_column(c);
+                        if !evaluable_at(ds, dims, grain, c)
+                            && !r.semi_dimensions.iter().any(|s| s == base)
+                        {
+                            r.semi_dimensions.push(base.to_string());
+                        }
+                    }
+                }
+                r.probed.push((probe, clause));
+            }
+        }
+        Ok(())
+    }
+    let mut r = Routing {
+        direct: Vec::new(),
+        probed: Vec::new(),
+        semi_dimensions: Vec::new(),
+    };
 
     // 1. Dimension selections: one bound varchar, split in SQL.
     for sel in &scope.dimensions {
@@ -122,124 +323,84 @@ pub fn compile_scope(
         if values.is_empty() {
             // Selected a derived value the map does not produce: nothing
             // can match, and saying so beats an empty `in ()`.
-            return Ok(ScopeSql {
-                predicate: "false".to_string(),
-                params: Vec::new(),
-                semantics: ScopeSemantics::Direct,
-            });
+            return Ok(nothing());
         }
         let clause = (
             format!("\"{base}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))"),
             vec![Value::Text(values.join(SELECTION_DELIMITER))],
         );
-        if grain.key_columns().contains(&base.as_str()) {
-            direct.push(clause);
-        } else {
-            finer.push(clause);
-            semi_dimensions.push(base);
-        }
+        place(&mut r, ds, dims, grain, &[sel.column.as_str()], clause)?;
     }
 
     // 2. Text filter: OR of ILIKE over declared textual columns.
+    //
+    // Each column is routed on its own, because the OR cannot be split:
+    // a textual column this grain does not carry becomes its own
+    // membership term inside the OR, and the whole filter is one direct
+    // clause. Leaving such columns out — the earlier choice — silently
+    // applied the filter to the fine-grained measures and not to the
+    // coarse ones on the same row, and marked nothing (spec §6.3).
     if let Some(text) = &scope.text {
-        let pattern = format!("%{text}%");
-        let mut terms = Vec::new();
-        let mut term_params = Vec::new();
+        let pattern = Value::Text(like_pattern(text));
+        let mut terms: Vec<String> = Vec::new();
+        let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
-            // Only columns present at this grain; a textual column from a
-            // finer grain would need its own semi-join, and the global
-            // text filter is not worth that complexity (spec §4.1).
-            if grain.key_columns().contains(&col.name.as_str()) {
-                terms.push(format!("\"{}\" ilike ?", col.name));
-                term_params.push(Value::Text(pattern.clone()));
-            }
-        }
-        if !terms.is_empty() {
-            direct.push((format!("({})", terms.join(" or ")), term_params));
-        }
-    }
-
-    // 3. Expression filter: AST lowered, literals bound.
-    if let Some(expr) = &scope.expression {
-        let mut expr_params = Vec::new();
-        let rendered = render_expr(expr, &mut expr_params, dims)?;
-        // "Finer" means the column lives at a finer grain — not merely
-        // that it is absent from this grain's *key*. A measure or
-        // attribute declared at this grain is on this very table, so it
-        // is a direct predicate; routing it through a semi-join badges
-        // the result "positions that have…" when it is nothing of the
-        // kind, and leaves the column as an unqualified outer reference
-        // that would silently rebind if the probe grain ever carried a
-        // column of the same name.
-        let is_finer = |c: &str| {
-            let base = dims.base_column(c);
-            if grain.key_columns().contains(&base) {
-                return false;
-            }
-            // Declared at this grain — a measure or attribute of it.
-            match ds.column(base).and_then(|col| col.grain()) {
-                Some(g) => g != grain,
-                // Not declared at any grain (a plain dimension), so it is
-                // finer exactly when it is not a key column here.
-                None => true,
-            }
-        };
-        let mentions_finer = expr.columns().iter().any(|c| is_finer(c));
-        if mentions_finer {
-            for c in expr.columns() {
-                let base = dims.base_column(c);
-                if is_finer(c) && !semi_dimensions.iter().any(|s| s == base) {
-                    semi_dimensions.push(base.to_string());
+            let name = col.name.as_str();
+            let test = format!("\"{name}\" ilike ? escape '\\'");
+            match route(ds, dims, grain, &[name])? {
+                None => terms.push(test),
+                Some(probe) => {
+                    if is_membership(grain, probe) && !r.semi_dimensions.iter().any(|s| s == name) {
+                        r.semi_dimensions.push(name.to_string());
+                    }
+                    terms.push(membership(ds, grain, probe, era, &test));
                 }
             }
-            finer.push((rendered, expr_params));
-        } else {
-            direct.push((rendered, expr_params));
+            term_params.push(pattern.clone());
+        }
+        if !terms.is_empty() {
+            r.direct
+                .push((format!("({})", terms.join(" or ")), term_params));
         }
     }
 
-    // Finer predicates apply as a membership test against the grain where
-    // those columns exist. The finest grain always carries every key
-    // column, so it is the safe target.
-    if !finer.is_empty() {
-        // `is not distinct from`, not `=`: the key columns are matching
-        // two rows of the *same* table, so a NULL here is a real value on
-        // both sides rather than a rolled-up placeholder. Plain equality
-        // would make a position with no LHU fail its own semi-join, and
-        // the row would still be present carrying a coarse measure of
-        // NULL — visibly inconsistent rather than merely absent.
-        let join = grain
-            .key_columns()
+    // 3. Expression filter: AST lowered, literals bound, one clause per
+    // top-level conjunct so each can be routed to the grain that carries
+    // its columns.
+    if let Some(expr) = &scope.expression {
+        for term in conjuncts(expr) {
+            let mut expr_params = Vec::new();
+            let rendered = render_expr(term, &mut expr_params, dims)?;
+            let columns = term.columns();
+            place(&mut r, ds, dims, grain, &columns, (rendered, expr_params))?;
+        }
+    }
+
+    // Probed clauses: one `exists` per grain, holding every clause routed
+    // there. The wrappers are appended after the direct clauses, so their
+    // values follow every direct clause's — which is exactly what carrying
+    // the values with the clause gives.
+    let Routing {
+        mut direct,
+        probed,
+        semi_dimensions,
+    } = r;
+    for probe in ds.grains() {
+        let mine: Vec<&Clause> = probed
             .iter()
-            .map(|k| format!("probe.\"{k}\" is not distinct from base.\"{k}\""))
+            .filter(|(g, _)| *g == probe)
+            .map(|(_, c)| c)
+            .collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let inner = mine
+            .iter()
+            .map(|(clause, _)| clause.clone())
             .collect::<Vec<_>>()
             .join(" and ");
-        // The probe must read the same era as its caller. Reading live
-        // from inside an as-of query mixes today's data into a historical
-        // answer — and does it silently, because the numbers still look
-        // like numbers (spec §6.5).
-        let mut where_terms = vec![
-            join,
-            finer
-                .iter()
-                .map(|(clause, _)| clause.clone())
-                .collect::<Vec<_>>()
-                .join(" and "),
-        ];
-        if let Some(generations) = era.generations {
-            where_terms.push(format!("({generations})"));
-        }
-        // The wrapper is appended last, so its values follow every direct
-        // clause's — which is exactly what carrying them together gives.
-        let finer_params: Vec<Value> = finer.iter().flat_map(|(_, p)| p.clone()).collect();
-        direct.push((
-            format!(
-                "exists (select 1 from {} probe where {})",
-                table_name(&ds.name, probe, era.kind),
-                where_terms.join(" and ")
-            ),
-            finer_params,
-        ));
+        let inner_params: Vec<Value> = mine.iter().flat_map(|(_, p)| p.clone()).collect();
+        direct.push((membership(ds, grain, probe, era, &inner), inner_params));
     }
 
     // One pass: the predicate and its values come out of the same
@@ -448,7 +609,6 @@ grain = "position"
             &dataset(),
             grain,
             &dims(),
-            Grain::UnderlyingPair,
             Era::live(),
         )
         .unwrap();
@@ -505,7 +665,6 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
-            Grain::UnderlyingPair,
             Era::live(),
         )
         .unwrap();
@@ -515,7 +674,6 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
-            Grain::UnderlyingPair,
             Era::live(),
         )
         .unwrap();
@@ -544,6 +702,196 @@ grain = "position"
         // lhu is not declared textual.
         assert!(!sql.predicate.contains("\"lhu\""), "{}", sql.predicate);
         assert_eq!(sql.params.len(), 2, "one bound pattern per textual column");
+    }
+
+    #[test]
+    fn the_text_filter_escapes_likes_own_wildcards() {
+        // `50_` must find `50_` and not `500`; `%` must find `%`.
+        let (dir, store) = store();
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_underlying_live(
+                     book varchar, lhu varchar, position_ref varchar,
+                     counterparty varchar, instrument_ref varchar,
+                     underlying_ref varchar, delta01 double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 insert into risk_underlying_live values
+                   ('BK50_','L','P1','C','I1','SPX', 1, 'b', 1, 1, now()),
+                   ('BK500','L','P2','C','I2','RUT', 10, 'b', 1, 1, now()),
+                   ('BK%','L','P3','C','I3','NDX', 100, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let total = |text: &str| -> f64 {
+            let sql = compile_scope(
+                store.writer(),
+                &Scope {
+                    text: Some(text.into()),
+                    ..Scope::default()
+                },
+                &dataset(),
+                Grain::Underlying,
+                &dims(),
+                Era::live(),
+            )
+            .unwrap();
+            store
+                .writer()
+                .query_row(
+                    &format!(
+                        "select coalesce(sum(delta01), 0) from risk_underlying_live where {}",
+                        sql.predicate
+                    ),
+                    duckdb::params_from_iter(sql.params.iter()),
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            total("50_"),
+            1.0,
+            "an underscore is a character, not a wildcard"
+        );
+        assert_eq!(total("%"), 100.0, "so is a percent sign");
+        assert_eq!(
+            total("BK5"),
+            11.0,
+            "and an ordinary prefix still matches broadly"
+        );
+        drop(dir);
+    }
+
+    #[test]
+    fn an_attribute_of_a_coarser_grain_is_a_lookup_not_a_membership_test() {
+        // `strike` is an instrument attribute. From underlying grain the
+        // shared keys include `instrument_ref`, which pins the instrument,
+        // so the predicate is functionally determined: Direct, through a
+        // probe of the instrument table. From position grain the keys do
+        // not name the instrument, so it is "positions that hold an
+        // instrument with…" — SemiJoined.
+        let mut ds = dataset();
+        ds.columns.push(geode_core::schema::ColumnSpec {
+            name: "strike".into(),
+            source_name: None,
+            ty: geode_core::schema::ColumnType::F64,
+            required: false,
+            textual: false,
+            role: geode_core::schema::ColumnRole::Attribute {
+                grain: Grain::Instrument,
+            },
+        });
+        let (dir, store) = store();
+        let scope = Scope {
+            expression: Some(parse_expr("strike > 100").unwrap()),
+            ..Scope::default()
+        };
+        let at = |grain: Grain| {
+            compile_scope(store.writer(), &scope, &ds, grain, &dims(), Era::live()).unwrap()
+        };
+        let fine = at(Grain::Underlying);
+        assert!(
+            fine.predicate.contains("from risk_instrument_live probe"),
+            "{}",
+            fine.predicate
+        );
+        assert!(
+            fine.predicate
+                .contains("probe.\"instrument_ref\" is not distinct from"),
+            "{}",
+            fine.predicate
+        );
+        assert_eq!(fine.semantics, ScopeSemantics::Direct);
+
+        let coarse = at(Grain::Position);
+        assert!(
+            !coarse.predicate.contains("instrument_ref"),
+            "{}",
+            coarse.predicate
+        );
+        assert_eq!(
+            coarse.semantics,
+            ScopeSemantics::SemiJoined {
+                dimensions: vec!["strike".into()]
+            }
+        );
+
+        let own = at(Grain::Instrument);
+        assert!(!own.predicate.contains("exists"), "{}", own.predicate);
+        drop(dir);
+    }
+
+    #[test]
+    fn conjuncts_of_different_grains_route_separately() {
+        // `underlying_ref = 'SPX' and book = 'BK000'` from position grain:
+        // the first needs the underlying table, the second is on this one.
+        // One clause per top-level `and`, each routed on its own.
+        let (dir, store) = store();
+        let scope = Scope {
+            expression: Some(parse_expr("underlying_ref = 'SPX' and book = 'BK000'").unwrap()),
+            ..Scope::default()
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &dataset(),
+            Grain::Position,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert_eq!(
+            sql.predicate.matches("exists").count(),
+            1,
+            "{}",
+            sql.predicate
+        );
+        assert!(
+            sql.predicate.starts_with("\"book\" = ?"),
+            "the direct term first: {}",
+            sql.predicate
+        );
+        assert_eq!(sql.params.len(), 2);
+        assert_eq!(
+            sql.semantics,
+            ScopeSemantics::SemiJoined {
+                dimensions: vec!["underlying_ref".into()]
+            }
+        );
+
+        // Inside one term the split is not possible, and an OR across
+        // grains has no single table to evaluate on: a loud error at
+        // compile time, not a binder error in the pool.
+        let mixed = Scope {
+            expression: Some(parse_expr("underlying_ref = 'SPX' or delta01 > 1").unwrap()),
+            ..Scope::default()
+        };
+        let ok = compile_scope(
+            store.writer(),
+            &mixed,
+            &dataset(),
+            Grain::Position,
+            &dims(),
+            Era::live(),
+        );
+        assert!(ok.is_ok(), "both columns live on the underlying table");
+        let unknown = Scope {
+            expression: Some(parse_expr("nosuch = 1").unwrap()),
+            ..Scope::default()
+        };
+        assert!(
+            compile_scope(
+                store.writer(),
+                &unknown,
+                &dataset(),
+                Grain::Position,
+                &dims(),
+                Era::live(),
+            )
+            .is_err(),
+            "an unknown column fails at compile time"
+        );
+        drop(dir);
     }
 
     #[test]
@@ -626,7 +974,6 @@ grain = "position"
             &dataset(),
             Grain::Underlying,
             &dims(),
-            Grain::UnderlyingPair,
             Era::live(),
         )
         .unwrap();

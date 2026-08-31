@@ -39,25 +39,37 @@ pub struct ResolvedGeneration {
 }
 
 /// The newest generation at or before `at`, for every partition that
-/// existed by then, across **all** of a dataset's archive tables.
+/// existed by then, across **all** of the tables a dataset's history
+/// lives in — every grain's archive *and* live.
 ///
-/// It must be all of them. A generation is a *file*, and one file
-/// publishes every grain under a single `gen_id` — but a partition can be
-/// absent from one grain's archive while present at another (a cash-only
-/// book has no underlying rows; a grain added later has no history at all
-/// while coarser grains have years). Resolving from a single grain and
-/// applying the result to every grain deletes those partitions from the
-/// answer silently, which is the same class of narrowing as matching a
-/// NULL book with `=`.
+/// It must be all of them, in both directions. A generation is a *file*,
+/// and one file publishes every grain under a single `gen_id` — but a
+/// partition can be absent from one grain's archive while present at
+/// another (a cash-only book has no underlying rows; a grain added later
+/// has no history at all while coarser grains have years). And the
+/// generation a partition holds *now* is in live and nowhere else: the
+/// publish transaction moves the outgoing generation to the archive, it
+/// does not copy the incoming one there (§4.3). Resolving from the archive
+/// alone answers "as of an hour ago" with this morning's *previous* file,
+/// and finds nothing at all for a partition published only once. Either
+/// omission narrows the answer silently, the same class of defect as
+/// matching a NULL book with `=`.
+///
+/// Ties on `source_time` break on `gen_id`, newest first. They are
+/// ordinary: a corrected republish keeps its source time (§4.4) and the
+/// generation it replaced goes to the archive with the same stamp, so the
+/// archive holds two generations of one partition at one instant. Without
+/// the tiebreak the window function's choice is whatever order the rows
+/// came back in, and `retention.rs` can keep the one this drops.
 pub fn resolve_generations(
     conn: &Connection,
-    archive_tables: &[String],
+    tables: &[String],
     at: DateTime<Utc>,
 ) -> Result<Vec<ResolvedGeneration>, StoreError> {
-    if archive_tables.is_empty() {
+    if tables.is_empty() {
         return Ok(Vec::new());
     }
-    let union = archive_tables
+    let union = tables
         .iter()
         .map(|t| format!("select distinct batch, book, gen_id, source_time from {t}"))
         .collect::<Vec<_>>()
@@ -66,7 +78,8 @@ pub fn resolve_generations(
         "select batch, book, gen_id, source_time from (
              select batch, book, gen_id, source_time,
                     row_number() over (
-                        partition by batch, book order by source_time desc
+                        partition by batch, book
+                        order by source_time desc, gen_id desc
                     ) as rn
              from ({union}) where source_time <= ?
          ) where rn = 1"
@@ -95,6 +108,13 @@ pub fn resolve_generations(
 /// A predicate selecting exactly those generations. Values come from the
 /// catalog, not from user input, so they are inlined as quoted literals;
 /// scope predicates, which do take user input, bind (spec §6.2).
+///
+/// A generation is named by `(batch, book, gen_id, source_time)`, not by
+/// `gen_id` alone. The relation this filters is archive-plus-live, and
+/// `gen_id` is allocated as `max + 1` over the catalog *before* the
+/// catalog row is written — a load that publishes and then fails to record
+/// leaves rows whose id the next load reuses. Naming the source time too
+/// means such a collision selects one generation rather than both.
 pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
     if generations.is_empty() {
         // Selecting nothing, not everything: a time before all history is
@@ -113,8 +133,10 @@ pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
                 None => "book is null".to_string(),
             };
             format!(
-                "(batch = '{}' and {book_term} and gen_id = {generation})",
+                "(batch = '{}' and {book_term} and gen_id = {generation} \
+                 and source_time = '{}'::timestamptz)",
                 batch.replace('\'', "''"),
+                g.source_time.to_rfc3339(),
             )
         })
         .collect::<Vec<_>>()
@@ -209,6 +231,76 @@ mod tests {
             ts("2026-08-30T10:00:00Z"),
         );
         assert!(err.is_err(), "an unreadable generation row must propagate");
+    }
+
+    #[test]
+    fn a_tie_on_source_time_resolves_to_the_newest_gen_id_every_time() {
+        // A corrected republish keeps its source time (§4.4), so two
+        // generations of one partition share an instant. Without a
+        // tiebreak the window function's pick was whichever row came
+        // back first — both were observed across twenty runs.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_snapshot_position_archive(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into risk_snapshot_position_archive values
+                   ('BK000', 'b', 1, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 2, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        for _ in 0..20 {
+            let gens = resolve_generations(
+                store.writer(),
+                &["risk_snapshot_position_archive".to_string()],
+                ts("2026-08-30T10:00:00Z"),
+            )
+            .unwrap();
+            assert_eq!(gens.len(), 1);
+            assert_eq!(gens[0].gen_id, 2, "the correction wins, deterministically");
+        }
+    }
+
+    #[test]
+    fn the_predicate_names_the_source_time_so_a_reused_gen_id_selects_one_generation() {
+        // `gen_id` is `max + 1` over the catalog, allocated before the
+        // catalog row is written: a publish that then fails to record
+        // leaves rows whose id the next load reuses. Same partition, same
+        // id, different instants — the predicate must pick one.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_snapshot_position_archive(
+                     book varchar, batch varchar, gen_id bigint, pnl double,
+                     source_time timestamp with time zone);
+                 insert into risk_snapshot_position_archive values
+                   ('BK000', 'b', 1, 100, '2026-08-30T07:00:00Z'),
+                   ('BK000', 'b', 1, 5, '2026-08-30T09:00:00Z');",
+            )
+            .unwrap();
+        let gens = resolve_generations(
+            store.writer(),
+            &["risk_snapshot_position_archive".to_string()],
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        let total: f64 = store
+            .writer()
+            .query_row(
+                &format!(
+                    "select sum(pnl) from risk_snapshot_position_archive where {}",
+                    generation_predicate(&gens)
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 5.0, "the 09:00 generation alone, not both");
     }
 
     #[test]

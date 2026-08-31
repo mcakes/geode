@@ -148,19 +148,26 @@ impl DataService {
         Catalog::new(&self.conn).book_freshness(dataset)
     }
 
-    /// How far back time travel can go, or `None` when nothing is
-    /// archived — never a fabricated time (spec §4.6).
+    /// How far back time travel can go, or `None` when nothing has ever
+    /// been published — never a fabricated time (spec §4.6).
+    ///
+    /// Over the archive *and* live: a partition published once has its
+    /// only generation in live, and as-of to any instant since then reads
+    /// it (`Era::relation`), so the bound starts at the oldest generation
+    /// anywhere rather than at the oldest one that has been superseded.
     pub fn as_of_bounds(&self, dataset: &str) -> Result<Option<DateTime<Utc>>, StoreError> {
         let Some(ds) = self.config.schema.dataset(dataset) else {
             return Ok(None);
         };
         let mut oldest: Option<DateTime<Utc>> = None;
-        for grain in ds.grains() {
-            let table = crate::store::ddl::table_name(
-                dataset,
-                grain,
+        let tables = ds.grains().into_iter().flat_map(|grain| {
+            [
                 crate::store::ddl::TableKind::Archive,
-            );
+                crate::store::ddl::TableKind::Live,
+            ]
+            .map(|kind| crate::store::ddl::table_name(dataset, grain, kind))
+        });
+        for table in tables {
             let sql = format!("select min(source_time) from {table}");
             let found: Option<DateTime<Utc>> = self
                 .conn
@@ -294,14 +301,21 @@ mod tests {
         // dataset carries the same value and `stalest()` — the whole
         // point of §5.4 — can no longer tell one input from another.
         let (_db, _src, svc) = service();
-        let conn = duckdb::Connection::open(_db.path().join("geode.duckdb")).unwrap();
-        conn.execute_batch(
-            "insert into risk_snapshot_position_archive
-               select *, 1, TIMESTAMPTZ '2026-07-01 00:00:00Z'
-               from risk_snapshot_position_live limit 1;",
-        )
-        .ok();
-        drop(conn);
+        // A month-old generation of a partition nothing else covers,
+        // written through the service's own store. An earlier version of
+        // this test opened a second `Connection` on the file — a separate
+        // database instance whose writes the service never saw — and
+        // `.ok()`ed an insert that failed anyway on its column count. It
+        // then passed against an empty archive, vacuously.
+        svc._store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_archive
+                   select * replace ('ghost' as batch, 99 as gen_id,
+                                     TIMESTAMPTZ '2026-07-01 00:00:00Z' as source_time)
+                   from risk_snapshot_position_live limit 1;",
+            )
+            .unwrap();
 
         let requested = chrono::DateTime::parse_from_rfc3339("2026-08-30T00:00:00Z")
             .unwrap()
@@ -315,22 +329,36 @@ mod tests {
             Some("2026-08-30T00:00:00+00:00"),
             "the request is recorded as the request"
         );
-        for f in &p.datasets {
-            assert_ne!(
-                f.as_of.as_deref(),
-                Some("2026-08-30T00:00:00+00:00"),
-                "but the freshness must be what was read, not what was asked"
-            );
-        }
+        assert_eq!(
+            p.datasets.len(),
+            1,
+            "one dataset, so the stalest input is unambiguous"
+        );
+        assert_eq!(
+            p.datasets[0].as_of.as_deref(),
+            Some("2026-07-01T00:00:00+00:00"),
+            "the freshness is the stalest partition read, not what was asked"
+        );
         svc.shutdown();
     }
 
     #[test]
-    fn as_of_bounds_are_none_when_nothing_is_archived() {
-        // A first load writes only to live, so there is no history yet —
-        // and the bound must say so rather than invent a time.
+    fn as_of_bounds_start_at_the_oldest_generation_anywhere() {
+        // A first load writes only to live — and that generation *is*
+        // readable as-of any instant since it was published, so the bound
+        // starts there rather than at the first superseded generation.
         let (_db, _src, svc) = service();
-        assert!(svc.as_of_bounds("risk_snapshot").unwrap().is_none());
+        let oldest_live = svc
+            .freshness("risk_snapshot")
+            .unwrap()
+            .into_iter()
+            .map(|(_, t)| t)
+            .min()
+            .expect("the fixture loaded something");
+        assert_eq!(
+            svc.as_of_bounds("risk_snapshot").unwrap(),
+            Some(oldest_live)
+        );
         assert!(svc.as_of_bounds("nonesuch").unwrap().is_none());
         svc.shutdown();
     }

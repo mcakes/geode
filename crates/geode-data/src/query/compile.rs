@@ -6,14 +6,14 @@
 //! requery budget; emitting one puts expand and collapse on the 8ms frame
 //! budget instead, because every level is already in the snapshot.
 
-use crate::query::scope_sql::compile_scope;
+use crate::query::scope_sql::{Era, compile_scope};
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::{Attribution, ScopeSemantics, attribution_of};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::schema::{Aggregate, ColumnRole, ColumnSpec, Grain, SchemaSpec};
+use geode_core::schema::{Aggregate, ColumnRole, ColumnSpec, DatasetSpec, Grain, SchemaSpec};
 use geode_core::scope::Scope;
 use geode_core::view::{ViewColumn, ViewSpec};
 
@@ -37,11 +37,13 @@ pub struct CompiledQuery {
     /// stalest input (spec §5.4), and the caller cannot compute that
     /// without knowing which datasets were touched.
     pub stalest_input: Vec<String>,
-    /// For an as-of query, the newest generation actually resolved per
-    /// dataset. The *requested* instant is not the answer: asking for
-    /// today against data last published a month ago must report the
-    /// month-old time, or §5.4's stalest-input rule reports nothing at
-    /// all because every dataset carries the same requested value.
+    /// For an as-of query, the *oldest* generation actually resolved per
+    /// dataset — the same stalest-input rule live freshness uses (§4.5: a
+    /// dataset's headline as-of is its oldest book). The *requested*
+    /// instant is not the answer: asking for today against data last
+    /// published a month ago must report the month-old time, or §5.4's
+    /// stalest-input rule reports nothing at all because every dataset
+    /// carries the same requested value.
     pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
 }
 
@@ -49,43 +51,33 @@ fn quoted(cols: &[String]) -> Vec<String> {
     cols.iter().map(|c| format!("\"{c}\"")).collect()
 }
 
-/// The finest declared grain whose key carries every grouping column.
-///
-/// It must be *declared* — `apply_schema` only creates tables for grains
-/// the dataset has measures or attributes at, so picking the finest grain
-/// unconditionally would name a table that does not exist. It must carry
-/// every grouping column, or it cannot produce the levels of the tree.
-fn spine_grain_for(
-    ds: &geode_core::schema::DatasetSpec,
-    view: &ViewSpec,
-    dims: &DerivedDimensions,
-) -> Option<Grain> {
-    ds.grains().into_iter().rev().find(|g| {
-        view.grouping
-            .iter()
-            .all(|col| g.key_columns().contains(&dims.base_column(col)))
+/// Whether `grain` carries every one of `columns` as a dimension —
+/// derived dimensions resolved to their source first.
+fn carries_all(grain: Grain, columns: &[String], dims: &DerivedDimensions) -> bool {
+    columns.iter().all(|col| {
+        grain
+            .dimension_key_columns()
+            .contains(&dims.base_column(col))
     })
 }
 
-/// `GROUPING SETS` covering depths `0..=max_depth` — the prefixes of the
-/// grouping tuple, and nothing deeper.
+/// The finest declared grain carrying every one of `columns`.
 ///
-/// A full `ROLLUP` materializes every level including the leaves, so a
-/// collapsed tree still pays for rows nobody is looking at: at 1M rows
-/// that is 398k rows produced to display 80 (`docs/perf.md`). It also
-/// makes the blotter's flatten walk — grouping snapshot rows by parent to
-/// build the visible row list gpui-component's `TableDelegate` indexes
-/// into — proportional to what was materialized rather than to what is on
-/// screen.
-///
-/// The caller materializes one level deeper than what is open, so a
-/// single-step expand is already in hand and only a deeper one requeries.
-fn grouping_sets(group_cols: &[String], max_depth: usize) -> String {
-    let depth = max_depth.min(group_cols.len());
-    let sets: Vec<String> = (0..=depth)
-        .map(|d| format!("({})", group_cols[..d].join(", ")))
-        .collect();
-    format!("grouping sets ({})", sets.join(", "))
+/// It must be *declared* — `apply_schema` only creates tables for grains
+/// the dataset has measures or attributes at, so picking the finest grain
+/// unconditionally would name a table that does not exist. Dimension
+/// keys, not the raw key: the pair table's `underlying_ref` is `least(u1,
+/// u2)`, and a tree spined on it would show only the underlying that
+/// sorts first in each pair.
+fn finest_carrying(
+    ds: &DatasetSpec,
+    columns: &[String],
+    dims: &DerivedDimensions,
+) -> Option<Grain> {
+    ds.grains()
+        .into_iter()
+        .rev()
+        .find(|g| carries_all(*g, columns, dims))
 }
 
 /// Single-quote escaping for a literal inlined into SQL. Derived
@@ -124,15 +116,15 @@ fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
 }
 
 /// The scanned relation, with any derived dimensions this query groups by
-/// projected onto it. Wrapping the table rather than rewriting every
+/// projected onto it. Wrapping the relation rather than rewriting every
 /// reference keeps `group by`, `grouping()` and the scope's `base` alias
 /// working on a plain column name.
-fn scan(table: &str, derived: &[&geode_core::dimensions::DerivedDimension]) -> String {
+fn scan(relation: &str, derived: &[&geode_core::dimensions::DerivedDimension]) -> String {
     if derived.is_empty() {
-        return table.to_string();
+        return relation.to_string();
     }
     format!(
-        "(select *, {} from {table})",
+        "(select *, {} from {relation})",
         derived
             .iter()
             .map(|d| derived_expr(d))
@@ -152,7 +144,7 @@ fn derived_for<'a>(
     columns
         .iter()
         .filter_map(|c| dims.get(c))
-        .filter(|d| grain.key_columns().contains(&d.from.as_str()))
+        .filter(|d| grain.dimension_key_columns().contains(&d.from.as_str()))
         .collect()
 }
 
@@ -169,7 +161,31 @@ fn existing_enum_types(conn: &Connection, dataset: &str) -> Result<Vec<String>, 
             r.get::<_, String>(0)
         })
         .map_err(err)?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
+/// Every table a dataset's history lives in: the archive **and** live for
+/// each grain. Generations are resolved across all of them — a partition
+/// can be missing from one grain while present at another (a cash-only
+/// book has no underlying rows), and the generation a partition holds now
+/// is in live and nowhere else (see `Era::relation`).
+fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
+    ds.grains()
+        .into_iter()
+        .flat_map(|g| {
+            [
+                table_name(dataset, g, TableKind::Archive),
+                table_name(dataset, g, TableKind::Live),
+            ]
+        })
+        .collect()
+}
+
+fn compile_error(view: &ViewSpec, message: String) -> StoreError {
+    StoreError::Sql {
+        statement: format!("compile view '{}'", view.name),
+        source: duckdb::Error::InvalidParameterName(message),
+    }
 }
 
 pub fn compile_view(
@@ -185,60 +201,33 @@ pub fn compile_view(
 ) -> Result<CompiledQuery, StoreError> {
     let ds = schema
         .dataset(&view.dataset)
-        .ok_or_else(|| StoreError::Sql {
-            statement: format!("compile view '{}'", view.name),
-            source: duckdb::Error::InvalidParameterName(format!(
-                "unknown dataset '{}'",
-                view.dataset
-            )),
-        })?;
+        .ok_or_else(|| compile_error(view, format!("unknown dataset '{}'", view.dataset)))?;
 
     let n = view.grouping.len();
     let depth = max_depth.min(n);
     let group_cols = quoted(&view.grouping);
+    let materialized = &view.grouping[..depth];
     let mut params: Vec<Value> = Vec::new();
     let mut ctes: Vec<String> = Vec::new();
     let mut selects: Vec<String> = Vec::new();
     let mut joins: Vec<String> = Vec::new();
     let mut columns: Vec<CompiledColumn> = Vec::new();
 
-    // The spine must be able to produce every level, so it needs every
-    // grouping column — and it must be a grain the dataset actually
-    // declares, because only those have tables. The finest such grain is
-    // the most selective spine.
-    let spine_grain = spine_grain_for(ds, view, dims).ok_or_else(|| StoreError::Sql {
-        statement: format!("compile view '{}'", view.name),
-        source: duckdb::Error::InvalidParameterName(format!(
-            "no declared grain of '{}' carries every grouping column {:?}; \
-             a grouping column must be a key column of some grain",
-            view.dataset, view.grouping
-        )),
-    })?;
-    // Same statement shape, different tables (spec §6.5). Only the as-of
-    // path pays for history; live carries no generation predicate at all.
-    // Every archive table the dataset has, not just the spine's. A
-    // generation is a file and a file publishes every grain, but a
-    // partition can be missing from one grain while present at another —
-    // resolving from one grain would drop those partitions from every
+    // Same statement shape, different relations (spec §6.5). Only the
+    // as-of path pays for history; live carries no generation predicate
+    // at all. Resolved across every table the dataset's history lives in,
+    // not one grain's: a partition can be missing from one grain while
+    // present at another, and resolving from one would drop it from every
     // grain's answer (see `resolve_generations`).
-    let archives_of = |dataset: &str, ds: &geode_core::schema::DatasetSpec| -> Vec<String> {
-        ds.grains()
-            .into_iter()
-            .map(|g| table_name(dataset, g, TableKind::Archive))
-            .collect()
-    };
     let mut resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>> =
         std::collections::BTreeMap::new();
-    let (kind_for_joins, gen_pred) = match as_of {
+    let (kind, gen_pred) = match as_of {
         crate::query::as_of::AsOf::Live => (TableKind::Live, None),
         crate::query::as_of::AsOf::At(t) => {
-            let gens = crate::query::as_of::resolve_generations(
-                conn,
-                &archives_of(&view.dataset, ds),
-                *t,
-            )?;
-            if let Some(newest) = gens.iter().map(|g| g.source_time).max() {
-                resolved_as_of.insert(view.dataset.clone(), newest);
+            let gens =
+                crate::query::as_of::resolve_generations(conn, &history_of(&view.dataset, ds), *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
+                resolved_as_of.insert(view.dataset.clone(), oldest);
             }
             (
                 TableKind::Archive,
@@ -246,125 +235,59 @@ pub fn compile_view(
             )
         }
     };
-    // One era for the whole statement: the spine, every aggregate, and
-    // the scope's semi-join probe must all read the same tables.
-    let era = crate::query::scope_sql::Era {
-        kind: kind_for_joins,
+    // One era for the whole statement: every aggregate, the spine's
+    // fallback scan, the scope's membership probes and the cross-dataset
+    // joins must all read the same relations.
+    let era = Era {
+        kind,
         generations: gen_pred.as_deref(),
     };
     let and_gen = |p: &str| match &gen_pred {
         Some(g) => format!("({p}) and ({g})"),
         None => p.to_string(),
     };
-    let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, spine_grain, era)?;
-    params.extend(spine_scope.params.clone());
 
-    if n == 0 {
-        // No grouping columns: the tree is a single grand-total row. The
-        // spine selects it without a table at all — reading the table
-        // without a GROUP BY would emit one spine row per *input* row, and
-        // the scope is applied inside each measure subquery anyway.
-        ctes.push("spine as (select 0 as row_depth)".to_string());
-        // The spine's own scope params are unused in this shape.
-        params.clear();
-    } else if depth == 0 {
-        // Bounded to the grand total: one row, depth zero. The aggregate
-        // is what makes it exactly one row.
-        ctes.push(format!(
-            "spine as (select 0 as row_depth, count(*) as _rows \
-             from {table} base where {pred})",
-            table = scan(
-                &table_name(&view.dataset, spine_grain, kind_for_joins),
-                &derived_for(&view.grouping, dims, spine_grain),
-            ),
-            pred = and_gen(&spine_scope.predicate),
-        ));
+    // The spine is the set of `(grouping tuple, depth)` rows the tree has,
+    // and it is assembled from the aggregates rather than scanned from one
+    // table. A spine scanned from the finest table only has rows for
+    // entities that table holds — a cash-only book has position rows and
+    // no underlying rows, so it was in the grand total and on no row
+    // beneath it, and the children did not sum to their parent. Each
+    // aggregate already knows its groups at every level it carries; the
+    // spine is their union, and the grand-total row is a constant so a
+    // scope selecting nothing still yields the one row a tree always has.
+    let mut spine_sources: Vec<String> = vec![if depth == 0 {
+        "select 0 as row_depth".to_string()
     } else {
-        // `grouping()` may only name columns some set groups by, and its
-        // width would then change with the bound — so the spine emits an
-        // explicit depth instead of a bitmask. Under prefix sets a level
-        // with `p` of `depth` columns present sets the top `depth - p`
-        // bits, so popcount recovers the depth directly.
-        let materialized = &group_cols[..depth];
-        ctes.push(format!(
-            "spine as (select {select}, \
-             ({depth} - bit_count(grouping({group}))) as row_depth \
-             from {table} base where {pred} group by {sets})",
-            select = materialized.join(", "),
-            group = materialized.join(", "),
-            table = scan(
-                &table_name(&view.dataset, spine_grain, kind_for_joins),
-                &derived_for(&view.grouping[..depth], dims, spine_grain),
-            ),
-            pred = and_gen(&spine_scope.predicate),
-            sets = grouping_sets(&group_cols, depth),
-        ));
-    }
+        format!(
+            "select {}, 0 as row_depth",
+            materialized
+                .iter()
+                .map(|g| format!("NULL as \"{g}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }];
+    let mut covered = vec![false; depth + 1];
+    covered[0] = true;
 
-    // Cast only to types that actually exist: the derived ENUMs are built
-    // by ingest, so before the first load there are none and the cast
-    // would be a hard error. Degrading to plain strings is correct — the
-    // interning is an optimization, not a semantic.
-    //
-    // And only for live. The ENUMs are rebuilt from the *live* table on
-    // every ingest, so they carry today's values; an archived row holding
-    // a value that has since left live — a retired book, a closed LHU —
-    // cannot be cast through them, and the query fails outright with a
-    // conversion error. The era decides this, like every other table
-    // choice in this function.
-    let interned: Vec<&str> = if era.kind != TableKind::Live {
-        Vec::new()
-    } else {
-        let existing = existing_enum_types(conn, &view.dataset)?;
-        crate::store::ddl::dimension_columns(ds)
-            .into_iter()
-            .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
-            .collect()
-    };
-    for (i, g) in view.grouping.iter().enumerate() {
-        // Dimension columns are cast to their derived ENUM so the result
-        // comes back dictionary-encoded rather than as strings (spec
-        // §6.6, §7.2) — the renderer then compares on integer codes.
-        //
-        // Below the materialized bound the column is not in the spine at
-        // all. It is still selected, as the NULL a rolled-up level would
-        // carry, so the snapshot's shape does not depend on the bound.
-        let ty = if interned.contains(&g.as_str()) {
-            crate::store::ddl::enum_type_name(&view.dataset, g)
-        } else {
-            "varchar".to_string()
-        };
-        if i >= depth {
-            selects.push(format!("NULL::{ty} as \"{g}\""));
-        } else {
-            selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
-        }
-        columns.push(CompiledColumn {
-            name: g.clone(),
-            grain: None,
-            attribution_by_depth: vec![Attribution::Additive; n + 1],
-            scope_semantics: ScopeSemantics::Direct,
-        });
-    }
-    selects.push("s.row_depth".to_string());
-    columns.push(CompiledColumn {
-        name: "row_depth".to_string(),
-        grain: None,
-        attribution_by_depth: vec![Attribution::Additive; n + 1],
-        scope_semantics: ScopeSemantics::Direct,
-    });
+    // Deferred until the spine is in `ctes`: the outer select's joins and
+    // columns, in view order.
+    let mut agg_joins: Vec<String> = Vec::new();
+    let mut agg_selects: Vec<String> = Vec::new();
+    let mut agg_columns: Vec<CompiledColumn> = Vec::new();
 
     // One aggregate subquery per measure grain the view touches.
     for grain in view.measure_grains(schema) {
         let alias = format!("agg_{}", grain.table());
-        let grain_scope = compile_scope(conn, scope, ds, grain, dims, spine_grain, era)?;
+        let grain_scope = compile_scope(conn, scope, ds, grain, dims, era)?;
 
-        // Only the grouping columns this grain has, and only within the
-        // materialized depth — selecting a key the spine no longer groups
-        // by would leave it outside every aggregate.
-        let own: Vec<String> = view.grouping[..depth]
+        // Only the grouping columns this grain carries, and only within
+        // the materialized depth — selecting a key the spine no longer
+        // groups by would leave it outside every aggregate.
+        let own: Vec<String> = materialized
             .iter()
-            .filter(|g| grain.key_columns().contains(&dims.base_column(g)))
+            .filter(|g| grain.dimension_key_columns().contains(&dims.base_column(g)))
             .cloned()
             .collect();
         let own_q = quoted(&own);
@@ -438,24 +361,56 @@ pub fn compile_view(
         };
         ctes.push(format!(
             "{alias} as (select {keys}{comma}{sub_depth}, {aggs} \
-             from {table} base where {pred}{sub_group})",
+             from {relation} base where {pred}{sub_group})",
             keys = own_q.join(", "),
             comma = if own.is_empty() { "" } else { ", " },
             aggs = aggs.join(", "),
-            table = scan(
-                &table_name(&view.dataset, grain, kind_for_joins),
+            relation = scan(
+                &era.relation(&view.dataset, grain),
                 &derived_for(&own, dims, grain),
             ),
             pred = and_gen(&grain_scope.predicate),
         ));
-        // The grain subquery's params follow the spine's, in CTE order.
+        // The grain subquery's params follow the previous CTE's, in CTE
+        // order.
         params.extend(grain_scope.params);
+
+        // The depths this grain carries in full are spine levels it can
+        // supply: at such a depth its own level *is* the spine's.
+        let carried: Vec<usize> = (1..=depth).filter(|d| own_present[*d] == *d).collect();
+        if !carried.is_empty() {
+            let projection: Vec<String> = materialized
+                .iter()
+                .map(|g| {
+                    if own.contains(g) {
+                        format!("{alias}.\"{g}\"")
+                    } else {
+                        "NULL".to_string()
+                    }
+                })
+                .chain(std::iter::once(format!("{alias}.sub_depth")))
+                .collect();
+            spine_sources.push(format!(
+                "select {} from {alias} where {alias}.sub_depth in ({})",
+                projection.join(", "),
+                carried
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for d in carried {
+                covered[d] = true;
+            }
+        }
 
         let on = if own.is_empty() {
             "true".to_string()
         } else {
+            // `else -1`: unreachable, and a row that reached it would
+            // match nothing rather than the grand total.
             let level = format!(
-                "{alias}.sub_depth = case s.row_depth {} else 0 end",
+                "{alias}.sub_depth = case s.row_depth {} else -1 end",
                 own_present
                     .iter()
                     .enumerate()
@@ -469,7 +424,7 @@ pub fn compile_view(
                 .collect::<Vec<_>>()
                 .join(" and ")
         };
-        joins.push(format!("left join {alias} on {on}"));
+        agg_joins.push(format!("left join {alias} on {on}"));
 
         for m in measures {
             // Attribution per depth, from the schema alone.
@@ -491,8 +446,8 @@ pub fn compile_view(
                     m.name
                 )
             };
-            selects.push(format!("{expr} as \"{}\"", m.name));
-            columns.push(CompiledColumn {
+            agg_selects.push(format!("{expr} as \"{}\"", m.name));
+            agg_columns.push(CompiledColumn {
                 name: m.name.clone(),
                 grain: Some(grain),
                 attribution_by_depth: by_depth,
@@ -500,6 +455,106 @@ pub fn compile_view(
             });
         }
     }
+
+    // Depths no measure grain carries — a view with no measures, or one
+    // grouped by a column finer than every measure it shows — are scanned
+    // from the finest declared grain that carries them, exactly as the
+    // whole spine once was.
+    let missing: Vec<usize> = (1..=depth).filter(|d| !covered[*d]).collect();
+    if !missing.is_empty() {
+        let spine_grain = finest_carrying(ds, materialized, dims).ok_or_else(|| {
+            compile_error(
+                view,
+                format!(
+                    "no declared grain of '{}' carries every grouping column {:?}; \
+                     a grouping column must be a dimension key of some grain",
+                    view.dataset, materialized
+                ),
+            )
+        })?;
+        let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, era)?;
+        // `grouping()` may only name columns some set groups by, and its
+        // width would then change with the bound — so the scan emits an
+        // explicit depth instead of a bitmask. Under prefix sets a level
+        // with `p` of `depth` columns present sets the top `depth - p`
+        // bits, so popcount recovers the depth directly.
+        let sets: Vec<String> = missing
+            .iter()
+            .map(|d| format!("({})", group_cols[..*d].join(", ")))
+            .collect();
+        spine_sources.push(format!(
+            "select {select}, ({depth} - bit_count(grouping({select}))) as row_depth \
+             from {relation} base where {pred} group by grouping sets ({sets})",
+            select = group_cols[..depth].join(", "),
+            relation = scan(
+                &era.relation(&view.dataset, spine_grain),
+                &derived_for(materialized, dims, spine_grain),
+            ),
+            pred = and_gen(&spine_scope.predicate),
+            sets = sets.join(", "),
+        ));
+        params.extend(spine_scope.params);
+    }
+    ctes.push(format!(
+        "spine as (select distinct * from ({}))",
+        spine_sources.join(" union all ")
+    ));
+
+    // Cast only to types that actually exist: the derived ENUMs are built
+    // by ingest, so before the first load there are none and the cast
+    // would be a hard error. Degrading to plain strings is correct — the
+    // interning is an optimization, not a semantic.
+    //
+    // And only for live. The ENUMs are rebuilt from the *live* table on
+    // every ingest, so they carry today's values; an archived row holding
+    // a value that has since left live — a retired book, a closed LHU —
+    // cannot be cast through them, and the query fails outright with a
+    // conversion error. The era decides this, like every other relation
+    // choice in this function.
+    let interned: Vec<&str> = if era.kind != TableKind::Live {
+        Vec::new()
+    } else {
+        let existing = existing_enum_types(conn, &view.dataset)?;
+        crate::store::ddl::dimension_columns(ds)
+            .into_iter()
+            .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
+            .collect()
+    };
+    for (i, g) in view.grouping.iter().enumerate() {
+        // Dimension columns are cast to their derived ENUM so the result
+        // comes back dictionary-encoded rather than as strings (spec
+        // §6.6, §7.2) — the renderer then compares on integer codes.
+        //
+        // Below the materialized bound the column is not in the spine at
+        // all. It is still selected, as the NULL a rolled-up level would
+        // carry, so the snapshot's shape does not depend on the bound.
+        let ty = if interned.contains(&g.as_str()) {
+            crate::store::ddl::enum_type_name(&view.dataset, g)
+        } else {
+            "varchar".to_string()
+        };
+        if i >= depth {
+            selects.push(format!("NULL::{ty} as \"{g}\""));
+        } else {
+            selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
+        }
+        columns.push(CompiledColumn {
+            name: g.clone(),
+            grain: None,
+            attribution_by_depth: vec![Attribution::Additive; n + 1],
+            scope_semantics: ScopeSemantics::Direct,
+        });
+    }
+    selects.push("s.row_depth".to_string());
+    columns.push(CompiledColumn {
+        name: "row_depth".to_string(),
+        grain: None,
+        attribution_by_depth: vec![Attribution::Additive; n + 1],
+        scope_semantics: ScopeSemantics::Direct,
+    });
+    joins.extend(agg_joins);
+    selects.extend(agg_selects);
+    columns.extend(agg_columns);
 
     // Cross-dataset joins (spec §6.4). Join keys are declared in schema
     // config and joined onto the spine.
@@ -517,14 +572,14 @@ pub fn compile_view(
         // The key must be on the spine *as materialized*. Testing the
         // whole grouping would reference a column the bounded spine does
         // not group by, which is a binder error rather than a NULL.
-        if !join.on.iter().all(|k| view.grouping[..depth].contains(k)) {
+        if !join.on.iter().all(|k| materialized.contains(k)) {
             continue;
         }
-        let Some(joined_grain) = joined_ds.grains().into_iter().find(|g| {
-            join.on
-                .iter()
-                .all(|k| g.key_columns().contains(&k.as_str()))
-        }) else {
+        let Some(joined_grain) = joined_ds
+            .grains()
+            .into_iter()
+            .find(|g| carries_all(*g, &join.on, dims))
+        else {
             continue;
         };
         // Only once the join is known to actually happen: a skipped join
@@ -557,18 +612,20 @@ pub fn compile_view(
                 // Each dataset has its own generations, so the spine's
                 // predicate does not apply here. Without this a
                 // historical join reads every archived generation at once.
-                // Across all of the joined dataset's grains, for the same
-                // reason the spine resolves across all of its own.
                 let gens = crate::query::as_of::resolve_generations(
                     conn,
-                    &archives_of(&join.dataset, joined_ds),
+                    &history_of(&join.dataset, joined_ds),
                     *t,
                 )?;
-                if let Some(newest) = gens.iter().map(|g| g.source_time).max() {
-                    resolved_as_of.insert(join.dataset.clone(), newest);
+                if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
+                    resolved_as_of.insert(join.dataset.clone(), oldest);
                 }
                 Some(crate::query::as_of::generation_predicate(&gens))
             }
+        };
+        let joined_era = Era {
+            kind,
+            generations: joined_gen.as_deref(),
         };
         let projection: Vec<String> = join
             .on
@@ -593,9 +650,9 @@ pub fn compile_view(
             .collect::<Vec<_>>()
             .join(" and ");
         joins.push(format!(
-            "left join (select {projection} from {table} where {pred} group by {keys}) {alias} on {on}",
+            "left join (select {projection} from {relation} where {pred} group by {keys}) {alias} on {on}",
             projection = projection.join(", "),
-            table = table_name(&join.dataset, joined_grain, kind_for_joins),
+            relation = joined_era.relation(&join.dataset, joined_grain),
             pred = joined_gen.as_deref().unwrap_or("true"),
             keys = join
                 .on
@@ -882,6 +939,54 @@ kind = "dimension"
             max_depth,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn an_as_of_join_finds_a_reference_dataset_that_was_published_once() {
+        // The reference dataset has one generation, and it is in live —
+        // nothing has ever superseded it. Resolving the join's generations
+        // from the archive alone found none, the join's predicate became
+        // `false`, and every reference column in every as-of answer was
+        // NULL, with no error.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "delete from risk_snapshot_underlying_live;
+                 insert into risk_snapshot_underlying_archive values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z');
+                 insert into instrument_ref_instrument_live
+                 values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z');",
+            )
+            .unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "instrument_ref", "strike"]);
+        let i1 = rows
+            .iter()
+            .find(|r| r[1] == "Some(\"I1\")")
+            .unwrap_or_else(|| panic!("{rows:?}"));
+        assert_eq!(i1[2], "Some(4200.0)", "{rows:?}");
+        assert_eq!(
+            q.resolved_as_of.get("instrument_ref").map(|t| t.to_rfc3339()),
+            Some("2026-08-01T00:00:00+00:00".to_string()),
+            "and the join's freshness is the generation it read"
+        );
     }
 
     #[test]
@@ -1373,7 +1478,6 @@ kind = "measure"
             ds.dataset("risk_snapshot").unwrap(),
             Grain::Position,
             &DerivedDimensions::default(),
-            Grain::Underlying,
             crate::query::scope_sql::Era::live(),
         )
         .unwrap();
@@ -1405,7 +1509,6 @@ kind = "measure"
             ds.dataset("risk_snapshot").unwrap(),
             Grain::Position,
             &desks(),
-            Grain::Underlying,
             crate::query::scope_sql::Era::live(),
         )
         .unwrap();
@@ -1430,7 +1533,6 @@ kind = "measure"
                 ds.dataset("risk_snapshot").unwrap(),
                 Grain::Position,
                 &desks(),
-                Grain::Underlying,
                 crate::query::scope_sql::Era::live(),
             )
             .unwrap()
@@ -1530,9 +1632,13 @@ kind = "measure"
         )
         .unwrap();
 
-        assert!(
-            !q.sql.contains("_live"),
-            "an as-of query must not name a live table: {}",
+        // Live is read — the current generation lives nowhere else — but
+        // only ever beside its archive, under the generation predicate.
+        // A bare live reference anywhere is today's data leaking in.
+        assert_eq!(
+            q.sql.matches("_live").count(),
+            q.sql.matches("union all select * from").count(),
+            "every live reference must be one half of an era relation: {}",
             q.sql
         );
         let rows = run(&store, &q, &["row_depth", "daily_trading_pnl"]);
@@ -1540,6 +1646,463 @@ kind = "measure"
         assert_eq!(
             total[1], "Some(100.0)",
             "the archived value, not the live 7: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn as_of_after_the_current_generation_reads_the_current_generation() {
+        // The generation a partition holds now is in live and nowhere
+        // else. Resolving from the archive alone answered "as of an hour
+        // ago" with this morning's *previous* file (100, not 7), and found
+        // nothing at all for BK1, which has only ever been published once.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "delete from risk_snapshot_position_live;
+                 delete from risk_snapshot_underlying_live;
+                 insert into risk_snapshot_position_archive values
+                   ('BK0','L0','P1','C', 100, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z');
+                 insert into risk_snapshot_position_live values
+                   ('BK0','L0','P1','C', 7, 'b', 2, 2, TIMESTAMPTZ '2026-08-10 00:00:00Z'),
+                   ('BK1','L1','P2','C', 30, 'b1', 3, 3, TIMESTAMPTZ '2026-08-01 00:00:00Z');
+                 insert into risk_snapshot_underlying_archive values
+                   ('BK0','L0','P1','C','I1','SPX', 40, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z');
+                 insert into risk_snapshot_underlying_live values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 2, 2, TIMESTAMPTZ '2026-08-10 00:00:00Z'),
+                   ('BK1','L1','P2','C','I2','SPX', 5, 'b1', 3, 3, TIMESTAMPTZ '2026-08-01 00:00:00Z');",
+            )
+            .unwrap();
+        let at = |s: &str| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        };
+        let totals = |t: &str| {
+            let q = compile_view(
+                store.writer(),
+                &view(),
+                &schema(),
+                &Scope::default(),
+                &DerivedDimensions::default(),
+                &crate::query::as_of::AsOf::At(at(t)),
+                usize::MAX,
+            )
+            .unwrap();
+            let rows = run(&store, &q, &["row_depth", "delta01", "daily_trading_pnl"]);
+            let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap().clone();
+            (total[1].clone(), total[2].clone(), q.resolved_as_of)
+        };
+
+        let (delta, pnl, resolved) = totals("2026-08-15T00:00:00Z");
+        assert_eq!(pnl, "Some(37.0)", "BK0 at gen 2 (7) plus BK1 at gen 3 (30)");
+        assert_eq!(
+            delta, "Some(15.0)",
+            "10 + 5, the generations current at 08-15"
+        );
+        // The label is the *oldest* partition read — §4.5's stalest-book
+        // rule, the same one live freshness applies — not the newest.
+        assert_eq!(
+            resolved.get("risk_snapshot"),
+            Some(&at("2026-08-01T00:00:00Z")),
+            "BK1's 08-01 generation is the stalest input"
+        );
+
+        // Before BK0's second generation, the archived one is current and
+        // live's must not leak in.
+        let (delta, pnl, _) = totals("2026-08-05T00:00:00Z");
+        assert_eq!(pnl, "Some(130.0)", "BK0 at gen 1 (100) plus BK1 (30)");
+        assert_eq!(delta, "Some(45.0)", "40 + 5");
+    }
+
+    /// The real desk schema declares the pair grain, which makes it the
+    /// finest declared grain — and its `underlying_ref` is `least(u1, u2)`.
+    fn schema_with_pairs() -> SchemaSpec {
+        let mut s = schema();
+        let ds = s
+            .datasets
+            .iter_mut()
+            .find(|d| d.name == "risk_snapshot")
+            .unwrap();
+        ds.columns.push(geode_core::schema::ColumnSpec {
+            name: "cross_gamma02".into(),
+            source_name: None,
+            ty: geode_core::schema::ColumnType::F64,
+            required: false,
+            textual: false,
+            role: ColumnRole::Measure {
+                grain: Grain::UnderlyingPair,
+                aggregate: Aggregate::Sum,
+            },
+        });
+        s
+    }
+
+    /// One worst-of over RUT and SPX: two underlying rows and one
+    /// canonical pair row `(RUT, SPX)`, in which SPX is `underlying2_ref`.
+    fn pair_fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .apply_schema(schema_with_pairs().dataset("risk_snapshot").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_live values
+                   ('BK0','L0','P1','C', 7, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, now()),
+                   ('BK0','L0','P1','C','I1','RUT', 20, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_pair_live values
+                   ('BK0','L0','P1','C','I1','RUT','SPX', 3, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn scoping_to_an_underlying_that_sorts_second_in_its_pair_keeps_the_position() {
+        // The single most common trader action, on the real schema. The
+        // pair table's `underlying_ref` is `least(u1, u2)`, so a predicate
+        // applied to it directly misses every pair where SPX sorts second
+        // — every pair, on a worst-of over NDX/RUT/SPX. The spine and the
+        // semi-join probe both did exactly that, and the tree came back
+        // as a lone total row with a blank PnL.
+        let (_d, store) = pair_fixture();
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "underlying_ref".into(),
+                values: vec!["SPX".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema_with_pairs(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        assert!(
+            !q.sql
+                .contains("from risk_snapshot_underlying_pair_live probe"),
+            "the pair table must never be the probe for an underlying: {}",
+            q.sql
+        );
+        let rows = run(
+            &store,
+            &q,
+            &[
+                "row_depth",
+                "underlying_ref",
+                "delta01",
+                "daily_trading_pnl",
+            ],
+        );
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[2], "Some(10.0)", "SPX's delta: {rows:?}");
+        assert_eq!(
+            total[3], "Some(7.0)",
+            "the position has SPX risk, so its PnL survives: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "Some(2.0)" && r[1] == "Some(\"SPX\")"),
+            "and SPX has its own row under the LHU: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn the_underlying_level_shows_every_underlying_not_the_first_of_each_pair() {
+        // Unscoped, the same fixture: a spine on the pair table showed RUT
+        // (the pair's `least`) and never SPX, and SPX's delta joined to
+        // nothing while still counting in the total.
+        let (_d, store) = pair_fixture();
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "underlying_ref", "delta01"]);
+        let mut level2: Vec<(String, String)> = rows
+            .iter()
+            .filter(|r| r[0] == "Some(2.0)")
+            .map(|r| (r[1].clone(), r[2].clone()))
+            .collect();
+        level2.sort();
+        assert_eq!(
+            level2,
+            vec![
+                ("Some(\"RUT\")".to_string(), "Some(20.0)".to_string()),
+                ("Some(\"SPX\")".to_string(), "Some(10.0)".to_string()),
+            ],
+            "{rows:?}"
+        );
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[2], "Some(30.0)", "and the children sum to it");
+    }
+
+    #[test]
+    fn cross_gamma_is_blank_below_instrument_level_and_present_above_it() {
+        // spec §6.3: the pair is canonical, so an underlying-level row has
+        // no honest share of it; an instrument-level or coarser row does.
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "cross_gamma02"]);
+        let at = |d: &str| -> Vec<String> {
+            rows.iter()
+                .filter(|r| r[0] == d)
+                .map(|r| r[1].clone())
+                .collect()
+        };
+        assert_eq!(at("Some(0.0)"), vec!["Some(3.0)"], "{rows:?}");
+        assert_eq!(at("Some(1.0)"), vec!["Some(3.0)"], "{rows:?}");
+        assert_eq!(at("Some(2.0)"), vec!["None", "None"], "{rows:?}");
+        assert_eq!(at("Some(3.0)"), vec!["None", "None"], "{rows:?}");
+        let cg = q
+            .columns
+            .iter()
+            .find(|c| c.name == "cross_gamma02")
+            .unwrap();
+        assert_eq!(cg.attribution_by_depth[1], Attribution::Additive);
+        assert_eq!(cg.attribution_by_depth[2], Attribution::NonAttributable);
+    }
+
+    #[test]
+    fn a_measure_predicate_is_evaluated_at_the_measures_own_grain() {
+        // `delta01 > 5` from position grain: the probe has to be the
+        // underlying table, where the column is. Probing the spine's
+        // grain instead was a binder error the moment the spine was a
+        // grain that lacked the column — every grain but one.
+        let (_d, store) = pair_fixture();
+        let scope = Scope {
+            expression: Some(geode_core::scope::parse_expr("delta01 > 15").unwrap()),
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema_with_pairs(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[1], "Some(20.0)", "only RUT's delta passes: {rows:?}");
+        assert_eq!(
+            total[2], "Some(7.0)",
+            "the position has a row that passes, so it is in: {rows:?}"
+        );
+        let pnl = q
+            .columns
+            .iter()
+            .find(|c| c.name == "daily_trading_pnl")
+            .unwrap();
+        assert_eq!(
+            pnl.scope_semantics,
+            ScopeSemantics::SemiJoined {
+                dimensions: vec!["delta01".into()]
+            }
+        );
+    }
+
+    #[test]
+    fn a_pair_measure_predicate_reaches_both_underlyings_of_the_pair() {
+        // `cross_gamma02 > 1` from underlying grain probes the pair table.
+        // The keys the two grains share are the *dimension* keys — up to
+        // `instrument_ref` — because the pair table's `underlying_ref` is
+        // `least(u1, u2)`. Joining on it too would admit RUT (the pair's
+        // `least`) and drop SPX from the same instrument.
+        let (_d, store) = pair_fixture();
+        let scope = Scope {
+            expression: Some(geode_core::scope::parse_expr("cross_gamma02 > 1").unwrap()),
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema_with_pairs(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(
+            total[1], "Some(30.0)",
+            "both underlyings of the instrument that has the pair: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_cash_only_position_has_a_row_at_the_lhu_level() {
+        // A position with trading PnL and no greeks — a cash line, a fee.
+        // The spine was scanned from the finest table, which has no row
+        // for it, so its 900 was in the grand total and on no row beneath
+        // it: the children did not sum to their parent.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_live values
+                   ('BK0','L7','P7','C', 900, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let q = compile(&store);
+        let rows = run(&store, &q, &["row_depth", "lhu", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[2], "Some(907.0)", "{rows:?}");
+        let l7 = rows
+            .iter()
+            .find(|r| r[0] == "Some(1.0)" && r[1] == "Some(\"L7\")")
+            .unwrap_or_else(|| panic!("the cash-only LHU needs a row: {rows:?}"));
+        assert_eq!(l7[2], "Some(900.0)");
+        // And nothing beneath it: the position has no underlying to sit
+        // under, and inventing one would be an allocation.
+        assert!(
+            !rows
+                .iter()
+                .any(|r| r[1] == "Some(\"L7\")" && r[0] != "Some(1.0)"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_scope_selecting_nothing_still_yields_the_grand_total_row() {
+        // The tree always has its root. With the spine assembled from the
+        // aggregates, an empty result would otherwise have no rows at all.
+        let (_d, store) = fixture();
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "book".into(),
+                values: vec!["NOWHERE".into()],
+            }],
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &schema(),
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01"]);
+        assert_eq!(
+            rows,
+            vec![vec!["Some(0.0)".to_string(), "None".to_string()]]
+        );
+    }
+
+    #[test]
+    fn a_view_with_no_measures_still_has_every_level() {
+        // Nothing to assemble the spine from, so it is scanned from the
+        // finest grain carrying the grouping — the shape the whole spine
+        // once had.
+        let (_d, store) = fixture();
+        let mut v = view();
+        v.columns.clear();
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "underlying_ref"]);
+        assert_eq!(rows.len(), 6, "{rows:?}");
+        assert!(
+            rows.iter()
+                .any(|r| r[0] == "Some(2.0)" && r[1] == "Some(\"RUT\")"),
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_text_filter_reaches_coarse_measures_by_membership() {
+        // `underlying_ref` is textual and finer than position grain. The
+        // filter applied to the greeks and silently not to the PnL beside
+        // them — and marked nothing (spec §6.3).
+        let (_d, store) = fixture();
+        let mut s = schema();
+        s.datasets[0]
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "underlying_ref")
+            .unwrap()
+            .textual = true;
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_snapshot_position_live values
+                   ('BK0','L0','P2','C', 3, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK0','L0','P2','C','I2','NDX', 50, 'b', 1, 1, now());",
+            )
+            .unwrap();
+        let scope = Scope {
+            text: Some("SPX".into()),
+            ..Scope::default()
+        };
+        let q = compile_view(
+            store.writer(),
+            &view(),
+            &s,
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let rows = run(&store, &q, &["row_depth", "delta01", "daily_trading_pnl"]);
+        let total = rows.iter().find(|r| r[0] == "Some(0.0)").unwrap();
+        assert_eq!(total[1], "Some(10.0)", "{rows:?}");
+        assert_eq!(
+            total[2], "Some(7.0)",
+            "positions that have SPX risk, not every position: {rows:?}"
+        );
+        let pnl = q
+            .columns
+            .iter()
+            .find(|c| c.name == "daily_trading_pnl")
+            .unwrap();
+        assert_eq!(
+            pnl.scope_semantics,
+            ScopeSemantics::SemiJoined {
+                dimensions: vec!["underlying_ref".into()]
+            }
         );
     }
 

@@ -179,11 +179,16 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             ),
         }));
     }
+    // Rows with no book are kept and reported rather than dropped, so they
+    // are a partition of their own — one the publish has to replace, or
+    // every republish of this batch appends another copy of them to live.
     let partitions: Vec<Partition> = books
         .iter()
+        .map(|book| Some(book.clone()))
+        .chain((unattributed_rows > 0).then_some(None))
         .map(|book| Partition {
             batch: req.batch.to_string(),
-            book: book.clone(),
+            book,
         })
         .collect();
 
@@ -647,6 +652,89 @@ source_name = "ModelCode"
             out.push_str(&fields.join(","));
         }
         out
+    }
+
+    /// Blank one CSV column on every other data row, leaving the rest intact.
+    fn blank_alternate_rows(csv: &str, header: &str) -> String {
+        let mut lines = csv.lines();
+        let head = lines.next().expect("header");
+        let at = head
+            .split(',')
+            .position(|h| h == header)
+            .expect("column present");
+        let mut out = String::from(head);
+        for (i, line) in lines.enumerate() {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            if i % 2 == 0 {
+                fields[at] = "";
+            }
+            out.push('\n');
+            out.push_str(&fields.join(","));
+        }
+        out
+    }
+
+    #[test]
+    fn republishing_a_file_with_bookless_rows_does_not_accumulate_them() {
+        // Rows with no book are kept and reported (§4.4), which makes them
+        // live data in a partition of their own. That partition has to be
+        // replaced on republish like any other, or every republish of the
+        // batch appends another copy and the desk total drifts upward.
+        let f = fixture();
+        let file = ready_file(&f);
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let twin = file.csv_path.with_file_name("risk_20260830_blank.csv");
+        std::fs::write(&twin, blank_alternate_rows(&text, "Book")).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let mut sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+
+        let bookless = |f: &Fixture| -> i64 {
+            f.store
+                .writer()
+                .query_row(
+                    "select count(*) from risk_snapshot_position_live where book is null",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let load_twin = |sentinel: &crate::source::Sentinel| {
+            load_file(
+                &f.store,
+                &LoadRequest {
+                    dataset: &f.ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &twin,
+                    sentinel,
+                    batch: "blank",
+                },
+            )
+            .unwrap()
+        };
+
+        let first = load_twin(&sentinel);
+        assert!(
+            matches!(&first.health, Health::Degraded { reason } if reason.contains("no book")),
+            "{:?}",
+            first.health
+        );
+        let after_first = bookless(&f);
+        assert!(after_first > 0, "the bookless rows must be live");
+        let live_after_first = count(&f, "risk_snapshot_position_live");
+
+        // A corrected republish of the same batch, an hour later.
+        sentinel.as_of += chrono::Duration::hours(1);
+        load_twin(&sentinel);
+        assert_eq!(
+            bookless(&f),
+            after_first,
+            "the bookless partition is replaced, not appended to"
+        );
+        assert_eq!(
+            count(&f, "risk_snapshot_position_live"),
+            live_after_first,
+            "live holds exactly one generation of the batch"
+        );
     }
 
     #[test]

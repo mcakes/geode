@@ -211,3 +211,36 @@ put a 398k-row walk on the frame budget to paint 80 rows.
 
 Not gated in CI yet; these are the first stored baselines for the query
 path.
+
+### Re-measured after the round-5 correctness fixes
+
+Same machine, same fixture, same harness. **The result-row counts changed,
+and that is the finding**, not the latency:
+
+| View | Result rows before → after | 1M before → after |
+|---|---|---|
+| `tree`, scoped to 3 books | 74,689 → **136,868** | 23.9 ms → 31.2 ms |
+| `tree`, scoped, bounded to depth 2 | 121 → 133 | 10.8 ms → 11.7 ms |
+| `shallow` (book only), scoped | 4 → 4 | 6.0 ms → 5.9 ms |
+| `tree`, all 20 books | 398,085 → **729,466** | 69.9 ms → 99.2 ms |
+| `tree`, unscoped | 398,085 → **729,466** | 66.1 ms → 96.1 ms |
+| `tree`, unscoped, bounded to depth 2 | 121 → 133 | 10.3 ms → 11.4 ms |
+
+The fixture declares the pair grain, so the compiler's spine was the
+`measures_underlying_pair` table — whose `underlying_ref` is the *lesser*
+of a canonical pair (§3.3), not the underlying. The underlying level of
+the tree therefore only ever showed the underlying that sorted first in
+each pair, and everything beneath the others was absent while still
+counting in the totals. The rows that appeared are the rows that were
+missing: **about 45% of the tree.** Latency moved with the row count and
+nothing else — 136,868 rows in 31 ms is a better per-row rate than
+74,689 in 24 ms was — so the §7.1 <50ms contract still holds for every
+shape the blotter submits, and the two unbounded rows miss it as they did
+before, for the same reason.
+
+The spine is now assembled from the per-grain aggregates (each is
+referenced twice in the statement: once by the spine, once by the join)
+rather than scanned from one table. DuckDB handled the double reference
+within budget; `as materialized` on the aggregate CTEs is the lever if a
+future view shape does not. The depth-0 full scan is gone: the grand-total
+row is a constant.

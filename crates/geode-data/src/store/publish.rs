@@ -17,7 +17,12 @@ use geode_core::schema::Grain;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Partition {
     pub batch: String,
-    pub book: String,
+    /// `None` is the partition of rows with no book. Ingest keeps such
+    /// rows and reports them (spec §4.4), so they are live data and must
+    /// be replaced on republish like any other partition — otherwise every
+    /// republish appends another copy and live no longer holds one
+    /// generation per partition.
+    pub book: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,15 +64,19 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 /// literals. Safe because both come from the catalog and the sentinel, not
 /// from user input; scope predicates, which do take user input, bind
 /// instead (spec §6.2).
+///
+/// `book is null` for the bookless partition: `book = '…'` matches no
+/// NULL, so that partition would never be deleted and would accumulate a
+/// copy per republish.
 fn partition_predicate(partitions: &[Partition]) -> String {
     let terms: Vec<String> = partitions
         .iter()
         .map(|p| {
-            format!(
-                "(batch = '{}' and book = '{}')",
-                p.batch.replace('\'', "''"),
-                p.book.replace('\'', "''")
-            )
+            let book = match &p.book {
+                Some(b) => format!("book = '{}'", b.replace('\'', "''")),
+                None => "book is null".to_string(),
+            };
+            format!("(batch = '{}' and {book})", p.batch.replace('\'', "''"))
         })
         .collect();
     if terms.is_empty() {
@@ -215,7 +224,7 @@ mod tests {
             staging_table: "staging_position".into(),
             partitions: vec![Partition {
                 batch: batch.into(),
-                book: book.into(),
+                book: Some(book.into()),
             }],
             gen_id: generation,
             source_time: t,
@@ -418,10 +427,52 @@ mod tests {
         let mut req = request("BK001_BK002", "BK001", 1, ts("2026-08-30T07:00:00Z"));
         req.partitions.push(Partition {
             batch: "BK001_BK002".into(),
-            book: "BK002".into(),
+            book: Some("BK002".into()),
         });
         publish_file(store.writer(), &req).unwrap();
         assert_eq!(live_rows(&store).len(), 2);
+    }
+
+    #[test]
+    fn the_bookless_partition_is_replaced_like_any_other() {
+        // Rows with no book are kept and reported, not dropped, so they
+        // are live data. `book = '…'` never matched them, so every
+        // republish appended another copy: live no longer held one
+        // generation per partition, and the total drifted upward.
+        let (_d, store) = fixture();
+        let publish = |generation: i64, t: &str, live_t: Option<&str>| {
+            store
+                .writer()
+                .execute_batch("delete from staging_position")
+                .unwrap();
+            stage(&store, "BK000", 10.0, "BK000", generation);
+            store
+                .writer()
+                .execute(
+                    "insert into staging_position values (NULL, 'POS9', ?, 'BK000', ?)",
+                    duckdb::params![3.0, generation],
+                )
+                .unwrap();
+            let mut req = request("BK000", "BK000", generation, ts(t));
+            req.partitions.push(Partition {
+                batch: "BK000".into(),
+                book: None,
+            });
+            req.live_source_time = live_t.map(ts);
+            publish_file(store.writer(), &req).unwrap();
+        };
+        publish(1, "2026-08-30T07:00:00Z", None);
+        publish(2, "2026-08-30T08:00:00Z", Some("2026-08-30T07:00:00Z"));
+        assert_eq!(
+            count(&store, "risk_snapshot_position_live"),
+            2,
+            "one generation per partition, the bookless one included"
+        );
+        assert_eq!(
+            count(&store, "risk_snapshot_position_archive"),
+            2,
+            "and the outgoing bookless rows went to history"
+        );
     }
 
     #[test]

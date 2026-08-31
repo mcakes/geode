@@ -49,7 +49,12 @@ impl ScopeSemantics {
 /// `grouping` is the prefix of the view's grouping tuple for this level,
 /// so a three-level tree calls this three times with growing slices.
 pub fn attribution_of(grain: Grain, grouping: &[String], dims: &DerivedDimensions) -> Attribution {
-    let key = grain.key_columns();
+    // Dimension keys, not the raw key: the pair grain's `underlying_ref`
+    // is `least(u1, u2)`, so grouping by the underlying does not partition
+    // its rows — an SPX-RUT pair belongs to both. That is spec §6.3's
+    // "non-attributable at an underlying-level grouping" rule, and it
+    // falls out of the vocabulary rather than needing a special case.
+    let key = grain.dimension_key_columns();
 
     // Resolve derived dimensions to their source before testing: `desk`
     // counts as `book`, which is what makes a desk rollup additive.
@@ -176,6 +181,29 @@ IDX_EXO_EU = ["BK000", "BK001"]
         assert_eq!(
             attribution(Grain::Position, &["book", "model_code", "position_ref"]),
             Attribution::DeterminedNonAdditive
+        );
+    }
+
+    #[test]
+    fn cross_gamma_is_not_attributable_at_an_underlying_level_grouping() {
+        // spec §6.3: the pair is canonicalized, so an SPX-RUT pair would
+        // land under whichever name sorts first — arbitrary. Additive at
+        // or coarser than instrument, blank below.
+        assert_eq!(
+            attribution(Grain::UnderlyingPair, &["book", "instrument_ref"]),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution(Grain::UnderlyingPair, &["lhu", "underlying_ref"]),
+            Attribution::NonAttributable
+        );
+        assert_eq!(
+            attribution(
+                Grain::UnderlyingPair,
+                &["lhu", "underlying_ref", "position_ref"]
+            ),
+            Attribution::NonAttributable,
+            "naming the position does not name the pair"
         );
     }
 
