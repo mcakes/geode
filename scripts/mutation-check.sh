@@ -31,7 +31,11 @@
 #     earlier abort did exactly that, and the mutation was found committed
 #     to a working tree days later.
 #
-# Usage: zsh scripts/mutation-check.sh   (from the repo root)
+# Usage: zsh scripts/mutation-check.sh [substring]   (from the repo root)
+#
+# With a substring, only entries whose name contains it are run — for
+# iterating on the entries you just added. Always finish with an unfiltered
+# run; a filtered one proves nothing about the rest.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -75,8 +79,13 @@ trap 'cleanup; exit 143' TERM
 # report "caught" on the strength of unrelated tests, or "SURVIVED" while a
 # perfectly good test sits one crate away. Name the crate that holds the
 # test, not the crate that holds the code.
+only="${1:-}"
+
 run_mutation() {
   local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}"
+  if [[ -n "$only" && "$name" != *"$only"* ]]; then
+    return 0
+  fi
   cp "$file" "$bak"
   in_flight="$file"
   local rc=0
@@ -261,3 +270,41 @@ run_mutation "probe: a blanked cell renders blank, not 0.00" \
   'return snap.f64_value(column, row).map(|v| format!("{v:.2}"));' \
   'return snap.f64_column(column)?.get(row).map(|v| format!("{v:.2}"));' \
   geode-shell
+
+run_mutation "snapshot: a rolled-up dimension cell is null" \
+  crates/geode-core/src/snapshot.rs \
+  'if row >= d.len() || d.is_null(row) {' \
+  'if row >= d.len() {' \
+  geode-core
+
+run_mutation "snapshot: dimension cells read at UInt16 key width" \
+  crates/geode-core/src/snapshot.rs \
+  'arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?,' \
+  'None::<&DictionaryArray<UInt16Type>>?,' \
+  geode-core
+
+run_mutation "snapshot: dictionary columns expose UInt16 codes" \
+  crates/geode-core/src/snapshot.rs \
+  'let d = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?;' \
+  'let d = None::<&DictionaryArray<UInt16Type>>?;' \
+  geode-core
+
+# No entry for the UInt16 arm of concat_preserving_dictionaries. Removing
+# it falls back to arrow's own concat, which — measured, not assumed —
+# unifies the shared dictionary to the same result. It is a speed
+# optimization at arrow 58.4.0, so a mutation of it has no behaviour for a
+# test to catch, and an entry here would only ever report SURVIVED. The
+# shared-dictionary path's actual behaviour is covered below.
+
+run_mutation "snapshot: every batch contributes its dictionary keys" \
+  crates/geode-core/src/snapshot.rs \
+  'let keys: Vec<&dyn Array> = dicts.iter().map(|d| d.keys() as &dyn Array).collect();' \
+  'let keys: Vec<&dyn Array> = dicts[..1].iter().map(|d| d.keys() as &dyn Array).collect();' \
+  geode-core
+
+run_mutation "snapshot: text reads a dimension under either era encoding" \
+  crates/geode-core/src/snapshot.rs \
+  '        self.dict_value(name, row)
+            .or_else(|| self.str_value(name, row))' \
+  '        self.str_value(name, row)' \
+  geode-core

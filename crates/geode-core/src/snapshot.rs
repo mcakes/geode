@@ -51,12 +51,24 @@ impl Provenance {
 
 /// Concatenate batches, keeping a shared dictionary shared.
 ///
-/// Arrow's `concat` *appends* dictionaries rather than noticing that two
-/// batches carry the same one, so after a handful of 2048-row batches the
-/// merged dictionary outgrows the 8-bit key space and the keys overflow.
-/// Every batch of one query carries the same derived ENUM, so its keys
-/// can simply be concatenated against the one dictionary — correct, and
-/// cheaper than merging.
+/// Every batch of one query carries the same derived ENUM, so its keys can
+/// simply be concatenated against that one dictionary rather than
+/// unified — cheaper, and it keeps the codes stable, which is what §7.2
+/// lets a renderer compare and group on.
+///
+/// **This is an optimization, not a correctness guard.** An earlier
+/// comment here claimed Arrow's `concat` appends dictionaries rather than
+/// noticing two batches share one, and that the merged dictionary
+/// therefore outgrows the 8-bit key space and the keys overflow. Measured
+/// against arrow 58.4.0, that is not what happens: concatenating 40
+/// batches of a 200-value dictionary yields a 200-entry dictionary at
+/// UInt8, and 300 stays 300 at UInt16 — `concat` unifies. Where the union
+/// genuinely cannot fit the key type (disjoint 200-value dictionaries at
+/// UInt8) it returns `Err("Dictionary key bigger than the key type")`,
+/// which `from_batches` propagates and the pool reports as a failed query.
+/// So the fallback below is safe, and removing this fast path would cost
+/// speed rather than correctness. Re-measure before trusting either
+/// claim across an arrow upgrade.
 fn concat_preserving_dictionaries(
     batches: &[RecordBatch],
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
