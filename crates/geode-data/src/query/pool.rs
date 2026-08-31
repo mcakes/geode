@@ -234,7 +234,7 @@ fn worker(
         let outcome =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
                 Ok(r) => r.map_err(|e| e.to_string()),
-                Err(payload) => Err(panic_message(&payload)),
+                Err(payload) => Err(panic_message(&*payload)),
             };
 
         // The stale check and the send happen under one lock. Releasing it
@@ -269,7 +269,7 @@ fn worker(
 
 /// The message out of a caught panic payload, which is a `&str` for a
 /// literal `panic!` and a `String` for a formatted one.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     let what = payload
         .downcast_ref::<&str>()
         .map(|s| (*s).to_string())

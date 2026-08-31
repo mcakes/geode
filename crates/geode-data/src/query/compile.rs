@@ -702,6 +702,15 @@ pub fn compile_view(
     // Without them two runs of one query can interleave a depth's rows
     // differently, and a tile that requeries every few seconds reshuffles
     // rows that did not change.
+    //
+    // This is a determinism backstop, not a presentation order. A grouping
+    // column is cast to its derived ENUM above, and DuckDB orders an ENUM
+    // by its declaration order — which `refresh_enum` builds from a bare
+    // `select distinct`, so it is neither alphabetical nor stable across
+    // an ingest that rebuilds the type. What holds is that two queries
+    // against one generation return rows in the same order. A view that
+    // wants a meaningful order should declare `sort`, which is emitted
+    // ahead of these.
     let mut order_keys = vec!["s.row_depth asc".to_string()];
     for s in &view.sort {
         order_keys.push(format!(
