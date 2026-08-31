@@ -10,6 +10,7 @@ use crate::query::compile::compile_view;
 use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
+use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -28,6 +29,10 @@ pub struct DataServiceConfig {
 
 pub struct DataService {
     config: DataServiceConfig,
+    /// Config errors found at open (spec §10.1). Held rather than
+    /// returned so `open` keeps its signature and a caller that does not
+    /// surface diagnostics still gets a working service.
+    diagnostics: Vec<Diagnostic>,
     /// Field order is drop order, and it is load-bearing here. `QueryPool`
     /// joins its workers in `Drop`, and those workers hold read
     /// connections to this database — so the pool must be dropped, and the
@@ -53,13 +58,45 @@ impl DataService {
         Catalog::new(store.writer()).ensure_tables()?;
         let conn = store.reader()?;
         let (pool, results) = QueryPool::spawn(&store, config.query_workers.max(1))?;
+        // Validate here, not at first query: a misconfigured view otherwise
+        // surfaces as a DuckDB binder error from inside a pool worker,
+        // attributed to whichever tile happened to submit it, with the
+        // config that caused it nowhere in the message. §10.1 wants a
+        // diagnostic naming the view.
+        //
+        // Reported, never fatal — the same rule the shell follows for bad
+        // config. One broken view must not stop the service the other
+        // views need.
+        let diagnostics = config
+            .views
+            .iter()
+            .flat_map(|v| v.validate(&config.schema, &config.dimensions))
+            .collect();
         Ok(DataService {
             config,
+            diagnostics,
             _store: store,
             conn,
             pool,
             results,
         })
+    }
+
+    /// What validation found at open: config errors that would otherwise
+    /// have surfaced as binder errors inside the query pool. Empty when
+    /// every view checks out.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Check a scope before it is compiled, so a bad column is reported
+    /// against the scope rather than as a binder error (§10.1). The
+    /// caller owns scope state, so this cannot be done at open.
+    pub fn validate_scope(&self, dataset: &str, scope: &Scope) -> Vec<Diagnostic> {
+        match self.config.schema.dataset(dataset) {
+            Some(ds) => scope.validate(ds, &self.config.dimensions),
+            None => Vec::new(),
+        }
     }
 
     /// Compile and submit. Results arrive on [`Self::query_results`];
@@ -238,6 +275,62 @@ mod tests {
         svc.query_results()
             .recv_timeout(Duration::from_secs(60))
             .unwrap()
+    }
+
+    #[test]
+    fn a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later() {
+        // Unwired, this view compiled fine and failed inside a pool worker
+        // as `Binder Error: ... nosuchcolumn`, attributed to whichever tile
+        // submitted it, with nothing naming the view or the config that
+        // caused it (§10.1). And it failed at first query, not at load, so
+        // a view nobody opened looked healthy.
+        let (db, _src, _svc) = service();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let mut broken = crate::ingest::load::tests_support::tree_view();
+        broken.name = "broken".into();
+        broken.grouping.push("nosuchcolumn".into());
+
+        let svc = DataService::open(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![broken],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+        })
+        .expect("a broken view must not stop the service opening");
+
+        let diags = svc.diagnostics();
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("broken") && d.message.contains("nosuchcolumn")),
+            "the diagnostic must name the view and the column: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_scope_naming_an_unknown_column_is_reported_against_the_scope() {
+        let (_db, _src, svc) = service();
+        let scope = Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "nosuchcolumn".into(),
+                values: vec!["x".into()],
+            }],
+            ..Scope::default()
+        };
+        let diags = svc.validate_scope("risk_snapshot", &scope);
+        assert!(
+            diags.iter().any(|d| d.message.contains("nosuchcolumn")),
+            "{diags:?}"
+        );
+        assert!(
+            svc.validate_scope("risk_snapshot", &Scope::default())
+                .is_empty(),
+            "an empty scope is valid"
+        );
     }
 
     #[test]

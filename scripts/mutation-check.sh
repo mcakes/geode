@@ -184,6 +184,31 @@ run_mutation "provenance: stalest partition, not newest" \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
+# ---- config validation (spec §10.1, §6.8)
+
+run_mutation "validation: views are checked when the service opens" \
+  crates/geode-data/src/service.rs \
+  '            .flat_map(|v| v.validate(&config.schema, &config.dimensions))' \
+  '            .flat_map(|_v| Vec::<Diagnostic>::new())'
+
+run_mutation "validation: a scope column is checked against the dataset" \
+  crates/geode-core/src/scope/mod.rs \
+  '                None if ds.column(&c).is_none() => {' \
+  '                None if false => {' \
+  geode-core
+
+run_mutation "validation: a derived dimension is not an unknown grouping" \
+  crates/geode-core/src/view.rs \
+  '            if let Some(d) = dims.get(g) {' \
+  '            if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
+  geode-core
+
+run_mutation "validation: a derived dimension shadowing a column is reported" \
+  crates/geode-core/src/view.rs \
+  '                if ds.column(g).is_some() {' \
+  '                if false {' \
+  geode-core
+
 # ---- generation id allocation (spec §4.3)
 
 run_mutation "catalog: a gen_id is reserved, not peeked" \

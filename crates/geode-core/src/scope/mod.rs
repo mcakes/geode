@@ -11,6 +11,7 @@ pub mod expr;
 pub use expr::{CompareOp, Expr, Literal, ParseError, parse_expr};
 
 use crate::config::{Diagnostic, Severity};
+use crate::dimensions::DerivedDimensions;
 use crate::schema::DatasetSpec;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -104,15 +105,30 @@ impl Scope {
     /// Columns must exist in the dataset. Failures are Diagnostics, never
     /// panics — a bad scope is a user error reported at the point of entry
     /// (spec §10.1).
-    pub fn validate(&self, ds: &DatasetSpec) -> Vec<Diagnostic> {
+    ///
+    /// A derived dimension (§6.8) is a legitimate scope column even though
+    /// no dataset declares it — `desk = "Flow"` is the standing case — so
+    /// a name is resolved through `dims` before being called unknown. What
+    /// must exist is the column it derives *from*.
+    pub fn validate(&self, ds: &DatasetSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
+        let bad = |message: String| Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message,
+        };
         self.columns()
             .into_iter()
-            .filter(|c| ds.column(c).is_none())
-            .map(|c| Diagnostic {
-                severity: Severity::Error,
-                layer: None,
-                file: None,
-                message: format!("scope references unknown column '{c}'"),
+            .filter_map(|c| match dims.get(&c) {
+                Some(d) if ds.column(&d.from).is_none() => Some(bad(format!(
+                    "scope references '{c}', derived from '{}', which dataset '{}' does not have",
+                    d.from, ds.name
+                ))),
+                Some(_) => None,
+                None if ds.column(&c).is_none() => {
+                    Some(bad(format!("scope references unknown column '{c}'")))
+                }
+                None => None,
             })
             .collect()
     }
@@ -340,7 +356,7 @@ grain = "underlying"
             expression: Some(parse_expr("nonesuch = 'x'").unwrap()),
             ..Scope::default()
         };
-        let diags = s.validate(&dataset());
+        let diags = s.validate(&dataset(), &DerivedDimensions::default());
         assert_eq!(diags.len(), 1);
         assert!(
             diags[0].message.contains("nonesuch"),
@@ -360,7 +376,10 @@ grain = "underlying"
             expression: Some(parse_expr("delta01 > 100").unwrap()),
             impossible: false,
         };
-        assert!(s.validate(&dataset()).is_empty());
+        assert!(
+            s.validate(&dataset(), &DerivedDimensions::default())
+                .is_empty()
+        );
     }
 
     #[test]

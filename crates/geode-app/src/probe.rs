@@ -282,6 +282,13 @@ fn run(setup: Setup, out: std::sync::mpsc::Sender<Reading>) {
             return;
         }
     };
+    // Config errors the service found in the views (spec §10.1). Not
+    // fatal — a broken view degrades itself and the rest still run — but
+    // saying nothing is how a view that never binds looks like a view that
+    // returns no rows.
+    for diagnostic in service.diagnostics() {
+        eprintln!("[probe] {diagnostic}");
+    }
 
     // Stops when the receiver drops, which is when the window closes.
     // One stderr line per reading: the probe is opt-in and this is the
