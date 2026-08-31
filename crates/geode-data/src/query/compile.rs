@@ -983,7 +983,9 @@ kind = "dimension"
             .unwrap_or_else(|| panic!("{rows:?}"));
         assert_eq!(i1[2], "Some(4200.0)", "{rows:?}");
         assert_eq!(
-            q.resolved_as_of.get("instrument_ref").map(|t| t.to_rfc3339()),
+            q.resolved_as_of
+                .get("instrument_ref")
+                .map(|t| t.to_rfc3339()),
             Some("2026-08-01T00:00:00+00:00".to_string()),
             "and the join's freshness is the generation it read"
         );
