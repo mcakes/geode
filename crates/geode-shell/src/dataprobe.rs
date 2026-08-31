@@ -76,11 +76,10 @@ fn cell_text(snap: &Snapshot, column: &str, row: usize) -> Option<String> {
     if let Some(values) = snap.i64_column(column) {
         return values.get(row).map(|v| v.to_string());
     }
-    // Dimension columns come back dictionary-encoded (spec §7.2); the code
-    // is the value, resolved here for display only.
-    snap.dict_value(column, row)
-        .or_else(|| snap.str_value(column, row))
-        .map(str::to_string)
+    // Dimension columns come back dictionary-encoded on the live path and
+    // as plain strings under as-of (spec §6.5, §7.2). `text_value` reads
+    // either, so the probe does not have to know which era it is showing.
+    snap.text_value(column, row).map(str::to_string)
 }
 
 /// A `label → value` line, matching the perf overlay's readout shape.

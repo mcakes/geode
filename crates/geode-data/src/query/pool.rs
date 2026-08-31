@@ -369,6 +369,77 @@ mod tests {
         pool.shutdown();
     }
 
+    /// A dataset whose dimension has more than 255 distinct values, read
+    /// back through the snapshot boundary.
+    ///
+    /// DuckDB sizes an ENUM's dictionary key to the vocabulary: UInt8 up
+    /// to 255 values, UInt16 above. Every real underlying list is past
+    /// that cliff, so this is the first realistic dataset's behaviour, not
+    /// an edge case.
+    fn enum_fixture(distinct: usize, pick: &str) -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("g.duckdb")).unwrap();
+        let list = (0..distinct)
+            .map(|i| format!("'U{i:04}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        store
+            .writer()
+            .execute_batch(&format!(
+                "create type underlying_enum as enum ({list});
+                 create table t as select '{pick}'::underlying_enum as underlying_ref;"
+            ))
+            .unwrap();
+        (dir, store)
+    }
+
+    /// Returns the snapshot alongside the Arrow type DuckDB actually
+    /// produced, so the key-width promotion is asserted rather than
+    /// assumed. This is the one place the promotion is observable —
+    /// `Snapshot` exists to keep Arrow out of everything above it.
+    fn read_one(store: &Store, sql: &str) -> (Snapshot, String) {
+        let conn = store.reader().unwrap();
+        let mut stmt = conn.prepare(sql).unwrap();
+        let batches: Vec<_> = stmt.query_arrow(duckdb::params![]).unwrap().collect();
+        let arrow_type = format!("{:?}", batches[0].schema().field(0).data_type());
+        let snap = Snapshot::from_batches(
+            batches,
+            vec![ColumnMeta {
+                name: "underlying_ref".into(),
+                attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
+                scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+            }],
+            1,
+            Provenance::default(),
+        )
+        .unwrap();
+        (snap, arrow_type)
+    }
+
+    #[test]
+    fn a_dimension_past_the_255_value_cliff_reads_back() {
+        let (_d, store) = enum_fixture(300, "U0299");
+        let (snap, arrow_type) = read_one(&store, "select underlying_ref from t");
+        assert_eq!(
+            arrow_type, "Dictionary(UInt16, Utf8)",
+            "the cliff this test exists for; if DuckDB stops promoting, \
+             the test is no longer covering anything"
+        );
+        assert_eq!(
+            snap.dict_value("underlying_ref", 0),
+            Some("U0299"),
+            "a 300-value ENUM promotes to UInt16 keys and must still read"
+        );
+    }
+
+    #[test]
+    fn a_dimension_below_the_cliff_still_reads() {
+        let (_d, store) = enum_fixture(200, "U0199");
+        let (snap, arrow_type) = read_one(&store, "select underlying_ref from t");
+        assert_eq!(arrow_type, "Dictionary(UInt8, Utf8)");
+        assert_eq!(snap.dict_value("underlying_ref", 0), Some("U0199"));
+    }
+
     #[test]
     fn shutdown_is_idempotent_and_does_not_hang() {
         let (_d, store) = fixture(100);
