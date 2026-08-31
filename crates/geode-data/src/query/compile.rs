@@ -692,23 +692,31 @@ pub fn compile_view(
         }
     }
 
-    let order = if view.sort.is_empty() {
-        String::new()
-    } else {
-        let keys: Vec<String> = view
-            .sort
-            .iter()
-            .map(|s| {
-                format!(
-                    "\"{}\" {}",
-                    s.column,
-                    if s.descending { "desc" } else { "asc" }
-                )
-            })
-            .collect();
-        // Shallowest first, so a parent precedes its children.
-        format!(" order by s.row_depth asc, {}", keys.join(", "))
-    };
+    // Shallowest first, so a parent always precedes its children — the
+    // order a flatten walk over the rows assumes. This is emitted whether
+    // or not the view declares a sort: with no ORDER BY at all the rows
+    // arrive in whatever order the plan produces, which puts the grand
+    // total in the middle of the result and a child before its parent.
+    //
+    // The grouping columns follow as tie-breakers so the order is total.
+    // Without them two runs of one query can interleave a depth's rows
+    // differently, and a tile that requeries every few seconds reshuffles
+    // rows that did not change.
+    let mut order_keys = vec!["s.row_depth asc".to_string()];
+    for s in &view.sort {
+        order_keys.push(format!(
+            "\"{}\" {}",
+            s.column,
+            if s.descending { "desc" } else { "asc" }
+        ));
+    }
+    for g in &view.grouping {
+        let key = format!("\"{g}\" asc");
+        if !order_keys.contains(&key) {
+            order_keys.push(key);
+        }
+    }
+    let order = format!(" order by {}", order_keys.join(", "));
 
     let sql = format!(
         "with {ctes} select {selects} from spine s {joins}{order}",
@@ -1065,6 +1073,85 @@ kind = "dimension"
         let q = joined_query(&store, &schema, 0);
         let rows = run(&store, &q, &["row_depth"]);
         assert_eq!(rows.len(), 1, "the grand total alone: {rows:?}");
+    }
+
+    /// Parse the `Some(n)` the `run` helper formats depths as. It reads
+    /// every column as f64 first, so a depth arrives as "Some(1.0)".
+    fn depths(rows: &[Vec<String>]) -> Vec<i64> {
+        rows.iter()
+            .map(|r| {
+                r[0].trim_start_matches("Some(")
+                    .trim_end_matches(')')
+                    .parse::<f64>()
+                    .unwrap_or_else(|_| panic!("unparsable row_depth {:?}", r[0]))
+                    as i64
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rows_arrive_shallowest_first_when_the_view_declares_no_sort() {
+        // The blotter flattens the tree by walking the rows in order and
+        // assumes a parent is already placed when its children arrive.
+        // Most views declare no sort, so this is the ordinary path, and
+        // without an ORDER BY the order is whatever the plan happens to
+        // produce. Widened past the two-row fixture, because a handful of
+        // rows can come back depth-ordered by luck.
+        let (_d, store) = fixture();
+        let mut inserts = String::new();
+        for i in 0..40 {
+            inserts.push_str(&format!(
+                "insert into risk_snapshot_position_live values
+                   ('BK{i}','L{i}','P{i}','C', {i}, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK{i}','L{i}','P{i}','C','I{i}','U{i}', {i}, 'b', 1, 1, now());",
+            ));
+        }
+        store.writer().execute_batch(&inserts).unwrap();
+
+        let q = compile(&store);
+        assert!(
+            view().sort.is_empty(),
+            "this test is about the no-sort path; view() has grown a sort"
+        );
+        let rows = run(&store, &q, &["row_depth"]);
+        let d = depths(&rows);
+        assert!(
+            d.len() > 40,
+            "expected a tree of some size, got {}",
+            d.len()
+        );
+        assert!(
+            d.windows(2).all(|w| w[0] <= w[1]),
+            "not shallowest-first, so a child can precede its parent: {d:?}"
+        );
+    }
+
+    #[test]
+    fn the_row_order_is_total_so_a_requery_does_not_reshuffle() {
+        // A tile requeries on a timer. If the order is only "by depth",
+        // rows within a depth may interleave differently each run and the
+        // tree visibly reshuffles though nothing changed. Asserted as a
+        // total order over the grouping columns rather than by running the
+        // query repeatedly: identical input to one plan is not where the
+        // nondeterminism would show, so a loop here would prove nothing.
+        let (_d, store) = fixture();
+        let q = compile(&store);
+        let sql = q.sql.to_lowercase();
+        let order = sql
+            .rsplit_once(" order by ")
+            .map(|(_, o)| o.to_string())
+            .unwrap_or_else(|| panic!("no order by in:\n{}", q.sql));
+        assert!(
+            order.starts_with("s.row_depth asc"),
+            "depth must lead the order: {order}"
+        );
+        for g in &view().grouping {
+            assert!(
+                order.contains(&format!("\"{g}\"")),
+                "grouping column {g} is not a tie-breaker: {order}"
+            );
+        }
     }
 
     #[test]

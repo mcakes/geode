@@ -257,6 +257,60 @@ run_mutation "ingest: the bookless partition is published" \
   '.chain((unattributed_rows > 0).then_some(None))' \
   '.chain(None)'
 
+# ---- the query pool (spec §6.7, §7.3, §10.1)
+
+run_mutation "pool: a panicking query does not wedge its view" \
+  crates/geode-data/src/query/pool.rs \
+  '            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
+                Ok(r) => r.map_err(|e| e.to_string()),
+                Err(payload) => Err(panic_message(&payload)),
+            };' \
+  '            run(&conn, &req).map_err(|e| e.to_string());'
+
+run_mutation "pool: a post-shutdown submit is not queued" \
+  crates/geode-data/src/query/pool.rs \
+  '        if q.shutdown {
+            return id;
+        }' \
+  '        if false {
+            return id;
+        }'
+
+run_mutation "pool: a cancelled query delivers nothing, not an error" \
+  crates/geode-data/src/query/pool.rs \
+  'let cancelled = q.cancelled.remove(&id);' \
+  'let cancelled = { q.cancelled.remove(&id); false };'
+
+# No entry for allocating the query id under the lock, nor for holding the
+# lock across the stale check and the send. Both are races: the mutation is
+# only observable on an interleaving the test cannot force, so an entry
+# would report SURVIVED whether the code is right or wrong. They are
+# argued in comments at the site instead.
+
+# ---- row order (spec §6.3; the blotter's flatten walk)
+
+run_mutation "order: emitted even when the view declares no sort" \
+  crates/geode-data/src/query/compile.rs \
+  'let order = format!(" order by {}", order_keys.join(", "));' \
+  'let order = if view.sort.is_empty() { String::new() } else { format!(" order by {}", order_keys.join(", ")) };'
+
+run_mutation "order: shallowest first" \
+  crates/geode-data/src/query/compile.rs \
+  'let mut order_keys = vec!["s.row_depth asc".to_string()];' \
+  'let mut order_keys: Vec<String> = Vec::new();'
+
+run_mutation "order: grouping columns break ties" \
+  crates/geode-data/src/query/compile.rs \
+  '    for g in &view.grouping {
+        let key = format!("\"{g}\" asc");
+        if !order_keys.contains(&key) {
+            order_keys.push(key);
+        }
+    }' \
+  '    for g in &view.grouping {
+        let _ = g;
+    }'
+
 # ---- the snapshot read path (spec §6.6, §6.3)
 
 run_mutation "snapshot: a null measure is not zero" \
