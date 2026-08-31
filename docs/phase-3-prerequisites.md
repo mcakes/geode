@@ -9,6 +9,35 @@ two durability items. None of it blocks Phase 2b, and all of it blocks a
 blotter that renders real numbers, which is why it is a prerequisite
 rather than backlog.
 
+## What actually blocks the blotter
+
+Three items, in the order the blotter will hit them. Do these first; the
+rest can ride along with Phase 3 work.
+
+1. **`Snapshot` cannot express a null (§1).** The blotter's very first
+   render is wrong without it: every deliberately-blanked cell reads as
+   `0.0`. Nothing downstream can compensate, because the information is
+   already gone by the time a module sees it. Fix `f64_value` first, then
+   the dictionary width — a real underlying list exceeds 255 values, so
+   that one bites on the first realistic dataset too.
+2. **`ORDER BY` is not emitted when a view declares no sort (§5).** The
+   blotter's flatten walk assumes parent-before-children; the compiler
+   does not currently guarantee it. This is a one-line fix and a test,
+   and it is load-bearing for the tree the whole phase is about.
+3. **The pool is not panic-safe (§2).** A panic in a worker permanently
+   wedges that view — the tile stops updating with no error, for the rest
+   of the session. Survivable in a probe that requeries every 5s;
+   unacceptable in a blotter someone leaves open all day.
+
+Everything else — `gen_id` allocation, validation wiring, the smaller
+items — is real but does not stop the blotter being built correctly. Fix
+them when the surrounding code is already open.
+
+**Before starting any of it:** run `zsh scripts/mutation-check.sh` to
+confirm the 27 existing entries still pass, and add an entry for each
+behaviour you change. Five review rounds of evidence say a green suite
+here proves very little on its own.
+
 ## 1. `Snapshot` cannot express a null (blocks the blotter)
 
 `geode-core/src/snapshot.rs`.
