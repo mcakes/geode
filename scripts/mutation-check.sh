@@ -263,7 +263,7 @@ run_mutation "pool: a panicking query does not wedge its view" \
   crates/geode-data/src/query/pool.rs \
   '            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
                 Ok(r) => r.map_err(|e| e.to_string()),
-                Err(payload) => Err(panic_message(&payload)),
+                Err(payload) => Err(panic_message(&*payload)),
             };' \
   '            run(&conn, &req).map_err(|e| e.to_string());'
 
