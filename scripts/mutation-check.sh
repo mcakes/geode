@@ -189,6 +189,12 @@ run_mutation "enum: a stale value degrades rather than failing the query" \
   'selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));' \
   'selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));'
 
+run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
+  crates/geode-core/src/scope/mod.rs \
+  'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
+  'if false {' \
+  geode-core
+
 run_mutation "scope: a contradiction still names its dimension" \
   crates/geode-core/src/scope/mod.rs \
   'dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));' \

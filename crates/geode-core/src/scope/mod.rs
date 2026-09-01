@@ -133,7 +133,8 @@ impl Scope {
             file: None,
             message,
         };
-        self.columns()
+        let mut diags: Vec<Diagnostic> = self
+            .columns()
             .into_iter()
             .filter_map(|c| match dims.get(&c) {
                 Some(d) if ds.column(&d.from).is_none() => Some(bad(format!(
@@ -146,7 +147,25 @@ impl Scope {
                 }
                 None => None,
             })
-            .collect()
+            .collect();
+
+        // A derived dimension is a mapped label, not an ordered value, so
+        // `desk > 'EU'` means nothing. The compiler already refuses it —
+        // but as a `StoreError::Sql` from inside the query path, long after
+        // the person who typed it has moved on. §10.1 wants it here, at the
+        // point of entry, while it is still their expression.
+        if let Some(e) = &self.expression {
+            e.for_each_comparison(&mut |column, op| {
+                if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    diags.push(bad(format!(
+                        "'{column}' is a derived dimension, so '{}' has no meaning on it; \
+                         use =, != or in",
+                        op.sql()
+                    )));
+                }
+            });
+        }
+        diags
     }
 }
 
@@ -290,6 +309,54 @@ grain = "underlying"
             !e.is_empty(),
             "a contradiction selects nothing; empty selects everything"
         );
+    }
+
+    #[test]
+    fn an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry() {
+        // A derived dimension is a mapped label, not an ordered value, so
+        // `desk > 'EU'` means nothing. The compiler already refuses it —
+        // but from inside the query path, as a StoreError::Sql, long after
+        // the person who typed the expression has moved on.
+        let dims = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n",
+            )
+            .unwrap()],
+        );
+        let dims = crate::dimensions::DerivedDimensions::from_doc(&dims).0;
+
+        let ordered = Scope {
+            expression: Some(parse_expr("desk > 'EU'").unwrap()),
+            ..Scope::default()
+        };
+        let diags = ordered.validate(&dataset(), &dims);
+        assert!(
+            diags.iter().any(|d| d.message.contains("no meaning")),
+            "{diags:?}"
+        );
+
+        // Equality and membership are exactly what a mapped label supports,
+        // so they must not be reported — or the rule is just "no
+        // expressions on derived dimensions".
+        for text in ["desk = 'Flow'", "desk != 'Flow'"] {
+            let ok = Scope {
+                expression: Some(parse_expr(text).unwrap()),
+                ..Scope::default()
+            };
+            assert!(
+                ok.validate(&dataset(), &dims).is_empty(),
+                "{text} is meaningful on a derived dimension"
+            );
+        }
+
+        // And an ordering comparison on a real column is fine.
+        let real = Scope {
+            expression: Some(parse_expr("delta01 > 1").unwrap()),
+            ..Scope::default()
+        };
+        assert!(real.validate(&dataset(), &dims).is_empty());
     }
 
     #[test]
