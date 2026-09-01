@@ -188,8 +188,56 @@ impl DataService {
     }
 
     /// Per-book freshness for a dataset (spec §4.5).
-    pub fn freshness(&self, dataset: &str) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
-        Catalog::new(&self.conn).book_freshness(dataset)
+    ///
+    /// Takes the era rather than assuming live. Reporting today's
+    /// freshness beside a historical result inverts the rule §5.4 exists
+    /// for — the same defect class that was fixed at five other sites in
+    /// phase 2b, and this was the one place left holding it. The parameter
+    /// is what stops the next caller reintroducing it by omission.
+    pub fn freshness(
+        &self,
+        dataset: &str,
+        as_of: AsOf,
+    ) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
+        let at = match as_of {
+            AsOf::Live => return Catalog::new(&self.conn).book_freshness(dataset),
+            AsOf::At(t) => t,
+        };
+        let Some(ds) = self.config.schema.dataset(dataset) else {
+            return Ok(Vec::new());
+        };
+        let tables: Vec<String> = ds
+            .grains()
+            .into_iter()
+            .flat_map(|g| {
+                [
+                    crate::store::ddl::table_name(
+                        dataset,
+                        g,
+                        crate::store::ddl::TableKind::Archive,
+                    ),
+                    crate::store::ddl::table_name(dataset, g, crate::store::ddl::TableKind::Live),
+                ]
+            })
+            .collect();
+
+        // The oldest generation contributing to each book, which is the
+        // same stalest-input rule live freshness applies (§4.5) — a book
+        // is as fresh as the stalest file behind it, not the newest.
+        let mut by_book: std::collections::BTreeMap<String, DateTime<Utc>> =
+            std::collections::BTreeMap::new();
+        for g in crate::query::as_of::resolve_generations(&self.conn, &tables, at)? {
+            let book = g.book.clone().unwrap_or_default();
+            by_book
+                .entry(book)
+                .and_modify(|t| {
+                    if g.source_time < *t {
+                        *t = g.source_time;
+                    }
+                })
+                .or_insert(g.source_time);
+        }
+        Ok(by_book.into_iter().collect())
     }
 
     /// How far back time travel can go, or `None` when nothing has ever
@@ -389,7 +437,7 @@ mod tests {
     #[test]
     fn freshness_is_reported_per_book() {
         let (_db, _src, svc) = service();
-        let books = svc.freshness("risk_snapshot").unwrap();
+        let books = svc.freshness("risk_snapshot", AsOf::Live).unwrap();
         assert!(!books.is_empty(), "books must have freshness recorded");
         svc.shutdown();
     }
@@ -449,7 +497,7 @@ mod tests {
         // starts there rather than at the first superseded generation.
         let (_db, _src, svc) = service();
         let oldest_live = svc
-            .freshness("risk_snapshot")
+            .freshness("risk_snapshot", AsOf::Live)
             .unwrap()
             .into_iter()
             .map(|(_, t)| t)

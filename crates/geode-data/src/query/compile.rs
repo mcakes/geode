@@ -577,8 +577,21 @@ pub fn compile_view(
         };
         if i >= depth {
             selects.push(format!("NULL::{ty} as \"{g}\""));
-        } else {
+        } else if ty == "varchar" {
             selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
+        } else {
+            // `try_cast`, not `::`. The ENUM is rebuilt at ingest (§3.6),
+            // so a value it does not carry means something already went
+            // wrong upstream — but a plain cast turns that anomaly into
+            // `Conversion Error: Could not convert string 'X' to UINT8`,
+            // which fails the whole statement. One unknown book then costs
+            // the trader every row of the tile rather than one cell.
+            //
+            // The cost is that such a value reads back blank, and a blank
+            // dimension cell already means "rolled up". That is a real
+            // ambiguity and it is the lesser one: the alternative is not a
+            // louder error about that value, it is no data at all.
+            selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));
         }
         columns.push(CompiledColumn {
             name: g.clone(),
@@ -2288,6 +2301,37 @@ kind = "measure"
                 .all(|a| *a == Attribution::Additive),
             "a name inside a literal is not a reference: {:?}",
             derived.attribution_by_depth
+        );
+    }
+
+    #[test]
+    fn a_stale_enum_degrades_that_column_instead_of_failing_the_query() {
+        // The ENUM is refreshed at ingest (§3.6), so a value it does not
+        // carry means something already went wrong upstream. A plain cast
+        // makes that anomaly fail the *whole* statement, so one unknown
+        // book costs the trader every row of the tile.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "drop type if exists risk_snapshot_lhu_enum;
+                 create type risk_snapshot_lhu_enum as enum ('L0');
+                 insert into risk_snapshot_position_live values
+                   ('BK9','L_UNKNOWN','P9','C', 5, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK9','L_UNKNOWN','P9','C','I9','SPX', 3, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = compile(&store);
+        let rows = run(&store, &q, &["row_depth", "lhu"]);
+        assert!(!rows.is_empty(), "the query must still answer: {}", q.sql);
+        // The known value still reads; the unknown one degrades to blank
+        // rather than taking the statement down with it.
+        let lhus: Vec<&str> = rows.iter().map(|r| r[1].as_str()).collect();
+        assert!(
+            lhus.iter().any(|v| v.contains("L0")),
+            "the known value must survive: {lhus:?}"
         );
     }
 

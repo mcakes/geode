@@ -184,6 +184,17 @@ run_mutation "provenance: stalest partition, not newest" \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
+run_mutation "enum: a stale value degrades rather than failing the query" \
+  crates/geode-data/src/query/compile.rs \
+  'selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));' \
+  'selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));'
+
+run_mutation "scope: a contradiction still names its dimension" \
+  crates/geode-core/src/scope/mod.rs \
+  'dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));' \
+  'dimensions.retain(|d| !d.values.is_empty());' \
+  geode-core
+
 # ---- derived column attribution (spec §6.3)
 
 run_mutation "derived: a derived column inherits its inputs' attribution" \

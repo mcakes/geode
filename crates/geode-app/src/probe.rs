@@ -215,7 +215,7 @@ fn source_spec(setup: &Setup) -> SourceSpec {
 fn query_once(service: &DataService, setup: &Setup) -> Reading {
     let freshness = || {
         service
-            .freshness(&setup.dataset)
+            .freshness(&setup.dataset, AsOf::Live)
             .unwrap_or_default()
             .into_iter()
             .map(|(book, as_of)| (book, as_of.to_rfc3339(), 0))
