@@ -184,6 +184,28 @@ run_mutation "provenance: stalest partition, not newest" \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
+# ---- derived column attribution (spec §6.3)
+
+run_mutation "derived: a derived column inherits its inputs' attribution" \
+  crates/geode-data/src/query/compile.rs \
+  '            let referenced = referenced_columns(sql, &columns);' \
+  '            let referenced: Vec<&CompiledColumn> = Vec::new();'
+
+run_mutation "derived: attribution meet takes the weaker claim" \
+  crates/geode-core/src/attribution.rs \
+  '            (NonAttributable, _) | (_, NonAttributable) => NonAttributable,' \
+  '            (NonAttributable, _) | (_, NonAttributable) => Additive,' \
+  geode-core
+
+run_mutation "derived: a name inside a string literal is not a reference" \
+  crates/geode-data/src/query/compile.rs \
+  '        if in_string {
+            continue;
+        }' \
+  '        if false {
+            continue;
+        }'
+
 # ---- config validation (spec §10.1, §6.8)
 
 run_mutation "validation: views are checked when the service opens" \

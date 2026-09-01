@@ -21,6 +21,24 @@ pub enum Attribution {
     NonAttributable,
 }
 
+impl Attribution {
+    /// The weaker of two claims, for a value computed from both.
+    ///
+    /// A derived column is only as attributable as its inputs: an
+    /// expression over a `NonAttributable` measure is itself
+    /// non-attributable, because the number it is built from does not
+    /// belong to this row. Ordered `Additive` < `DeterminedNonAdditive` <
+    /// `NonAttributable`, weakest wins.
+    pub fn meet(self, other: Attribution) -> Attribution {
+        use Attribution::*;
+        match (self, other) {
+            (NonAttributable, _) | (_, NonAttributable) => NonAttributable,
+            (DeterminedNonAdditive, _) | (_, DeterminedNonAdditive) => DeterminedNonAdditive,
+            (Additive, Additive) => Additive,
+        }
+    }
+}
+
 /// How a scope predicate was applied to a measure's grain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScopeSemantics {
@@ -34,6 +52,29 @@ pub enum ScopeSemantics {
 impl ScopeSemantics {
     pub fn is_direct(&self) -> bool {
         matches!(self, ScopeSemantics::Direct)
+    }
+
+    /// The weaker of two, for a value computed from both: semi-joined if
+    /// either input was, over the union of the dimensions responsible.
+    /// "Positions that have SPX risk" does not become direct by being
+    /// divided by something that is.
+    pub fn meet(&self, other: &ScopeSemantics) -> ScopeSemantics {
+        match (self, other) {
+            (ScopeSemantics::Direct, ScopeSemantics::Direct) => ScopeSemantics::Direct,
+            _ => {
+                let mut dimensions: Vec<String> = [self, other]
+                    .iter()
+                    .filter_map(|s| match s {
+                        ScopeSemantics::SemiJoined { dimensions } => Some(dimensions.clone()),
+                        ScopeSemantics::Direct => None,
+                    })
+                    .flatten()
+                    .collect();
+                dimensions.sort();
+                dimensions.dedup();
+                ScopeSemantics::SemiJoined { dimensions }
+            }
+        }
     }
 
     pub fn dimensions(&self) -> &[String] {
@@ -89,6 +130,58 @@ mod tests {
     use crate::config::{LayerDoc, merge_docs};
     use crate::dimensions::DerivedDimensions;
     use crate::schema::Grain;
+
+    #[test]
+    fn the_attribution_meet_takes_the_weaker_claim() {
+        use Attribution::*;
+        // A value computed from both is only as attributable as the
+        // weaker input: dividing a blanked number by a good one does not
+        // produce a number that belongs to this row.
+        assert_eq!(Additive.meet(Additive), Additive);
+        assert_eq!(Additive.meet(NonAttributable), NonAttributable);
+        assert_eq!(NonAttributable.meet(Additive), NonAttributable);
+        assert_eq!(Additive.meet(DeterminedNonAdditive), DeterminedNonAdditive);
+        assert_eq!(
+            DeterminedNonAdditive.meet(NonAttributable),
+            NonAttributable,
+            "non-attributable is weaker than merely non-additive"
+        );
+        // Commutative, or the answer would depend on column order.
+        for (a, b) in [
+            (Additive, NonAttributable),
+            (Additive, DeterminedNonAdditive),
+            (DeterminedNonAdditive, NonAttributable),
+        ] {
+            assert_eq!(a.meet(b), b.meet(a), "{a:?} vs {b:?}");
+        }
+    }
+
+    #[test]
+    fn the_scope_semantics_meet_unions_the_dimensions_responsible() {
+        let semi = |d: &[&str]| ScopeSemantics::SemiJoined {
+            dimensions: d.iter().map(|s| s.to_string()).collect(),
+        };
+        assert_eq!(
+            ScopeSemantics::Direct.meet(&ScopeSemantics::Direct),
+            ScopeSemantics::Direct
+        );
+        // "Positions that have SPX risk" does not become direct by being
+        // divided by something that is.
+        assert_eq!(
+            ScopeSemantics::Direct.meet(&semi(&["underlying_ref"])),
+            semi(&["underlying_ref"])
+        );
+        assert_eq!(
+            semi(&["underlying_ref"]).meet(&semi(&["lhu"])),
+            semi(&["lhu", "underlying_ref"]),
+            "both dimensions are responsible, named once each"
+        );
+        assert_eq!(
+            semi(&["lhu"]).meet(&semi(&["lhu"])),
+            semi(&["lhu"]),
+            "the same dimension twice is still one dimension"
+        );
+    }
 
     fn dims() -> DerivedDimensions {
         let text = r#"
