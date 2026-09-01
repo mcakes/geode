@@ -11,6 +11,7 @@ pub mod expr;
 pub use expr::{CompareOp, Expr, Literal, ParseError, parse_expr};
 
 use crate::config::{Diagnostic, Severity};
+use crate::dimensions::DerivedDimensions;
 use crate::schema::DatasetSpec;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -60,6 +61,7 @@ impl Scope {
     pub fn and_then(&self, inner: &Scope) -> Scope {
         let mut dimensions = self.dimensions.clone();
         let mut impossible = self.impossible || inner.impossible;
+        let mut contradicted: Vec<String> = Vec::new();
         for sel in &inner.dimensions {
             if sel.values.is_empty() {
                 continue;
@@ -67,12 +69,21 @@ impl Scope {
             match dimensions.iter_mut().find(|d| d.column == sel.column) {
                 Some(existing) => {
                     existing.values.retain(|v| sel.values.contains(v));
-                    impossible |= existing.values.is_empty();
+                    if existing.values.is_empty() {
+                        impossible = true;
+                        contradicted.push(existing.column.clone());
+                    }
                 }
                 None => dimensions.push(sel.clone()),
             }
         }
-        dimensions.retain(|d| !d.values.is_empty());
+        // A selection emptied by intersection is kept, with its values
+        // gone: it is the record of *which* dimension contradicted, and
+        // `columns()` needs the name to say so. One that arrived empty
+        // never constrained anything and is dropped as before. The
+        // compiler is unaffected either way — it returns "nothing" as soon
+        // as it sees `impossible`, and skips empty selections regardless.
+        dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));
 
         Scope {
             dimensions,
@@ -88,11 +99,17 @@ impl Scope {
 
     /// Every column the scope constrains. The text filter is excluded: it
     /// targets whatever the schema declares textual, not a named column.
+    ///
+    /// A contradiction still names its dimension. This is what a UI renders
+    /// scope chips from, and reporting nothing for a scope that selects
+    /// nothing made it indistinguishable from a scope that constrains
+    /// nothing — the two are opposites, and the wrong one reads as "you
+    /// are looking at everything".
     pub fn columns(&self) -> Vec<String> {
         let mut out: Vec<String> = self
             .dimensions
             .iter()
-            .filter(|d| !d.values.is_empty())
+            .filter(|d| self.impossible || !d.values.is_empty())
             .map(|d| d.column.clone())
             .collect();
         if let Some(e) = &self.expression {
@@ -104,17 +121,51 @@ impl Scope {
     /// Columns must exist in the dataset. Failures are Diagnostics, never
     /// panics — a bad scope is a user error reported at the point of entry
     /// (spec §10.1).
-    pub fn validate(&self, ds: &DatasetSpec) -> Vec<Diagnostic> {
-        self.columns()
+    ///
+    /// A derived dimension (§6.8) is a legitimate scope column even though
+    /// no dataset declares it — `desk = "Flow"` is the standing case — so
+    /// a name is resolved through `dims` before being called unknown. What
+    /// must exist is the column it derives *from*.
+    pub fn validate(&self, ds: &DatasetSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
+        let bad = |message: String| Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message,
+        };
+        let mut diags: Vec<Diagnostic> = self
+            .columns()
             .into_iter()
-            .filter(|c| ds.column(c).is_none())
-            .map(|c| Diagnostic {
-                severity: Severity::Error,
-                layer: None,
-                file: None,
-                message: format!("scope references unknown column '{c}'"),
+            .filter_map(|c| match dims.get(&c) {
+                Some(d) if ds.column(&d.from).is_none() => Some(bad(format!(
+                    "scope references '{c}', derived from '{}', which dataset '{}' does not have",
+                    d.from, ds.name
+                ))),
+                Some(_) => None,
+                None if ds.column(&c).is_none() => {
+                    Some(bad(format!("scope references unknown column '{c}'")))
+                }
+                None => None,
             })
-            .collect()
+            .collect();
+
+        // A derived dimension is a mapped label, not an ordered value, so
+        // `desk > 'EU'` means nothing. The compiler already refuses it —
+        // but as a `StoreError::Sql` from inside the query path, long after
+        // the person who typed it has moved on. §10.1 wants it here, at the
+        // point of entry, while it is still their expression.
+        if let Some(e) = &self.expression {
+            e.for_each_comparison(&mut |column, op| {
+                if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    diags.push(bad(format!(
+                        "'{column}' is a derived dimension, so '{}' has no meaning on it; \
+                         use =, != or in",
+                        op.sql()
+                    )));
+                }
+            });
+        }
+        diags
     }
 }
 
@@ -261,6 +312,82 @@ grain = "underlying"
     }
 
     #[test]
+    fn an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry() {
+        // A derived dimension is a mapped label, not an ordered value, so
+        // `desk > 'EU'` means nothing. The compiler already refuses it —
+        // but from inside the query path, as a StoreError::Sql, long after
+        // the person who typed the expression has moved on.
+        let dims = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n",
+            )
+            .unwrap()],
+        );
+        let dims = crate::dimensions::DerivedDimensions::from_doc(&dims).0;
+
+        let ordered = Scope {
+            expression: Some(parse_expr("desk > 'EU'").unwrap()),
+            ..Scope::default()
+        };
+        let diags = ordered.validate(&dataset(), &dims);
+        assert!(
+            diags.iter().any(|d| d.message.contains("no meaning")),
+            "{diags:?}"
+        );
+
+        // Equality and membership are exactly what a mapped label supports,
+        // so they must not be reported — or the rule is just "no
+        // expressions on derived dimensions".
+        for text in ["desk = 'Flow'", "desk != 'Flow'"] {
+            let ok = Scope {
+                expression: Some(parse_expr(text).unwrap()),
+                ..Scope::default()
+            };
+            assert!(
+                ok.validate(&dataset(), &dims).is_empty(),
+                "{text} is meaningful on a derived dimension"
+            );
+        }
+
+        // And an ordering comparison on a real column is fine.
+        let real = Scope {
+            expression: Some(parse_expr("delta01 > 1").unwrap()),
+            ..Scope::default()
+        };
+        assert!(real.validate(&dataset(), &dims).is_empty());
+    }
+
+    #[test]
+    fn a_contradiction_still_names_the_dimension_that_caused_it() {
+        // `columns()` is what a UI renders scope chips from. A
+        // contradiction dropped the emptied selection, so it reported no
+        // columns at all — and a tile showing nothing because its scope
+        // contradicted the workspace's looked exactly like a tile with no
+        // scope. The two are opposites.
+        let selection = |v: &str| Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec![v.into()],
+            }],
+            ..Scope::default()
+        };
+        let contradiction = selection("BK000").and_then(&selection("BK001"));
+
+        assert!(contradiction.impossible, "precondition");
+        assert_eq!(
+            contradiction.columns(),
+            vec!["book".to_string()],
+            "the contradicted dimension is still what the scope is about"
+        );
+        assert!(
+            !contradiction.is_empty(),
+            "and it is not an empty scope, which selects everything"
+        );
+    }
+
+    #[test]
     fn a_contradiction_survives_further_composition() {
         // Otherwise a third, unrelated layer would launder it away.
         let contradiction = Scope {
@@ -340,7 +467,7 @@ grain = "underlying"
             expression: Some(parse_expr("nonesuch = 'x'").unwrap()),
             ..Scope::default()
         };
-        let diags = s.validate(&dataset());
+        let diags = s.validate(&dataset(), &DerivedDimensions::default());
         assert_eq!(diags.len(), 1);
         assert!(
             diags[0].message.contains("nonesuch"),
@@ -360,7 +487,10 @@ grain = "underlying"
             expression: Some(parse_expr("delta01 > 100").unwrap()),
             impossible: false,
         };
-        assert!(s.validate(&dataset()).is_empty());
+        assert!(
+            s.validate(&dataset(), &DerivedDimensions::default())
+                .is_empty()
+        );
     }
 
     #[test]

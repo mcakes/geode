@@ -65,6 +65,22 @@ impl Expr {
         out
     }
 
+    /// Visit every `Compare` node as `(column, op)`.
+    ///
+    /// `In` is deliberately not visited: membership is meaningful on a
+    /// derived dimension, which is the only caller's whole question.
+    pub fn for_each_comparison(&self, f: &mut impl FnMut(&str, CompareOp)) {
+        match self {
+            Expr::And(a, b) | Expr::Or(a, b) => {
+                a.for_each_comparison(f);
+                b.for_each_comparison(f);
+            }
+            Expr::Not(e) => e.for_each_comparison(f),
+            Expr::Compare { column, op, .. } => f(column, *op),
+            Expr::In { .. } => {}
+        }
+    }
+
     fn walk_columns<'a>(&'a self, out: &mut Vec<&'a str>) {
         match self {
             Expr::And(a, b) | Expr::Or(a, b) => {

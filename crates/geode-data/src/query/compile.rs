@@ -80,6 +80,48 @@ fn finest_carrying(
         .find(|g| carries_all(*g, columns, dims))
 }
 
+/// The already-compiled columns a derived expression names.
+///
+/// The expression is raw SQL, not the scope grammar, so there is no parse
+/// tree to walk. Identifier-like tokens are matched against the columns
+/// the view has already produced, which is exactly the set a derived
+/// column is allowed to reference. Tokenising rather than substring
+/// matching is what keeps `delta01` out of `delta01_usd`, and skipping
+/// quoted text keeps a column name inside a string literal from counting.
+///
+/// Over-matching is the safe direction: a name that appears as a SQL
+/// keyword or function would only pull in a *weaker* marker, never a
+/// stronger one, and none of the aggregate names collide with the
+/// column vocabulary here.
+fn referenced_columns<'a>(sql: &str, columns: &'a [CompiledColumn]) -> Vec<&'a CompiledColumn> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    for ch in sql.chars() {
+        if ch == '\'' {
+            in_string = !in_string;
+            current.clear();
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if ch.is_alphanumeric() || ch == '_' {
+            current.push(ch);
+        } else if !current.is_empty() {
+            tokens.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    columns
+        .iter()
+        .filter(|c| tokens.contains(&c.name))
+        .collect()
+}
+
 /// Single-quote escaping for a literal inlined into SQL. Derived
 /// dimension values come from config, which is trusted but not
 /// necessarily quote-free.
@@ -535,8 +577,21 @@ pub fn compile_view(
         };
         if i >= depth {
             selects.push(format!("NULL::{ty} as \"{g}\""));
-        } else {
+        } else if ty == "varchar" {
             selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));
+        } else {
+            // `try_cast`, not `::`. The ENUM is rebuilt at ingest (§3.6),
+            // so a value it does not carry means something already went
+            // wrong upstream — but a plain cast turns that anomaly into
+            // `Conversion Error: Could not convert string 'X' to UINT8`,
+            // which fails the whole statement. One unknown book then costs
+            // the trader every row of the tile rather than one cell.
+            //
+            // The cost is that such a value reads back blank, and a blank
+            // dimension cell already means "rolled up". That is a real
+            // ambiguity and it is the lesser one: the alternative is not a
+            // louder error about that value, it is no data at all.
+            selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));
         }
         columns.push(CompiledColumn {
             name: g.clone(),
@@ -683,11 +738,36 @@ pub fn compile_view(
     for c in &view.columns {
         if let ViewColumn::Derived { name, sql } = c {
             selects.push(format!("({sql}) as \"{name}\""));
+            // A derived column is only as attributable as what it is
+            // computed from. Marked Additive/Direct unconditionally, an
+            // expression over a NonAttributable measure claimed to be
+            // summable at a level where its own input is blanked (§6.3) —
+            // and the marker is the only thing a renderer has to go on, so
+            // a wrong one is worse than a missing column.
+            let referenced = referenced_columns(sql, &columns);
+            let (attribution_by_depth, scope_semantics) = if referenced.is_empty() {
+                // A constant, or an expression over nothing this view
+                // selects: nothing to inherit, and nothing to overclaim.
+                (vec![Attribution::Additive; n + 1], ScopeSemantics::Direct)
+            } else {
+                let meet_at = |depth: usize| {
+                    referenced
+                        .iter()
+                        .filter_map(|c| c.attribution_by_depth.get(depth).copied())
+                        .fold(Attribution::Additive, Attribution::meet)
+                };
+                (
+                    (0..=n).map(meet_at).collect(),
+                    referenced.iter().fold(ScopeSemantics::Direct, |acc, c| {
+                        acc.meet(&c.scope_semantics)
+                    }),
+                )
+            };
             columns.push(CompiledColumn {
                 name: name.clone(),
                 grain: None,
-                attribution_by_depth: vec![Attribution::Additive; n + 1],
-                scope_semantics: ScopeSemantics::Direct,
+                attribution_by_depth,
+                scope_semantics,
             });
         }
     }
@@ -827,6 +907,19 @@ kind = "measure"
             )
             .unwrap();
         (dir, store)
+    }
+
+    fn compile_with(store: &crate::store::Store, view: &ViewSpec) -> CompiledQuery {
+        compile_view(
+            store.writer(),
+            view,
+            &schema(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap()
     }
 
     fn compile(store: &crate::store::Store) -> CompiledQuery {
@@ -2072,6 +2165,173 @@ kind = "measure"
         assert!(
             blanked >= 4,
             "the fixture must actually contain blanked rows, or this asserts nothing: {blanked}"
+        );
+    }
+
+    #[test]
+    fn a_derived_column_inherits_the_attribution_of_what_it_references() {
+        // A derived column was marked Additive/Direct unconditionally. An
+        // expression over cross gamma therefore claimed to be summable at
+        // a level where cross gamma itself is blanked (§6.3) — the marker
+        // says "add this up" about a number built from one that must not
+        // be. The marker is the only thing a renderer has to go on, so a
+        // wrong one is worse than a missing column.
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        v.columns.push(ViewColumn::Derived {
+            name: "cg_per_delta".into(),
+            sql: "cross_gamma02 / nullif(delta01, 0)".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let of = |name: &str| {
+            q.columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+                .clone()
+        };
+        let cross_gamma = of("cross_gamma02");
+        let derived = of("cg_per_delta");
+
+        assert_eq!(
+            cross_gamma.attribution_by_depth[2],
+            Attribution::NonAttributable,
+            "precondition: cross gamma is blanked at depth 2"
+        );
+        assert_eq!(
+            derived.attribution_by_depth[2],
+            Attribution::NonAttributable,
+            "an expression over a blanked measure is not additive"
+        );
+        assert_eq!(
+            derived.attribution_by_depth[1], cross_gamma.attribution_by_depth[1],
+            "and it tracks its inputs at every level, not just the worst"
+        );
+    }
+
+    #[test]
+    fn a_derived_column_over_one_measure_carries_exactly_that_measures_markers() {
+        // The other half: the meet must be able to say "additive", or the
+        // rule above is just "always blank". Over a single input the
+        // answer is not a judgement call — it is that input's markers,
+        // level for level, including the levels where they are additive.
+        let (_d, store) = fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Derived {
+            name: "delta_doubled".into(),
+            sql: "delta01 * 2".into(),
+        });
+        let q = compile_with(&store, &v);
+        let of = |name: &str| {
+            q.columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        assert_eq!(
+            of("delta_doubled").attribution_by_depth,
+            of("delta01").attribution_by_depth,
+        );
+        assert!(
+            of("delta01")
+                .attribution_by_depth
+                .contains(&Attribution::Additive),
+            "precondition: this input is additive somewhere, or the \
+             assertion above is satisfied by blanking everything"
+        );
+    }
+
+    #[test]
+    fn a_derived_column_referencing_nothing_selected_does_not_overclaim() {
+        // A constant has no inputs to inherit from. It must not be given a
+        // weaker marker than it has earned, nor a stronger one.
+        let (_d, store) = fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Derived {
+            name: "one".into(),
+            sql: "1".into(),
+        });
+        let q = compile_with(&store, &v);
+        let derived = q.columns.iter().find(|c| c.name == "one").unwrap();
+        assert!(
+            derived
+                .attribution_by_depth
+                .iter()
+                .all(|a| *a == Attribution::Additive),
+            "{:?}",
+            derived.attribution_by_depth
+        );
+    }
+
+    #[test]
+    fn a_column_name_inside_a_string_literal_is_not_a_reference() {
+        // A label that happens to mention a column must not inherit that
+        // column's markers.
+        //
+        // The literal needs a separator after the name. Without one the
+        // closing quote's `current.clear()` discards it anyway, so a
+        // single-token literal passes whether or not the `in_string` guard
+        // is there — the first version of this test proved nothing, and
+        // the mutation harness is what said so.
+        let (_d, store) = fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Derived {
+            name: "label".into(),
+            sql: "'daily_trading_pnl per unit'".into(),
+        });
+        let q = compile_with(&store, &v);
+        let derived = q.columns.iter().find(|c| c.name == "label").unwrap();
+        assert!(
+            derived
+                .attribution_by_depth
+                .iter()
+                .all(|a| *a == Attribution::Additive),
+            "a name inside a literal is not a reference: {:?}",
+            derived.attribution_by_depth
+        );
+    }
+
+    #[test]
+    fn a_stale_enum_degrades_that_column_instead_of_failing_the_query() {
+        // The ENUM is refreshed at ingest (§3.6), so a value it does not
+        // carry means something already went wrong upstream. A plain cast
+        // makes that anomaly fail the *whole* statement, so one unknown
+        // book costs the trader every row of the tile.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "drop type if exists risk_snapshot_lhu_enum;
+                 create type risk_snapshot_lhu_enum as enum ('L0');
+                 insert into risk_snapshot_position_live values
+                   ('BK9','L_UNKNOWN','P9','C', 5, 'b', 1, 1, now());
+                 insert into risk_snapshot_underlying_live values
+                   ('BK9','L_UNKNOWN','P9','C','I9','SPX', 3, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let q = compile(&store);
+        let rows = run(&store, &q, &["row_depth", "lhu"]);
+        assert!(!rows.is_empty(), "the query must still answer: {}", q.sql);
+        // The known value still reads; the unknown one degrades to blank
+        // rather than taking the statement down with it.
+        let lhus: Vec<&str> = rows.iter().map(|r| r[1].as_str()).collect();
+        assert!(
+            lhus.iter().any(|v| v.contains("L0")),
+            "the known value must survive: {lhus:?}"
         );
     }
 

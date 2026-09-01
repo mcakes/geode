@@ -3,7 +3,12 @@
 
 pub mod scope_sql;
 
-pub use scope_sql::{ScopeSql, compile_scope};
+// `Era` is re-exported deliberately. Every site that names a relation or
+// builds a WHERE clause must go through it, and five review rounds found
+// defects at sites that had reached for `TableKind::Live` instead — the
+// single most repeated defect class in phase 2b. Leaving it reachable only
+// via `scope_sql` made the wrong thing the convenient one.
+pub use scope_sql::{Era, ScopeSql, compile_scope};
 pub mod compile;
 
 pub use compile::{CompiledColumn, CompiledQuery, compile_view};

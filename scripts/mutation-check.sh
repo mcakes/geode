@@ -184,6 +184,82 @@ run_mutation "provenance: stalest partition, not newest" \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
+run_mutation "enum: a stale value degrades rather than failing the query" \
+  crates/geode-data/src/query/compile.rs \
+  'selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));' \
+  'selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));'
+
+run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
+  crates/geode-core/src/scope/mod.rs \
+  'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
+  'if false {' \
+  geode-core
+
+run_mutation "scope: a contradiction still names its dimension" \
+  crates/geode-core/src/scope/mod.rs \
+  'dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));' \
+  'dimensions.retain(|d| !d.values.is_empty());' \
+  geode-core
+
+# ---- derived column attribution (spec §6.3)
+
+run_mutation "derived: a derived column inherits its inputs' attribution" \
+  crates/geode-data/src/query/compile.rs \
+  '            let referenced = referenced_columns(sql, &columns);' \
+  '            let referenced: Vec<&CompiledColumn> = Vec::new();'
+
+run_mutation "derived: attribution meet takes the weaker claim" \
+  crates/geode-core/src/attribution.rs \
+  '            (NonAttributable, _) | (_, NonAttributable) => NonAttributable,' \
+  '            (NonAttributable, _) | (_, NonAttributable) => Additive,' \
+  geode-core
+
+run_mutation "derived: a name inside a string literal is not a reference" \
+  crates/geode-data/src/query/compile.rs \
+  '        if in_string {
+            continue;
+        }' \
+  '        if false {
+            continue;
+        }'
+
+# ---- config validation (spec §10.1, §6.8)
+
+run_mutation "validation: views are checked when the service opens" \
+  crates/geode-data/src/service.rs \
+  '            .flat_map(|v| v.validate(&config.schema, &config.dimensions))' \
+  '            .flat_map(|_v| Vec::<Diagnostic>::new())'
+
+run_mutation "validation: a scope column is checked against the dataset" \
+  crates/geode-core/src/scope/mod.rs \
+  '                None if ds.column(&c).is_none() => {' \
+  '                None if false => {' \
+  geode-core
+
+run_mutation "validation: a derived dimension is not an unknown grouping" \
+  crates/geode-core/src/view.rs \
+  '            if let Some(d) = dims.get(g) {' \
+  '            if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
+  geode-core
+
+run_mutation "validation: a derived dimension shadowing a column is reported" \
+  crates/geode-core/src/view.rs \
+  '                if ds.column(g).is_some() {' \
+  '                if false {' \
+  geode-core
+
+# ---- generation id allocation (spec §4.3)
+
+run_mutation "catalog: a gen_id is reserved, not peeked" \
+  crates/geode-data/src/store/catalog.rs \
+  "        let sql = \"select nextval('file_generations_gen_id')\";" \
+  '        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";'
+
+run_mutation "catalog: the gen_id sequence starts above existing generations" \
+  crates/geode-data/src/store/catalog.rs \
+  'let start = self.latest_gen_id()? + 1;' \
+  'let start = 1;'
+
 # ---- the grain vocabulary (spec §3.3, §6.3)
 
 run_mutation "vocabulary: pair grain does not carry the underlying dimension" \

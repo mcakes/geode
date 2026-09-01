@@ -110,11 +110,22 @@ pub fn resolve_generations(
 /// scope predicates, which do take user input, bind (spec §6.2).
 ///
 /// A generation is named by `(batch, book, gen_id, source_time)`, not by
-/// `gen_id` alone. The relation this filters is archive-plus-live, and
-/// `gen_id` is allocated as `max + 1` over the catalog *before* the
-/// catalog row is written — a load that publishes and then fails to record
-/// leaves rows whose id the next load reuses. Naming the source time too
-/// means such a collision selects one generation rather than both.
+/// `gen_id` alone. The relation this filters is archive-plus-live, and a
+/// `gen_id` collision would otherwise select two generations at once.
+///
+/// `gen_id` now comes from a sequence (`Catalog::reserve_gen_id`), so a
+/// load that publishes and then fails to record can no longer leave its id
+/// for the next load to reuse. **The source-time term stays anyway**, and
+/// the prerequisites doc's suggestion that it could go once the sequence
+/// landed is wrong on one point: the sequence fixes allocation from here
+/// on, and does nothing about ids already written. A database loaded by an
+/// older build can hold two generations of one partition sharing an id
+/// right now, and dropping this term would make those ambiguous again —
+/// silently, and only for the history that predates the fix.
+///
+/// The cost is real but small: statement text grows with partition count,
+/// which is on the deferred list as a plan-caching concern. Correctness on
+/// existing data outranks it.
 pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
     if generations.is_empty() {
         // Selecting nothing, not everything: a time before all history is

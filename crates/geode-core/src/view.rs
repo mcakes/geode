@@ -7,6 +7,7 @@
 //! compiler (geode-data) turns it into one statement.
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
+use crate::dimensions::DerivedDimensions;
 use crate::schema::{ColumnRole, Grain, SchemaSpec};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +81,14 @@ impl ViewSpec {
         out
     }
 
-    pub fn validate(&self, schema: &SchemaSpec) -> Vec<Diagnostic> {
+    /// Check the view against the schema it will compile against.
+    ///
+    /// Takes the derived dimensions because §6.8 names are not dataset
+    /// columns: `desk` is computed from `book` and is absent from every
+    /// CSV. Validating without them would report the feature's own
+    /// vocabulary as unknown, which is why this could not simply be wired
+    /// up as it stood.
+    pub fn validate(&self, schema: &SchemaSpec, dims: &DerivedDimensions) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         let bad = |m: String| Diagnostic {
             severity: Severity::Error,
@@ -120,6 +128,26 @@ impl ViewSpec {
         }
 
         for g in &self.grouping {
+            // A derived dimension that shadows a real column is worse than
+            // an unknown one: the group-by resolves to whichever the
+            // compiler reaches first, so the answer is quietly the wrong
+            // one rather than absent. Reported here, at load, because
+            // nothing downstream can tell which was meant.
+            if let Some(d) = dims.get(g) {
+                if ds.column(g).is_some() {
+                    diags.push(bad(format!(
+                        "grouping '{g}' shadows a real column of dataset '{}': \
+                         it is also a derived dimension from '{}'. Rename one.",
+                        self.dataset, d.from
+                    )));
+                } else if ds.column(&d.from).is_none() {
+                    diags.push(bad(format!(
+                        "grouping '{g}' is derived from '{}', which dataset '{}' does not have",
+                        d.from, self.dataset
+                    )));
+                }
+                continue;
+            }
             if ds.column(g).is_none() {
                 diags.push(bad(format!("grouping names unknown column '{g}'")));
             }
@@ -259,6 +287,14 @@ mod tests {
         merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()])
     }
 
+    fn dimensions(text: &str) -> DerivedDimensions {
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", text).unwrap()],
+        );
+        DerivedDimensions::from_doc(&doc).0
+    }
+
     const SAMPLE: &str = r#"
 [desk_risk]
 dataset = "risk_snapshot"
@@ -379,7 +415,7 @@ grain = "instrument"
         let (views, _) = ViewSpec::from_doc(&doc(
             "[v]\ndataset = \"nosuch\"\ngrouping = [\"nocolumn\"]\n",
         ));
-        let diags = views[0].validate(&schema());
+        let diags = views[0].validate(&schema(), &DerivedDimensions::default());
         assert!(
             diags.iter().any(|d| d.message.contains("nosuch")),
             "{diags:?}"
@@ -389,8 +425,44 @@ grain = "instrument"
     #[test]
     fn a_well_formed_view_validates_clean() {
         let (views, _) = ViewSpec::from_doc(&doc(SAMPLE));
-        let diags = views[0].validate(&schema());
+        let diags = views[0].validate(&schema(), &DerivedDimensions::default());
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn grouping_by_a_derived_dimension_is_not_an_unknown_column() {
+        // §6.8: `desk` is not in the CSVs — it is computed from `book`.
+        // Validation that only knows the dataset calls it unknown, so
+        // wiring validation up without the derived dimensions would reject
+        // every view the feature exists for.
+        let dims = dimensions("[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n");
+        let (views, _) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"desk\"]\n\
+             [[v.columns]]\nname = \"delta01\"\nkind = \"measure\"\n",
+        ));
+        let diags = views[0].validate(&schema(), &dims);
+        assert!(
+            diags.is_empty(),
+            "a derived grouping is not an unknown column: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_dimension_that_shadows_a_real_column_is_reported() {
+        // Accepted silently, the group-by then runs against whichever the
+        // compiler resolves first — the derived mapping or the column of
+        // the same name in the data. Both are plausible and only one is
+        // meant, so the answer is quietly wrong rather than absent.
+        let dims = dimensions("[book]\nfrom = \"lhu\"\n[book.values]\nL0 = \"Flow\"\n");
+        let (views, _) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
+             [[v.columns]]\nname = \"delta01\"\nkind = \"measure\"\n",
+        ));
+        let diags = views[0].validate(&schema(), &dims);
+        assert!(
+            diags.iter().any(|d| d.message.contains("shadows")),
+            "expected a shadowing diagnostic, got {diags:?}"
+        );
     }
 
     #[test]

@@ -94,7 +94,25 @@ impl<'a> Catalog<'a> {
     }
 
     pub fn ensure_tables(&self) -> Result<(), StoreError> {
-        self.sql(DDL)
+        self.sql(DDL)?;
+        self.ensure_gen_id_sequence()
+    }
+
+    /// Create the generation sequence starting above whatever the catalog
+    /// already holds.
+    ///
+    /// It cannot live in [`DDL`] with a literal `START 1`: on a database
+    /// written before the sequence existed, that would hand out ids that
+    /// are already stamped onto live rows — the same collision this
+    /// sequence exists to prevent, but hitting every existing partition
+    /// rather than one crashed load. `IF NOT EXISTS` makes this a no-op
+    /// once created, so the start value is only ever read from a catalog
+    /// the sequence has not yet been responsible for.
+    fn ensure_gen_id_sequence(&self) -> Result<(), StoreError> {
+        let start = self.latest_gen_id()? + 1;
+        self.sql(&format!(
+            "CREATE SEQUENCE IF NOT EXISTS file_generations_gen_id START {start};"
+        ))
     }
 
     /// Reserve a file id *before* loading, so the `source_file_id` stamped
@@ -111,9 +129,31 @@ impl<'a> Catalog<'a> {
             })
     }
 
-    /// Peek at the next generation id without consuming it.
-    pub fn next_gen_id(&self) -> Result<i64, StoreError> {
-        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";
+    /// Take the next generation id, consuming it.
+    ///
+    /// A sequence rather than `max(gen_id) + 1`, because that was peeked
+    /// *before* the catalog row was written: a load that published its
+    /// rows and then failed to record left the id free, and the next load
+    /// stamped a different generation of the same partition with it. The
+    /// generation predicate then could not tell the two apart. A sequence
+    /// hands out an id once whether or not anything is ever recorded
+    /// against it, so a crashed load costs an id and nothing else.
+    pub fn reserve_gen_id(&self) -> Result<i64, StoreError> {
+        let sql = "select nextval('file_generations_gen_id')";
+        self.conn
+            .query_row(sql, [], |r| r.get(0))
+            .map_err(|source| StoreError::Sql {
+                statement: sql.into(),
+                source,
+            })
+    }
+
+    /// The newest generation recorded, or 0 when nothing has loaded.
+    ///
+    /// Read-only: freshness reporting asks this on every query, and must
+    /// not burn an id to answer.
+    pub fn latest_gen_id(&self) -> Result<i64, StoreError> {
+        let sql = "select coalesce(max(gen_id), 0) from file_generations";
         self.conn
             .query_row(sql, [], |r| r.get(0))
             .map_err(|source| StoreError::Sql {
@@ -459,11 +499,82 @@ mod tests {
     fn gen_ids_are_monotonic() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        assert_eq!(cat.next_gen_id().unwrap(), 1);
+        assert_eq!(cat.reserve_gen_id().unwrap(), 1);
         let mut r = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
         r.gen_id = 1;
         cat.record(&r).unwrap();
-        assert_eq!(cat.next_gen_id().unwrap(), 2);
+        assert_eq!(cat.reserve_gen_id().unwrap(), 2);
+    }
+
+    #[test]
+    fn a_reserved_gen_id_is_never_handed_out_twice() {
+        // The id used to be `max(gen_id) + 1` over the catalog, peeked
+        // before the row was written. A load that published its rows and
+        // then failed to record left the id free, so the next load stamped
+        // a *different* generation of the same partition with it — and the
+        // generation predicate could no longer tell them apart.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+
+        let published = cat.reserve_gen_id().unwrap();
+        // The catalog row is never written: this is the crash window.
+        let next = cat.reserve_gen_id().unwrap();
+        assert_ne!(
+            published, next,
+            "an id handed out once must not be handed out again, recorded or not"
+        );
+    }
+
+    #[test]
+    fn the_newest_recorded_generation_is_reported_without_consuming_an_id() {
+        // Freshness reporting reads the newest generation; it must not
+        // allocate, or merely asking how fresh a dataset is would burn an
+        // id on every query.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        assert_eq!(cat.latest_gen_id().unwrap(), 0, "nothing recorded yet");
+
+        let mut r = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
+        r.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&r).unwrap();
+
+        assert_eq!(cat.latest_gen_id().unwrap(), r.gen_id);
+        assert_eq!(
+            cat.latest_gen_id().unwrap(),
+            r.gen_id,
+            "reading twice reports the same generation"
+        );
+    }
+
+    #[test]
+    fn a_database_that_predates_the_sequence_continues_above_its_generations() {
+        // `CREATE SEQUENCE IF NOT EXISTS ... START 1` on a database that
+        // already holds generations would hand out ids that are already in
+        // use, which is the collision this change exists to remove — with
+        // every existing partition as the victim rather than a crashed
+        // load.
+        let (_d, store) = store();
+        {
+            // A catalog as it looked before the sequence: rows carrying
+            // gen_ids, and no sequence to match.
+            let cat = Catalog::new(store.writer());
+            for (i, book) in ["BK000", "BK001", "BK002"].iter().enumerate() {
+                let mut r = record(book, &[book], ts("2026-08-30T07:00:00Z"));
+                r.gen_id = i as i64 + 1;
+                cat.record(&r).unwrap();
+            }
+            store
+                .writer()
+                .execute_batch("drop sequence if exists file_generations_gen_id;")
+                .unwrap();
+        }
+
+        let cat = Catalog::new(store.writer());
+        cat.ensure_tables().unwrap();
+        assert!(
+            cat.reserve_gen_id().unwrap() > 3,
+            "the sequence must start above the generations already recorded"
+        );
     }
 
     #[test]

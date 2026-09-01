@@ -3,13 +3,29 @@
 Work that Phase 2b deliberately left undone, scoped for a branch to be
 taken **before** the blotter. Written 2026-08-31 at `9c03941`.
 
-## Status (2026-08-31, branch `worktree-phase-3-prerequisites`)
+## Status (2026-08-31) — everything in this document is done
 
-**The three blockers are done, and so is all of §2.** Still open: §3
-(`gen_id` sequence), §4 (validation wiring), and every §5 item except the
-`ORDER BY` one. Those are unchanged and still worth doing.
+Two branches. The first did the three blockers and all of §2; the second
+did §3, §4 and the rest of §5. Nothing below is outstanding.
 
-Two things this branch found that were not in the list below:
+Three items were **not** implemented as written, each for a reason
+recorded at the site:
+
+- **The `source_time` term in the generation predicate stays** (§3 says it
+  "can go" once `gen_id` comes from a sequence). The sequence fixes
+  allocation from here on and does nothing about ids already written: a
+  database loaded by an older build can hold two generations of one
+  partition sharing an id right now, and dropping the term would make
+  those ambiguous again, silently, only for history predating the fix.
+- **The `else 0` arm of the `sub_depth` CASE** was already `else -1`,
+  fixed in round 5. Verified, not re-done.
+- **The ENUM `try_cast` guard trades one ambiguity for another** and is
+  worth knowing about: a value the ENUM lacks now reads back blank, and a
+  blank dimension cell already means "rolled up". That is the lesser
+  evil only because the alternative is a `Conversion Error` that fails the
+  whole statement — one unknown book costing every row of the tile.
+
+Two things the first branch found that were not in the list below:
 
 - **`depth_of_row` returned `None` for every real query result.** DuckDB
   emits the narrowest integer that fits, so `row_depth` arrives as
@@ -145,7 +161,17 @@ is right or wrong. They are argued in comments at the site instead.
 - `service.rs` field order drops `_store` (and its database handle)
   before `QueryPool`'s workers are joined.
 
-## 3. `gen_id` allocation can collide
+## 3. `gen_id` allocation can collide — DONE
+
+`Catalog::reserve_gen_id` takes from a DuckDB sequence; `latest_gen_id`
+is the read-only half freshness reporting needs (it was
+`next_gen_id() - 1`, which a consuming sequence would both break and
+charge for). `ensure_tables` creates the sequence starting above whatever
+the catalog already holds — a literal `START 1` in the DDL would hand out
+ids already stamped onto live rows.
+
+The `source_time` term in the predicate **stays**; see the status note at
+the top.
 
 `geode-data/src/store/catalog.rs`, `next_gen_id()`.
 
@@ -157,7 +183,14 @@ this by also matching `source_time`; the actual fix is a DuckDB sequence,
 like `file_generations_id` already uses for file ids. Do that and the
 `source_time` term in the predicate can go.
 
-## 4. Validation never runs
+## 4. Validation never runs — DONE
+
+Both validators take `DerivedDimensions` and resolve a name through it
+before calling it unknown. `DataService::open` validates every view and
+holds the diagnostics (`diagnostics()`); `validate_scope` is the scope
+half, which cannot run at open because the caller owns scope state. A
+derived name that shadows a real column is an error at load. Reported,
+never fatal.
 
 `ViewSpec::validate` and `Scope::validate` are not called from
 `DataService::open`, so a misconfigured view surfaces as a DuckDB binder
@@ -167,7 +200,13 @@ also reject derived dimensions as unknown columns, and neither takes
 first. A derived name that shadows a real dataset column is accepted and
 silently groups by the wrong one; that should be a load-time diagnostic.
 
-## 5. Smaller, but real
+## 5. Smaller, but real — DONE
+
+Derived columns take the meet of what they reference; the ENUM cast is
+`try_cast`; `Scope::columns()` names a contradicted dimension;
+`freshness` takes the era; `Era` is re-exported; derived-dimension
+operator misuse is a diagnostic at entry. The `else -1` arm was already
+fixed in round 5.
 
 - ~~`compile.rs` emits no `ORDER BY` when `view.sort` is empty~~ **DONE.**
   Depth now always leads the order, with the grouping columns following as
