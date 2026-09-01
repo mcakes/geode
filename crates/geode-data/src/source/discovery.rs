@@ -348,7 +348,7 @@ mod tests {
             gen_id: 1,
             loaded_at: Utc::now(),
             row_count: 1,
-            books: vec!["BK000".into()],
+            books: vec![Some("BK000".to_string())],
             health: crate::health::Health::Ok,
         })
         .unwrap();
@@ -375,7 +375,7 @@ mod tests {
             gen_id: 1,
             loaded_at: Utc::now(),
             row_count: 1,
-            books: vec!["BK000".into()],
+            books: vec![Some("BK000".to_string())],
             health: crate::health::Health::Ok,
         })
         .unwrap();

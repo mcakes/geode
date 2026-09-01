@@ -218,7 +218,17 @@ fn query_once(service: &DataService, setup: &Setup) -> Reading {
             .freshness(&setup.dataset, AsOf::Live)
             .unwrap_or_default()
             .into_iter()
-            .map(|(book, as_of)| (book, as_of.to_rfc3339(), 0))
+            // The bookless partition is real data with its own freshness
+            // (§4.4 keeps unattributed rows rather than dropping them), so
+            // it gets a label rather than an empty cell. Parenthesised so
+            // it cannot be mistaken for a book actually called that.
+            .map(|(book, as_of)| {
+                (
+                    book.unwrap_or_else(|| "(no book)".to_string()),
+                    as_of.to_rfc3339(),
+                    0,
+                )
+            })
             .collect::<Vec<_>>()
     };
 

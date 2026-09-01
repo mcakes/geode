@@ -248,6 +248,23 @@ run_mutation "validation: a derived dimension shadowing a column is reported" \
   '                if false {' \
   geode-core
 
+# ---- the bookless partition in the catalog (spec §4.5)
+
+run_mutation "catalog: the bookless partition gets a file_books row" \
+  crates/geode-data/src/store/catalog.rs \
+  '        for book in &rec.books {' \
+  '        for book in rec.books.iter().filter(|b| b.is_some()) {'
+
+run_mutation "catalog: freshness can be asked about a null book" \
+  crates/geode-data/src/store/catalog.rs \
+  '                 where fg.batch = ? and fb.book is null",' \
+  '                 where fg.batch = ? and false",'
+
+run_mutation "ingest: the backfill guard covers every partition written" \
+  crates/geode-data/src/ingest/load.rs \
+  '    for partition in &partitions {' \
+  '    for partition in partitions.iter().filter(|p| p.book.is_some()) {'
+
 # ---- generation id allocation (spec §4.3)
 
 run_mutation "catalog: a gen_id is reserved, not peeked" \
