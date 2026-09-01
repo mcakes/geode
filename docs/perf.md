@@ -107,6 +107,15 @@ real data essentially immediately and the §7.1 one-second startup budget
 never depends on reading a CSV. This is what amending §5.3 from in-memory
 to persistent storage bought.
 
+> **Read this before acting on the 1.87×.** The benchmark behind it
+> stages a file with `read_csv` and nothing else — the real staging path
+> is `read_csv` *plus* `split_by_grain`, a grouped aggregation per grain
+> that is not in the measurement at all. So the figure is sound for what
+> it measures and is **not** a measurement of staging. Whether the
+> combined path parallelises as well is open. The work is on hold until
+> it is measured on the real path and against a real network share:
+> `docs/ingest-cold-start-handoff.md`.
+
 **Spec §5.6's open question is answered: parallel staging wins, by
 1.87× at realistic file sizes.** The plan predicted parallelism would
 *not* help, reasoning that DuckDB's CSV reader is already multi-threaded

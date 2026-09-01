@@ -6,6 +6,13 @@
 //! separate connections buys anything is a benchmark question the spec
 //! declines to assume (spec §5.6), and Task 14 measures it.
 //!
+//! **Moving staging onto a pool is planned but on hold** — read
+//! `docs/ingest-cold-start-handoff.md` first. The 1.87× in `docs/perf.md`
+//! measures `read_csv` alone, not staging, and `staging_raw` /
+//! `staging_{grain}` are fixed global names that concurrent staging would
+//! overwrite. This paragraph becomes wrong the day that lands; rewrite it
+//! rather than leaving it to mislead.
+//!
 //! Preemption granularity is one file: the queue is re-sorted on every
 //! submit, so a newly landed current file jumps ahead of remaining backfill
 //! without interrupting a load in flight (spec §5.4).
