@@ -509,9 +509,15 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
 ///    init_reclaimed_keybindings`'s scoped `NoAction` reclaim (spec
 ///    §2b2), which the modal panel's `"GeodeModal"` key context makes
 ///    possible;
-/// 3. everything else — bare `enter` and bare `escape` included — returns
-///    `false`. `enter` is deliberately inert and reserved: settings apply
-///    the instant they are stepped, so there is nothing to confirm.
+/// 3. bare `enter` is claimed and dropped — returns `true` without acting.
+///    It is deliberately inert and reserved: settings apply the instant
+///    they are stepped, so there is nothing to confirm. Claiming it (not
+///    just ignoring it) is required, not cosmetic: with a focused `Input`,
+///    an unclaimed key continues to the window's text-input phase (spec
+///    §3) rather than simply vanishing, and `enter` reaching the input
+///    fires an `InputEvent::Change` that would reset `selected` back to
+///    the top match even though the text itself is unchanged;
+/// 4. everything else, bare `escape` included, returns `false`.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -529,6 +535,16 @@ fn handle_key(
         let selected = state.selected;
         shell.settings_scroll.scroll_to_item(selected);
         cx.notify();
+        return true;
+    }
+
+    // Bare `enter` is reserved and deliberately inert (see this
+    // function's own doc comment, item 3) — claimed and dropped rather
+    // than left unhandled, because leaving it unhandled would NOT make it
+    // inert: an unclaimed key continues past this handler to the filter's
+    // own text-input phase, where `enter` fires an `InputEvent::Change`
+    // that resets `selected` back to the top match.
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
         return true;
     }
 
@@ -906,6 +922,37 @@ mod tests {
         state.selected = 2;
         state.set_query("dark".to_string());
         assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn a_click_resolves_a_setting_id_to_its_filtered_position() {
+        // The list the user clicks is the filtered one, so a row's click
+        // handler (keyed by SettingId, as it always was) must resolve to a
+        // position in THAT list, not in the full one — the settings twin
+        // of keybindings' `a_click_resolves_an_action_id_to_its_filtered_position`.
+        let rows = rows();
+        let mut state = SettingsState::new();
+        state.set_query(rows[2].title.to_string());
+        let visible = visible_rows(&state, &rows);
+        assert_eq!(
+            filtered_position(&visible, &rows, rows[2].id),
+            Some(0),
+            "the only match sits at filtered position 0, whatever its \
+             position in the full list"
+        );
+    }
+
+    #[test]
+    fn a_click_on_a_row_the_filter_hid_resolves_to_nothing() {
+        let rows = rows();
+        let mut state = SettingsState::new();
+        state.set_query(rows[2].title.to_string());
+        let visible = visible_rows(&state, &rows);
+        let hidden = rows
+            .iter()
+            .find(|r| !visible.iter().any(|m| rows[m.row].id == r.id))
+            .expect("the query must hide at least one row");
+        assert_eq!(filtered_position(&visible, &rows, hidden.id), None);
     }
 
     // -- click_selects_or_steps ------------------------------------------

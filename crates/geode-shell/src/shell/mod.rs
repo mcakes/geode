@@ -6331,9 +6331,11 @@ mod tests {
             shell.palette.as_ref().unwrap().filtered().len()
         });
         assert!(
-            len > 12,
-            "sanity: the unfiltered palette needs more than 12 rows for \
-             these steps to be distinguishable, got {len}"
+            len >= 16,
+            "sanity: the last assertion below (ctrl+d then ctrl+f, landing \
+             at 15) needs at least 16 rows or it fails on ITS OWN clamp \
+             instead of proving the step size — a looser bound here would \
+             fail at the wrong assertion with a confusing message, got {len}"
         );
 
         cx.simulate_keystrokes("ctrl-d");
@@ -6363,7 +6365,17 @@ mod tests {
     }
 
     /// The split this change deliberately preserves (spec §3): the new
-    /// larger steps clamp, while the ±1 keys keep wrapping.
+    /// larger steps clamp, while the ±1 keys keep wrapping. This test and
+    /// its partner above (`the_palette_takes_the_larger_navigation_steps`)
+    /// are jointly, not individually, sufficient: that one alone would
+    /// pass against a `nav_command` that returned `Move(0)` for every key
+    /// (every assertion there stays put or moves by the size actually
+    /// under test, never wraps), and this one alone would pass against a
+    /// palette that ignored the new keys entirely (every clamp assertion
+    /// here is also satisfied by "nothing moved"). Together they pin both
+    /// that the new keys move the selection by the right amount AND that
+    /// the amount clamps rather than wraps — do not delete one believing
+    /// the other still covers navigation.
     #[gpui::test]
     fn palette_big_steps_clamp_while_arrows_still_wrap(cx: &mut gpui::TestAppContext) {
         let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
@@ -8041,6 +8053,51 @@ mod tests {
         });
     }
 
+    /// The full inertness contract for the reserved `enter` (spec §3):
+    /// with a focused `Input`, `handle_key` returning `false` for it would
+    /// NOT make it inert — `enter` would reach the filter, be normalized
+    /// away to an empty edit, but still fire an unconditional
+    /// `InputEvent::Change` that resets `selected` back to the top match
+    /// via `SettingsState::set_query`. `handle_key` claims it instead (see
+    /// its own doc comment). Unlike `enter_does_nothing_in_the_settings_
+    /// dialog` above, this moves the selection off the top row FIRST, so
+    /// a reset back to 0 is actually observable.
+    #[gpui::test]
+    fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        cx.simulate_keystrokes("down down");
+        let selected_before =
+            shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected);
+        assert_eq!(
+            selected_before, 2,
+            "sanity: two downs land on the third row"
+        );
+        let dark_before =
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+
+        cx.simulate_keystrokes("enter");
+
+        let (query, selected, dark_after, open) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().unwrap();
+            (
+                state.query.clone(),
+                state.selected,
+                shell.services.theme.active_mode().is_dark(),
+                shell.modal.is_some(),
+            )
+        });
+        assert!(
+            query.is_empty(),
+            "enter must not leave any character in the filter"
+        );
+        assert_eq!(
+            selected, selected_before,
+            "enter must not reset the selection to the top match"
+        );
+        assert_eq!(dark_after, dark_before, "enter must not step any value");
+        assert!(open, "enter must not close the dialog");
+    }
+
     #[gpui::test]
     fn escape_closes_the_settings_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppContext) {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -9012,6 +9069,38 @@ mod tests {
             filter_is_focused(&shell, &mut cx),
             "navigation must not steal focus from the filter"
         );
+    }
+
+    /// `tab` is reserved here (it steps values in the settings dialog,
+    /// which has nothing to step) and must be genuinely inert: with a
+    /// focused `Input`, `handle_key` returning `false` for it would NOT
+    /// make it inert — the key would continue to the filter's own
+    /// text-input phase, and `InputState::normalize_input` strips only
+    /// `\n`/`\r`, not `\t`, so it would land as a literal tab character
+    /// and collapse the list to "no matches". `handle_key` claims it
+    /// instead (see its own doc comment).
+    #[gpui::test]
+    fn tab_is_reserved_and_leaves_the_keybindings_dialog_untouched(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_keystrokes("down down");
+        let selected_before =
+            shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected);
+        assert_eq!(
+            selected_before, 2,
+            "sanity: two downs land on the third row"
+        );
+
+        cx.simulate_keystrokes("tab");
+
+        let (query, selected) = shell.read_with(&cx, |shell, _| {
+            let state = shell.keybindings.as_ref().unwrap();
+            (state.query.clone(), state.selected)
+        });
+        assert!(
+            query.is_empty(),
+            "tab must not leak a literal tab character into the filter"
+        );
+        assert_eq!(selected, selected_before, "tab must not move the selection");
     }
 
     /// Enter blurs the filter so rebind capture sees raw keys: the letter

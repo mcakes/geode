@@ -134,12 +134,35 @@ a "clear first" step would only ever cost a keystroke.
 step, so there is nothing to confirm, and the key is held in reserve rather
 than aliased onto `tab`.
 
-A key a dialog does not claim (`enter` in settings, `tab` in keybindings,
-anything else that falls through) leaves that dialog's `on_key` handler
-returning `false`, unhandled. The modal branch in `ShellView::handle_key_down`
-acts only on `escape`, and the shell keymap `Matcher` is never reached while a
-modal is open, so an unclaimed key is inert — it can neither fire a shell
-chord behind the dialog nor close it.
+With a focused `Input`, an *unclaimed* key is not inert — it continues past
+the dialog's `on_key` handler to the window's own text-input phase
+(`Window::dispatch_keystroke`'s second phase, which runs whenever the key
+event still `propagate`s after every listener; `cx.stop_propagation()` is
+what a claimed key uses to skip it). That phase is exactly what feeds the
+shared filter `Input`, which is always focused while a list dialog is open —
+so a genuinely reserved key like `enter` in settings or `tab` in keybindings
+must be *claimed and dropped* (`on_key` returns `true` having done nothing),
+not left unhandled, or it lands in the filter as a stray character.
+Concretely: `InputState::normalize_input` strips `\n`/`\r` but not `\t`, so
+an unclaimed `tab` types a literal tab into the query and collapses the list
+to "no matches"; and even though `enter` does get normalized away to nothing,
+`replace_text_in_range` still fires `InputEvent::Change` unconditionally, so
+the query-edit subscription resets the selection to the top match regardless.
+Both dialogs claim their reserved key for exactly this reason — see
+`keybindings_view::handle_key` and `settings_view::handle_key`'s own doc
+comments. (On a shipped build this never reaches a real user: `enter` and
+`tab` are both control characters, and macOS routes control characters to
+`doCommandBySelector` while Windows' `parse_char_message` drops
+`is_control()` characters, so neither ever reaches `insertText` on either
+platform — the leak was only ever observable in the `#[gpui::test]` harness,
+which drives `Window::dispatch_keystroke` directly rather than through a
+real platform text-input callback. The rule holds regardless of platform, so
+the claim is made unconditionally rather than relying on that.) A claimed
+key, in either dialog, still cannot fire a shell chord behind the dialog or
+close it: the modal branch in `ShellView::handle_key_down` acts only on
+`escape` once the dialog's own handler has had first refusal, and the shell
+keymap `Matcher`
+is never reached while a modal is open.
 
 ### The command palette
 
@@ -304,7 +327,8 @@ nothing to restore here.
   semantics; `shell::mod`'s tests drive them directly.
 - **`derive_rows`' no-caching contract** in both dialogs: rows are still
   derived fresh on every render and every keystroke.
-- **The palette, apart from the four keys it gains** (§3). Its query field,
+- **The palette, apart from the six keys it gains** (§3: `ctrl+d`/`ctrl+u`/
+  `ctrl+f`/`ctrl+b`, `pageup`/`pagedown`). Its query field,
   its `PaletteState` filtering, its wrapping ±1 keys, its rendering and its
   dispatch path are all untouched — this change adds a fallback arm to
   `handle_palette_key` and nothing else.

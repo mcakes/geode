@@ -12,10 +12,14 @@
 //! `Input` leaves free ([`crate::listfilter::nav_command`]:
 //! `up`/`down`/`ctrl+p`/`ctrl+n` ∓1, `ctrl+d`/`ctrl+u` ±5,
 //! `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus `enter` and
-//! `escape`. This replaced the vim motions ([`crate::vimnav`]) and the
-//! `/` find sessions ([`crate::vimfind`]) this dialog used to drive;
-//! both modules stay in the crate — `vimnav::apply` still does the
-//! clamped index arithmetic here.
+//! `escape`. `tab`/`shift+tab` are also claimed, but only to be dropped —
+//! they are the settings dialog's stepping keys, reserved and inert here
+//! (see [`handle_key`]'s own doc comment for why claiming, not just
+//! ignoring, is what actually makes them inert). This replaced the vim
+//! motions ([`crate::vimnav`]) and the `/` find sessions
+//! ([`crate::vimfind`]) this dialog used to drive; both modules stay in
+//! the crate — `vimnav::apply` still does the clamped index arithmetic
+//! here.
 //!
 //! ## Rebind capture
 //!
@@ -464,7 +468,17 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
 ///    doc's "Rebind capture");
 /// 3. [`listfilter::nav_command`] motions move the selection within the
 ///    *filtered* list;
-/// 4. everything else returns `false`, unhandled — which for a printable
+/// 4. bare `tab`/`shift+tab` are claimed and dropped — returns `true`
+///    without acting. They are the settings dialog's stepping keys,
+///    reserved and deliberately inert here. Claiming them (not just
+///    falling through) is what actually makes them inert: with a focused
+///    `Input`, an unclaimed key continues to the window's text-input
+///    phase (spec §3) rather than simply vanishing, and
+///    `InputState::normalize_input` strips only `\n`/`\r` from an
+///    inserted edit — not `\t` — so an unclaimed `tab` would land in the
+///    filter as a literal tab character and collapse the list to "no
+///    matches";
+/// 5. everything else returns `false`, unhandled — which for a printable
 ///    key is exactly right: the modal branch in `handle_key_down` only
 ///    stops propagation for keys this handler claims, so an unclaimed
 ///    character goes on to the focused `Input`'s own text-insertion
@@ -529,6 +543,26 @@ fn handle_key(
         let selected = state.selected;
         shell.keybindings_scroll.scroll_to_item(selected);
         cx.notify();
+        return true;
+    }
+
+    // `tab`/`shift+tab` are reserved (they step values in the settings
+    // dialog, which has nothing to step here) — claimed and dropped
+    // rather than left unhandled, because leaving them unhandled would
+    // NOT make them inert: an unclaimed key continues past this handler
+    // to the filter's own text-input phase (see this function's own doc
+    // comment, item 4), and a literal tab character in the query would
+    // collapse the list to "no matches".
+    if ks.mods == Modifiers::NONE && ks.key == "tab" {
+        return true;
+    }
+    if ks.key == "tab"
+        && ks.mods
+            == (Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            })
+    {
         return true;
     }
 
