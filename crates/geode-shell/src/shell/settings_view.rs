@@ -56,9 +56,11 @@
 //!
 //! ## Find (`/`), both styles
 //!
-//! Identical semantics to the keybinding dialog, via the shared session
-//! drivers in [`crate::vimfind`] (promoted out of `keybindings_view` by
-//! this same rewrite): vim style jumps the selection incrementally from
+//! Driven by the shared session drivers in [`crate::vimfind`] (promoted
+//! out of `keybindings_view` by this same rewrite, and now this dialog's
+//! only caller — the keybinding dialog has since moved to an
+//! always-focused fuzzy filter, which this dialog has yet to follow):
+//! vim style jumps the selection incrementally from
 //! the anchor with `n`/`shift+n` repeats; fzf style narrows the rendered
 //! list, `up`/`down` step the matches, and `enter` picks — with the one
 //! settings-specific meaning of *picking*: the session just ends, full
@@ -71,7 +73,10 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
+use gpui::{
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, StyledText,
+    Window, div, px,
+};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fontsize::FontSize;
@@ -83,7 +88,7 @@ use crate::theme::Mode;
 use crate::vimfind::{self, FindDirection, FindStyle, VimFind, filter_matches};
 use crate::vimnav::{self, NavResult, VimListNav};
 
-use super::keybindings_view::{highlighted_text, key_chip};
+use super::keybindings_view::key_chip;
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui. Row derivation, value stepping, session state.
@@ -441,12 +446,19 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
+        // No filter field yet: this dialog still drives `/` find and vim
+        // motions, and `build` does not render `dialog::filter_row`.
+        // Focusing an input that is not in the rendered element tree
+        // would route every key to the window root, past `ShellView`'s
+        // own listener — so it stays `false` until this dialog moves to
+        // the shared filter too.
+        false,
     );
 }
 
-/// The [`dialog::ModalKeyHandler`] for this dialog, mirroring
-/// `keybindings_view::handle_key`'s priority order with stepping in place
-/// of rebind capture:
+/// The [`dialog::ModalKeyHandler`] for this dialog. Priority order (the
+/// shape `keybindings_view::handle_key` had before that dialog moved to
+/// the shared filter, with stepping in place of rebind capture):
 ///
 /// 1. an active find session owns every keystroke (vim or fzf per
 ///    `ShellView::find_style`, via the shared `vimfind` drivers — an fzf
@@ -602,6 +614,36 @@ fn on_row_clicked(shell: &mut ShellView, clicked: SettingId, cx: &mut Context<Sh
     cx.notify();
 }
 
+/// One line of a row's label with the find query's matched span lit —
+/// contiguous substring, so a background tint (`primary` at 20%, the same
+/// tint idiom the sidebar's active workspace disc uses — no raw colors)
+/// plus bold, via `StyledText::with_highlights` exactly as the palette's
+/// `highlighted_title` does (byte range from [`vimfind::match_range`]).
+/// Plain text when there's no query or this line doesn't contain it.
+///
+/// Lives here, private, rather than in `keybindings_view`: that module's
+/// shared [`highlighted_text`](super::keybindings_view::highlighted_text)
+/// moved to fuzzy-match *indices* when the keybinding dialog adopted the
+/// filter-first UX, and a subsequence match has no single contiguous
+/// range to hand `match_range`. This dialog is still on `/` find, so it
+/// keeps the substring rendering until it moves too — at which point this
+/// goes away in favour of the shared helper again.
+fn highlighted_find_text(text: &str, query: Option<&str>, primary: Hsla) -> AnyElement {
+    match query.and_then(|q| vimfind::match_range(text, q)) {
+        Some(range) => {
+            let style = HighlightStyle {
+                background_color: Some(primary.opacity(0.2)),
+                font_weight: Some(FontWeight::BOLD),
+                ..Default::default()
+            };
+            StyledText::new(text.to_string())
+                .with_highlights([(range, style)])
+                .into_any_element()
+        }
+        None => div().child(text.to_string()).into_any_element(),
+    }
+}
+
 /// The [`dialog::ShellModal::build`] closure body: a scrollable row list
 /// (title + muted category on the left, with find-match highlighting; the
 /// current value label on the right in the mono data face) plus the
@@ -665,12 +707,12 @@ fn build(
 
         let label = v_flex()
             .gap_0p5()
-            .child(highlighted_text(row.title, hl_query, theme.primary))
+            .child(highlighted_find_text(row.title, hl_query, theme.primary))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(highlighted_text(row.category, hl_query, theme.primary)),
+                    .child(highlighted_find_text(row.category, hl_query, theme.primary)),
             );
 
         // The current value, in the data face — a value readout, not

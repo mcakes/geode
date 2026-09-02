@@ -160,6 +160,13 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
 /// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
 /// runs at all.
 ///
+/// `pub(crate)` since the filter-first dialog UX:
+/// `keybindings_view::highlighted_text` paints its rows' fuzzy matches
+/// through this same conversion rather than growing a second copy — and
+/// it leans on the out-of-range guard below deliberately, since it feeds
+/// one row's indices to two separate label lines (title, then category)
+/// and each pass must simply skip the other line's.
+///
 /// **Out-of-range guard** (fix-round nit): the indices are positions in
 /// the *lowered* match text while `boundaries` comes from the
 /// original-case `title`, and `str::to_lowercase` is not always
@@ -173,7 +180,7 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
 /// highlight, and free-form theme names would be all it takes. Indices
 /// that fall outside the title are therefore skipped (the in-range
 /// characters still highlight normally) instead of indexing.
-fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
     if indices.is_empty() {
         return Vec::new();
     }

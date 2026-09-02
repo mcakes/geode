@@ -61,8 +61,8 @@ use crate::keymap::{Keystroke, Modifiers};
 /// state machine serves both — `/` starts the session and query editing is
 /// byte-for-byte identical either way; what differs is what the *caller*
 /// does with the query (jump the selection vs. narrow the rendered rows —
-/// the keybinding dialog's `press_while_finding` vs.
-/// `press_while_finding_fzf`). Mirrors [`crate::fontsize::FontSize`]'s
+/// [`press_while_finding`] vs. [`press_while_finding_fzf`], as the
+/// settings dialog calls them). Mirrors [`crate::fontsize::FontSize`]'s
 /// shape exactly: `config_value`/`label`/`from_value`/`from_config` plus a
 /// [`persist_to_user_config`] sibling, so the settings control, startup
 /// resolution, and hot reload all ride the same paths font size does.
@@ -738,10 +738,11 @@ mod tests {
     //
     // These tests moved here with the code they pin (the settings-dialog
     // rewrite promoted the session-press semantics out of
-    // `keybindings_view` so both dialogs share one driver); the
-    // keybindings-specific halves — what *picking* means there (rebind
-    // listening starts), searchable-text philosophy — stayed behind in
-    // `keybindings_view::tests`, exercised through its thin wrappers.
+    // `keybindings_view` so both dialogs could share one driver). They
+    // are now the only tests of these drivers: the keybinding dialog has
+    // since moved to an always-focused fuzzy filter and its own
+    // find-specific tests went with its wrappers, leaving the settings
+    // dialog as the drivers' one caller.
 
     /// A session mid-flight: `find` started, anchor saved at `selected` —
     /// the exact state a caller is in right after handling `/`.

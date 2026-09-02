@@ -57,8 +57,12 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, MouseButton, SharedString, Window, div, hsla, px};
+use gpui::{
+    AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window, div, hsla,
+    px,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
@@ -172,7 +176,7 @@ pub fn open_shell_dialog<F>(
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
-    open_shell_dialog_with_key(view, window, cx, title, build, None);
+    open_shell_dialog_with_key(view, window, cx, title, build, None, false);
 }
 
 /// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
@@ -184,6 +188,14 @@ pub fn open_shell_dialog<F>(
 /// door for any future handler-less modal. Still the same one door, same
 /// open-time hygiene — this is the one place that constructs a
 /// [`ShellModal`], `open_shell_dialog` included.
+///
+/// `focus_filter` focuses [`ShellView::dialog_input`] on open — every list
+/// dialog passes `true` (the filter-first dialog UX: the first character
+/// typed must reach the filter, not fall on the floor);
+/// `open_shell_dialog` passes `false`. A modal that passes `true` must
+/// actually render that input — [`filter_row`] — since gpui dispatches
+/// keys down the *rendered* focus path and would otherwise route them to
+/// the window root, past `ShellView`'s own key listener.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -191,6 +203,7 @@ pub fn open_shell_dialog_with_key<F>(
     title: impl Into<SharedString>,
     build: F,
     on_key: Option<ModalKeyHandler>,
+    focus_filter: bool,
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
@@ -213,7 +226,46 @@ pub fn open_shell_dialog_with_key<F>(
         build: Rc::new(build),
         on_key,
     });
+
+    if focus_filter {
+        // Reset by value, not by rebuilding the entity — the same
+        // lifecycle `toggle_palette` gives `palette_input` (see
+        // `ShellView::dialog_input`'s own doc comment). `set_value` does
+        // not emit `InputEvent::Change` (checked against the pinned
+        // checkout, same as `toggle_palette`'s own comment records), so
+        // this reset never reaches the subscription; each dialog's fresh
+        // state already starts with an empty query.
+        view.dialog_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let handle = view.dialog_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+    }
+
     cx.notify();
+}
+
+/// The filter row every list dialog wears at the top: the shared
+/// `Input`, chrome stripped (`appearance(false)`) with a bottom border
+/// standing in for it — the palette's own `input_row` idiom
+/// (`palette::render`), so the three filtering surfaces look alike.
+///
+/// `frozen` renders a muted, static copy of the query *instead of* the
+/// live input: the keybinding dialog passes `Some(query)` while it is
+/// listening for a binding, when the input is blurred and a caret would
+/// be a lie about where keystrokes are going.
+pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let row = div().w_full().border_b_1().border_color(theme.border);
+    match frozen {
+        Some(query) => row
+            .py_1()
+            .text_color(theme.muted_foreground)
+            .child(query.to_string())
+            .into_any_element(),
+        None => row
+            .child(Input::new(input).appearance(false).w_full())
+            .into_any_element(),
+    }
 }
 
 /// Cap on the modal panel's height, as a fraction of the window's viewport
@@ -318,9 +370,8 @@ pub(crate) fn render_modal(
                 .small()
                 .ghost()
                 .icon(IconName::Close)
-                .on_click(cx.listener(|view, _event, _window, cx| {
-                    view.modal = None;
-                    cx.notify();
+                .on_click(cx.listener(|view, _event, window, cx| {
+                    view.close_modal(window, cx);
                 })),
         );
 
@@ -367,9 +418,8 @@ pub(crate) fn render_modal(
         .debug_selector(|| "shell-modal-backdrop".to_string())
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|view, _event, _window, cx| {
-                view.modal = None;
-                cx.notify();
+            cx.listener(|view, _event, window, cx| {
+                view.close_modal(window, cx);
             }),
         )
         .child(panel)
