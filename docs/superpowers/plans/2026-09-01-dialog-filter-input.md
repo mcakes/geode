@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the vim/fzf `/` find model in Geode's settings and keybindings dialogs with an always-focused fuzzy filter input plus arrow-key navigation.
+**Goal:** Replace the vim/fzf `/` find model in Geode's settings and keybindings dialogs with an always-focused fuzzy filter input plus arrow-key navigation, and give all three filtered list surfaces — the two dialogs and the command palette — one navigation vocabulary.
 
-**Architecture:** Both dialogs adopt the command palette's existing pattern — a gpui-component `Entity<InputState>` owned by `ShellView`, focused on open, feeding a pure ranking helper that filters and re-orders rows. A new pure module (`dialogfilter`) owns ranking and the nav-key vocabulary; `vimnav::apply` still does the clamped selection arithmetic. Rebind capture keeps working by blurring the input while listening, so raw keystrokes reach the modal key handler exactly as they do today.
+**Architecture:** Both dialogs adopt the command palette's existing pattern — a gpui-component `Entity<InputState>` owned by `ShellView`, focused on open, feeding a pure ranking helper that filters and re-orders rows. A new pure module (`listfilter`) owns ranking and the nav-key vocabulary; `vimnav::apply` still does the clamped selection arithmetic. Rebind capture keeps working by blurring the input while listening, so raw keystrokes reach the modal key handler exactly as they do today. The palette then adopts the same vocabulary additively, gaining `ctrl+d`/`u`/`f`/`b` and `pageup`/`pagedown` while keeping every key it already has.
 
 **Tech Stack:** Rust, gpui (Zed's UI framework, unpinned git dep), gpui-component (pinned rev `0e2fb7a`), criterion for benches.
 
@@ -27,14 +27,14 @@
 
 ---
 
-### Task 1: The `dialogfilter` pure core
+### Task 1: The `listfilter` pure core
 
 Ranking and the nav-key vocabulary, with no `gpui` anywhere — the piece both dialogs will consume in Tasks 2 and 3.
 
 **Files:**
-- Create: `crates/geode-shell/src/dialogfilter.rs`
-- Modify: `crates/geode-shell/src/lib.rs:21` (module list, alphabetical — `dialogfilter` sorts between `defaults` and `fonts`)
-- Test: `crates/geode-shell/src/dialogfilter.rs` (inline `#[cfg(test)] mod tests`, the house pattern — see `vimnav.rs`)
+- Create: `crates/geode-shell/src/listfilter.rs`
+- Modify: `crates/geode-shell/src/lib.rs:21` (module list, alphabetical — `listfilter` sorts between `defaults` and `fonts`)
+- Test: `crates/geode-shell/src/listfilter.rs` (inline `#[cfg(test)] mod tests`, the house pattern — see `vimnav.rs`)
 
 **Interfaces:**
 - Consumes: `palette::fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)>` (`palette.rs:102`); `vimnav::NavCommand` (`vimnav.rs:69`); `keymap::{Keystroke, Modifiers}`.
@@ -45,7 +45,7 @@ Ranking and the nav-key vocabulary, with no `gpui` anywhere — the piece both d
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `crates/geode-shell/src/dialogfilter.rs` with the module doc, the two public signatures stubbed with `todo!()`, and this test module:
+Create `crates/geode-shell/src/listfilter.rs` with the module doc, the two public signatures stubbed with `todo!()`, and this test module:
 
 ```rust
 #[cfg(test)]
@@ -202,19 +202,24 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p geode-shell dialogfilter`
-Expected: FAIL — the `todo!()` stubs panic (or the file does not compile until `lib.rs` declares the module; add `pub mod dialogfilter;` to `crates/geode-shell/src/lib.rs` first, between `pub mod defaults;` and `pub mod fonts;`).
+Run: `cargo test -p geode-shell listfilter`
+Expected: FAIL — the `todo!()` stubs panic (or the file does not compile until `lib.rs` declares the module; add `pub mod listfilter;` to `crates/geode-shell/src/lib.rs` first, between `pub mod defaults;` and `pub mod fonts;`).
 
 - [ ] **Step 3: Write the implementation**
 
-Replace the stubs in `crates/geode-shell/src/dialogfilter.rs`:
+Replace the stubs in `crates/geode-shell/src/listfilter.rs`:
 
 ```rust
-//! Shared pure core for the two list dialogs' filter-first UX
+//! Shared pure core for Geode's filtered list surfaces — the settings
+//! and keybinding dialogs and the command palette
 //! (`docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md` §4,
-//! §6): fuzzy ranking of row text, and the keystroke vocabulary the
-//! dialogs still own once a focused text input has claimed every
+//! §6): fuzzy ranking of row text, and the keystroke vocabulary those
+//! surfaces still own once a focused text input has claimed every
 //! printable key.
+//!
+//! [`rank`] serves the two dialogs; the palette does its own filtering
+//! inside `PaletteState` over a richer item type. [`nav_command`] serves
+//! all three.
 //!
 //! No `gpui` here, in the mould of [`crate::vimnav`] and
 //! [`crate::vimfind`] — feed it plain strings and shell-native
@@ -282,10 +287,16 @@ pub fn rank(texts: &[String], query: &str) -> Vec<Ranked> {
     scored.into_iter().map(|(_, ranked)| ranked).collect()
 }
 
-/// Map one keystroke onto a list-navigation command, or `None` if the
-/// dialogs do not claim it (see the module doc for what they *can*
+/// Map one keystroke onto a list-navigation command, or `None` if no
+/// list surface claims it (see the module doc for what they *can*
 /// claim). The caller feeds the result to [`crate::vimnav::apply`], which
 /// clamps against the current — filtered — row count.
+///
+/// The palette consults this only as a *fallback*, after its own
+/// `up`/`down`/`ctrl+p`/`ctrl+n` arms have already returned: those keep
+/// wrapping (`PaletteState::move_selection`), while everything reaching
+/// here clamps. That ordering is why nothing has to inspect the returned
+/// delta to decide which rule applies (spec §3, "The command palette").
 pub fn nav_command(ks: &Keystroke) -> Option<NavCommand> {
     let delta = match (ks.mods, ks.key.as_str()) {
         (Modifiers::NONE, "up") | (Modifiers::CTRL, "p") => -1,
@@ -304,7 +315,7 @@ If `match` on `(ks.mods, ...)` against the `Modifiers::NONE` / `Modifiers::CTRL`
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p geode-shell dialogfilter`
+Run: `cargo test -p geode-shell listfilter`
 Expected: PASS, 10 tests.
 
 If `rows_are_ordered_by_score_not_by_position` fails, do **not** weaken the assertion — read `palette::fuzzy_match`'s scoring (`palette.rs:102-160`) and pick two fixture strings that genuinely score differently, then update the test's strings and its comment to match what you verified.
@@ -315,9 +326,9 @@ Run: `cargo fmt --check && cargo clippy -p geode-shell --all-targets -- -D warni
 Expected: all clean.
 
 ```bash
-git add crates/geode-shell/src/dialogfilter.rs crates/geode-shell/src/lib.rs
+git add crates/geode-shell/src/listfilter.rs crates/geode-shell/src/lib.rs
 git commit -m "$(cat <<'EOF'
-feat: add the dialogfilter pure core
+feat: add the listfilter pure core
 
 Fuzzy ranking over row text and the keystroke vocabulary the list
 dialogs can still claim once a focused single-line Input has taken every
@@ -342,7 +353,7 @@ Converts the keybindings dialog end to end and introduces the `ShellView` machin
 - Test: `crates/geode-shell/src/shell/keybindings_view.rs` (inline pure tests) and `crates/geode-shell/src/shell/mod.rs` (`#[gpui::test]`s, alongside the existing dialog tests)
 
 **Interfaces:**
-- Consumes: `dialogfilter::{Ranked, rank, nav_command}` (Task 1); `vimnav::apply(selected, len, cmd)`; `palette::fuzzy_match`; `keybindings_view::{press_while_listening, CaptureOutcome, searchable_text, derive_rows, spawn_rebind, is_same_key_recapture}` (all unchanged).
+- Consumes: `listfilter::{Ranked, rank, nav_command}` (Task 1); `vimnav::apply(selected, len, cmd)`; `palette::fuzzy_match`; `keybindings_view::{press_while_listening, CaptureOutcome, searchable_text, derive_rows, spawn_rebind, is_same_key_recapture}` (all unchanged).
 - Produces:
   - `ShellView::dialog_input: Entity<InputState>` — the shared filter field for **both** dialogs
   - `ShellView::close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>)`
@@ -495,14 +506,14 @@ impl KeybindingsState {
     }
 }
 
-/// The rows this dialog currently shows, ranked — [`crate::dialogfilter::rank`]
+/// The rows this dialog currently shows, ranked — [`crate::listfilter::rank`]
 /// over each row's [`searchable_text`]. Derived fresh at every call site
 /// (render, key handling, click resolution), never cached: the same
 /// no-caching contract [`derive_rows`] itself has, and the row counts
 /// here are small enough that one ranking pass costs nothing measurable.
 pub fn visible_rows(state: &KeybindingsState, rows: &[KeybindingRow]) -> Vec<Ranked> {
     let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-    dialogfilter::rank(&texts, &state.query)
+    listfilter::rank(&texts, &state.query)
 }
 
 /// Where the row for `clicked` currently sits in the *filtered* list, or
@@ -521,7 +532,7 @@ pub fn filtered_position(
 }
 ```
 
-Update the imports at the top of the file: drop `vimfind::{self, FindDirection, FindStyle, FzfOutcome, VimFind, match_range}` and `vimnav::{self, NavResult, VimListNav}`; add `use crate::dialogfilter::{self, Ranked};` and `use crate::vimnav;`. Delete the now-unreferenced wrappers `press_while_finding`, `press_while_finding_fzf`, `highlight_query`, `repeat_find`, and `filter_matches`'s local import.
+Update the imports at the top of the file: drop `vimfind::{self, FindDirection, FindStyle, FzfOutcome, VimFind, match_range}` and `vimnav::{self, NavResult, VimListNav}`; add `use crate::listfilter::{self, Ranked};` and `use crate::vimnav;`. Delete the now-unreferenced wrappers `press_while_finding`, `press_while_finding_fzf`, `highlight_query`, `repeat_find`, and `filter_matches`'s local import.
 
 - [ ] **Step 4: Run the pure tests to verify they pass**
 
@@ -541,7 +552,7 @@ Replace `keybindings_view::handle_key` (currently `keybindings_view.rs:476`) wit
 ///    through to `handle_key_down`'s "escape closes the modal";
 /// 2. bare `enter` starts listening on the selected row and blurs the
 ///    filter input, so the capture sees raw keystrokes (spec §3);
-/// 3. [`dialogfilter::nav_command`] motions move the selection within the
+/// 3. [`listfilter::nav_command`] motions move the selection within the
 ///    *filtered* list;
 /// 4. everything else returns `false`, unhandled — which for a printable
 ///    key is exactly right: the modal branch in `handle_key_down` does
@@ -598,7 +609,7 @@ fn handle_key(
         return true;
     }
 
-    if let Some(cmd) = dialogfilter::nav_command(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         state.selected = vimnav::apply(state.selected, visible.len(), cmd);
         let selected = state.selected;
         shell.keybindings_scroll.scroll_to_item(selected);
@@ -1223,7 +1234,7 @@ impl SettingsState {
 /// function's doc comment).
 pub fn visible_rows(state: &SettingsState, rows: &[SettingRow]) -> Vec<Ranked> {
     let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-    dialogfilter::rank(&texts, &state.query)
+    listfilter::rank(&texts, &state.query)
 }
 
 /// Where the row for `clicked` currently sits in the *filtered* list, or
@@ -1254,7 +1265,7 @@ pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> b
 }
 ```
 
-Update imports: drop `vimfind::{self, FindDirection, FindStyle, VimFind, filter_matches}` and `vimnav::{self, NavResult, VimListNav}`; add `use crate::dialogfilter::{self, Ranked};` and `use crate::vimnav;`. **Keep** `use crate::vimfind::FindStyle;` if `rows_for`/`apply_setting` still name it for the Find style row — they do (spec §8), so keep exactly that import and no more.
+Update imports: drop `vimfind::{self, FindDirection, FindStyle, VimFind, filter_matches}` and `vimnav::{self, NavResult, VimListNav}`; add `use crate::listfilter::{self, Ranked};` and `use crate::vimnav;`. **Keep** `use crate::vimfind::FindStyle;` if `rows_for`/`apply_setting` still name it for the Find style row — they do (spec §8), so keep exactly that import and no more.
 
 - [ ] **Step 4: Rewrite `handle_key`**
 
@@ -1263,7 +1274,7 @@ Update imports: drop `vimfind::{self, FindDirection, FindStyle, VimFind, filter_
 /// `keybindings_view::handle_key` with value stepping in place of rebind
 /// capture:
 ///
-/// 1. [`dialogfilter::nav_command`] motions move the selection within the
+/// 1. [`listfilter::nav_command`] motions move the selection within the
 ///    *filtered* list;
 /// 2. `tab` / `shift+tab` step the selected row's value forward / back,
 ///    wrapping, applied immediately through [`apply_setting`]. `tab` is
@@ -1286,7 +1297,7 @@ fn handle_key(
     };
     let visible = visible_rows(state, &rows);
 
-    if let Some(cmd) = dialogfilter::nav_command(ks) {
+    if let Some(cmd) = listfilter::nav_command(ks) {
         state.selected = vimnav::apply(state.selected, visible.len(), cmd);
         let selected = state.selected;
         shell.settings_scroll.scroll_to_item(selected);
@@ -1576,6 +1587,178 @@ EOF
 
 ---
 
+### Task 5: The command palette's larger navigation steps
+
+The palette gains `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b` and `pageup`/`pagedown` (spec §3, "The command palette"). Additive only: every key it has today behaves exactly as it does today, wrapping included. Comes after Task 4 because on Windows and Linux the palette's `ctrl+f` needs that binding too.
+
+**Files:**
+- Modify: `crates/geode-shell/src/shell/mod.rs` — `handle_palette_key` (`mod.rs:1236`) and its doc comment
+- Test: `crates/geode-shell/src/shell/mod.rs` (`#[gpui::test]`s, using Task 2's `dialog_test_shell` helper)
+
+**Interfaces:**
+- Consumes: `listfilter::nav_command` (Task 1); `vimnav::apply`; `palette::PaletteState::{selected, set_selected, filtered}`; `shell::keys::convert_keystroke`.
+- Produces: nothing new — a fallback arm inside an existing method.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `shell/mod.rs`'s test module. `dialog_test_shell` takes an action id, so it opens the palette as readily as a dialog.
+
+```rust
+    /// The palette gains the dialogs' larger steps (spec §3): ctrl+d/u
+    /// move ±5, ctrl+f/b and pageup/pagedown ±10.
+    #[gpui::test]
+    fn the_palette_takes_the_larger_navigation_steps(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().filtered().len());
+        assert!(
+            len > 12,
+            "sanity: the unfiltered palette needs more than 12 rows for \
+             these steps to be distinguishable, got {len}"
+        );
+
+        cx.simulate_keystrokes("ctrl-d");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            5,
+            "ctrl+d moves down 5"
+        );
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            15,
+            "ctrl+f moves down 10 more"
+        );
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            10,
+            "ctrl+u moves back 5"
+        );
+        cx.simulate_keystrokes("pageup");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "pageup is ctrl+b's alias: back 10"
+        );
+    }
+
+    /// The split this change deliberately preserves (spec §3): the new
+    /// larger steps clamp, while the ±1 keys keep wrapping.
+    #[gpui::test]
+    fn palette_big_steps_clamp_while_arrows_still_wrap(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().filtered().len());
+
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "ctrl+u at the top clamps — a page jump must not teleport to the end"
+        );
+
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "up at the top still wraps to the last result, exactly as before"
+        );
+
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "and ctrl+f at the bottom clamps"
+        );
+    }
+
+    /// Typing still reaches the query field: the new arm must not swallow
+    /// characters on their way to the input.
+    #[gpui::test]
+    fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        cx.simulate_input("theme");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().query().to_string()),
+            "theme"
+        );
+    }
+```
+
+All four accessors these tests use are already public and need no visibility changes: `query()` (`palette.rs:302`), `selected()` (`:306`), `set_selected()` (`:336`), `filtered()` (`:355`).
+
+- [ ] **Step 2: Run to verify they fail**
+
+Run: `cargo test -p geode-shell palette`
+Expected: the two navigation tests FAIL (`ctrl-d` currently does nothing, so the selection stays at 0). `the_new_palette_arm_does_not_intercept_typing` should already PASS — that is deliberate, it is the regression guard for Step 3.
+
+- [ ] **Step 3: Add the fallback arm**
+
+In `handle_palette_key` (`mod.rs:1236`), leave the existing `escape` / `enter` / `up` / `down` / `"p" if mods.control` / `"n" if mods.control` arms untouched, and replace the catch-all `_ => {}` arm with:
+
+```rust
+            // Everything the named arms above did not take. Two outcomes:
+            // a larger navigation step (the vocabulary the two list
+            // dialogs use, adopted here so all three filtered surfaces
+            // read the same — spec §3, "The command palette"), or a
+            // genuine no-op.
+            //
+            // These clamp, while the ±1 arms above wrap: reaching this
+            // arm at all means the key was NOT up/down/ctrl+p/ctrl+n, so
+            // nothing here has to inspect the delta to pick a rule. A
+            // page jump that teleports from the top of a long result list
+            // to the bottom reads as a glitch, not as a feature.
+            //
+            // A bare typed character lands here too, and must stay a true
+            // no-op — deliberately not `cx.stop_propagation()`, so the
+            // window's separate text-input phase still delivers it to the
+            // focused `palette_input` (see this method's doc comment).
+            _ => {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(cmd) = listfilter::nav_command(&ks)
+                    && let Some(palette) = self.palette.as_mut()
+                {
+                    let len = palette.filtered().len();
+                    let next = crate::vimnav::apply(palette.selected(), len, cmd);
+                    palette.set_selected(next);
+                    self.sync_palette_scroll();
+                }
+            }
+```
+
+Extend the method's doc comment: the "acts on the short list of navigation/close keys" sentence now needs to name the larger steps and record the wrap-vs-clamp split and why the arm ordering makes it fall out for free.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `cargo test -p geode-shell palette`
+Expected: all three PASS.
+
+If `set_selected` clamps differently than expected (it defends against a stale click index — see its doc comment at `palette.rs:327`), read it before adjusting anything: `vimnav::apply` has already clamped, so the two must agree rather than fight.
+
+- [ ] **Step 5: Verify and commit**
+
+Run: `cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && cargo bench --workspace --no-run`
+Expected: all four clean.
+
+```bash
+git add crates/geode-shell/src/shell/mod.rs
+git commit -m "$(cat <<'EOF'
+feat: give the palette the dialogs' larger navigation steps
+
+ctrl+d/u (±5), ctrl+f/b and pageup/pagedown (±10) join the palette's
+existing up/down/ctrl+p/ctrl+n, so all three filtered list surfaces read
+the same. Purely additive: the ±1 keys keep wrapping, and the new steps
+clamp — a page jump that teleports across a long result list reads as a
+glitch. The arm ordering makes that split fall out without inspecting
+the delta.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013AGrUwbHcA9ef7Mz2gQNrK
+EOF
+)"
+```
+
+---
+
 ## Notes for the reviewer
 
 Three things in this plan are worth checking against the pinned checkouts rather than taken on trust, because the whole key vocabulary rests on them (spec §2 has the citations):
@@ -1583,5 +1766,6 @@ Three things in this plan are worth checking against the pinned checkouts rather
 1. `left`/`right`/`home`/`end` really are unconditional in `Input`'s element, and `tab`/`pageup`/`pagedown`/`up`/`down` really are gated on `is_multi_line`.
 2. A `NoAction` binding in the `"Input"` context really does leave `match_result.bindings` empty rather than merely reordering.
 3. Focusing `dialog_input`'s handle before the element has ever rendered works — the palette already depends on this (`toggle_palette` focuses before the palette's first frame), so it is precedent, not a new bet.
+4. Task 5's wrap-vs-clamp split rests entirely on arm ordering inside one `match`: the ±1 keys must return before the fallback arm is reached, or they would silently start clamping. `palette_big_steps_clamp_while_arrows_still_wrap` is the test that would catch that regression — check it actually exercises both halves.
 
-The one behaviour with no automated coverage is Task 4's binding; it needs a Windows or Linux run to confirm.
+The one behaviour with no automated coverage is Task 4's binding; it needs a Windows or Linux run to confirm. Note that Task 5's palette `ctrl+f` depends on it there too, which is why it is sequenced after.

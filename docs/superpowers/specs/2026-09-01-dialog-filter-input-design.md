@@ -2,8 +2,9 @@
 
 **Status:** approved, not yet implemented
 **Date:** 2026-09-01
-**Scope:** `geode-shell`'s two list dialogs (settings, keybindings) and one
-init-time keybinding in `geode-app`.
+**Scope:** `geode-shell`'s two list dialogs (settings, keybindings), the
+command palette's navigation vocabulary, and one init-time keybinding in
+`geode-app`.
 
 ## 1. What changes and why
 
@@ -29,6 +30,11 @@ to consume (§8).
 The command palette (`ctrl+k`) already works exactly this way. This aligns
 the dialogs with the surface users already have in their hands, rather than
 inventing a third interaction model.
+
+The traffic runs both ways: the palette **gains** the larger navigation
+steps the dialogs are keeping (`ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`,
+`pageup`/`pagedown`), which it has never had. One vocabulary, three
+surfaces — see §3's palette subsection for the one place they still differ.
 
 ## 2. Verified platform constraints
 
@@ -114,6 +120,29 @@ acts only on `escape`, and the shell keymap `Matcher` is never reached while a
 modal is open, so an unclaimed key is inert — it can neither fire a shell
 chord behind the dialog nor close it.
 
+### The command palette
+
+The palette adopts the same navigation vocabulary, additively: `ctrl+d` /
+`ctrl+u` (±5), `ctrl+f` / `ctrl+b` and `pageup` / `pagedown` (±10) join the
+`up` / `down` / `ctrl+p` / `ctrl+n` it already has. Everything else about the
+palette is untouched.
+
+One difference survives on purpose. **`PaletteState::move_selection` wraps**
+at both ends (`palette.rs:362` — `up` at row 0 selects the last row) where
+the dialogs clamp, and it keeps wrapping: that is the behaviour already in
+the user's hands for the ±1 keys, and there is no reason this change should
+disturb it. The new larger steps **clamp**, in the palette as in the dialogs
+— a page jump that teleports from the top of a 50-result list to the bottom
+reads as a glitch, not a feature.
+
+Implementation follows from that split rather than from a special case:
+`ShellView::handle_palette_key`'s existing named arms (`escape`, `enter`,
+`up`, `down`, `ctrl+p`, `ctrl+n`) stay exactly as they are and return first;
+a new fallback arm below them runs `listfilter::nav_command` and applies the
+result through `vimnav::apply` + `PaletteState::set_selected`, which clamps.
+The ±1 keys can never reach that arm, so nothing needs to ask "is this delta
+1?".
+
 ### Rebind capture (keybindings only)
 
 Rebinding needs every keystroke, including bare letters the input would
@@ -184,12 +213,21 @@ and its first refusal on keystrokes — it simply now only ever sees what the
 
 Navigation needs no new state machine: `vimnav::apply(selected, len, cmd)`
 already does the clamped arithmetic. A small shared
-`dialogfilter::nav_command(&Keystroke) -> Option<NavCommand>` maps the §3
-table onto `NavCommand`, and both dialogs feed its result to `vimnav::apply`.
-It lives in the same new pure module as the ranking helper (§4) rather than
-in `dialog.rs`, so both are unit-testable without a window.
+`listfilter::nav_command(&Keystroke) -> Option<NavCommand>` maps the §3
+table onto `NavCommand`, and all three surfaces feed its result to
+`vimnav::apply` — both dialogs' `ModalKeyHandler`s, and
+`ShellView::handle_palette_key`'s new fallback arm. It lives in the same new
+pure module as the ranking helper (§4) rather than in `dialog.rs`, so both
+are unit-testable without a window, and so the palette — which is not a
+dialog — can reach it without importing dialog chrome. The module is named
+for what it serves (every filtered list surface), not for the dialogs alone.
 `vimnav::VimListNav::press` — the `j`/`k`, count-prefix and `gg` state
 machine — is not used by the dialogs any more.
+
+The palette's keys arrive as `gpui::Keystroke` (`handle_palette_key` reads
+`event.keystroke` directly), so that call site converts once via
+`convert_keystroke` before consulting `nav_command`, which speaks the
+shell-native type like every other keymap-facing seam in this crate.
 
 ## 7. The `ctrl+f` shim
 
@@ -245,7 +283,11 @@ nothing to restore here.
   semantics; `shell::mod`'s tests drive them directly.
 - **`derive_rows`' no-caching contract** in both dialogs: rows are still
   derived fresh on every render and every keystroke.
-- The toolbar filter field, the palette, and anything in the blotter.
+- **The palette, apart from the four keys it gains** (§3). Its query field,
+  its `PaletteState` filtering, its wrapping ±1 keys, its rendering and its
+  dispatch path are all untouched — this change adds a fallback arm to
+  `handle_palette_key` and nothing else.
+- The toolbar filter field, and anything in the blotter.
 
 ## 10. Testing
 
@@ -257,8 +299,8 @@ Pure, no window:
 - `rank` — empty query yields natural order; a non-empty query hides
   non-matches, orders by score, breaks ties by natural order; highlight
   indices are char offsets into the match text.
-- `list_nav_command` — every row of the §3 table, including the
-  `pageup`/`pagedown` aliases, and `None` for keys the dialogs must not claim.
+- `nav_command` — every row of the §3 table, including the
+  `pageup`/`pagedown` aliases, and `None` for keys no surface may claim.
 - Dialog state — a query edit resets the selection to the top match; nav
   clamps at both ends of the *filtered* list; a click maps a filtered index
   back to the right row identity.
@@ -275,7 +317,10 @@ With `TestAppContext`:
   letter is captured as a binding and does **not** appear in the filter;
   `escape` cancels, refocuses the input, and leaves the query intact;
 - `escape` from the normal state closes the dialog and restores focus to the
-  shell root.
+  shell root;
+- in the palette, `ctrl+d`/`u`/`f`/`b` move the selection by the §3 amounts
+  and **clamp** at both ends, while `up` at row 0 still **wraps** to the last
+  result — the two halves of the split this change deliberately preserves.
 
 Deleted: the vim/fzf find tests inside `settings_view` and
 `keybindings_view` — those drive a find session neither dialog has any more.
