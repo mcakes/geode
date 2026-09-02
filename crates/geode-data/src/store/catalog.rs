@@ -1022,6 +1022,49 @@ mod tests {
     }
 
     #[test]
+    fn the_backfill_guard_does_not_read_another_datasets_source_times() {
+        // `batch` is the filename with its date component removed, so two
+        // datasets whose source files share a naming stem produce the same
+        // batch. Without the dataset filter the guard for one read the
+        // other's source times, and a legitimately new file was filed as
+        // history — no error, no degradation, just data that never went
+        // live.
+        //
+        // The first mutation entry for this was a false positive: it bound
+        // `dataset` to `fg.batch`, which broke batch matching rather than
+        // dataset scoping, so it was "caught" for the wrong reason and
+        // this case had no test at all.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+
+        let mut risk = record("SHARED", &["BK000"], ts("2026-08-30T14:00:00Z"));
+        risk.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&risk).unwrap();
+
+        let mut vol = record("SHARED", &["BK000"], ts("2026-08-30T06:00:00Z"));
+        vol.dataset = "implied_vol_summary".into();
+        vol.path = std::path::PathBuf::from("/src/vol_2026-08-30_BK000.csv");
+        vol.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&vol).unwrap();
+
+        assert_eq!(
+            cat.live_source_time("implied_vol_summary", "SHARED", Some("BK000"))
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(6),
+            "the vol dataset's own generation, not the risk one eight \
+             hours newer that happens to share a batch name"
+        );
+        assert_eq!(
+            cat.live_source_time("risk_snapshot", "SHARED", Some("BK000"))
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(14),
+            "and each dataset still sees its own"
+        );
+    }
+
+    #[test]
     fn a_multi_book_file_contributes_to_every_book_it_covers() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());

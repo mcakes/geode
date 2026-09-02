@@ -412,8 +412,8 @@ run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" 
 
 run_mutation "catalog: the backfill guard is scoped to its dataset" \
   crates/geode-data/src/store/catalog.rs \
-  '                 where fg.dataset = ? and fg.batch = ? and fb.book is null",' \
-  '                 where fg.batch = ? and ? is not null and fb.book is null",'
+  'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
+  'where ? is not null and fg.batch = ? and fb.book is null'
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
@@ -444,8 +444,8 @@ run_mutation "catalog: the bookless partition gets a file_books row" \
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
-  'and fb.book is null",' \
-  'and fb.book is not null",'
+  'and fg.batch = ? and fb.book is null' \
+  'and fg.batch = ? and fb.book is not null'
 
 run_mutation "ingest: the backfill guard covers every partition written" \
   crates/geode-data/src/ingest/load.rs \
