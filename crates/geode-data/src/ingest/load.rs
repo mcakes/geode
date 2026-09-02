@@ -198,9 +198,19 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // A failed lookup must not collapse into "nothing is live yet" — that
     // would silently disable the backfill guard and let an old file
     // overwrite current risk, the exact outcome the guard exists to prevent.
+    // Over every partition this file writes, the bookless one included.
+    //
+    // Folding over the named books alone missed it, and the gap is
+    // reachable whenever a batch's books change between generations:
+    // version 1 writes books [A] plus unattributed rows, version 2 writes
+    // books [B] plus unattributed rows. The guard asked only about B,
+    // which was never live, got `None`, and published — overwriting the
+    // bookless partition that version 1 left live at a *newer* source
+    // time. That is the one thing the guard exists to prevent, and the
+    // bookless partition was outside it.
     let mut live_source_time = None;
-    for book in &books {
-        if let Some(t) = catalog.live_source_time(req.batch, book)? {
+    for partition in &partitions {
+        if let Some(t) = catalog.live_source_time(req.batch, partition.book.as_deref())? {
             live_source_time = Some(live_source_time.map_or(t, |cur: DateTime<Utc>| cur.max(t)));
         }
     }
@@ -288,7 +298,9 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         gen_id,
         loaded_at: Utc::now(),
         row_count: rows as usize,
-        books,
+        // Every partition written, not just the named books: the bookless
+        // one needs a `file_books` row or its freshness is unrecoverable.
+        books: partitions.iter().map(|p| p.book.clone()).collect(),
         health: health.clone(),
     })?;
 
@@ -675,6 +687,83 @@ source_name = "ModelCode"
             out.push_str(&fields.join(","));
         }
         out
+    }
+
+    /// Set `header` to `value` on every row that currently has one,
+    /// leaving blanks blank — a file covering a different book, with the
+    /// same bookless rows.
+    fn rename_books(csv: &str, header: &str, value: &str) -> String {
+        let mut lines = csv.lines();
+        let head = lines.next().expect("header");
+        let at = head
+            .split(',')
+            .position(|h| h == header)
+            .expect("column present");
+        let mut out = String::from(head);
+        for line in lines {
+            let mut fields: Vec<&str> = line.split(',').collect();
+            if !fields[at].is_empty() {
+                fields[at] = value;
+            }
+            out.push('\n');
+            out.push_str(&fields.join(","));
+        }
+        out
+    }
+
+    #[test]
+    fn an_older_file_cannot_overwrite_the_bookless_partition() {
+        // The backfill guard folded over the file's *named* books only, so
+        // the bookless partition sat outside it. Reachable whenever a
+        // batch's book set changes between generations: v1 writes [BK…]
+        // plus unattributed rows, v2 writes [BKZZZ] plus unattributed
+        // rows. The guard asked only about BKZZZ, which was never live,
+        // got `None`, and published — overwriting bookless rows that v1
+        // had left live at a *newer* source time.
+        let f = fixture();
+        let file = ready_file(&f);
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let mut sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+
+        // v1: real books plus bookless rows, at the sentinel's own time.
+        let v1 = file.csv_path.with_file_name("risk_20260830_shift.csv");
+        std::fs::write(&v1, blank_alternate_rows(&text, "Book")).unwrap();
+        let load = |path: &std::path::Path, sentinel: &crate::source::Sentinel| {
+            load_file(
+                &f.store,
+                &LoadRequest {
+                    dataset: &f.ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: path,
+                    sentinel,
+                    batch: "shift",
+                },
+            )
+            .unwrap()
+        };
+        load(&v1, &sentinel);
+
+        // v2: same batch, same bookless rows, a different named book, and
+        // an hour *older*. It must not become live.
+        let v2 = file
+            .csv_path
+            .with_file_name("risk_20260830_shift_older.csv");
+        let renamed = rename_books(&blank_alternate_rows(&text, "Book"), "Book", "BKZZZ");
+        std::fs::write(&v2, renamed).unwrap();
+        sentinel.as_of -= chrono::Duration::hours(1);
+        sentinel.books = vec!["BKZZZ".to_string()];
+        let older = load(&v2, &sentinel);
+
+        assert!(
+            older
+                .published
+                .iter()
+                .all(|p| matches!(p, PublishOutcome::ArchivedOnly { .. })),
+            "an older file must become history, not overwrite the bookless \
+             partition that is live at a newer time: {:?}",
+            older.published
+        );
     }
 
     #[test]

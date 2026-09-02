@@ -15,6 +15,11 @@ use std::path::{Path, PathBuf};
 
 pub type FileId = i64;
 
+/// Freshness per partition of a dataset. `None` is the bookless
+/// partition — rows whose book is NULL, which have freshness of their own
+/// like any other partition.
+pub type BookFreshness = Vec<(Option<String>, DateTime<Utc>)>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileGeneration {
     pub file_id: FileId,
@@ -30,7 +35,13 @@ pub struct FileGeneration {
     pub gen_id: i64,
     pub loaded_at: DateTime<Utc>,
     pub row_count: usize,
-    pub books: Vec<String>,
+    /// The partitions this file wrote, as `(dataset, batch, book)` names
+    /// them. `None` is the bookless partition — rows whose book is NULL,
+    /// which 2a reports rather than drops, and which publishes under
+    /// `book is null`. Modelled the same way `Partition.book` is, because
+    /// a `Vec<String>` cannot represent it and everything that joined on
+    /// it silently lost those rows.
+    pub books: Vec<Option<String>>,
     pub health: Health,
 }
 
@@ -197,10 +208,13 @@ impl<'a> Catalog<'a> {
                 source,
             })?;
 
+        // A `None` book writes a NULL row rather than no row: the bookless
+        // partition exists and its freshness has to be recoverable, which
+        // an absent row cannot express.
         for book in &rec.books {
             let sql = "insert into file_books values (?, ?)";
             self.conn
-                .execute(sql, duckdb::params![file_id, book])
+                .execute(sql, duckdb::params![file_id, book.as_deref()])
                 .map_err(|source| StoreError::Sql {
                     statement: sql.into(),
                     source,
@@ -249,7 +263,7 @@ impl<'a> Catalog<'a> {
         }))
     }
 
-    fn books_of(&self, file_id: FileId) -> Result<Vec<String>, StoreError> {
+    fn books_of(&self, file_id: FileId) -> Result<Vec<Option<String>>, StoreError> {
         let sql = "select book from file_books where file_id = ? order by book";
         let err = |source| StoreError::Sql {
             statement: sql.to_string(),
@@ -257,7 +271,7 @@ impl<'a> Catalog<'a> {
         };
         let mut stmt = self.conn.prepare(sql).map_err(err)?;
         let rows = stmt
-            .query_map(duckdb::params![file_id], |r| r.get::<_, String>(0))
+            .query_map(duckdb::params![file_id], |r| r.get::<_, Option<String>>(0))
             .map_err(err)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
@@ -265,16 +279,32 @@ impl<'a> Catalog<'a> {
     /// The newest source time published for a partition (spec §4.3). This is
     /// what the backfill guard compares against: an older file shares the
     /// batch, so it must not overwrite what is already live.
+    /// `book` is `None` for the bookless partition, matching
+    /// `Partition.book`. `fb.book = ?` cannot match a NULL, so asking with
+    /// `&str` could never see it — and a load of purely unattributed rows
+    /// therefore computed "nothing is live yet" and published with the
+    /// guard disabled.
     pub fn live_source_time(
         &self,
         batch: &str,
-        book: &str,
+        book: Option<&str>,
     ) -> Result<Option<DateTime<Utc>>, StoreError> {
-        let sql = "select max(fg.source_time) from file_generations fg
-                   join file_books fb on fb.file_id = fg.file_id
-                   where fg.batch = ? and fb.book = ?";
+        let (sql, params): (&str, Vec<duckdb::types::Value>) = match book {
+            Some(b) => (
+                "select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.batch = ? and fb.book = ?",
+                vec![batch.to_string().into(), b.to_string().into()],
+            ),
+            None => (
+                "select max(fg.source_time) from file_generations fg
+                 join file_books fb on fb.file_id = fg.file_id
+                 where fg.batch = ? and fb.book is null",
+                vec![batch.to_string().into()],
+            ),
+        };
         self.conn
-            .query_row(sql, duckdb::params![batch, book], |r| r.get(0))
+            .query_row(sql, duckdb::params_from_iter(params), |r| r.get(0))
             .map_err(|source| StoreError::Sql {
                 statement: sql.into(),
                 source,
@@ -282,10 +312,13 @@ impl<'a> Catalog<'a> {
     }
 
     /// Per-book freshness: a book is as fresh as its *stalest* file.
-    pub fn book_freshness(
-        &self,
-        dataset: &str,
-    ) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
+    ///
+    /// `None` is the bookless partition, which has freshness of its own.
+    /// It used to have none: `file_books` held no row for it, so the join
+    /// dropped it — invisibly on a file that also carried real books,
+    /// where its staleness was reported as theirs, and entirely on a file
+    /// of only unattributed rows.
+    pub fn book_freshness(&self, dataset: &str) -> Result<BookFreshness, StoreError> {
         let sql = "select book, min(t) from (
                        select fg.batch as batch, fb.book as book, max(fg.source_time) as t
                        from file_generations fg
@@ -300,7 +333,10 @@ impl<'a> Catalog<'a> {
         let mut stmt = self.conn.prepare(sql).map_err(err)?;
         let rows = stmt
             .query_map(duckdb::params![dataset], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, DateTime<Utc>>(1)?))
+                Ok((
+                    r.get::<_, Option<String>>(0)?,
+                    r.get::<_, DateTime<Utc>>(1)?,
+                ))
             })
             .map_err(err)?;
         Ok(rows.filter_map(|r| r.ok()).collect())
@@ -316,7 +352,10 @@ impl<'a> Catalog<'a> {
         let fresh = self.book_freshness(dataset)?;
         Ok(fresh
             .into_iter()
-            .filter(|(b, _)| books.is_empty() || books.contains(b))
+            // Scoping to named books excludes the bookless partition: it is
+            // not any of them. Unscoped includes it, because it is part of
+            // the dataset.
+            .filter(|(b, _)| books.is_empty() || b.as_ref().is_some_and(|b| books.contains(b)))
             .map(|(_, t)| t)
             .min())
     }
@@ -490,7 +529,7 @@ mod tests {
             gen_id: 0,
             loaded_at: source_time,
             row_count: 10,
-            books: books.iter().map(|b| b.to_string()).collect(),
+            books: books.iter().map(|b| Some(b.to_string())).collect(),
             health: Health::Ok,
         }
     }
@@ -611,7 +650,7 @@ mod tests {
             .unwrap();
         assert_eq!(found.gen_id, 2);
         assert_eq!(found.source_time.hour(), 9);
-        assert_eq!(found.books, vec!["BK000".to_string()]);
+        assert_eq!(found.books, vec![Some("BK000".to_string())]);
     }
 
     #[test]
@@ -631,7 +670,10 @@ mod tests {
             r.gen_id = generation;
             cat.record(&r).unwrap();
         }
-        let t = cat.live_source_time("BK000", "BK000").unwrap().unwrap();
+        let t = cat
+            .live_source_time("BK000", Some("BK000"))
+            .unwrap()
+            .unwrap();
         assert_eq!(
             t.day(),
             30,
@@ -652,7 +694,10 @@ mod tests {
         cat.record(&b).unwrap();
 
         let fresh = cat.book_freshness("risk_snapshot").unwrap();
-        let bk000 = fresh.iter().find(|(b, _)| b == "BK000").unwrap();
+        let bk000 = fresh
+            .iter()
+            .find(|(b, _)| b.as_deref() == Some("BK000"))
+            .unwrap();
         assert_eq!(bk000.1.hour(), 7, "a book is as fresh as its stalest file");
     }
 
@@ -677,6 +722,81 @@ mod tests {
             scoped.hour(),
             14,
             "scoping to a fresh book must not inherit a stale one"
+        );
+    }
+
+    #[test]
+    fn the_bookless_partition_has_freshness_of_its_own() {
+        // Rows whose book is NULL are an ordinary part of the feed (2a
+        // reports them rather than dropping them) and publish as their own
+        // partition, `book is null`. But `file_books` had no row for them,
+        // and `book_freshness` inner-joins it — so their staleness was
+        // either invisible or, on a file that also carries real books,
+        // silently reported as those books' staleness instead.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+
+        // One file with a real book, one file of only unattributed rows,
+        // and the unattributed one is much staler.
+        let mut a = record("BK000", &["BK000"], ts("2026-08-30T14:00:00Z"));
+        a.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&a).unwrap();
+
+        let mut b = record("UNATTRIBUTED", &[], ts("2026-08-30T07:00:00Z"));
+        b.books = vec![None];
+        b.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&b).unwrap();
+
+        let fresh = cat.book_freshness("risk_snapshot").unwrap();
+        let bookless = fresh
+            .iter()
+            .find(|(b, _)| b.is_none())
+            .unwrap_or_else(|| panic!("the bookless partition must appear: {fresh:?}"));
+        assert_eq!(
+            bookless.1.hour(),
+            7,
+            "and carry its own source time, not another book's"
+        );
+        assert!(
+            fresh.iter().any(|(b, _)| b.as_deref() == Some("BK000")),
+            "without displacing the real books: {fresh:?}"
+        );
+    }
+
+    #[test]
+    fn the_backfill_guard_sees_the_bookless_partition() {
+        // `live_source_time` took `&str`, so nothing could ask what was
+        // live for `book is null`, and the load folded the guard over its
+        // named books only. Reachable whenever a batch's books change
+        // between generations: v1 writes [A] plus unattributed, v2 writes
+        // [B] plus unattributed, the guard asks only about B, B was never
+        // live, so it publishes — overwriting the bookless partition v1
+        // left live at a newer source time.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        let mut r = record("MIXED", &["BK000"], ts("2026-08-30T14:00:00Z"));
+        r.books = vec![Some("BK000".to_string()), None];
+        r.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&r).unwrap();
+
+        assert_eq!(
+            cat.live_source_time("MIXED", None)
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(14),
+            "the bookless partition of this batch is live and must say so"
+        );
+        assert_eq!(
+            cat.live_source_time("MIXED", Some("BK000"))
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(14),
+            "and the named book still resolves"
+        );
+        assert_eq!(
+            cat.live_source_time("MIXED", Some("BK999")).unwrap(),
+            None,
+            "a book this batch does not carry is not live"
         );
     }
 

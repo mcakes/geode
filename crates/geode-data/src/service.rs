@@ -8,6 +8,7 @@
 use crate::query::as_of::AsOf;
 use crate::query::compile::compile_view;
 use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
+use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
@@ -194,11 +195,7 @@ impl DataService {
     /// for — the same defect class that was fixed at five other sites in
     /// phase 2b, and this was the one place left holding it. The parameter
     /// is what stops the next caller reintroducing it by omission.
-    pub fn freshness(
-        &self,
-        dataset: &str,
-        as_of: AsOf,
-    ) -> Result<Vec<(String, DateTime<Utc>)>, StoreError> {
+    pub fn freshness(&self, dataset: &str, as_of: AsOf) -> Result<BookFreshness, StoreError> {
         let at = match as_of {
             AsOf::Live => return Catalog::new(&self.conn).book_freshness(dataset),
             AsOf::At(t) => t,
@@ -224,10 +221,10 @@ impl DataService {
         // The oldest generation contributing to each book, which is the
         // same stalest-input rule live freshness applies (§4.5) — a book
         // is as fresh as the stalest file behind it, not the newest.
-        let mut by_book: std::collections::BTreeMap<String, DateTime<Utc>> =
+        let mut by_book: std::collections::BTreeMap<Option<String>, DateTime<Utc>> =
             std::collections::BTreeMap::new();
         for g in crate::query::as_of::resolve_generations(&self.conn, &tables, at)? {
-            let book = g.book.clone().unwrap_or_default();
+            let book = g.book.clone();
             by_book
                 .entry(book)
                 .and_modify(|t| {
