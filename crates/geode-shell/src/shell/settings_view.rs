@@ -9,8 +9,10 @@
 //! The old dialog was the one surface in Geode that didn't speak the
 //! shell's own language: mouse-first controls (a dropdown popup, a switch,
 //! button groups), its own search input with its own focus, none of the
-//! vim vocabulary every other list surface here has (`crate::vimnav`
-//! motions, `/` find via `crate::vimfind`), and a stack of documented
+//! vim vocabulary every other list surface here HAD AT THE TIME
+//! (`crate::vimnav` motions, `/` find via `crate::vimfind` — both since
+//! retired from every dialog by the filter-first rewrite, see
+//! `keybindings_view`'s module doc), and a stack of documented
 //! layout workarounds just to keep the composite from collapsing inside
 //! our own modal chrome (see `dialog::render_modal`'s height-contract doc
 //! comment for the scar tissue that remains). The keybinding dialog
@@ -189,8 +191,13 @@ pub fn derive_rows(
     ]
 }
 
-/// Which way a value step goes — `h`/`left` vs. `l`/`right` (and
-/// `enter`/`space`/same-row click, which cycle forward = `Right`).
+/// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
+/// (back, `Left`), and a click on the already-selected row (forward,
+/// mirroring `tab`). The old dialog's `h`/`left`/`l`/`right` motions and
+/// its `enter`/`space` cycle-forward keys are retired along with the vim
+/// vocabulary this dialog no longer speaks (see the module doc); `enter`
+/// is deliberately inert now rather than aliased onto `Right` — see
+/// [`handle_key`]'s own doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDirection {
     Left,
@@ -200,9 +207,10 @@ pub enum StepDirection {
 /// The value index one step from `current` in a `len`-value list,
 /// WRAPPING at both ends — deliberately unlike `vimnav::apply`'s clamped
 /// list navigation: a settings value is a cycle (fzf → vim → fzf), not a
-/// list with ends, and wrap is what makes `enter`'s cycle-forward reach
-/// every value. `len == 0` yields 0 (unreachable for real rows — every
-/// setting has at least two values — but deterministic).
+/// list with ends, and wrap is what lets a run of `tab` presses (or
+/// repeated clicks on the same row) reach every value without ever
+/// hitting a dead end. `len == 0` yields 0 (unreachable for real rows —
+/// every setting has at least two values — but deterministic).
 pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     if len == 0 {
         return 0;
@@ -363,10 +371,12 @@ fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<Shel
 }
 
 /// [`set_theme_on`]'s sibling for find style. Nothing to apply beyond the
-/// state itself: both list dialogs read `ShellView::find_style` fresh on
-/// every keystroke and render — including THIS one, so stepping the row
-/// re-labels its own value and swaps the dialog's own find behavior (and
-/// its footer's find hints) on the very next render.
+/// state itself, and honestly nothing downstream either: neither dialog
+/// reads `ShellView::find_style` for behaviour any more (the filter-first
+/// rewrite retired both `/` sessions it used to choose between — spec
+/// `2026-09-01-dialog-filter-input-design.md` §8). Stepping this row only
+/// re-labels its own value and persists the setting; it steers nothing
+/// until Phase 3's blotter reads it (§9).
 fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<ShellView>) {
     shell.find_style = style;
     shell.persist_find_style(cx);
@@ -378,12 +388,12 @@ fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<S
 /// handler for tests, since the old dropdown's popup overlay couldn't be
 /// clicked from a `#[gpui::test]` — still holds, and `shell::mod`'s tests
 /// still call it). Now a thin `Entity::update` wrapper over
-/// [`set_theme_on`], the same core this dialog's `h`/`l` stepping applies
-/// through. Only test code calls these four wrappers since the rewrite
-/// (the dialog itself already holds `&mut ShellView` mid-key-dispatch and
-/// must use the cores directly), hence the not-test `dead_code`
-/// allowance rather than `#[cfg(test)]`: they stay compiled, documented,
-/// and reachable for any future non-modal caller.
+/// [`set_theme_on`], the same core this dialog's `tab`/`shift+tab`
+/// stepping applies through. Only test code calls these four wrappers
+/// since the rewrite (the dialog itself already holds `&mut ShellView`
+/// mid-key-dispatch and must use the cores directly), hence the not-test
+/// `dead_code` allowance rather than `#[cfg(test)]`: they stay compiled,
+/// documented, and reachable for any future non-modal caller.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
     view.update(cx, |shell, cx| set_theme_on(shell, name, cx));
@@ -837,7 +847,8 @@ mod tests {
 
     #[test]
     fn stepping_a_two_value_row_is_a_toggle_either_way() {
-        // Bool rows are two-value enums — wrap makes h and l both toggle.
+        // Bool rows are two-value enums — wrap makes tab and shift+tab
+        // both toggle.
         assert_eq!(step(2, 0, StepDirection::Right), 1);
         assert_eq!(step(2, 1, StepDirection::Right), 0);
         assert_eq!(step(2, 0, StepDirection::Left), 1);

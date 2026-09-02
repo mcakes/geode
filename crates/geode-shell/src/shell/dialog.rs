@@ -250,13 +250,14 @@ pub fn open_shell_dialog<F>(
 
 /// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
 /// keybinding dialog needs first refusal on every keystroke while it's
-/// open, to drive vim navigation and rebind-capture — see that type's own
-/// doc comment; the settings dialog joined it with the row-list rewrite,
-/// for vim nav/find/stepping). `open_shell_dialog` is simply this with
-/// `on_key: None` — no production modal uses it today, but it stays as the
-/// door for any future handler-less modal. Still the same one door, same
-/// open-time hygiene — this is the one place that constructs a
-/// [`ShellModal`], `open_shell_dialog` included.
+/// open, to drive rebind-capture and the shared list-navigation vocabulary
+/// — see that type's own doc comment; the settings dialog joined it with
+/// the row-list rewrite, for that same navigation plus value-stepping).
+/// `open_shell_dialog` is simply this with `on_key: None` — no production
+/// modal uses it today, but it stays as the door for any future
+/// handler-less modal. Still the same one door, same open-time hygiene —
+/// this is the one place that constructs a [`ShellModal`],
+/// `open_shell_dialog` included.
 ///
 /// `focus_filter` focuses [`ShellView::dialog_input`] on open — every list
 /// dialog passes `true` (the filter-first dialog UX: the first character

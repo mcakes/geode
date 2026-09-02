@@ -249,13 +249,18 @@ pub struct ShellView {
     /// the settings control via `settings_view::set_font_size`, config hot
     /// reload) — see the `fontsize` module doc.
     font_size: FontSize,
-    /// The effective `/`-find behavior for list dialogs (vim jump vs. fzf
+    /// The `/`-find behavior setting for list dialogs (vim jump vs. fzf
     /// filter — `[ui] find_style`, see `vimfind::FindStyle`). Same
     /// lifecycle as `font_size` above: resolved at startup, re-resolved on
     /// config hot reload, set directly by the settings control
     /// (`settings_view::set_find_style`) — minus the render-time apply,
-    /// since there is nothing window-level to apply: `keybindings_view`'s
-    /// key handler and render just read it.
+    /// since there is nothing window-level to apply. Neither dialog reads
+    /// it for behaviour any more: the filter-first rewrite (spec
+    /// `2026-09-01-dialog-filter-input-design.md` §8) retired both `/`
+    /// sessions this setting used to steer. The field, its config
+    /// plumbing, and the settings row that steps it all survive whole —
+    /// on purpose, for Phase 3's blotter (§9) — so this is honestly a
+    /// setting with no reader today, not a live behavior switch.
     find_style: FindStyle,
     focus_handle: FocusHandle,
     /// The open command palette's state (Task 6), or `None` when closed.
@@ -284,7 +289,7 @@ pub struct ShellView {
     /// `ShellModal::build`'s doc comment) and by its
     /// [`dialog::ModalKeyHandler`] (`keybindings_view::handle_key`, reached
     /// through `handle_key_down`'s modal branch). Deliberately holds no
-    /// `gpui` types itself (`vimnav::VimListNav`, a selection index, and the
+    /// `gpui` types itself (a selection index, the filter query, and the
     /// in-progress capture sequence only) so it stays unit-testable without
     /// a window, the same way `PaletteState` does — the dialog's
     /// `ScrollHandle` lives in the sibling `keybindings_scroll` field below
@@ -297,8 +302,9 @@ pub struct ShellView {
     keybindings_scroll: ScrollHandle,
     /// The open settings dialog's own pure state (the settings-dialog
     /// rewrite: the keybinding dialog's pattern applied to settings —
-    /// selection, `vimnav` accumulator, `/` find session), or `None` when
-    /// closed/never opened. Set fresh by [`settings_view::open`] each time
+    /// selection and filter query, the same shape `KeybindingsState` has
+    /// minus the capture sequence), or `None` when closed/never opened.
+    /// Set fresh by [`settings_view::open`] each time
     /// and read/mutated by that module's `build` closure and
     /// [`dialog::ModalKeyHandler`], exactly the `keybindings` field's own
     /// contract two fields up — including holding no `gpui` types, for the
@@ -1415,13 +1421,16 @@ impl ShellView {
         // not an action-dispatch layer, so this is the only place Escape
         // gets handled for it — after the modal's own `on_key` handler
         // (below) has had first refusal, which is how a dialog swallows an
-        // Escape as "cancel" without closing: rebind capture in the
-        // keybinding dialog, an active find session in the settings one.
+        // Escape as "cancel" without closing: today that is only the
+        // keybinding dialog's rebind capture (`keybindings_view`'s
+        // `listening` branch) — the settings dialog claims no keys of its
+        // own on Escape, so it always falls through to this branch's
+        // close.
         if self.modal.is_some() || window.has_active_dialog(cx) {
             if self.modal.is_some() {
-                // Part B: offer the modal's own key handler (if any) first
-                // refusal — the keybinding dialog's vim nav/rebind-capture
-                // seam (`dialog::ModalKeyHandler`, see its own doc comment
+                // Offer the modal's own key handler (if any) first
+                // refusal — the keybinding dialog's rebind-capture seam
+                // (`dialog::ModalKeyHandler`, see its own doc comment
                 // for why this is the shell-native `Keystroke`, not gpui's
                 // raw one). `on_key` is cloned out of `self.modal` before
                 // being called for the same reentrancy reason `render`
