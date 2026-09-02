@@ -93,7 +93,7 @@ use crate::theme::Mode;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
 
-use super::keybindings_view::{highlighted_text, key_chip};
+use super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui. Row derivation, value stepping, session state.
@@ -462,7 +462,8 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
 /// close/reopen — the same contract as the palette and the keybinding
 /// dialog. Goes through [`dialog::open_shell_dialog_with_key`] (the one
 /// standard door, with the Part B key seam): this dialog needs first
-/// refusal on every keystroke for vim nav, `/` find, and value stepping.
+/// refusal on every keystroke for the filter-nav vocabulary
+/// ([`listfilter::nav_command`]) and `tab`/`shift+tab` value stepping.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
@@ -610,23 +611,12 @@ fn build(
         let row = &rows[row_ix];
         let is_selected = position == state.selected;
 
-        // The ranked indices are char offsets into `searchable_text(row)`
-        // — `"{title} {category}"` — so they have to be split back across
-        // the two label lines they are painted on. Index `title_len`
-        // itself is the separating space and belongs to neither.
+        // `split_label_indices` (shared with `keybindings_view::build` —
+        // see its own doc comment for why this is one function, not two
+        // copies) splits the ranked char offsets back across the title
+        // and category lines they're painted on.
         let title_len = row.title.chars().count();
-        let title_ix: Vec<usize> = m
-            .indices
-            .iter()
-            .copied()
-            .filter(|&i| i < title_len)
-            .collect();
-        let cat_ix: Vec<usize> = m
-            .indices
-            .iter()
-            .filter(|&&i| i > title_len)
-            .map(|&i| i - title_len - 1)
-            .collect();
+        let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
         let mut row_el = h_flex()
             .w_full()
@@ -921,6 +911,10 @@ mod tests {
         let mut state = SettingsState::new();
         state.selected = 1;
         assert!(click_selects_or_steps(&mut state, 1));
+        assert_eq!(
+            state.selected, 1,
+            "a cycle click leaves the selection where it was"
+        );
     }
 
     // -- mod_alias_label -------------------------------------------------

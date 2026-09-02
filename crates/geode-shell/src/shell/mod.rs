@@ -7802,28 +7802,93 @@ mod tests {
     }
 
     /// tab steps the selected row's value forward and shift+tab back,
-    /// through the same apply path a click takes.
+    /// through the same apply path a click takes. Narrowed to the Font
+    /// size row rather than the (two-value) Dark mode row deliberately:
+    /// on a two-value row `step(2, current, Left)` and
+    /// `step(2, current, Right)` land on the same value, so asserting
+    /// only "the value changed" either direction can't tell a correct
+    /// `StepDirection::Left`/`Right` mapping in `handle_key` from an
+    /// accidentally swapped one. Font size has three values
+    /// (Small/Medium/Large), so asserting the EXACT target after each
+    /// key -- not just "it changed" -- genuinely pins the direction: a
+    /// swapped mapping would land tab on Small, not Large.
     #[gpui::test]
     fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-        // Narrow to the Dark mode row so the selection is unambiguous and
-        // the applied effect is a single observable boolean.
-        cx.simulate_input("dark");
-        let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+        cx.simulate_input("font");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Medium,
+            "sanity: the test shell starts at the Medium default"
+        );
 
         cx.simulate_keystrokes("tab");
         assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark()),
-            !before,
-            "tab should step the selected row's value forward"
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Large,
+            "tab should step Font size forward, Medium -> Large"
         );
 
         cx.simulate_keystrokes("shift-tab");
         assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark()),
-            before,
-            "shift+tab should step it back"
+            shell.read_with(&cx, |shell, _| shell.font_size),
+            crate::fontsize::FontSize::Medium,
+            "shift+tab should step it back, Large -> Medium"
         );
+    }
+
+    /// The three `apply_setting` arms `tab_and_shift_tab_step_the_
+    /// selected_value` doesn't reach (that test covers Font size) --
+    /// Theme, Dark mode, Find style -- each stepped once through a real
+    /// `tab` keystroke, so a mis-wired arm (e.g. `SettingId::Theme =>
+    /// set_font_size_on`) is caught here rather than nowhere: `
+    /// apply_setting` takes `&mut ShellView` and has no pure unit test of
+    /// its own. One fresh dialog per row rather than one dialog walked
+    /// with `j`/`k` (as the retired vim-nav version of this test did):
+    /// selecting a different row now means typing a different filter
+    /// query, and there's no key that clears the shared field back to
+    /// empty mid-session, so three small dialogs are simpler than one
+    /// that fights its own filter.
+    #[gpui::test]
+    fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before = shell.read_with(&cx, |shell, _| {
+                shell.services.theme.active_name().to_string()
+            });
+            cx.simulate_input("theme");
+            cx.simulate_keystrokes("tab");
+            let after = shell.read_with(&cx, |shell, _| {
+                shell.services.theme.active_name().to_string()
+            });
+            assert_ne!(
+                after, before,
+                "tab on the Theme row should step to a different theme"
+            );
+        }
+
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before =
+                shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+            cx.simulate_input("dark");
+            cx.simulate_keystrokes("tab");
+            let after =
+                shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+            assert_eq!(after, !before, "tab on the Dark mode row should toggle it");
+        }
+
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before = shell.read_with(&cx, |shell, _| shell.find_style);
+            cx.simulate_input("keyboard");
+            cx.simulate_keystrokes("tab");
+            let after = shell.read_with(&cx, |shell, _| shell.find_style);
+            assert_ne!(
+                after, before,
+                "tab on the Find style row should flip vim/fzf"
+            );
+        }
     }
 
     /// Enter is inert and reserved here (spec §3): it must not step a

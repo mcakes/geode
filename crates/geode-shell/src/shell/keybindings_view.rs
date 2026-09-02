@@ -644,6 +644,27 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
         .into_any_element()
 }
 
+/// Split ranked `indices` (char offsets into a row's `searchable_text`,
+/// `"{title} {category}"` — see `searchable_text` in this module and in
+/// `settings_view`) back across the two label lines a row paints them on.
+/// `title_len` is the title's own char count; the offset at exactly
+/// `title_len` is the separating space and belongs to neither returned
+/// list. Shared by both list dialogs' `build` (`keybindings_view` and
+/// `settings_view`) rather than duplicated: the arithmetic is only
+/// correct as long as *both* modules' `searchable_text` stays
+/// `"{title} {category}"`, so one copy is what keeps a future separator
+/// change from silently mis-highlighting whichever module didn't get the
+/// memo.
+pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<usize>, Vec<usize>) {
+    let title_ix = indices.iter().copied().filter(|&i| i < title_len).collect();
+    let cat_ix = indices
+        .iter()
+        .filter(|&&i| i > title_len)
+        .map(|&i| i - title_len - 1)
+        .collect();
+    (title_ix, cat_ix)
+}
+
 /// The [`dialog::ShellModal::build`] closure body: a scrollable row list
 /// (title + category on the left, the current binding as [`key_chip`]s —
 /// or "unbound" — on the right, live capture chips while listening) plus a
@@ -691,23 +712,8 @@ fn build(
         let is_selected = position == state.selected;
         let is_listening = is_selected && state.listening.is_some();
 
-        // The ranked indices are char offsets into `searchable_text(row)`
-        // — `"{title} {category}"` — so they have to be split back across
-        // the two label lines they are painted on. Index `title_len`
-        // itself is the separating space and belongs to neither.
         let title_len = row.title.chars().count();
-        let title_ix: Vec<usize> = m
-            .indices
-            .iter()
-            .copied()
-            .filter(|&i| i < title_len)
-            .collect();
-        let cat_ix: Vec<usize> = m
-            .indices
-            .iter()
-            .filter(|&&i| i > title_len)
-            .map(|&i| i - title_len - 1)
-            .collect();
+        let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
         let mut row_el = h_flex()
             .w_full()
@@ -1312,5 +1318,37 @@ mod tests {
         state.listening = Some(vec![key("a")]);
         state.set_query("foc".to_string());
         assert!(state.listening.is_none());
+    }
+
+    // -- split_label_indices ---------------------------------------------
+
+    #[test]
+    fn split_label_indices_partitions_around_the_separating_space() {
+        // "Toggle palette Palette" — title "Toggle palette" is 14 chars
+        // (indices 0..=13), index 14 is the separating space, category
+        // "Palette" starts at 15.
+        let title_len = "Toggle palette".chars().count();
+        assert_eq!(title_len, 14);
+        // One index from the title (0), the separator itself (14, must be
+        // dropped by both sides), and one from the category (15, the
+        // category's own first char).
+        let (title_ix, cat_ix) = split_label_indices(&[0, 14, 15], title_len);
+        assert_eq!(
+            title_ix,
+            vec![0],
+            "the separator index must not land in the title half"
+        );
+        assert_eq!(
+            cat_ix,
+            vec![0],
+            "a category-side index is rebased to be relative to the category's own start"
+        );
+    }
+
+    #[test]
+    fn split_label_indices_on_empty_indices_is_two_empty_lists() {
+        let (title_ix, cat_ix) = split_label_indices(&[], 5);
+        assert!(title_ix.is_empty());
+        assert!(cat_ix.is_empty());
     }
 }
