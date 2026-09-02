@@ -12,6 +12,7 @@
 
 use crate::attribution::{Attribution, ScopeSemantics};
 use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+use arrow::buffer::NullBuffer;
 use arrow::record_batch::RecordBatch;
 
 #[derive(Debug, Clone)]
@@ -56,24 +57,45 @@ impl Provenance {
 /// unified — cheaper, and it keeps the codes stable, which is what §7.2
 /// lets a renderer compare and group on.
 ///
-/// **This is an optimization, not a correctness guard.** An earlier
-/// comment here claimed Arrow's `concat` appends dictionaries rather than
-/// noticing two batches share one, and that the merged dictionary
-/// therefore outgrows the 8-bit key space and the keys overflow. Measured
-/// against arrow 58.4.0, that is not what happens: concatenating 40
-/// batches of a 200-value dictionary yields a 200-entry dictionary at
-/// UInt8, and 300 stays 300 at UInt16 — `concat` unifies. Where the union
-/// genuinely cannot fit the key type (disjoint 200-value dictionaries at
-/// UInt8) it returns `Err("Dictionary key bigger than the key type")`,
-/// which `from_batches` propagates and the pool reports as a failed query.
-/// So the fallback below is safe, and removing this fast path would cost
-/// speed rather than correctness. Re-measure before trusting either
-/// claim across an arrow upgrade.
+/// **It also guards §7.2's code identity, which the fallback does not.**
+/// This comment has been wrong twice, so the measurements are recorded
+/// rather than the conclusions.
+///
+/// The original claim — that arrow's `concat` appends dictionaries and
+/// overflows the key space — is false at arrow 58.4.0: 40 batches of a
+/// 200-value dictionary concatenate to 200 entries at UInt8, 300 stays
+/// 300 at UInt16, and a union that genuinely cannot fit the key type
+/// (disjoint 200-value dictionaries at UInt8) returns
+/// `Err("Dictionary key bigger than the key type")` rather than
+/// corrupting.
+///
+/// The correction that replaced it — "the fallback is safe; this path
+/// costs speed only" — was measured without nulls, and that is the case
+/// that matters. With a NULL present the fallback emits a *duplicate*
+/// dictionary entry:
+///
+/// ```text
+/// no nulls      dict=["A","B","C"]      codes=[0,1,2,0]
+/// null present  dict=["A","B","C","A"]  codes=[0,1,0,2,3]
+/// ```
+///
+/// `"A"` then has both code 0 and code 3. `dict_value` still returns the
+/// right string, so nothing visibly breaks — but §7.2's whole premise is
+/// that the renderer compares and groups on codes, and after a fallback
+/// concat code equality no longer implies string equality. A renderer
+/// grouping by code would split one book in two. A NULL in a dimension
+/// column is not exotic: it *is* the rolled-up row, present in
+/// essentially every result.
+///
+/// The fast path is unreached in production today (every batch of one
+/// query carries the same derived ENUM), so this is a latent property of
+/// the fallback rather than a live defect. Re-measure before trusting any
+/// of it across an arrow upgrade.
 fn concat_preserving_dictionaries(
     batches: &[RecordBatch],
 ) -> Result<RecordBatch, arrow::error::ArrowError> {
     use arrow::array::ArrayRef;
-    use arrow::datatypes::{DataType, UInt8Type, UInt16Type};
+    use arrow::datatypes::{DataType, UInt8Type, UInt16Type, UInt32Type};
 
     let schema = batches[0].schema();
     if batches.len() == 1 {
@@ -92,6 +114,9 @@ fn concat_preserving_dictionaries(
             }
             DataType::Dictionary(k, _) if **k == DataType::UInt16 => {
                 concat_shared_dictionary::<UInt16Type>(&slices)
+            }
+            DataType::Dictionary(k, _) if **k == DataType::UInt32 => {
+                concat_shared_dictionary::<UInt32Type>(&slices)
             }
             _ => None,
         };
@@ -151,15 +176,17 @@ fn concat_shared_dictionary<K: arrow::datatypes::ArrowDictionaryKeyType>(
 /// slices are exposed for bulk work that wants the narrower type.
 #[derive(Debug, Clone, Copy)]
 pub enum DictCodes<'a> {
-    U8(&'a [u8]),
-    U16(&'a [u16]),
+    U8(&'a [u8], Option<&'a NullBuffer>),
+    U16(&'a [u16], Option<&'a NullBuffer>),
+    U32(&'a [u32], Option<&'a NullBuffer>),
 }
 
 impl DictCodes<'_> {
     pub fn len(&self) -> usize {
         match self {
-            DictCodes::U8(c) => c.len(),
-            DictCodes::U16(c) => c.len(),
+            DictCodes::U8(c, _) => c.len(),
+            DictCodes::U16(c, _) => c.len(),
+            DictCodes::U32(c, _) => c.len(),
         }
     }
 
@@ -167,14 +194,32 @@ impl DictCodes<'_> {
         self.len() == 0
     }
 
-    /// The code at `row`, widened. `None` past the end.
+    /// Whether this row has no value — the rolled-up level, not a code.
     ///
-    /// A code is present for every row including NULL ones, where it is
-    /// arbitrary; only [`Snapshot::dict_value`] consults the null bitmap.
+    /// §7.2 tells the renderer to compare and group on codes, so this has
+    /// to be askable here. Without it a code-based renderer reads the
+    /// arbitrary code sitting under a NULL — in practice 0 — and puts the
+    /// grand-total row under a real book, which is exactly the defect
+    /// [`Snapshot::dict_value`] consults the bitmap to avoid.
+    pub fn is_null(&self, row: usize) -> bool {
+        let nulls = match self {
+            DictCodes::U8(_, n) | DictCodes::U16(_, n) | DictCodes::U32(_, n) => *n,
+        };
+        row >= self.len() || nulls.is_some_and(|n| n.is_null(row))
+    }
+
+    /// The code at `row`. `None` past the end **or for a NULL row**, so a
+    /// caller that groups on the result cannot silently merge rolled-up
+    /// rows into a real dimension value. Use [`Self::raw`] for bulk work
+    /// that has already established there are no nulls.
     pub fn code(&self, row: usize) -> Option<usize> {
+        if self.is_null(row) {
+            return None;
+        }
         match self {
-            DictCodes::U8(c) => c.get(row).map(|v| *v as usize),
-            DictCodes::U16(c) => c.get(row).map(|v| *v as usize),
+            DictCodes::U8(c, _) => c.get(row).map(|v| *v as usize),
+            DictCodes::U16(c, _) => c.get(row).map(|v| *v as usize),
+            DictCodes::U32(c, _) => c.get(row).map(|v| *v as usize),
         }
     }
 }
@@ -273,8 +318,36 @@ impl Snapshot {
     /// the two apart prints a confident zero where the honest answer is
     /// "this number does not belong to this row".
     pub fn f64_value(&self, name: &str, row: usize) -> Option<f64> {
-        let values = self.column(name)?.as_any().downcast_ref::<Float64Array>()?;
-        (row < values.len() && !values.is_null(row)).then(|| values.value(row))
+        let arr = self.column(name)?;
+        if let Some(values) = arr.as_any().downcast_ref::<Float64Array>() {
+            return (row < values.len() && !values.is_null(row)).then(|| values.value(row));
+        }
+        // A declared `i64` measure does not come back as an integer.
+        // `ColumnType::I64` is BIGINT, the default aggregate is `Sum`, and
+        // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
+        // `Decimal128(38, 0)`. Nothing forbids such a measure, so without
+        // this arm every one of its cells read blank, and under §6.3 a
+        // blank cell is a positive claim: "this number does not belong to
+        // this row". Turning "I cannot read this type" into that claim is
+        // the worst failure available here.
+        use arrow::array::Decimal128Array;
+        use arrow::datatypes::DataType;
+        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {
+            if row >= values.len() || values.is_null(row) {
+                return None;
+            }
+            let scale = match arr.data_type() {
+                DataType::Decimal128(_, s) => *s,
+                _ => 0,
+            };
+            return Some(values.value(row) as f64 / 10f64.powi(scale as i32));
+        }
+        // A narrower float, or an integer measure that was not summed.
+        if let Some(v) = self.i64_value(name, row) {
+            return Some(v as f64);
+        }
+        let values = arr.as_any().downcast_ref::<arrow::array::Float32Array>()?;
+        (row < values.len() && !values.is_null(row)).then(|| values.value(row) as f64)
     }
 
     /// Zero-copy over the whole column, **only when it is exactly Int64**.
@@ -339,26 +412,32 @@ impl Snapshot {
     /// shared value dictionary. The renderer compares and formats on the
     /// codes rather than the strings (spec §7.2).
     ///
-    /// Both key widths are matched, because the width is a property of the
-    /// data rather than the schema: DuckDB sizes an ENUM's key to its
-    /// vocabulary, UInt8 up to 255 values and UInt16 above (verified: 200
-    /// → UInt8, 300 → UInt16). Matching only UInt8 made every dimension
-    /// with a real underlying list fall through this *and* `str_column`
-    /// and render blank.
+    /// The key width is a property of the data, not the schema: DuckDB
+    /// sizes an ENUM's key to its vocabulary. Measured at the boundaries:
+    /// 255 → UInt8, 256 → UInt16, 65535 → UInt16, 65536 → UInt32. All
+    /// three are matched.
     ///
-    /// The codes carry no null bitmap, so a rolled-up cell is an arbitrary
-    /// code here. Use [`Self::dict_value`] to read one cell for display.
+    /// An earlier version matched UInt8 only, and every dimension with a
+    /// real underlying list fell through this *and* `str_column` and
+    /// rendered blank. The version after it matched UInt8 and UInt16 and
+    /// called that exhaustive — it was not, and the comment saying so
+    /// would have stopped the next reader re-checking. If a further width
+    /// ever appears, this is the third place to find out about it.
     pub fn dict_column(&self, name: &str) -> Option<(DictCodes<'_>, &StringArray)> {
         use arrow::array::DictionaryArray;
-        use arrow::datatypes::{UInt8Type, UInt16Type};
+        use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
         let arr = self.column(name)?;
         if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
             let values = d.values().as_any().downcast_ref::<StringArray>()?;
-            return Some((DictCodes::U8(d.keys().values()), values));
+            return Some((DictCodes::U8(d.keys().values(), d.nulls()), values));
         }
-        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?;
+        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+            let values = d.values().as_any().downcast_ref::<StringArray>()?;
+            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));
+        }
+        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;
         let values = d.values().as_any().downcast_ref::<StringArray>()?;
-        Some((DictCodes::U16(d.keys().values()), values))
+        Some((DictCodes::U32(d.keys().values(), d.nulls()), values))
     }
 
     /// One string cell, or `None` when the column is absent, the value is
@@ -383,13 +462,16 @@ impl Snapshot {
     /// name.
     pub fn dict_value(&self, name: &str, row: usize) -> Option<&str> {
         use arrow::array::DictionaryArray;
-        use arrow::datatypes::{UInt8Type, UInt16Type};
+        use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
         let arr = self.column(name)?;
         if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
             return dictionary_cell(d, row);
         }
+        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+            return dictionary_cell(d, row);
+        }
         dictionary_cell(
-            arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?,
+            arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?,
             row,
         )
     }
@@ -409,6 +491,51 @@ impl Snapshot {
             .or_else(|| self.str_value(name, row))
     }
 
+    /// One cell as display text, for the types no other accessor reads.
+    ///
+    /// `ColumnType` accepts `date`, `timestamp` and `bool`, and DuckDB
+    /// emits them as `Date32`, `Timestamp(Micros)` and `Boolean` — none of
+    /// which any typed accessor here matched, so a legal declaration
+    /// produced a column of blank cells. Under §6.3 a blank cell asserts
+    /// "this number does not belong to this row", so an unreadable type
+    /// silently became a claim about the data. `business_date` is the
+    /// standing example: `store/ddl.rs` names it as the attribute worth
+    /// displaying, and the sample config declares it `utf8`, which was a
+    /// workaround for this gap rather than a preference.
+    ///
+    /// Returns owned text because a formatted date has nowhere to borrow
+    /// from. Numbers are deliberately not formatted here — precision is
+    /// the renderer's decision, so it should ask `f64_value` first.
+    pub fn display_value(&self, name: &str, row: usize) -> Option<String> {
+        use arrow::array::{BooleanArray, Date32Array, Date64Array, TimestampMicrosecondArray};
+
+        if let Some(s) = self.text_value(name, row) {
+            return Some(s.to_string());
+        }
+        let arr = self.column(name)?;
+        let present = |a: &dyn Array| row < a.len() && !a.is_null(row);
+
+        if let Some(v) = arr.as_any().downcast_ref::<BooleanArray>() {
+            return present(v).then(|| v.value(row).to_string());
+        }
+        if let Some(v) = arr.as_any().downcast_ref::<Date32Array>() {
+            return present(v)
+                .then(|| v.value_as_date(row).map(|d| d.to_string()))
+                .flatten();
+        }
+        if let Some(v) = arr.as_any().downcast_ref::<Date64Array>() {
+            return present(v)
+                .then(|| v.value_as_date(row).map(|d| d.to_string()))
+                .flatten();
+        }
+        if let Some(v) = arr.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+            return present(v)
+                .then(|| v.value_as_datetime(row).map(|d| d.to_string()))
+                .flatten();
+        }
+        None
+    }
+
     /// How many grouping columns are present on this row — 0 is the grand
     /// total, `grouping_len` a leaf. The compiler emits it directly rather
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
@@ -426,6 +553,10 @@ impl Snapshot {
 pub enum TestColumn {
     F64(Vec<Option<f64>>),
     I64(Vec<i64>),
+    /// A narrower integer, as DuckDB actually emits `row_depth`. A
+    /// fixture that only builds `Int64` cannot see the width defect that
+    /// made `depth_of_row` return `None` for every real result.
+    I32(Vec<i32>),
     Str(Vec<Option<&'static str>>),
     /// Dictionary-encoded, the shape a live ENUM column arrives in. The
     /// key width follows DuckDB's own rule — UInt8 up to 255 distinct
@@ -441,8 +572,8 @@ pub enum TestColumn {
 fn dictionary_fixture(
     cells: &[Option<String>],
 ) -> (arrow::datatypes::DataType, arrow::array::ArrayRef) {
-    use arrow::array::{ArrayRef, DictionaryArray, UInt8Array, UInt16Array};
-    use arrow::datatypes::{DataType, UInt8Type, UInt16Type};
+    use arrow::array::{ArrayRef, DictionaryArray, UInt8Array, UInt16Array, UInt32Array};
+    use arrow::datatypes::{DataType, UInt8Type, UInt16Type, UInt32Type};
     use std::sync::Arc;
 
     let mut distinct: Vec<&str> = Vec::new();
@@ -459,6 +590,18 @@ fn dictionary_fixture(
             .expect("every non-null cell is interned above")
     };
 
+    if distinct.len() > u16::MAX as usize {
+        let keys: UInt32Array = cells
+            .iter()
+            .map(|c| c.as_deref().map(|s| code_of(s) as u32))
+            .collect();
+        return (
+            DataType::Dictionary(Box::new(DataType::UInt32), Box::new(DataType::Utf8)),
+            Arc::new(
+                DictionaryArray::<UInt32Type>::try_new(keys, values).expect("fixture dictionary"),
+            ) as ArrayRef,
+        );
+    }
     if distinct.len() <= u8::MAX as usize {
         let keys: UInt8Array = cells
             .iter()
@@ -505,6 +648,10 @@ impl Snapshot {
                         (DataType::Float64, Arc::new(Float64Array::from(v.clone())))
                     }
                     TestColumn::I64(v) => (DataType::Int64, Arc::new(Int64Array::from(v.clone()))),
+                    TestColumn::I32(v) => (
+                        DataType::Int32,
+                        Arc::new(arrow::array::Int32Array::from(v.clone())),
+                    ),
                     TestColumn::Str(v) => (DataType::Utf8, Arc::new(StringArray::from(v.clone()))),
                     TestColumn::Dict(v) => dictionary_fixture(v),
                 };
@@ -741,15 +888,121 @@ mod tests {
         assert_eq!(s.dict_value("underlying_ref", 299), Some("U0299"));
         assert!(matches!(
             s.dict_column("underlying_ref").unwrap().0,
-            DictCodes::U16(_)
+            DictCodes::U16(..)
         ));
 
         let s = Snapshot::for_tests(vec![(dim("underlying_ref"), TestColumn::Dict(narrow))], 1);
         assert_eq!(s.dict_value("underlying_ref", 199), Some("U0199"));
         assert!(matches!(
             s.dict_column("underlying_ref").unwrap().0,
-            DictCodes::U8(_)
+            DictCodes::U8(..)
         ));
+    }
+
+    #[test]
+    fn dimension_codes_report_a_rolled_up_row_as_having_none() {
+        // §7.2 tells the renderer to compare and group on codes, so the
+        // code path has to answer the same question `dict_value` does. It
+        // did not: the arbitrary code under a NULL is 0, so a code-based
+        // renderer put the grand-total row under a real book — the same
+        // defect, reached through the API the spec points at.
+        let s = Snapshot::for_tests(
+            vec![(
+                dim("book"),
+                TestColumn::Dict(vec![Some("BK000".into()), None, Some("BK001".into())]),
+            )],
+            1,
+        );
+        let (codes, values) = s.dict_column("book").unwrap();
+        assert_eq!(values.len(), 2, "only the real books are in the dictionary");
+        assert!(!codes.is_null(0));
+        assert!(codes.is_null(1), "row 1 is the rolled-up level");
+        assert!(!codes.is_null(2));
+        assert_eq!(codes.code(1), None, "and has no code to group on");
+        assert_ne!(codes.code(0), codes.code(2), "distinct books stay distinct");
+        assert!(codes.is_null(99), "past the end is not a value either");
+    }
+
+    #[test]
+    fn a_dimension_past_the_65535_value_cliff_still_reads() {
+        // DuckDB sizes an ENUM's key to its vocabulary, and the widths do
+        // not stop at UInt16: measured, 255 -> UInt8, 256 -> UInt16,
+        // 65535 -> UInt16, 65536 -> UInt32. Matching only the first two
+        // left the same silent blank one cliff further out.
+        let wide: Vec<Option<String>> = (0..65_536).map(|i| Some(format!("U{i:06}"))).collect();
+        let s = Snapshot::for_tests(vec![(dim("underlying_ref"), TestColumn::Dict(wide))], 1);
+        assert!(matches!(
+            s.dict_column("underlying_ref").unwrap().0,
+            DictCodes::U32(..)
+        ));
+        assert_eq!(s.dict_value("underlying_ref", 65_535), Some("U065535"));
+        assert_eq!(s.text_value("underlying_ref", 0), Some("U000000"));
+    }
+
+    #[test]
+    fn a_summed_integer_measure_is_readable_as_a_number() {
+        // `ColumnType::I64` is BIGINT, the default aggregate is Sum, and
+        // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
+        // `Decimal128(38, 0)`. Nothing forbids declaring such a measure,
+        // and without an arm for it every cell read blank. Under §6.3 a
+        // blank cell is a positive claim about the data, so an unreadable
+        // type silently became "this number does not belong to this row".
+        use arrow::array::Decimal128Array;
+
+        let values = Decimal128Array::from(vec![Some(1_234i128), None, Some(-7i128)])
+            .with_precision_and_scale(38, 0)
+            .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "qty",
+            values.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
+        let s = Snapshot::from_batches(vec![batch], vec![dim("qty")], 1, Provenance::default())
+            .unwrap();
+
+        assert_eq!(s.f64_value("qty", 0), Some(1234.0));
+        assert_eq!(s.f64_value("qty", 1), None, "a NULL is still a NULL");
+        assert_eq!(s.f64_value("qty", 2), Some(-7.0));
+        assert_eq!(s.f64_value("qty", 99), None, "past the end");
+    }
+
+    #[test]
+    fn a_date_or_boolean_column_is_displayable() {
+        // `ColumnType` accepts date/timestamp/bool and DuckDB emits
+        // Date32/Timestamp/Boolean, none of which any typed accessor
+        // matched — so a legal declaration produced a column of blank
+        // cells, which §6.3 reads as a claim about the data.
+        use arrow::array::{BooleanArray, Date32Array};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("business_date", DataType::Date32, true),
+            Field::new("is_live", DataType::Boolean, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                // 2026-08-30 is 20695 days after the epoch.
+                Arc::new(Date32Array::from(vec![Some(20_695), None])),
+                Arc::new(BooleanArray::from(vec![Some(true), None])),
+            ],
+        )
+        .unwrap();
+        let s = Snapshot::from_batches(
+            vec![batch],
+            vec![dim("business_date"), dim("is_live")],
+            1,
+            Provenance::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.display_value("business_date", 0).as_deref(),
+            Some("2026-08-30")
+        );
+        assert_eq!(s.display_value("is_live", 0).as_deref(), Some("true"));
+        assert_eq!(s.display_value("business_date", 1), None, "NULL stays NULL");
+        assert_eq!(s.display_value("is_live", 1), None);
     }
 
     #[test]

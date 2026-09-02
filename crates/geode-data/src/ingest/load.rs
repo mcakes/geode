@@ -210,7 +210,9 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // bookless partition was outside it.
     let mut live_source_time = None;
     for partition in &partitions {
-        if let Some(t) = catalog.live_source_time(req.batch, partition.book.as_deref())? {
+        if let Some(t) =
+            catalog.live_source_time(req.dataset_name, req.batch, partition.book.as_deref())?
+        {
             live_source_time = Some(live_source_time.map_or(t, |cur: DateTime<Utc>| cur.max(t)));
         }
     }

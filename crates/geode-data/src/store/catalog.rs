@@ -120,7 +120,28 @@ impl<'a> Catalog<'a> {
     /// once created, so the start value is only ever read from a catalog
     /// the sequence has not yet been responsible for.
     fn ensure_gen_id_sequence(&self) -> Result<(), StoreError> {
-        let start = self.latest_gen_id()? + 1;
+        // `+ 2`, not `+ 1`, and the extra one is the whole point.
+        //
+        // The old allocator was `max(gen_id) + 1` over the catalog, peeked
+        // before the catalog row was written. So a load that published its
+        // rows and then failed to record leaves rows stamped
+        // `max_recorded + 1` while the catalog still reads `max_recorded`
+        // — and that orphaned id is exactly what `latest_gen_id() + 1`
+        // computes. Starting there would hand the first sequence-allocated
+        // id straight to the generation a crashed pre-sequence load
+        // already wrote: this migration would reproduce, once, the precise
+        // collision it exists to eliminate.
+        //
+        // Skipping one costs nothing (ids are opaque and need only be
+        // unique and increasing) and closes it, because a crashed old
+        // build could leak only that one id — allocation was always
+        // `max + 1`, so it could never get further ahead than that.
+        //
+        // Only where there is history to migrate. A catalog with no
+        // generations has no crashed load behind it and nothing to skip,
+        // so a fresh database still starts at 1.
+        let latest = self.latest_gen_id()?;
+        let start = if latest == 0 { 1 } else { latest + 2 };
         self.sql(&format!(
             "CREATE SEQUENCE IF NOT EXISTS file_generations_gen_id START {start};"
         ))
@@ -286,21 +307,32 @@ impl<'a> Catalog<'a> {
     /// guard disabled.
     pub fn live_source_time(
         &self,
+        dataset: &str,
         batch: &str,
         book: Option<&str>,
     ) -> Result<Option<DateTime<Utc>>, StoreError> {
+        // Scoped by dataset. `batch` is the filename with its date
+        // component removed, so two datasets whose source files share a
+        // stem produce the same batch — and the backfill guard for one
+        // then read the other's source times, filing a legitimately new
+        // file as history with no error and no degradation.
+        // `book_freshness` filters on dataset; this did not.
         let (sql, params): (&str, Vec<duckdb::types::Value>) = match book {
             Some(b) => (
                 "select max(fg.source_time) from file_generations fg
                  join file_books fb on fb.file_id = fg.file_id
-                 where fg.batch = ? and fb.book = ?",
-                vec![batch.to_string().into(), b.to_string().into()],
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?",
+                vec![
+                    dataset.to_string().into(),
+                    batch.to_string().into(),
+                    b.to_string().into(),
+                ],
             ),
             None => (
                 "select max(fg.source_time) from file_generations fg
                  join file_books fb on fb.file_id = fg.file_id
-                 where fg.batch = ? and fb.book is null",
-                vec![batch.to_string().into()],
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null",
+                vec![dataset.to_string().into(), batch.to_string().into()],
             ),
         };
         self.conn
@@ -617,6 +649,37 @@ mod tests {
     }
 
     #[test]
+    fn the_migration_skips_the_id_a_crashed_pre_sequence_load_could_hold() {
+        // The old allocator peeked `max(gen_id) + 1` before writing the
+        // catalog row, so a load that published and then failed to record
+        // left rows stamped with an id the catalog never learned about.
+        // Starting the sequence at `latest + 1` would hand that exact id
+        // out again — the migration reproducing, once, the collision it
+        // exists to remove.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+        for i in 1..=3 {
+            let mut r = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
+            r.gen_id = i;
+            cat.record(&r).unwrap();
+        }
+        // Generation 4 is the one a crashed load would have stamped onto
+        // rows without ever recording.
+        store
+            .writer()
+            .execute_batch("drop sequence if exists file_generations_gen_id;")
+            .unwrap();
+
+        let cat = Catalog::new(store.writer());
+        cat.ensure_tables().unwrap();
+        assert!(
+            cat.reserve_gen_id().unwrap() > 4,
+            "the first id handed out must clear the orphan a crashed \
+             pre-sequence load could be holding"
+        );
+    }
+
+    #[test]
     fn reserved_file_ids_are_used_as_given() {
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
@@ -671,7 +734,7 @@ mod tests {
             cat.record(&r).unwrap();
         }
         let t = cat
-            .live_source_time("BK000", Some("BK000"))
+            .live_source_time("risk_snapshot", "BK000", Some("BK000"))
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -780,23 +843,66 @@ mod tests {
         cat.record(&r).unwrap();
 
         assert_eq!(
-            cat.live_source_time("MIXED", None)
+            cat.live_source_time("risk_snapshot", "MIXED", None)
                 .unwrap()
                 .map(|t| t.hour()),
             Some(14),
             "the bookless partition of this batch is live and must say so"
         );
         assert_eq!(
-            cat.live_source_time("MIXED", Some("BK000"))
+            cat.live_source_time("risk_snapshot", "MIXED", Some("BK000"))
                 .unwrap()
                 .map(|t| t.hour()),
             Some(14),
             "and the named book still resolves"
         );
         assert_eq!(
-            cat.live_source_time("MIXED", Some("BK999")).unwrap(),
+            cat.live_source_time("risk_snapshot", "MIXED", Some("BK999"))
+                .unwrap(),
             None,
             "a book this batch does not carry is not live"
+        );
+    }
+
+    #[test]
+    fn the_bookless_partition_is_in_the_unscoped_as_of_but_not_a_named_scope() {
+        // The headline as-of is what consumers actually read
+        // (`service.rs` calls `dataset_as_of(dataset, &[])` on every live
+        // query), and the roll-up of the bookless partition into it is the
+        // whole point of making that partition visible. It was asserted
+        // nowhere: the freshness test stops at `book_freshness`, and the
+        // scoping test records no bookless data at all — so both
+        // directions of this rule could be inverted with the suite green.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+
+        let mut named = record("BK001", &["BK001"], ts("2026-08-30T14:00:00Z"));
+        named.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&named).unwrap();
+
+        // The bookless partition is the stalest thing in the dataset.
+        let mut bookless = record("UNATTRIBUTED", &[], ts("2026-08-30T06:00:00Z"));
+        bookless.books = vec![None];
+        bookless.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&bookless).unwrap();
+
+        let unscoped = cat.dataset_as_of("risk_snapshot", &[]).unwrap().unwrap();
+        assert_eq!(
+            unscoped.hour(),
+            6,
+            "unscoped, the dataset is as stale as its bookless rows"
+        );
+
+        let scoped = cat
+            .dataset_as_of("risk_snapshot", &["BK001".to_string()])
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            scoped.hour(),
+            14,
+            "scoping to a named book must not inherit the bookless \
+             partition's staleness — `book in (…)` does not match NULL, so \
+             the as-of and the rows it describes have to agree"
         );
     }
 

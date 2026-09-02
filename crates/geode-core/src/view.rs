@@ -110,18 +110,35 @@ impl ViewSpec {
 
         // A derived column may reference other view columns, so only
         // dimension and measure columns are checked against the schema.
+        //
+        // A derived *dimension* (§6.8) is resolved here for the same
+        // reason it is in the grouping loop below: `desk` is computed from
+        // `book` and is in no CSV, so checking it against the dataset
+        // alone reports the feature's own vocabulary as unknown. Fixing
+        // only the grouping loop left a view that names `desk` in both
+        // places still rejected.
         for c in &self.columns {
             match c {
                 ViewColumn::Derived { .. } => {}
                 other => {
-                    if ds.column(other.name()).is_none()
+                    let name = other.name();
+                    if let Some(d) = dims.get(name) {
+                        if ds.column(&d.from).is_none() {
+                            diags.push(bad(format!(
+                                "column '{name}' is derived from '{}', which dataset '{}' does not have",
+                                d.from, self.dataset
+                            )));
+                        }
+                        continue;
+                    }
+                    if ds.column(name).is_none()
                         && !self.joins.iter().any(|j| {
                             schema
                                 .dataset(&j.dataset)
-                                .is_some_and(|d| d.column(other.name()).is_some())
+                                .is_some_and(|d| d.column(name).is_some())
                         })
                     {
-                        diags.push(bad(format!("unknown column '{}'", other.name())));
+                        diags.push(bad(format!("unknown column '{name}'")));
                     }
                 }
             }
@@ -444,6 +461,33 @@ grain = "instrument"
         assert!(
             diags.is_empty(),
             "a derived grouping is not an unknown column: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_derived_dimension_is_accepted_as_a_column_not_only_as_a_grouping() {
+        // §6.8 was honoured in the grouping loop and not the columns loop,
+        // so a view naming `desk` in both — the ordinary way to group by a
+        // derived dimension and show it — was still rejected as unknown.
+        let dims = dimensions("[desk]\nfrom = \"book\"\n[desk.values]\nBK000 = \"Flow\"\n");
+        let (views, _) = ViewSpec::from_doc(&doc(
+            "[v]\ndataset = \"risk_snapshot\"\ngrouping = [\"desk\"]\n\
+             [[v.columns]]\nname = \"desk\"\nkind = \"dimension\"\n\
+             [[v.columns]]\nname = \"delta01\"\nkind = \"measure\"\n",
+        ));
+        let diags = views[0].validate(&schema(), &dims);
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn a_derived_column_whose_source_is_absent_is_reported() {
+        let dims = dimensions("[desk]\nfrom = \"nosuch\"\n[desk.values]\nX = \"Flow\"\n");
+        let (views, _) = ViewSpec::from_doc(&doc("[v]\ndataset = \"risk_snapshot\"\n\
+             [[v.columns]]\nname = \"desk\"\nkind = \"dimension\"\n"));
+        let diags = views[0].validate(&schema(), &dims);
+        assert!(
+            diags.iter().any(|d| d.message.contains("nosuch")),
+            "{diags:?}"
         );
     }
 

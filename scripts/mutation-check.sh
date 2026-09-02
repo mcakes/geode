@@ -288,6 +288,77 @@ run_mutation "validation: a derived dimension shadowing a column is reported" \
   '                if false {' \
   geode-core
 
+# ---- findings from the phase-2b/prerequisites review round
+
+run_mutation "derived: the value is blanked, not just the marker" \
+  crates/geode-data/src/query/compile.rs \
+  '            let expr = if blank.is_empty() {' \
+  '            let expr = if true {'
+
+run_mutation "derived: comments are stripped before scanning for columns" \
+  crates/geode-data/src/query/compile.rs \
+  '    let stripped = strip_sql_comments(sql);' \
+  '    let stripped = sql.to_string();'
+
+run_mutation "order: tie-breakers use the spine, not the ENUM-cast alias" \
+  crates/geode-data/src/query/compile.rs \
+  '            order_keys.push(format!("s.\"{g}\" asc"));' \
+  '            order_keys.push(format!("\"{g}\" asc"));'
+
+run_mutation "validation: a derived dimension is a legal view column" \
+  crates/geode-core/src/view.rs \
+  '                    if let Some(d) = dims.get(name) {' \
+  '                    if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
+  geode-core
+
+run_mutation "scope: a contradiction survives further composition" \
+  crates/geode-core/src/scope/mod.rs \
+  '        let mut contradicted: Vec<String> = if self.impossible {' \
+  '        let mut contradicted: Vec<String> = if false {' \
+  geode-core
+
+run_mutation "snapshot: dimension codes report a null row as null" \
+  crates/geode-core/src/snapshot.rs \
+  '        if self.is_null(row) {
+            return None;
+        }' \
+  '        if false {
+            return None;
+        }' \
+  geode-core
+
+run_mutation "snapshot: dimensions read at UInt32 key width" \
+  crates/geode-core/src/snapshot.rs \
+  '        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
+  '        let d = None::<&DictionaryArray<UInt32Type>>?;' \
+  geode-core
+
+run_mutation "snapshot: a summed i64 measure is readable" \
+  crates/geode-core/src/snapshot.rs \
+  '        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
+  '        if let Some(values) = None::<&Decimal128Array> {' \
+  geode-core
+
+run_mutation "pool: shutdown does not deliver its own interrupt" \
+  crates/geode-data/src/query/pool.rs \
+  'if stale || cancelled || q.shutdown {' \
+  'if stale || cancelled {'
+
+run_mutation "catalog: the migration clears a crashed load's orphan id" \
+  crates/geode-data/src/store/catalog.rs \
+  'let start = if latest == 0 { 1 } else { latest + 2 };' \
+  'let start = if latest == 0 { 1 } else { latest + 1 };'
+
+run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" \
+  crates/geode-data/src/store/catalog.rs \
+  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_some_and(|b| books.contains(b)))' \
+  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_none_or(|b| books.contains(b)))'
+
+run_mutation "catalog: the backfill guard is scoped to its dataset" \
+  crates/geode-data/src/store/catalog.rs \
+  '                 where fg.dataset = ? and fg.batch = ? and fb.book is null",' \
+  '                 where fg.batch = ? and ? is not null and fb.book is null",'
+
 # ---- the bookless partition in the catalog (spec §4.5)
 
 run_mutation "catalog: the bookless partition gets a file_books row" \
@@ -444,15 +515,8 @@ run_mutation "order: shallowest first" \
 
 run_mutation "order: grouping columns break ties" \
   crates/geode-data/src/query/compile.rs \
-  '    for g in &view.grouping {
-        let key = format!("\"{g}\" asc");
-        if !order_keys.contains(&key) {
-            order_keys.push(key);
-        }
-    }' \
-  '    for g in &view.grouping {
-        let _ = g;
-    }'
+  '    for g in view.grouping.iter().take(depth) {' \
+  '    for g in view.grouping.iter().take(0) {'
 
 # ---- the snapshot read path (spec §6.6, §6.3)
 
