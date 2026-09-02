@@ -837,8 +837,17 @@ mod tests {
         // left live at a newer source time.
         let (_d, store) = store();
         let cat = Catalog::new(store.writer());
-        let mut r = record("MIXED", &["BK000"], ts("2026-08-30T14:00:00Z"));
-        r.books = vec![Some("BK000".to_string()), None];
+        // Two generations of one batch, at *different* times and covering
+        // different partitions. Asking with the same time for both would
+        // let a query that matched the wrong partition return the right
+        // answer by accident — which is exactly what an earlier version of
+        // this fixture did, and the mutation harness is what said so.
+        let mut named = record("MIXED", &["BK000"], ts("2026-08-30T14:00:00Z"));
+        named.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&named).unwrap();
+
+        let mut r = record("MIXED", &[], ts("2026-08-30T09:00:00Z"));
+        r.books = vec![None];
         r.gen_id = cat.reserve_gen_id().unwrap();
         cat.record(&r).unwrap();
 
@@ -846,8 +855,9 @@ mod tests {
             cat.live_source_time("risk_snapshot", "MIXED", None)
                 .unwrap()
                 .map(|t| t.hour()),
-            Some(14),
-            "the bookless partition of this batch is live and must say so"
+            Some(9),
+            "the bookless partition has a live time of its own — not the \
+             named book's, which is four hours newer"
         );
         assert_eq!(
             cat.live_source_time("risk_snapshot", "MIXED", Some("BK000"))

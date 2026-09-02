@@ -368,8 +368,8 @@ run_mutation "catalog: the bookless partition gets a file_books row" \
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
-  '                 where fg.batch = ? and fb.book is null",' \
-  '                 where fg.batch = ? and false",'
+  'and fb.book is null",' \
+  'and fb.book is not null",'
 
 run_mutation "ingest: the backfill guard covers every partition written" \
   crates/geode-data/src/ingest/load.rs \
@@ -385,7 +385,7 @@ run_mutation "catalog: a gen_id is reserved, not peeked" \
 
 run_mutation "catalog: the gen_id sequence starts above existing generations" \
   crates/geode-data/src/store/catalog.rs \
-  'let start = self.latest_gen_id()? + 1;' \
+  'let start = if latest == 0 { 1 } else { latest + 2 };' \
   'let start = 1;'
 
 # ---- the grain vocabulary (spec §3.3, §6.3)
@@ -552,14 +552,18 @@ run_mutation "snapshot: a rolled-up dimension cell is null" \
 
 run_mutation "snapshot: dimension cells read at UInt16 key width" \
   crates/geode-core/src/snapshot.rs \
-  'arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?,' \
-  'None::<&DictionaryArray<UInt16Type>>?,' \
+  '        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+            return dictionary_cell(d, row);
+        }' \
+  '        if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
+            return dictionary_cell(d, row);
+        }' \
   geode-core
 
 run_mutation "snapshot: dictionary columns expose UInt16 codes" \
   crates/geode-core/src/snapshot.rs \
-  'let d = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?;' \
-  'let d = None::<&DictionaryArray<UInt16Type>>?;' \
+  '            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
+  '            return None;' \
   geode-core
 
 # No entry for the UInt16 arm of concat_preserving_dictionaries. Removing
