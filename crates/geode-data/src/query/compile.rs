@@ -1544,6 +1544,97 @@ kind = "measure"
     }
 
     #[test]
+    fn a_derived_dimension_finer_than_a_measures_grain_blanks_that_measure() {
+        // The last of the phase-2b handoff's predicted fixture gaps: a
+        // view grouped by a derived dimension whose `from` column is
+        // absent at one of the view's measure grains.
+        //
+        // `region` derives from `underlying_ref`, which the underlying and
+        // pair grains carry and the position grain does not. So at the
+        // region level `delta01` (underlying grain) is attributable and
+        // `daily_trading_pnl` (position grain) is not: a position's PnL
+        // belongs to the position, and splitting it across the regions its
+        // underlyings happen to sit in would invent a number (§6.3).
+        //
+        // The attribution rule compares *base* columns, so this only works
+        // if the derived name is resolved before the grain comparison —
+        // which is the thing no fixture exercised.
+        let (_d, store) = fixture();
+        let dims = {
+            let doc = merge_docs(
+                "dimensions",
+                &[LayerDoc::builtin(
+                    "dimensions",
+                    "[region]\nfrom = \"underlying_ref\"\n\
+                     [region.values]\nAMER = [\"SPX\"]\nEMEA = [\"RUT\"]\n",
+                )
+                .unwrap()],
+            );
+            DerivedDimensions::from_doc(&doc).0
+        };
+        let view = {
+            let text = r#"
+[by_region]
+dataset = "risk_snapshot"
+grouping = ["region"]
+[[by_region.columns]]
+name = "delta01"
+kind = "measure"
+[[by_region.columns]]
+name = "daily_trading_pnl"
+kind = "measure"
+"#;
+            let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+            ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+        };
+
+        let q = compile_view(
+            store.writer(),
+            &view,
+            &schema(),
+            &Scope::default(),
+            &dims,
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let of = |name: &str| {
+            q.columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        assert_eq!(
+            of("delta01").attribution_by_depth[1],
+            Attribution::Additive,
+            "an underlying-grain measure is attributable at a level keyed \
+             by an underlying-derived dimension"
+        );
+        assert_eq!(
+            of("daily_trading_pnl").attribution_by_depth[1],
+            Attribution::NonAttributable,
+            "a position-grain measure is not: the position grain does not \
+             carry underlying_ref, so no share of the PnL belongs here"
+        );
+
+        // And the value is blanked, not merely marked.
+        let rows = run(
+            &store,
+            &q,
+            &["row_depth", "region", "delta01", "daily_trading_pnl"],
+        );
+        let region_rows: Vec<&Vec<String>> = rows.iter().filter(|r| r[0] == "Some(1.0)").collect();
+        assert!(
+            !region_rows.is_empty(),
+            "the fixture must produce region rows: {rows:?}"
+        );
+        for r in &region_rows {
+            assert_eq!(r[3], "None", "PnL must be blank at the region level: {r:?}");
+        }
+    }
+
+    #[test]
     fn grouping_by_a_derived_dimension_produces_its_mapped_values() {
         // The map lives in config and has to reach the SQL: without it the
         // spine groups by a column no table has.
