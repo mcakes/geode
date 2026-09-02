@@ -122,6 +122,57 @@ PY
   restore
 }
 
+# ---- discovery (spec §5.2, §5.7)
+#
+# This decides what gets ingested at all, and its failure mode is the
+# quietest in the system: a file that is never loaded produces no error,
+# no degradation and no row — the tile is simply missing data nobody
+# asked about. It had no entries.
+
+run_mutation "discovery: a sentinel older than its CSV means still writing" \
+  crates/geode-data/src/source/discovery.rs \
+  '    if sentinel_mtime < mtime {' \
+  '    if false {'
+
+run_mutation "discovery: no sentinel means pending, not ready" \
+  crates/geode-data/src/source/discovery.rs \
+  '    let Ok(sentinel_meta) = std::fs::metadata(sentinel_path) else {' \
+  '    let Ok(sentinel_meta) = std::fs::metadata(csv_path) else {'
+
+run_mutation "discovery: waiting too long is reported, not waited on forever" \
+  crates/geode-data/src/source/discovery.rs \
+  '        return Ok(if waited > spec.pending_timeout {' \
+  '        return Ok(if false {'
+
+run_mutation "discovery: an unimplemented readiness strategy is surfaced" \
+  crates/geode-data/src/source/discovery.rs \
+  '    if let Readiness::StableMtime { polls } = spec.readiness {' \
+  '    if let Readiness::StableMtime { polls } = Readiness::Sentinel {'
+
+run_mutation "discovery: an unparsable sentinel is orphaned, not merely pending" \
+  crates/geode-data/src/source/discovery.rs \
+  '    let sentinel = match parse_sentinel(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(CandidateState::Orphaned {
+                reason: e.to_string(),
+            });
+        }
+    };' \
+  '    let sentinel = match parse_sentinel(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = e;
+            return Ok(CandidateState::Pending);
+        }
+    };'
+
+run_mutation "discovery: a changed file is reloaded" \
+  crates/geode-data/src/source/discovery.rs \
+  '        && prev.size == meta.len()
+        && prev.source_time == sentinel.as_of' \
+  '        && true'
+
 # ---- as-of routing (spec §6.5)
 
 run_mutation "as-of: multi-grain generation resolution" \
@@ -164,6 +215,46 @@ run_mutation "as-of: source-time tie breaks on gen_id" \
   'order by source_time desc, gen_id desc' \
   'order by source_time desc'
 
+# Retention deletes. A wrong query shows a wrong number and can be
+# re-run; a wrong sweep destroys history that no longer exists to be
+# re-read. These entries are here because this file had exactly one, and
+# it is the least recoverable code in the data layer.
+
+run_mutation "retention: an empty policy evicts nothing" \
+  crates/geode-data/src/store/retention.rs \
+  '        if !policy.is_empty() {' \
+  '        if true {'
+
+run_mutation "retention: the bookless partition is matchable by its keys" \
+  crates/geode-data/src/store/retention.rs \
+  '                       and k.book is not distinct from a.book' \
+  '                       and k.book = a.book'
+
+run_mutation "retention: age keeps the recent, not the ancient" \
+  crates/geode-data/src/store/retention.rs \
+  '                    "source_time >= '"'"'{}'"'"'::timestamptz",' \
+  '                    "source_time <= '"'"'{}'"'"'::timestamptz",'
+
+run_mutation "retention: every configured rule must be satisfied" \
+  crates/geode-data/src/store/retention.rs \
+  'keep = keep.join(" and "),' \
+  'keep = keep.join(" or "),'
+
+run_mutation "retention: the generation count bound is what it says" \
+  crates/geode-data/src/store/retention.rs \
+  'keep.push(format!("rn <= {n}"));' \
+  'keep.push(format!("rn <= {}", n + 1));'
+
+run_mutation "retention: the remaining bound is the oldest, not the newest" \
+  crates/geode-data/src/store/retention.rs \
+  '            (Some(a), Some(b)) => Some(a.min(b)),' \
+  '            (Some(a), Some(b)) => Some(a.max(b)),'
+
+run_mutation "retention: eviction is counted from the rows actually removed" \
+  crates/geode-data/src/store/retention.rs \
+  'report.evicted_rows += (before - after).max(0) as usize;' \
+  'report.evicted_rows += 0;'
+
 run_mutation "retention: source-time tie breaks on gen_id" \
   crates/geode-data/src/store/retention.rs \
   'order by source_time desc, gen_id desc' \
@@ -178,6 +269,11 @@ run_mutation "provenance: resolved vs requested time" \
   crates/geode-data/src/service.rs \
   'as_of: compiled' \
   'as_of: None.or(compiled'
+
+run_mutation "provenance: a join is labelled with its own instant" \
+  crates/geode-data/src/query/compile.rs \
+  '                    resolved_as_of.insert(join.dataset.clone(), oldest);' \
+  '                    let _ = oldest;'
 
 run_mutation "provenance: stalest partition, not newest" \
   crates/geode-data/src/query/compile.rs \
@@ -248,6 +344,102 @@ run_mutation "validation: a derived dimension shadowing a column is reported" \
   '                if false {' \
   geode-core
 
+# ---- findings from the phase-2b/prerequisites review round
+
+run_mutation "derived: the value is blanked, not just the marker" \
+  crates/geode-data/src/query/compile.rs \
+  '            let expr = if blank.is_empty() {' \
+  '            let expr = if true {'
+
+run_mutation "derived: comments are stripped before scanning for columns" \
+  crates/geode-data/src/query/compile.rs \
+  '    let stripped = strip_sql_comments(sql);' \
+  '    let stripped = sql.to_string();'
+
+run_mutation "order: tie-breakers use the spine, not the ENUM-cast alias" \
+  crates/geode-data/src/query/compile.rs \
+  '            order_keys.push(format!("s.\"{g}\" asc"));' \
+  '            order_keys.push(format!("\"{g}\" asc"));'
+
+run_mutation "validation: a derived dimension is a legal view column" \
+  crates/geode-core/src/view.rs \
+  '                    if let Some(d) = dims.get(name) {' \
+  '                    if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
+  geode-core
+
+run_mutation "scope: a contradiction survives further composition" \
+  crates/geode-core/src/scope/mod.rs \
+  '        let mut contradicted: Vec<String> = if self.impossible {' \
+  '        let mut contradicted: Vec<String> = if false {' \
+  geode-core
+
+run_mutation "snapshot: dimension codes report a null row as null" \
+  crates/geode-core/src/snapshot.rs \
+  '        if self.is_null(row) {
+            return None;
+        }' \
+  '        if false {
+            return None;
+        }' \
+  geode-core
+
+run_mutation "snapshot: dimensions read at UInt32 key width" \
+  crates/geode-core/src/snapshot.rs \
+  '        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
+  '        let d = None::<&DictionaryArray<UInt32Type>>?;' \
+  geode-core
+
+run_mutation "snapshot: a summed i64 measure is readable" \
+  crates/geode-core/src/snapshot.rs \
+  '        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
+  '        if let Some(values) = None::<&Decimal128Array> {' \
+  geode-core
+
+run_mutation "pool: shutdown does not deliver its own interrupt" \
+  crates/geode-data/src/query/pool.rs \
+  'if stale || cancelled || q.shutdown {' \
+  'if stale || cancelled {'
+
+run_mutation "catalog: the migration clears a crashed load's orphan id" \
+  crates/geode-data/src/store/catalog.rs \
+  'let start = if latest == 0 { 1 } else { latest + 2 };' \
+  'let start = if latest == 0 { 1 } else { latest + 1 };'
+
+run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" \
+  crates/geode-data/src/store/catalog.rs \
+  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_some_and(|b| books.contains(b)))' \
+  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_none_or(|b| books.contains(b)))'
+
+run_mutation "catalog: the backfill guard is scoped to its dataset (named book)" \
+  crates/geode-data/src/store/catalog.rs \
+  'where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  'where ? is not null and fg.batch = ? and fb.book = ?'
+
+run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
+  crates/geode-data/src/store/catalog.rs \
+  'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
+  'where ? is not null and fg.batch = ? and fb.book is null'
+
+run_mutation "catalog: a generation that never went live is not fresh" \
+  crates/geode-data/src/store/catalog.rs \
+  '                         and coalesce(fg.archived_only, false) = false' \
+  '                         and true'
+
+run_mutation "ingest: the publish event names the partitions written" \
+  crates/geode-data/src/ingest/runner.rs \
+  'books: loaded.partitions.clone(),' \
+  'books: Vec::new(),'
+
+run_mutation "ingest: an archived-only load is recorded as such" \
+  crates/geode-data/src/ingest/load.rs \
+  '    let archived_only = !published.is_empty()' \
+  '    let archived_only = false && !published.is_empty()'
+
+run_mutation "catalog: the archived_only column is added to old catalogs" \
+  crates/geode-data/src/store/catalog.rs \
+  'ALTER TABLE file_generations ADD COLUMN IF NOT EXISTS archived_only BOOLEAN;' \
+  '-- migration removed'
+
 # ---- the bookless partition in the catalog (spec §4.5)
 
 run_mutation "catalog: the bookless partition gets a file_books row" \
@@ -257,8 +449,8 @@ run_mutation "catalog: the bookless partition gets a file_books row" \
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
-  '                 where fg.batch = ? and fb.book is null",' \
-  '                 where fg.batch = ? and false",'
+  'and fg.batch = ? and fb.book is null' \
+  'and fg.batch = ? and fb.book is not null'
 
 run_mutation "ingest: the backfill guard covers every partition written" \
   crates/geode-data/src/ingest/load.rs \
@@ -274,7 +466,7 @@ run_mutation "catalog: a gen_id is reserved, not peeked" \
 
 run_mutation "catalog: the gen_id sequence starts above existing generations" \
   crates/geode-data/src/store/catalog.rs \
-  'let start = self.latest_gen_id()? + 1;' \
+  'let start = if latest == 0 { 1 } else { latest + 2 };' \
   'let start = 1;'
 
 # ---- the grain vocabulary (spec §3.3, §6.3)
@@ -283,6 +475,11 @@ run_mutation "vocabulary: pair grain does not carry the underlying dimension" \
   crates/geode-core/src/schema/grain.rs \
   'Grain::UnderlyingPair => &K_INSTRUMENT,' \
   'Grain::UnderlyingPair => &K_PAIR,'
+
+run_mutation "attribution: a derived dimension resolves to its base column" \
+  crates/geode-core/src/attribution.rs \
+  '        .map(|c| dims.base_column(c.as_str()))' \
+  '        .map(|c| c.as_str())'
 
 run_mutation "attribution: decided on dimension keys" \
   crates/geode-core/src/attribution.rs \
@@ -404,15 +601,8 @@ run_mutation "order: shallowest first" \
 
 run_mutation "order: grouping columns break ties" \
   crates/geode-data/src/query/compile.rs \
-  '    for g in &view.grouping {
-        let key = format!("\"{g}\" asc");
-        if !order_keys.contains(&key) {
-            order_keys.push(key);
-        }
-    }' \
-  '    for g in &view.grouping {
-        let _ = g;
-    }'
+  '    for g in view.grouping.iter().take(depth) {' \
+  '    for g in view.grouping.iter().take(0) {'
 
 # ---- the snapshot read path (spec §6.6, §6.3)
 
@@ -448,14 +638,18 @@ run_mutation "snapshot: a rolled-up dimension cell is null" \
 
 run_mutation "snapshot: dimension cells read at UInt16 key width" \
   crates/geode-core/src/snapshot.rs \
-  'arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?,' \
-  'None::<&DictionaryArray<UInt16Type>>?,' \
+  '        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+            return dictionary_cell(d, row);
+        }' \
+  '        if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
+            return dictionary_cell(d, row);
+        }' \
   geode-core
 
 run_mutation "snapshot: dictionary columns expose UInt16 codes" \
   crates/geode-core/src/snapshot.rs \
-  'let d = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>()?;' \
-  'let d = None::<&DictionaryArray<UInt16Type>>?;' \
+  '            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
+  '            return None;' \
   geode-core
 
 # No entry for the UInt16 arm of concat_preserving_dictionaries. Removing

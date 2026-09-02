@@ -46,6 +46,11 @@ pub struct LoadOutcome {
     /// diagnostics rather than vanishing silently.
     pub extra_columns: Vec<String>,
     pub published: Vec<PublishOutcome>,
+    /// The partitions this load wrote, `None` being the bookless one.
+    /// Taken from the staged rows rather than the sentinel, because the
+    /// sentinel's book list is advisory: a row whose book it omits is
+    /// still published, and a bookless partition is in no sentinel at all.
+    pub partitions: Vec<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -210,7 +215,9 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // bookless partition was outside it.
     let mut live_source_time = None;
     for partition in &partitions {
-        if let Some(t) = catalog.live_source_time(req.batch, partition.book.as_deref())? {
+        if let Some(t) =
+            catalog.live_source_time(req.dataset_name, req.batch, partition.book.as_deref())?
+        {
             live_source_time = Some(live_source_time.map_or(t, |cur: DateTime<Utc>| cur.max(t)));
         }
     }
@@ -283,6 +290,13 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         path: req.csv_path.to_path_buf(),
         source,
     })?;
+    // A generation every grain filed straight to the archive was never
+    // live, so it must not count toward freshness (§4.5). Recorded all the
+    // same: the load happened, and provenance should say so.
+    let archived_only = !published.is_empty()
+        && published
+            .iter()
+            .all(|p| matches!(p, PublishOutcome::ArchivedOnly { .. }));
     let file_id = catalog.record(&FileGeneration {
         file_id,
         dataset: req.dataset_name.to_string(),
@@ -301,6 +315,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         // Every partition written, not just the named books: the bookless
         // one needs a `file_books` row or its freshness is unrecoverable.
         books: partitions.iter().map(|p| p.book.clone()).collect(),
+        archived_only,
         health: health.clone(),
     })?;
 
@@ -324,6 +339,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         missing_required,
         extra_columns,
         published,
+        partitions: partitions.iter().map(|p| p.book.clone()).collect(),
     })
 }
 
@@ -756,6 +772,10 @@ source_name = "ModelCode"
         let older = load(&v2, &sentinel);
 
         assert!(
+            !older.published.is_empty(),
+            "the load must have published something to assert about"
+        );
+        assert!(
             older
                 .published
                 .iter()
@@ -763,6 +783,20 @@ source_name = "ModelCode"
             "an older file must become history, not overwrite the bookless \
              partition that is live at a newer time: {:?}",
             older.published
+        );
+
+        // And it must not move freshness. The generation is recorded —
+        // the load happened — but it never made a row live, so counting
+        // it would report the dataset as stale as a file nobody can see.
+        use chrono::Timelike;
+        let cat = crate::store::Catalog::new(f.store.writer());
+        let stale_hour = sentinel.as_of.hour();
+        assert!(
+            !cat.book_freshness("risk_snapshot")
+                .unwrap()
+                .iter()
+                .any(|(_, t)| t.hour() == stale_hour),
+            "a generation that never went live must not appear in freshness"
         );
     }
 

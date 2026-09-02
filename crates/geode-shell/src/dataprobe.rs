@@ -79,9 +79,11 @@ fn cell_text(snap: &Snapshot, column: &str, row: usize) -> Option<String> {
         return Some(v.to_string());
     }
     // Dimension columns come back dictionary-encoded on the live path and
-    // as plain strings under as-of (spec §6.5, §7.2). `text_value` reads
-    // either, so the probe does not have to know which era it is showing.
-    snap.text_value(column, row).map(str::to_string)
+    // as plain strings under as-of (spec §6.5, §7.2); `display_value`
+    // reads either, so the probe need not know which era it is showing,
+    // and also covers the date/timestamp/bool columns the schema accepts
+    // but no typed accessor matched.
+    snap.display_value(column, row)
 }
 
 /// A `label → value` line, matching the perf overlay's readout shape.
@@ -277,7 +279,11 @@ mod tests {
                         vec![Attribution::Additive; 2],
                         ScopeSemantics::Direct,
                     ),
-                    TestColumn::I64(vec![0, 1]),
+                    // Int32, not Int64: DuckDB emits `row_depth` at the
+                    // narrowest width that fits, and an Int64 fixture
+                    // cannot see the defect that made `depth_of_row`
+                    // return None for every real result.
+                    TestColumn::I32(vec![0, 1]),
                 ),
                 (
                     meta(

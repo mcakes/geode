@@ -7,7 +7,6 @@ use crate::query::compile::CompiledQuery;
 use crate::store::Store;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -45,6 +44,15 @@ struct Queue {
     /// query failure paints an error on a tile the user simply navigated
     /// away from.
     cancelled: std::collections::HashSet<QueryId>,
+    /// The last id handed out. Lives in the queue rather than beside it so
+    /// that allocating outside the lock is not expressible: ids and
+    /// insertion order cannot disagree if they are produced under the same
+    /// guard. It was an `AtomicU64` incremented before the lock was taken,
+    /// which let two concurrent submits for one view insert out of id
+    /// order and leave the *older* request pending — a race no test can
+    /// force reliably (measured: caught on 2 runs in 8), so making it
+    /// unrepresentable beats testing for it.
+    next_id: QueryId,
     shutdown: bool,
 }
 
@@ -56,7 +64,6 @@ type RunFn = fn(&duckdb::Connection, &QueryRequest) -> Result<Snapshot, duckdb::
 
 pub struct QueryPool {
     queue: Arc<(Mutex<Queue>, Condvar)>,
-    next_id: AtomicU64,
     threads: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -113,7 +120,6 @@ impl QueryPool {
         Ok((
             QueryPool {
                 queue,
-                next_id: AtomicU64::new(1),
                 threads: Mutex::new(threads),
             },
             rx,
@@ -125,11 +131,8 @@ impl QueryPool {
     pub fn submit(&self, req: QueryRequest) -> QueryId {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        // Allocated under the lock, so id order and insertion order agree.
-        // Allocating first let two concurrent submits for one view insert
-        // out of id order, leaving the *older* request pending and the
-        // newer one discarded as stale when it returned.
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        q.next_id += 1;
+        let id = q.next_id;
         // After shutdown nothing will ever run this, so queueing it only
         // strands the request (and its snapshot) in the pool.
         if q.shutdown {
@@ -251,7 +254,12 @@ fn worker(
         // stale, so drop it rather than delivering it out of order (§7.3).
         let stale = q.pending.get(&req.view).is_some_and(|(pid, _)| *pid > id);
         let cancelled = q.cancelled.remove(&id);
-        if stale || cancelled {
+        // `shutdown` interrupts every running query exactly as `cancel`
+        // does, so its `Interrupted` is equally self-inflicted. Delivering
+        // it hands the UI a query failure the pool caused while closing —
+        // the same defect `cancel` was fixed for, left standing on the
+        // neighbouring path.
+        if stale || cancelled || q.shutdown {
             continue;
         }
         if tx
@@ -300,6 +308,7 @@ fn run_one(conn: &duckdb::Connection, req: &QueryRequest) -> Result<Snapshot, du
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     /// A store with one table holding `rows` rows.
@@ -514,6 +523,45 @@ mod tests {
     }
 
     #[test]
+    fn a_summed_bigint_comes_back_as_a_decimal() {
+        // Pins the type DuckDB actually produces for a declared `i64`
+        // measure, which is why `f64_value` needs a Decimal128 arm at all:
+        // `sum(BIGINT)` is HUGEINT, exported as `Decimal128(38, 0)`. If
+        // this ever changes, the accessor should be revisited rather than
+        // silently reading blank.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch("create table t as select 5::bigint as qty union all select 7::bigint;")
+            .unwrap();
+        let conn = store.reader().unwrap();
+        let mut stmt = conn.prepare("select sum(qty) as qty from t").unwrap();
+        let batches: Vec<_> = stmt.query_arrow(duckdb::params![]).unwrap().collect();
+        assert_eq!(
+            format!("{:?}", batches[0].schema().field(0).data_type()),
+            "Decimal128(38, 0)"
+        );
+
+        let snap = Snapshot::from_batches(
+            batches,
+            vec![ColumnMeta {
+                name: "qty".into(),
+                attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
+                scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
+            }],
+            1,
+            Provenance::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            snap.f64_value("qty", 0),
+            Some(12.0),
+            "a legal i64 measure must be readable, not blank"
+        );
+    }
+
+    #[test]
     fn a_dimension_below_the_cliff_still_reads() {
         let (_d, store) = enum_fixture(200, "U0199");
         let (snap, arrow_type) = read_one(&store, "select underlying_ref from t");
@@ -601,6 +649,51 @@ mod tests {
             "a cancelled query must deliver nothing, not an error"
         );
         pool.shutdown();
+    }
+
+    /// Held false until the test has called `shutdown`, so the interrupt
+    /// lands while the query is running.
+    static SHUTDOWN_GATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    #[test]
+    fn shutdown_does_not_deliver_its_own_interrupt_as_a_failure() {
+        // `shutdown` interrupts every running query exactly as `cancel`
+        // does, so its `Interrupted` is equally self-inflicted. It used to
+        // be delivered: a query failure the pool caused while closing,
+        // handed to whatever drains the channel on teardown.
+        fn gated(_: &duckdb::Connection, _: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+            while !SHUTDOWN_GATE.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Err(duckdb::Error::InvalidParameterName("Interrupted".into()))
+        }
+
+        SHUTDOWN_GATE.store(false, Ordering::SeqCst);
+        let (_d, store) = fixture(100);
+        let (pool, rx) = QueryPool::spawn_with(&store, 1, gated).unwrap();
+        pool.submit(request("v1", "select sum(v) as v from t"));
+
+        let mut running = false;
+        for _ in 0..2000 {
+            {
+                let (lock, _) = &*pool.queue;
+                let q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                running = !q.running.is_empty();
+            }
+            if running {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(running, "the query never started");
+
+        SHUTDOWN_GATE.store(true, Ordering::SeqCst);
+        pool.shutdown();
+
+        assert!(
+            rx.recv_timeout(Duration::from_millis(500)).is_err(),
+            "shutting down must deliver nothing, not a failure it caused"
+        );
     }
 
     #[test]

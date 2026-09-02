@@ -89,15 +89,25 @@ fn finest_carrying(
 /// matching is what keeps `delta01` out of `delta01_usd`, and skipping
 /// quoted text keeps a column name inside a string literal from counting.
 ///
-/// Over-matching is the safe direction: a name that appears as a SQL
-/// keyword or function would only pull in a *weaker* marker, never a
-/// stronger one, and none of the aggregate names collide with the
-/// column vocabulary here.
+/// Over-matching is the safe direction and under-matching is not, which
+/// decides how this fails. A name that is really a SQL keyword or function
+/// pulls in a *weaker* marker, never a stronger one — the meet is monotone
+/// — so a false positive can only blank a cell that did not have to be
+/// blanked. A false *negative* hands out `Additive`/`Direct`, the
+/// strongest claim available, about an expression nobody analysed. So
+/// every uncertain case here resolves toward matching more.
+///
+/// Comments are stripped before scanning. Without that, one apostrophe in
+/// prose — `-- don't sum this across pairs` — opened a string that never
+/// closed and swallowed every identifier after it, and the empty result
+/// took the branch that claims `Additive` at every level.
 fn referenced_columns<'a>(sql: &str, columns: &'a [CompiledColumn]) -> Vec<&'a CompiledColumn> {
+    let stripped = strip_sql_comments(sql);
+
     let mut tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
-    for ch in sql.chars() {
+    for ch in stripped.chars() {
         if ch == '\'' {
             in_string = !in_string;
             current.clear();
@@ -116,10 +126,58 @@ fn referenced_columns<'a>(sql: &str, columns: &'a [CompiledColumn]) -> Vec<&'a C
         tokens.push(current);
     }
 
+    // Unbalanced quoting means the scan lost its place and the token list
+    // cannot be trusted. Fail toward the weakest claim — every column —
+    // rather than toward the strongest.
+    if in_string {
+        return columns.iter().collect();
+    }
+
     columns
         .iter()
         .filter(|c| tokens.contains(&c.name))
         .collect()
+}
+
+/// Remove `-- …` line comments and `/* … */` block comments.
+///
+/// Only the identifier scan needs this; the expression itself goes to
+/// DuckDB verbatim, comments and all.
+fn strip_sql_comments(sql: &str) -> String {
+    let bytes: Vec<char> = sql.chars().collect();
+    let mut out = String::with_capacity(sql.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if in_string {
+            out.push(ch);
+            if ch == '\'' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '\'' {
+            in_string = true;
+            out.push(ch);
+            i += 1;
+        } else if ch == '-' && bytes.get(i + 1) == Some(&'-') {
+            while i < bytes.len() && bytes[i] != '\n' {
+                i += 1;
+            }
+        } else if ch == '/' && bytes.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i < bytes.len() && !(bytes[i] == '*' && bytes.get(i + 1) == Some(&'/')) {
+                i += 1;
+            }
+            i = (i + 2).min(bytes.len());
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Single-quote escaping for a literal inlined into SQL. Derived
@@ -737,7 +795,6 @@ pub fn compile_view(
     // Derived columns are expressions over the columns already selected.
     for c in &view.columns {
         if let ViewColumn::Derived { name, sql } = c {
-            selects.push(format!("({sql}) as \"{name}\""));
             // A derived column is only as attributable as what it is
             // computed from. Marked Additive/Direct unconditionally, an
             // expression over a NonAttributable measure claimed to be
@@ -763,6 +820,32 @@ pub fn compile_view(
                     }),
                 )
             };
+            // Blank the *value* wherever the meet says NonAttributable,
+            // not just the marker.
+            //
+            // A measure is emitted as `case when s.row_depth in (…) then
+            // null else agg."x" end as "x"`, but a bare `x` inside a
+            // derived expression is resolved against the joined
+            // aggregate's column, not against the alias beside it — SQL
+            // only falls back to a lateral alias when no table column
+            // matches, and here one does. So the expression read straight
+            // past the blanking and printed a pair-grain number on a
+            // position-grain row: the double-count §6.3 exists to prevent.
+            // Asserting on markers alone cannot see it, which is why the
+            // test for this reads values.
+            let blank: Vec<String> = (0..=n)
+                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+            let expr = if blank.is_empty() {
+                format!("({sql})")
+            } else {
+                format!(
+                    "case when s.row_depth in ({}) then null else ({sql}) end",
+                    blank.join(", ")
+                )
+            };
+            selects.push(format!("{expr} as \"{name}\""));
             columns.push(CompiledColumn {
                 name: name.clone(),
                 grain: None,
@@ -783,14 +866,24 @@ pub fn compile_view(
     // differently, and a tile that requeries every few seconds reshuffles
     // rows that did not change.
     //
-    // This is a determinism backstop, not a presentation order. A grouping
-    // column is cast to its derived ENUM above, and DuckDB orders an ENUM
-    // by its declaration order — which `refresh_enum` builds from a bare
-    // `select distinct`, so it is neither alphabetical nor stable across
-    // an ingest that rebuilds the type. What holds is that two queries
-    // against one generation return rows in the same order. A view that
-    // wants a meaningful order should declare `sort`, which is emitted
-    // ahead of these.
+    // This is a determinism backstop, not a presentation order. What holds
+    // is that two queries against one generation return rows in the same
+    // order. A view that wants a meaningful order should declare `sort`,
+    // which is emitted ahead of these.
+    //
+    // The tie-breakers order on the **spine** column, `s."g"`, not on the
+    // output alias. The alias is the ENUM cast, and `try_cast` maps every
+    // value the ENUM does not carry to NULL — so two siblings with
+    // different dimension values collapse to the same key and the order
+    // stops being total exactly when a stale ENUM makes it matter most.
+    // The spine holds the raw varchar, so this is total by construction,
+    // and it drops the dependence on ENUM declaration order (which
+    // `refresh_enum` builds from a bare `select distinct`, so it is
+    // neither alphabetical nor stable across an ingest).
+    //
+    // Only the materialized prefix is ordered on: below the bound the
+    // output column is a constant `NULL::ty` for every row, so it can
+    // break no tie and the spine does not carry it either.
     let mut order_keys = vec!["s.row_depth asc".to_string()];
     for s in &view.sort {
         order_keys.push(format!(
@@ -799,10 +892,10 @@ pub fn compile_view(
             if s.descending { "desc" } else { "asc" }
         ));
     }
-    for g in &view.grouping {
-        let key = format!("\"{g}\" asc");
-        if !order_keys.contains(&key) {
-            order_keys.push(key);
+    let sorted_on: Vec<&str> = view.sort.iter().map(|s| s.column.as_str()).collect();
+    for g in view.grouping.iter().take(depth) {
+        if !sorted_on.contains(&g.as_str()) {
+            order_keys.push(format!("s.\"{g}\" asc"));
         }
     }
     let order = format!(" order by {}", order_keys.join(", "));
@@ -1102,6 +1195,77 @@ kind = "dimension"
     }
 
     #[test]
+    fn an_as_of_join_labels_each_side_with_the_instant_it_actually_read() {
+        // The fixture gap the phase-2b handoff named: an as-of query over
+        // a *joined* dataset whose two sides resolve to different
+        // instants. Every other as-of join test has both sides landing on
+        // one generation, so `resolved_as_of` could hold a single value
+        // for both and look correct.
+        //
+        // §5.4 is the point: a joined view is as stale as its stalest
+        // input, and `Provenance::stalest` can only say so if each dataset
+        // carries the instant it actually read. One timestamp for the pair
+        // makes them equal and hides that one side is weeks behind.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "delete from risk_snapshot_underlying_live;
+                 -- risk is current as of 10 August
+                 insert into risk_snapshot_underlying_archive values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, TIMESTAMPTZ '2026-08-10 00:00:00Z');
+                 -- the reference data is three weeks staler
+                 insert into instrument_ref_instrument_live
+                 values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, TIMESTAMPTZ '2026-07-20 00:00:00Z');",
+            )
+            .unwrap();
+
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+
+        let risk = q.resolved_as_of.get("risk_snapshot").copied();
+        let reference = q.resolved_as_of.get("instrument_ref").copied();
+        assert_eq!(
+            risk.map(|t| t.to_rfc3339()),
+            Some("2026-08-10T00:00:00+00:00".to_string()),
+            "the spine's own instant"
+        );
+        assert_eq!(
+            reference.map(|t| t.to_rfc3339()),
+            Some("2026-07-20T00:00:00+00:00".to_string()),
+            "and the join's, which is three weeks older"
+        );
+        assert_ne!(
+            risk, reference,
+            "the two sides must not collapse to one instant, or §5.4's \
+             stalest-input rule has nothing to compare"
+        );
+
+        // The data still joins: labelling is not the only thing being
+        // checked, or a compiler that returned no rows would pass.
+        let rows = run(&store, &q, &["row_depth", "instrument_ref", "strike"]);
+        assert!(
+            rows.iter().any(|r| r[2] == "Some(4200.0)"),
+            "the reference value must still be read: {rows:?}"
+        );
+    }
+
+    #[test]
     fn a_reference_row_per_holder_does_not_multiply_the_spine() {
         // The reference table is keyed per position, so one instrument
         // held by two positions has two rows. Joining the table directly
@@ -1249,9 +1413,13 @@ kind = "dimension"
             "depth must lead the order: {order}"
         );
         for g in &view().grouping {
+            // On the spine column, not the output alias. The alias is the
+            // ENUM cast, and `try_cast` collapses every value the ENUM
+            // lacks to NULL — so ordering on it stops being total exactly
+            // when a stale ENUM makes two siblings share a key.
             assert!(
-                order.contains(&format!("\"{g}\"")),
-                "grouping column {g} is not a tie-breaker: {order}"
+                order.contains(&format!("s.\"{g}\"")),
+                "grouping column {g} must break ties on the spine: {order}"
             );
         }
     }
@@ -1373,6 +1541,97 @@ kind = "measure"
 "#;
         let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
         ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_derived_dimension_finer_than_a_measures_grain_blanks_that_measure() {
+        // The last of the phase-2b handoff's predicted fixture gaps: a
+        // view grouped by a derived dimension whose `from` column is
+        // absent at one of the view's measure grains.
+        //
+        // `region` derives from `underlying_ref`, which the underlying and
+        // pair grains carry and the position grain does not. So at the
+        // region level `delta01` (underlying grain) is attributable and
+        // `daily_trading_pnl` (position grain) is not: a position's PnL
+        // belongs to the position, and splitting it across the regions its
+        // underlyings happen to sit in would invent a number (§6.3).
+        //
+        // The attribution rule compares *base* columns, so this only works
+        // if the derived name is resolved before the grain comparison —
+        // which is the thing no fixture exercised.
+        let (_d, store) = fixture();
+        let dims = {
+            let doc = merge_docs(
+                "dimensions",
+                &[LayerDoc::builtin(
+                    "dimensions",
+                    "[region]\nfrom = \"underlying_ref\"\n\
+                     [region.values]\nAMER = [\"SPX\"]\nEMEA = [\"RUT\"]\n",
+                )
+                .unwrap()],
+            );
+            DerivedDimensions::from_doc(&doc).0
+        };
+        let view = {
+            let text = r#"
+[by_region]
+dataset = "risk_snapshot"
+grouping = ["region"]
+[[by_region.columns]]
+name = "delta01"
+kind = "measure"
+[[by_region.columns]]
+name = "daily_trading_pnl"
+kind = "measure"
+"#;
+            let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+            ViewSpec::from_doc(&doc).0.into_iter().next().unwrap()
+        };
+
+        let q = compile_view(
+            store.writer(),
+            &view,
+            &schema(),
+            &Scope::default(),
+            &dims,
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let of = |name: &str| {
+            q.columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        assert_eq!(
+            of("delta01").attribution_by_depth[1],
+            Attribution::Additive,
+            "an underlying-grain measure is attributable at a level keyed \
+             by an underlying-derived dimension"
+        );
+        assert_eq!(
+            of("daily_trading_pnl").attribution_by_depth[1],
+            Attribution::NonAttributable,
+            "a position-grain measure is not: the position grain does not \
+             carry underlying_ref, so no share of the PnL belongs here"
+        );
+
+        // And the value is blanked, not merely marked.
+        let rows = run(
+            &store,
+            &q,
+            &["row_depth", "region", "delta01", "daily_trading_pnl"],
+        );
+        let region_rows: Vec<&Vec<String>> = rows.iter().filter(|r| r[0] == "Some(1.0)").collect();
+        assert!(
+            !region_rows.is_empty(),
+            "the fixture must produce region rows: {rows:?}"
+        );
+        for r in &region_rows {
+            assert_eq!(r[3], "None", "PnL must be blank at the region level: {r:?}");
+        }
     }
 
     #[test]
@@ -2220,6 +2479,188 @@ kind = "measure"
             derived.attribution_by_depth[1], cross_gamma.attribution_by_depth[1],
             "and it tracks its inputs at every level, not just the worst"
         );
+    }
+
+    #[test]
+    fn a_derived_column_is_blanked_where_its_inputs_are() {
+        // The marker is not enough. A measure blanked as NonAttributable
+        // is emitted as `case when s.row_depth in (…) then null else
+        // agg."x" end as "x"`, but a derived expression naming `x` is a
+        // bare identifier in the same SELECT list — SQL resolves that
+        // against the joined aggregate's *column*, not the alias beside
+        // it, so the expression reads the unblanked value and prints a
+        // pair-grain number on a position-grain row. Exactly the
+        // double-count §6.3 exists to prevent, and asserting on markers
+        // alone cannot see it.
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        v.columns.push(ViewColumn::Derived {
+            name: "cg_copy".into(),
+            sql: "cross_gamma02".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+
+        let rows = run(&store, &q, &["row_depth", "cross_gamma02", "cg_copy"]);
+        assert!(!rows.is_empty(), "the fixture must produce rows");
+        let mut blanked = 0;
+        for r in &rows {
+            if r[1] == "None" {
+                assert_eq!(
+                    r[2], "None",
+                    "row_depth {} blanks the measure but not the expression over it: {rows:?}",
+                    r[0]
+                );
+                blanked += 1;
+            }
+        }
+        assert!(
+            blanked >= 2,
+            "the fixture must actually blank some rows, or this asserts nothing: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_comment_does_not_hide_the_columns_referenced() {
+        // One apostrophe in prose used to open a string that never closed,
+        // swallowing every identifier after it — and the empty result took
+        // the branch that hands out `Additive` at every level. The unsafe
+        // direction is under-matching, so this is the case that matters.
+        let (_d, store) = pair_fixture();
+        for sql in [
+            "-- don't sum this across pairs\n cross_gamma02 * 2",
+            "/* the desk's own scaling */ cross_gamma02 * 2",
+            "cross_gamma02 * 2 -- can't total this",
+        ] {
+            let mut v = view();
+            v.columns.push(ViewColumn::Measure {
+                name: "cross_gamma02".into(),
+            });
+            v.columns.push(ViewColumn::Derived {
+                name: "scaled".into(),
+                sql: sql.into(),
+            });
+            let q = compile_view(
+                store.writer(),
+                &v,
+                &schema_with_pairs(),
+                &Scope::default(),
+                &DerivedDimensions::default(),
+                &crate::query::as_of::AsOf::Live,
+                usize::MAX,
+            )
+            .unwrap();
+            let of = |name: &str| {
+                q.columns
+                    .iter()
+                    .find(|c| c.name == name)
+                    .unwrap_or_else(|| panic!("no column {name}"))
+            };
+            assert_eq!(
+                of("scaled").attribution_by_depth,
+                of("cross_gamma02").attribution_by_depth,
+                "sql: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_comment_does_not_drag_in_columns_the_expression_never_names() {
+        // The discriminating case for stripping comments, as opposed to
+        // merely surviving them. Over an *additive* measure, an apostrophe
+        // in a comment used to leave the scan mid-string, and the
+        // unbalanced-quote guard then conservatively returned every
+        // column — including the pair-grain one — so the expression was
+        // blanked at depths where its actual input is perfectly additive.
+        // Safe, but wrong, and only visible when the expression's own
+        // inputs are stronger than the columns it accidentally pulls in.
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        v.columns.push(ViewColumn::Derived {
+            name: "scaled_delta".into(),
+            sql: "-- the desk's own scaling\n delta01 * 2".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let of = |name: &str| {
+            q.columns
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no column {name}"))
+        };
+        assert_eq!(
+            of("scaled_delta").attribution_by_depth,
+            of("delta01").attribution_by_depth,
+            "an expression over delta01 inherits delta01, not cross gamma"
+        );
+        assert_ne!(
+            of("delta01").attribution_by_depth,
+            of("cross_gamma02").attribution_by_depth,
+            "precondition: the two differ, or this asserts nothing"
+        );
+    }
+
+    #[test]
+    fn unbalanced_quoting_fails_toward_the_weakest_claim() {
+        // If the scan loses its place the token list cannot be trusted.
+        // Claiming `Additive` about an expression nobody analysed is the
+        // one outcome that must not happen.
+        let (_d, store) = pair_fixture();
+        let mut v = view();
+        v.columns.push(ViewColumn::Measure {
+            name: "cross_gamma02".into(),
+        });
+        v.columns.push(ViewColumn::Derived {
+            name: "odd".into(),
+            // A lone apostrophe outside a comment. An unterminated block
+            // comment does *not* reach this guard — it is stripped — so
+            // the input has to be unbalanced quoting itself.
+            sql: "cross_gamma02 'unterminated".into(),
+        });
+        let q = compile_view(
+            store.writer(),
+            &v,
+            &schema_with_pairs(),
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        );
+        // The expression itself may or may not bind; what matters is that
+        // when it does compile, the marker is not the strongest one.
+        if let Ok(q) = q
+            && let Some(odd) = q.columns.iter().find(|c| c.name == "odd")
+        {
+            assert!(
+                odd.attribution_by_depth
+                    .iter()
+                    .any(|a| *a != Attribution::Additive),
+                "an unanalysable expression must not claim Additive everywhere: {:?}",
+                odd.attribution_by_depth
+            );
+        }
     }
 
     #[test]

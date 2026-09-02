@@ -61,7 +61,22 @@ impl Scope {
     pub fn and_then(&self, inner: &Scope) -> Scope {
         let mut dimensions = self.dimensions.clone();
         let mut impossible = self.impossible || inner.impossible;
-        let mut contradicted: Vec<String> = Vec::new();
+        // Seeded from `self`, not just from this composition. A selection
+        // emptied by an earlier `and_then` is carried in `self.dimensions`
+        // with no values; recomputing `contradicted` from scratch let the
+        // next composition's `retain` drop it, so a third layer lost the
+        // name and reported whichever dimension it constrained instead —
+        // worse than reporting nothing, because that dimension is not what
+        // the scope is doing.
+        let mut contradicted: Vec<String> = if self.impossible {
+            self.dimensions
+                .iter()
+                .filter(|d| d.values.is_empty())
+                .map(|d| d.column.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         for sel in &inner.dimensions {
             if sel.values.is_empty() {
                 continue;
@@ -384,6 +399,33 @@ grain = "underlying"
         assert!(
             !contradiction.is_empty(),
             "and it is not an empty scope, which selects everything"
+        );
+
+        // And it survives further composition. Recomputing `contradicted`
+        // per call dropped the record on the next `and_then`: a third
+        // layer reported `lhu` — a constraint the scope is not applying —
+        // and a fourth reported nothing at all, which is the original bug.
+        let third = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "lhu".into(),
+                values: vec!["L0".into()],
+            }],
+            ..Scope::default()
+        };
+        let deeper = contradiction.and_then(&third);
+        assert!(deeper.impossible, "a contradiction cannot be laundered");
+        assert!(
+            deeper.columns().contains(&"book".to_string()),
+            "the dimension that contradicted is still named: {:?}",
+            deeper.columns()
+        );
+
+        let deepest = deeper.and_then(&Scope::default());
+        assert!(deepest.impossible);
+        assert!(
+            deepest.columns().contains(&"book".to_string()),
+            "and again through a layer that constrains nothing: {:?}",
+            deepest.columns()
         );
     }
 

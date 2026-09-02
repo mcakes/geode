@@ -34,13 +34,19 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Field order is drop order, and it is load-bearing here. `QueryPool`
-    /// joins its workers in `Drop`, and those workers hold read
-    /// connections to this database — so the pool must be dropped, and the
-    /// workers joined, before the connections they read through and the
-    /// store that owns the database handle. Listing `_store` first (as
-    /// this did) closed the database while workers were still running on
-    /// it.
+    /// Field order is drop order. `QueryPool` joins its workers in `Drop`,
+    /// and those workers hold read connections to this database, so the
+    /// pool is listed first: the workers are joined before the connections
+    /// they read through and the store that owns the database handle.
+    ///
+    /// The previous order was not a live bug, and an earlier version of
+    /// this comment wrongly said it was. duckdb-rs holds the database as
+    /// `Arc<Mutex<DatabaseHandle>>` and `try_clone` clones that `Arc`, so
+    /// dropping `_store` first issued one `duckdb_disconnect` and closed
+    /// nothing — `duckdb_close` runs only when the last reference goes.
+    /// The order here is still the right one, because it makes the
+    /// lifetime obvious instead of resting on a refcounting detail of a
+    /// pinned third-party binding.
     pool: QueryPool,
     results: Receiver<QueryResult>,
     /// A dedicated connection for compilation and catalog reads.

@@ -33,7 +33,8 @@ pub enum IngestEvent {
         dataset: String,
         batch: String,
         gen_id: i64,
-        books: Vec<String>,
+        /// The partitions written; `None` is the bookless one.
+        books: Vec<Option<String>>,
         rows: usize,
         health: Health,
     },
@@ -179,10 +180,13 @@ fn run(
                 dataset: dataset_name.clone(),
                 batch: item.batch.clone(),
                 gen_id: loaded.gen_id,
-                books: match &item.candidate.state {
-                    CandidateState::Ready(s) => s.books.clone(),
-                    _ => Vec::new(),
-                },
+                // What the load actually wrote, not what the sentinel
+                // advertised. The sentinel's list is advisory — a row
+                // whose book it omits is still published, and the
+                // bookless partition appears in no sentinel — so
+                // reporting it made a subscriber's view of a load differ
+                // from the load.
+                books: loaded.partitions.clone(),
                 rows: loaded.rows,
                 health: loaded.health,
             },
@@ -270,11 +274,26 @@ mod tests {
         let events = drain(&rx, expected);
         handle.shutdown();
 
-        let published = events
+        let published: Vec<&IngestEvent> = events
             .iter()
             .filter(|e| matches!(e, IngestEvent::Published { .. }))
-            .count();
-        assert_eq!(published, expected);
+            .collect();
+        assert_eq!(published.len(), expected);
+
+        // The event names the partitions the load actually wrote, not the
+        // sentinel's advisory list. The two differ whenever a row carries
+        // a book the sentinel omits, and always for the bookless
+        // partition, which appears in no sentinel at all — so a subscriber
+        // reading this saw a different load than the one that ran.
+        for e in &published {
+            let IngestEvent::Published { books, rows, .. } = e else {
+                unreachable!()
+            };
+            assert!(
+                !books.is_empty(),
+                "a publish of {rows} rows wrote at least one partition: {e:?}"
+            );
+        }
     }
 
     #[test]
