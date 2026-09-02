@@ -420,6 +420,11 @@ run_mutation "vocabulary: pair grain does not carry the underlying dimension" \
   'Grain::UnderlyingPair => &K_INSTRUMENT,' \
   'Grain::UnderlyingPair => &K_PAIR,'
 
+run_mutation "attribution: a derived dimension resolves to its base column" \
+  crates/geode-core/src/attribution.rs \
+  '        .map(|c| dims.base_column(c.as_str()))' \
+  '        .map(|c| c.as_str())'
+
 run_mutation "attribution: decided on dimension keys" \
   crates/geode-core/src/attribution.rs \
   'let key = grain.dimension_key_columns();' \
