@@ -364,6 +364,11 @@ run_mutation "catalog: a generation that never went live is not fresh" \
   '                         and coalesce(fg.archived_only, false) = false' \
   '                         and true'
 
+run_mutation "ingest: the publish event names the partitions written" \
+  crates/geode-data/src/ingest/runner.rs \
+  'books: loaded.partitions.clone(),' \
+  'books: Vec::new(),'
+
 run_mutation "ingest: an archived-only load is recorded as such" \
   crates/geode-data/src/ingest/load.rs \
   '    let archived_only = !published.is_empty()' \

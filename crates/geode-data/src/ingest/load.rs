@@ -46,6 +46,11 @@ pub struct LoadOutcome {
     /// diagnostics rather than vanishing silently.
     pub extra_columns: Vec<String>,
     pub published: Vec<PublishOutcome>,
+    /// The partitions this load wrote, `None` being the bookless one.
+    /// Taken from the staged rows rather than the sentinel, because the
+    /// sentinel's book list is advisory: a row whose book it omits is
+    /// still published, and a bookless partition is in no sentinel at all.
+    pub partitions: Vec<Option<String>>,
 }
 
 #[derive(Debug)]
@@ -334,6 +339,7 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         missing_required,
         extra_columns,
         published,
+        partitions: partitions.iter().map(|p| p.book.clone()).collect(),
     })
 }
 
