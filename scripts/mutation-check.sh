@@ -122,6 +122,57 @@ PY
   restore
 }
 
+# ---- discovery (spec §5.2, §5.7)
+#
+# This decides what gets ingested at all, and its failure mode is the
+# quietest in the system: a file that is never loaded produces no error,
+# no degradation and no row — the tile is simply missing data nobody
+# asked about. It had no entries.
+
+run_mutation "discovery: a sentinel older than its CSV means still writing" \
+  crates/geode-data/src/source/discovery.rs \
+  '    if sentinel_mtime < mtime {' \
+  '    if false {'
+
+run_mutation "discovery: no sentinel means pending, not ready" \
+  crates/geode-data/src/source/discovery.rs \
+  '    let Ok(sentinel_meta) = std::fs::metadata(sentinel_path) else {' \
+  '    let Ok(sentinel_meta) = std::fs::metadata(csv_path) else {'
+
+run_mutation "discovery: waiting too long is reported, not waited on forever" \
+  crates/geode-data/src/source/discovery.rs \
+  '        return Ok(if waited > spec.pending_timeout {' \
+  '        return Ok(if false {'
+
+run_mutation "discovery: an unimplemented readiness strategy is surfaced" \
+  crates/geode-data/src/source/discovery.rs \
+  '    if let Readiness::StableMtime { polls } = spec.readiness {' \
+  '    if let Readiness::StableMtime { polls } = Readiness::Sentinel {'
+
+run_mutation "discovery: an unparsable sentinel is orphaned, not merely pending" \
+  crates/geode-data/src/source/discovery.rs \
+  '    let sentinel = match parse_sentinel(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(CandidateState::Orphaned {
+                reason: e.to_string(),
+            });
+        }
+    };' \
+  '    let sentinel = match parse_sentinel(&text) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = e;
+            return Ok(CandidateState::Pending);
+        }
+    };'
+
+run_mutation "discovery: a changed file is reloaded" \
+  crates/geode-data/src/source/discovery.rs \
+  '        && prev.size == meta.len()
+        && prev.source_time == sentinel.as_of' \
+  '        && true'
+
 # ---- as-of routing (spec §6.5)
 
 run_mutation "as-of: multi-grain generation resolution" \

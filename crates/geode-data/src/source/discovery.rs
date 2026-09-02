@@ -316,6 +316,36 @@ mod tests {
     }
 
     #[test]
+    fn an_unimplemented_readiness_strategy_says_so_instead_of_going_quiet() {
+        // The stable-mtime strategy needs poll history nothing keeps yet.
+        // Reporting `Pending` would make such a source ingest nothing,
+        // forever, with no diagnostic — and a source that silently loads
+        // no files is the one failure mode §5.7 forbids, because there is
+        // nothing on screen to notice. The branch existed and nothing
+        // tested it.
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
+        write(d.path(), "risk_2026-08-30_BK000.csv.done", SENTINEL);
+
+        let mut s = spec(d.path());
+        s.readiness = Readiness::StableMtime { polls: 3 };
+        let (_sd, st) = store();
+        let cat = crate::store::Catalog::new(st.writer());
+        let found = discover(&s, &cat, SystemTime::now()).unwrap();
+
+        assert_eq!(found.len(), 1);
+        match &found[0].state {
+            CandidateState::Orphaned { reason } => {
+                assert!(
+                    reason.contains("not implemented") && reason.contains("risk_files"),
+                    "the diagnostic must name the source and say why: {reason}"
+                );
+            }
+            other => panic!("a source that can never load must say so, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn a_malformed_sentinel_is_orphaned_with_the_reason() {
         let d = tempfile::tempdir().unwrap();
         write(d.path(), "risk_2026-08-30_BK000.csv", "Book\nBK000\n");
