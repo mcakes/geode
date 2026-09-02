@@ -36,6 +36,7 @@ use crate::defaults::mod_alias_from_config;
 use crate::fonts;
 use crate::fontsize::{self, FontSize};
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
+use crate::listfilter;
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::perf::{self, FrameHistogram};
 use crate::reload;
@@ -1275,9 +1276,12 @@ impl ShellView {
     /// guard (below) only ever routes here what the `Input` didn't already
     /// consume.
     ///
-    /// This method now does exactly two things: act on the short list of
+    /// This method now does exactly two things: act on the list of
     /// navigation/close keys the palette still owns (up/down, ctrl+p/
-    /// ctrl+n, enter, escape), and otherwise do *nothing* — deliberately
+    /// ctrl+n, enter, escape, plus the larger steps — ctrl+d/u ±5, ctrl+f/b
+    /// and pageup/pagedown ±10 — that Task 5 added as a fallback arm so
+    /// this filtered list surface reads the same as the two dialogs', spec
+    /// §3, "The command palette"), and otherwise do *nothing* — deliberately
     /// not `cx.stop_propagation()`, which would be the wrong kind of
     /// "swallow": a bare typed character reaches this method too (no
     /// `KeyBinding` at all matches it inside `Input`'s own "Input" context,
@@ -1290,6 +1294,17 @@ impl ShellView {
     /// `if self.palette.is_some() { self.handle_palette_key(..); return; }`
     /// guard is a plain Rust-level branch that never falls through to
     /// `self.matcher.press` regardless of what happens in here.
+    ///
+    /// The named up/down/ctrl+p/ctrl+n arms below keep wrapping
+    /// (`PaletteState::move_selection`, unchanged since before Task 5),
+    /// while the larger steps in the fallback arm clamp
+    /// (`crate::vimnav::apply`) — a page jump that teleported from the top
+    /// of a long result list to the bottom would read as a glitch, not a
+    /// feature. That split falls out of arm order alone: the ±1 keys
+    /// return from their own arms before the fallback arm is ever reached,
+    /// so nothing there has to inspect the resolved delta to pick a rule —
+    /// reaching the fallback arm at all already means the key was none of
+    /// those four.
     ///
     /// Reads gpui's own `Keystroke` directly (`event.keystroke`, not the
     /// shell-native one `convert_keystroke` produces) because it needs the
@@ -1338,14 +1353,33 @@ impl ShellView {
                 }
                 self.sync_palette_scroll();
             }
-            // Every other bubbled key — most commonly a bare typed
-            // character, but also e.g. tab/home/end, none of which this
-            // palette gives any shell-level meaning to — is a genuine no-op
-            // here. See this method's own doc comment for why that's
-            // correct rather than an oversight: doing nothing is what lets
-            // the keystroke keep propagating to the input's own text
-            // insertion, while still never reaching `self.matcher`.
-            _ => {}
+            // Everything the named arms above did not take. Two outcomes:
+            // a larger navigation step (the vocabulary the two list
+            // dialogs use, adopted here so all three filtered surfaces
+            // read the same — spec §3, "The command palette"), or a
+            // genuine no-op.
+            //
+            // These clamp, while the ±1 arms above wrap: reaching this
+            // arm at all means the key was NOT up/down/ctrl+p/ctrl+n, so
+            // nothing here has to inspect the delta to pick a rule. A
+            // page jump that teleports from the top of a long result list
+            // to the bottom reads as a glitch, not as a feature.
+            //
+            // A bare typed character lands here too, and must stay a true
+            // no-op — deliberately not `cx.stop_propagation()`, so the
+            // window's separate text-input phase still delivers it to the
+            // focused `palette_input` (see this method's doc comment).
+            _ => {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(cmd) = listfilter::nav_command(&ks)
+                    && let Some(palette) = self.palette.as_mut()
+                {
+                    let len = palette.filtered().len();
+                    let next = crate::vimnav::apply(palette.selected(), len, cmd);
+                    palette.set_selected(next);
+                    self.sync_palette_scroll();
+                }
+            }
         }
     }
 
@@ -6276,6 +6310,94 @@ mod tests {
             selected,
             filtered_len - 1,
             "pressing up at index 0 should wrap to the last filtered item"
+        );
+    }
+
+    /// The palette gains the dialogs' larger steps (spec §3): ctrl+d/u
+    /// move ±5, ctrl+f/b and pageup/pagedown ±10.
+    #[gpui::test]
+    fn the_palette_takes_the_larger_navigation_steps(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().unwrap().filtered().len()
+        });
+        assert!(
+            len > 12,
+            "sanity: the unfiltered palette needs more than 12 rows for \
+             these steps to be distinguishable, got {len}"
+        );
+
+        cx.simulate_keystrokes("ctrl-d");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            5,
+            "ctrl+d moves down 5"
+        );
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            15,
+            "ctrl+f moves down 10 more"
+        );
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            10,
+            "ctrl+u moves back 5"
+        );
+        cx.simulate_keystrokes("pageup");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "pageup is ctrl+b's alias: back 10"
+        );
+    }
+
+    /// The split this change deliberately preserves (spec §3): the new
+    /// larger steps clamp, while the ±1 keys keep wrapping.
+    #[gpui::test]
+    fn palette_big_steps_clamp_while_arrows_still_wrap(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().unwrap().filtered().len()
+        });
+
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "ctrl+u at the top clamps — a page jump must not teleport to the end"
+        );
+
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "up at the top still wraps to the last result, exactly as before"
+        );
+
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "and ctrl+f at the bottom clamps"
+        );
+    }
+
+    /// Typing still reaches the query field: the new arm must not swallow
+    /// characters on their way to the input.
+    #[gpui::test]
+    fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        cx.simulate_input("theme");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .palette
+                .as_ref()
+                .unwrap()
+                .query()
+                .to_string()),
+            "theme"
         );
     }
 
