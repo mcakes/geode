@@ -184,8 +184,10 @@ and its first refusal on keystrokes — it simply now only ever sees what the
 
 Navigation needs no new state machine: `vimnav::apply(selected, len, cmd)`
 already does the clamped arithmetic. A small shared
-`dialog::list_nav_command(&Keystroke) -> Option<NavCommand>` maps the §3 table
-onto `NavCommand`, and both dialogs feed its result to `vimnav::apply`.
+`dialogfilter::nav_command(&Keystroke) -> Option<NavCommand>` maps the §3
+table onto `NavCommand`, and both dialogs feed its result to `vimnav::apply`.
+It lives in the same new pure module as the ranking helper (§4) rather than
+in `dialog.rs`, so both are unit-testable without a window.
 `vimnav::VimListNav::press` — the `j`/`k`, count-prefix and `gg` state
 machine — is not used by the dialogs any more.
 
