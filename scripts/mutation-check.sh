@@ -219,6 +219,11 @@ run_mutation "provenance: resolved vs requested time" \
   'as_of: compiled' \
   'as_of: None.or(compiled'
 
+run_mutation "provenance: a join is labelled with its own instant" \
+  crates/geode-data/src/query/compile.rs \
+  '                    resolved_as_of.insert(join.dataset.clone(), oldest);' \
+  '                    let _ = oldest;'
+
 run_mutation "provenance: stalest partition, not newest" \
   crates/geode-data/src/query/compile.rs \
   'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \

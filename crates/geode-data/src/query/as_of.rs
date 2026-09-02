@@ -245,6 +245,53 @@ mod tests {
     }
 
     #[test]
+    fn a_tie_that_straddles_archive_and_live_resolves_to_the_live_one() {
+        // The fixture gap the phase-2b handoff named: every other tie test
+        // puts both generations in the archive, so the tie-break was only
+        // ever exercised *within* one relation.
+        //
+        // The real shape is different. A corrected republish keeps its
+        // source time (§4.4), and the publish transaction moves the
+        // outgoing generation to the archive while the incoming one stays
+        // in live — so the two tied generations sit in *different*
+        // relations, and `Era::relation` reads them as `archive union all
+        // live`. Losing the tie-break across that union answers with the
+        // superseded copy of a corrected file: the wrong numbers,
+        // silently, for exactly the file someone corrected because it was
+        // wrong. Verified to fail without the `gen_id desc` term.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table straddle_archive(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 create table straddle_live(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into straddle_archive values
+                   ('BK000', 'b', 5, '2026-08-30T07:00:00Z');
+                 insert into straddle_live values
+                   ('BK000', 'b', 6, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+
+        let gens = resolve_generations(
+            store.writer(),
+            &["straddle_archive".to_string(), "straddle_live".to_string()],
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(gens.len(), 1, "one generation per partition");
+        assert_eq!(
+            gens[0].gen_id, 6,
+            "the correction wins across the archive/live union, not the \
+             copy it replaced"
+        );
+    }
+
+    #[test]
     fn a_tie_on_source_time_resolves_to_the_newest_gen_id_every_time() {
         // A corrected republish keeps its source time (§4.4), so two
         // generations of one partition share an instant. Without a

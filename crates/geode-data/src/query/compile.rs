@@ -1195,6 +1195,77 @@ kind = "dimension"
     }
 
     #[test]
+    fn an_as_of_join_labels_each_side_with_the_instant_it_actually_read() {
+        // The fixture gap the phase-2b handoff named: an as-of query over
+        // a *joined* dataset whose two sides resolve to different
+        // instants. Every other as-of join test has both sides landing on
+        // one generation, so `resolved_as_of` could hold a single value
+        // for both and look correct.
+        //
+        // §5.4 is the point: a joined view is as stale as its stalest
+        // input, and `Provenance::stalest` can only say so if each dataset
+        // carries the instant it actually read. One timestamp for the pair
+        // makes them equal and hides that one side is weeks behind.
+        let (_d, store) = fixture();
+        let schema = joined_schema();
+        store
+            .apply_schema(schema.dataset("instrument_ref").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "delete from risk_snapshot_underlying_live;
+                 -- risk is current as of 10 August
+                 insert into risk_snapshot_underlying_archive values
+                   ('BK0','L0','P1','C','I1','SPX', 10, 'b', 1, 1, TIMESTAMPTZ '2026-08-10 00:00:00Z');
+                 -- the reference data is three weeks staler
+                 insert into instrument_ref_instrument_live
+                 values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, TIMESTAMPTZ '2026-07-20 00:00:00Z');",
+            )
+            .unwrap();
+
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let q = compile_view(
+            store.writer(),
+            &joined_view(),
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::At(at),
+            usize::MAX,
+        )
+        .unwrap();
+
+        let risk = q.resolved_as_of.get("risk_snapshot").copied();
+        let reference = q.resolved_as_of.get("instrument_ref").copied();
+        assert_eq!(
+            risk.map(|t| t.to_rfc3339()),
+            Some("2026-08-10T00:00:00+00:00".to_string()),
+            "the spine's own instant"
+        );
+        assert_eq!(
+            reference.map(|t| t.to_rfc3339()),
+            Some("2026-07-20T00:00:00+00:00".to_string()),
+            "and the join's, which is three weeks older"
+        );
+        assert_ne!(
+            risk, reference,
+            "the two sides must not collapse to one instant, or §5.4's \
+             stalest-input rule has nothing to compare"
+        );
+
+        // The data still joins: labelling is not the only thing being
+        // checked, or a compiler that returned no rows would pass.
+        let rows = run(&store, &q, &["row_depth", "instrument_ref", "strike"]);
+        assert!(
+            rows.iter().any(|r| r[2] == "Some(4200.0)"),
+            "the reference value must still be read: {rows:?}"
+        );
+    }
+
+    #[test]
     fn a_reference_row_per_holder_does_not_multiply_the_spine() {
         // The reference table is keyed per position, so one instrument
         // held by two positions has two rows. Joining the table directly
