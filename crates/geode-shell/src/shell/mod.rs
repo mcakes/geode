@@ -8773,12 +8773,13 @@ mod tests {
         action: &str,
     ) -> (Entity<ShellView>, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
-        // Same scoped tab/shift-tab reclaim `main` registers in production
-        // (`dialog::init_geode_modal_keybindings`'s own doc comment has the
-        // full mechanism) — without this, a dialog test that presses tab
-        // would prove nothing: gpui-component's `Root` would still
-        // silently consume it exactly as it does in an unpatched window.
-        cx.update(dialog::init_geode_modal_keybindings);
+        // Same reclaimed keybindings `main` registers in production
+        // (`dialog::init_reclaimed_keybindings`'s own doc comment has the
+        // full mechanism for each) — without this, a dialog test that
+        // presses tab would prove nothing: gpui-component's `Root` would
+        // still silently consume it exactly as it does in an unpatched
+        // window.
+        cx.update(dialog::init_reclaimed_keybindings);
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {

@@ -70,7 +70,7 @@
 //! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus
 //! `tab`/`shift+tab` for stepping — reaching this dialog at all needs
 //! more than the `Input`'s own gating (see [`handle_key`]'s doc comment
-//! and `dialog::init_geode_modal_keybindings`). The `[ui] find_style`
+//! and `dialog::init_reclaimed_keybindings`). The `[ui] find_style`
 //! setting and its
 //! row are untouched by this — `FindStyle` still exists, is still
 //! rendered and still steppable like any other row (spec §8) — this
@@ -496,7 +496,7 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
 ///    component's `Root` also binds it unconditionally to its own
 ///    focus-cycling, above `ShellView` in the dispatch tree, and that
 ///    would swallow it too were it not for `dialog::
-///    init_geode_modal_keybindings`'s scoped `NoAction` reclaim (spec
+///    init_reclaimed_keybindings`'s scoped `NoAction` reclaim (spec
 ///    §2b2), which the modal panel's `"GeodeModal"` key context makes
 ///    possible;
 /// 3. everything else — bare `enter` and bare `escape` included — returns

@@ -157,49 +157,72 @@ pub struct ShellModal {
     pub on_key: Option<ModalKeyHandler>,
 }
 
-/// Reclaim `tab`/`shift-tab` from gpui-component's `Root` while a Geode
-/// modal is open, WITHOUT touching either key anywhere else in the app.
+/// Reclaim every key gpui-component binds by default that collides with
+/// Geode's own navigation vocabulary, via `gpui::NoAction` — `gpui`'s own
+/// mechanism for this: a `NoAction` binding suppresses every
+/// equal-or-weaker binding it outranks, so no action dispatches at all and
+/// the raw `KeyDownEvent` reaches our key listeners instead
+/// (`gpui::Keymap::bindings_for_input`, `crates/gpui/src/keymap.rs`, pinned
+/// checkout, sorts candidate bindings by context depth — deepest wins —
+/// before applying `NoAction` suppression). Two reclaims live here today,
+/// scoped differently on purpose:
 ///
-/// `Root` binds bare `tab`/`shift-tab` (unconditionally, no
-/// `cx.propagate()`) to its own focus-cycling actions in a `"Root"` key
-/// context wrapping the entire window (`crates/ui/src/root.rs`, pinned
-/// checkout) — so without this, those keystrokes are fully consumed there
-/// before `ShellView`'s own raw `on_key_down` (and so a modal's
-/// [`ModalKeyHandler`], e.g. the settings dialog's value-stepping) ever
-/// sees them (verified against `Window::dispatch_key_event`: an action
-/// binding that doesn't propagate returns before
-/// `finish_dispatch_key_event` — what fires raw key listeners — ever
-/// runs).
+/// 1. **`tab`/`shift-tab`**, scoped to `"GeodeModal"`. `Root` binds bare
+///    `tab`/`shift-tab` (unconditionally, no `cx.propagate()`) to its own
+///    focus-cycling actions in a `"Root"` key context wrapping the entire
+///    window (`crates/ui/src/root.rs`, pinned checkout) — so without a
+///    reclaim, those keystrokes are fully consumed there before
+///    `ShellView`'s own raw `on_key_down` (and so a modal's
+///    [`ModalKeyHandler`], e.g. the settings dialog's value-stepping) ever
+///    sees them (verified against `Window::dispatch_key_event`: an action
+///    binding that doesn't propagate returns before
+///    `finish_dispatch_key_event` — what fires raw key listeners — ever
+///    runs). Scoped to `"GeodeModal"` — the key context [`render_modal`]'s
+///    panel carries only while a Geode modal is on screen — rather than
+///    `"Root"` itself: `Root`'s focus cycling is a live affordance outside
+///    modals too, so reclaiming it app-wide would silently remove that
+///    everywhere, not just inside our own modals, which nobody asked for.
+///    `"GeodeModal"` sits deeper in the dispatch path than `"Root"`
+///    whenever it's present, so this binding outranks and suppresses
+///    `Root`'s Tab/TabPrev only then; outside a Geode modal `"GeodeModal"`
+///    is absent from the context stack, this binding is not enabled at
+///    all, and `Root`'s focus cycling is untouched.
 ///
-/// `gpui::NoAction` is `gpui`'s own mechanism for reclaiming a key
-/// gpui-component binds by default (the same idiom spec §7 calls for to
-/// reclaim `ctrl+f` from gpui-component's `Input`-scoped `Search` action,
-/// elsewhere): a `NoAction` binding suppresses every equal-or-weaker
-/// binding it outranks, so no action dispatches at all and the raw
-/// `KeyDownEvent` reaches our key listeners instead. Scoped to
-/// `"GeodeModal"` — the key context [`render_modal`]'s panel carries only
-/// while a Geode modal is on screen — rather than `"Root"` itself:
-/// reclaiming app-wide would silently remove gpui-component's focus
-/// cycling everywhere, not just inside our own modals, which nobody asked
-/// for. `gpui::Keymap::bindings_for_input` sorts candidate bindings by
-/// context depth (deepest wins) before applying `NoAction` suppression
-/// (`crates/gpui/src/keymap.rs`, pinned checkout) — `"GeodeModal"` sits
-/// deeper in the dispatch path than `"Root"` whenever it's present, so
-/// this binding outranks and suppresses `Root`'s Tab/TabPrev only then;
-/// outside a Geode modal `"GeodeModal"` is absent from the context stack,
-/// this binding is not enabled at all, and `Root`'s focus cycling is
-/// untouched.
+/// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
+///    gpui-component binds `ctrl-f` to its editor `Search` action in the
+///    `"Input"` key context on non-macOS (`crates/base/src/input/base/
+///    state.rs`, pinned rev), and that handler returns without
+///    `cx.propagate()` when the input isn't searchable — so `ctrl+f`,
+///    which both list dialogs and (per Task 5) the command palette use for
+///    "page down" (`crate::listfilter::nav_command`), would work on macOS
+///    (where gpui-component doesn't bind it at all) and die silently on
+///    Windows and Linux. This one can't be scoped to `"GeodeModal"` the
+///    way `tab` is: the command palette is not a [`render_modal`] surface,
+///    so a `"GeodeModal"`-scoped binding would never reach it. Going
+///    app-wide instead costs nothing, because gpui-component's `Search`
+///    action is dead weight in this app — nothing here uses a searchable
+///    input — unlike `Root`'s Tab cycling, which is a real affordance this
+///    reclaim must not disturb outside modals. (A pass-through action of
+///    our own would NOT work here either: `gpui` dispatches every matched
+///    binding in sequence — `Window::dispatch_key_event`, pinned checkout
+///    — so calling `cx.propagate()` from our own action would simply hand
+///    the keystroke on to `Search` right after.)
 ///
 /// Called once from `geode-app`'s `main` (after `gpui_component::init`,
-/// same ordering requirement) AND from every test that opens a real modal
-/// window (`shell::tests::dialog_test_shell`) — one definition rather than
-/// two copies that could drift, and the only way
+/// same ordering requirement — later registrations outrank earlier ones)
+/// AND from every test that opens a real modal window
+/// (`shell::tests::dialog_test_shell`) — one definition rather than copies
+/// that could drift, and the only way
 /// `tab_and_shift_tab_step_the_selected_value` (`shell::tests`) actually
-/// proves the mechanism instead of merely assuming it holds in production.
-pub fn init_geode_modal_keybindings(cx: &mut App) {
+/// proves the `tab` mechanism instead of merely assuming it holds in
+/// production. There is no equivalent test for `ctrl-f`: the behaviour it
+/// fixes only manifests on a non-macOS build with a real focused input,
+/// which this environment cannot exercise.
+pub fn init_reclaimed_keybindings(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModal")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModal")),
+        gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
     ]);
 }
 
@@ -438,7 +461,7 @@ pub(crate) fn render_modal(
         // which is what fires raw key listeners, ever runs). `"GeodeModal"`
         // is this panel's own, narrower context, present only while a
         // Geode modal is on screen and sitting DEEPER in the dispatch
-        // path than `Root`'s outer wrapper — [`init_geode_modal_keybindings`]
+        // path than `Root`'s outer wrapper — [`init_reclaimed_keybindings`]
         // binds `tab`/`shift-tab` to `NoAction` here, which (being the
         // deeper, and so higher-precedence, match — `gpui`'s
         // `Keymap::bindings_for_input` sorts by context depth) suppresses
