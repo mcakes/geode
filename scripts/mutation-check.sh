@@ -410,7 +410,12 @@ run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" 
   '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_some_and(|b| books.contains(b)))' \
   '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_none_or(|b| books.contains(b)))'
 
-run_mutation "catalog: the backfill guard is scoped to its dataset" \
+run_mutation "catalog: the backfill guard is scoped to its dataset (named book)" \
+  crates/geode-data/src/store/catalog.rs \
+  'where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
+  'where ? is not null and fg.batch = ? and fb.book = ?'
+
+run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
   crates/geode-data/src/store/catalog.rs \
   'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
   'where ? is not null and fg.batch = ? and fb.book is null'

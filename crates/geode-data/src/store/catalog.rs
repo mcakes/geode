@@ -1062,6 +1062,36 @@ mod tests {
             Some(14),
             "and each dataset still sees its own"
         );
+
+        // The bookless arm is a separate SQL statement and needs its own
+        // coverage: scoping one and not the other would be invisible here
+        // otherwise.
+        let mut risk_bookless = record("SHARED2", &[], ts("2026-08-30T15:00:00Z"));
+        risk_bookless.books = vec![None];
+        risk_bookless.path = std::path::PathBuf::from("/src/risk2.csv");
+        risk_bookless.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&risk_bookless).unwrap();
+
+        let mut vol_bookless = record("SHARED2", &[], ts("2026-08-30T05:00:00Z"));
+        vol_bookless.dataset = "implied_vol_summary".into();
+        vol_bookless.books = vec![None];
+        vol_bookless.path = std::path::PathBuf::from("/src/vol2.csv");
+        vol_bookless.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&vol_bookless).unwrap();
+
+        assert_eq!(
+            cat.live_source_time("implied_vol_summary", "SHARED2", None)
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(5),
+            "the bookless partition is scoped by dataset too"
+        );
+        assert_eq!(
+            cat.live_source_time("risk_snapshot", "SHARED2", None)
+                .unwrap()
+                .map(|t| t.hour()),
+            Some(15)
+        );
     }
 
     #[test]
