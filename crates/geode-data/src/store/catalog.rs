@@ -42,6 +42,13 @@ pub struct FileGeneration {
     /// a `Vec<String>` cannot represent it and everything that joined on
     /// it silently lost those rows.
     pub books: Vec<Option<String>>,
+    /// The publish filed this generation straight to the archive without
+    /// it ever being live — the backfill guard's outcome for a file older
+    /// than what is already current (§4.3). Recorded because the load did
+    /// happen and provenance should say so, but excluded from freshness:
+    /// a generation that never went live cannot be what a book's
+    /// staleness is measured from.
+    pub archived_only: bool,
     pub health: Health,
 }
 
@@ -74,8 +81,12 @@ CREATE TABLE IF NOT EXISTS file_generations (
   loaded_at TIMESTAMP WITH TIME ZONE,
   row_count BIGINT,
   health VARCHAR,
-  health_reason VARCHAR
+  health_reason VARCHAR,
+  archived_only BOOLEAN
 );
+-- Catalogs written before `archived_only` existed need the column added;
+-- CREATE TABLE IF NOT EXISTS leaves an existing table untouched.
+ALTER TABLE file_generations ADD COLUMN IF NOT EXISTS archived_only BOOLEAN;
 CREATE SEQUENCE IF NOT EXISTS file_generations_id START 1;
 CREATE TABLE IF NOT EXISTS file_books (
   file_id BIGINT,
@@ -201,7 +212,7 @@ impl<'a> Catalog<'a> {
         let (health, reason) = rec.health.to_parts();
         let sql = "insert into file_generations
                    select case when ? = 0 then nextval('file_generations_id') else ? end,
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                    returning file_id";
         let file_id: i64 = self
             .conn
@@ -221,6 +232,7 @@ impl<'a> Catalog<'a> {
                     rec.row_count as i64,
                     health,
                     reason,
+                    rec.archived_only,
                 ],
                 |r| r.get(0),
             )
@@ -246,7 +258,7 @@ impl<'a> Catalog<'a> {
 
     pub fn lookup_by_path(&self, path: &Path) -> Result<Option<FileGeneration>, StoreError> {
         let sql = "select file_id, dataset, batch, path, size, mtime, source_time, gen_id,
-                          loaded_at, row_count, health, health_reason
+                          loaded_at, row_count, health, health_reason, archived_only
                    from file_generations where path = ? order by gen_id desc limit 1";
         let err = |source| StoreError::Sql {
             statement: sql.to_string(),
@@ -262,7 +274,15 @@ impl<'a> Catalog<'a> {
         let file_id: i64 = row.get(0).unwrap();
         let health_label: String = row.get(10).unwrap();
         let health_reason: Option<String> = row.get(11).unwrap();
+        // NULL for rows written before the column existed, which is a
+        // real state: such a generation was recorded under the old rule,
+        // where every recorded generation counted toward freshness. Read
+        // as `Option` so the migration case is expressible, but not
+        // `unwrap_or`-ed over the *error* — a missing column is a bug in
+        // this query, not a value.
+        let archived_only: bool = row.get::<_, Option<bool>>(12).unwrap().unwrap_or(false);
         let found = FileGeneration {
+            archived_only,
             file_id,
             dataset: row.get(1).unwrap(),
             batch: row.get(2).unwrap(),
@@ -321,7 +341,8 @@ impl<'a> Catalog<'a> {
             Some(b) => (
                 "select max(fg.source_time) from file_generations fg
                  join file_books fb on fb.file_id = fg.file_id
-                 where fg.dataset = ? and fg.batch = ? and fb.book = ?",
+                 where fg.dataset = ? and fg.batch = ? and fb.book = ?
+                   and coalesce(fg.archived_only, false) = false",
                 vec![
                     dataset.to_string().into(),
                     batch.to_string().into(),
@@ -331,7 +352,8 @@ impl<'a> Catalog<'a> {
             None => (
                 "select max(fg.source_time) from file_generations fg
                  join file_books fb on fb.file_id = fg.file_id
-                 where fg.dataset = ? and fg.batch = ? and fb.book is null",
+                 where fg.dataset = ? and fg.batch = ? and fb.book is null
+                   and coalesce(fg.archived_only, false) = false",
                 vec![dataset.to_string().into(), batch.to_string().into()],
             ),
         };
@@ -356,6 +378,7 @@ impl<'a> Catalog<'a> {
                        from file_generations fg
                        join file_books fb on fb.file_id = fg.file_id
                        where fg.dataset = ?
+                         and coalesce(fg.archived_only, false) = false
                        group by fg.batch, fb.book
                    ) group by book order by book";
         let err = |source| StoreError::Sql {
@@ -562,6 +585,7 @@ mod tests {
             loaded_at: source_time,
             row_count: 10,
             books: books.iter().map(|b| Some(b.to_string())).collect(),
+            archived_only: false,
             health: Health::Ok,
         }
     }
@@ -914,6 +938,87 @@ mod tests {
              partition's staleness — `book in (…)` does not match NULL, so \
              the as-of and the rows it describes have to agree"
         );
+    }
+
+    #[test]
+    fn a_generation_that_never_went_live_does_not_move_freshness() {
+        // The backfill guard files an older file as history without it
+        // ever being current, but `record` runs regardless — so its
+        // `file_books` rows counted toward `book_freshness`, which has no
+        // live/archive distinction. A file that never contributed a single
+        // live row could therefore drag the dataset's headline as-of
+        // backwards, and `service.rs` reads that unscoped on every live
+        // query.
+        //
+        // Pre-existing, but the bookless partition made it far more
+        // reachable: `None` is a partition almost every real file has, so
+        // an archived-only generation nearly always introduces a
+        // (batch, book) pair that nothing live covers.
+        let (_d, store) = store();
+        let cat = Catalog::new(store.writer());
+
+        let mut live = record("BK000", &["BK000"], ts("2026-08-30T14:00:00Z"));
+        live.gen_id = cat.reserve_gen_id().unwrap();
+        cat.record(&live).unwrap();
+
+        // An older file for the same batch, carrying a partition nothing
+        // live covers. It became history and was never current.
+        let mut history = record("BK000", &[], ts("2026-08-30T06:00:00Z"));
+        history.books = vec![None];
+        history.gen_id = cat.reserve_gen_id().unwrap();
+        history.archived_only = true;
+        cat.record(&history).unwrap();
+
+        assert_eq!(
+            cat.dataset_as_of("risk_snapshot", &[])
+                .unwrap()
+                .unwrap()
+                .hour(),
+            14,
+            "a generation that never went live must not make the dataset \
+             look stale"
+        );
+        assert!(
+            !cat.book_freshness("risk_snapshot")
+                .unwrap()
+                .iter()
+                .any(|(b, _)| b.is_none()),
+            "and must not report a partition it never made live"
+        );
+    }
+
+    #[test]
+    fn a_catalog_written_before_archived_only_gains_the_column() {
+        // `CREATE TABLE IF NOT EXISTS` leaves an existing table alone, so
+        // a database written by an older build would keep the old shape
+        // and every insert would fail on column count. The ALTER is what
+        // makes `ensure_tables` a migration rather than a first-run.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table file_generations (
+                     file_id BIGINT PRIMARY KEY, dataset VARCHAR, batch VARCHAR,
+                     path VARCHAR, size BIGINT,
+                     mtime TIMESTAMP WITH TIME ZONE,
+                     source_time TIMESTAMP WITH TIME ZONE, gen_id BIGINT,
+                     loaded_at TIMESTAMP WITH TIME ZONE, row_count BIGINT,
+                     health VARCHAR, health_reason VARCHAR);",
+            )
+            .unwrap();
+
+        let cat = Catalog::new(store.writer());
+        cat.ensure_tables().unwrap();
+
+        // The column is there, and a record round-trips through it.
+        let mut r = record("BK000", &["BK000"], ts("2026-08-30T07:00:00Z"));
+        r.gen_id = cat.reserve_gen_id().unwrap();
+        r.archived_only = true;
+        let id = cat.record(&r).unwrap();
+        let found = cat.lookup_by_path(&r.path).unwrap().unwrap();
+        assert_eq!(found.file_id, id);
+        assert!(found.archived_only, "the flag survives the round trip");
     }
 
     #[test]

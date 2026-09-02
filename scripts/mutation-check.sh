@@ -359,6 +359,21 @@ run_mutation "catalog: the backfill guard is scoped to its dataset" \
   '                 where fg.dataset = ? and fg.batch = ? and fb.book is null",' \
   '                 where fg.batch = ? and ? is not null and fb.book is null",'
 
+run_mutation "catalog: a generation that never went live is not fresh" \
+  crates/geode-data/src/store/catalog.rs \
+  '                         and coalesce(fg.archived_only, false) = false' \
+  '                         and true'
+
+run_mutation "ingest: an archived-only load is recorded as such" \
+  crates/geode-data/src/ingest/load.rs \
+  '    let archived_only = !published.is_empty()' \
+  '    let archived_only = false && !published.is_empty()'
+
+run_mutation "catalog: the archived_only column is added to old catalogs" \
+  crates/geode-data/src/store/catalog.rs \
+  'ALTER TABLE file_generations ADD COLUMN IF NOT EXISTS archived_only BOOLEAN;' \
+  '-- migration removed'
+
 # ---- the bookless partition in the catalog (spec §4.5)
 
 run_mutation "catalog: the bookless partition gets a file_books row" \

@@ -349,6 +349,7 @@ mod tests {
             loaded_at: Utc::now(),
             row_count: 1,
             books: vec![Some("BK000".to_string())],
+            archived_only: false,
             health: crate::health::Health::Ok,
         })
         .unwrap();
@@ -376,6 +377,7 @@ mod tests {
             loaded_at: Utc::now(),
             row_count: 1,
             books: vec![Some("BK000".to_string())],
+            archived_only: false,
             health: crate::health::Health::Ok,
         })
         .unwrap();
