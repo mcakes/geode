@@ -58,12 +58,33 @@ retires settings' current `h`/`l`/`left`/`right` value stepping.
 **(b) Keys that fall through.** `up`, `down`, `pageup`, `pagedown` (lines
 3121-3128) and `tab`/`shift+tab` (lines 3110-3115) attach their listeners only
 `.when(self.is_multi_line())`. Both dialog inputs are single-line, so no
-listener exists and the raw event falls through untouched. `ctrl+d`,
+listener exists and the raw event falls through **the `Input`**. `ctrl+d`,
 `ctrl+u`, `ctrl+b`, `ctrl+n`, `ctrl+p` have **no** `KeyBinding` in the
 `"Input"` context at all (`state.rs:122-269`), so they are never matched.
 `enter` and `escape` are bound and do have listeners, but for a single-line,
 non-`clean_on_escape` input those handlers call `cx.propagate()` explicitly —
 the same route the palette already relies on.
+
+**(b2) `tab` and `shift+tab` die a second death, in `Root`.** Clearing the
+`Input` is not enough: `crates/ui/src/root.rs:21-25` binds `tab`/`shift-tab`
+to `Tab`/`TabPrev` in a `"Root"` key context, and `root.rs:582-584` attaches
+`on_action` listeners for both unconditionally — `on_action_tab`
+(`root.rs:482`) drives focus navigation and never re-propagates. Every
+gpui-component app wraps its root view in `Root`, this one included
+(`CLAUDE.md`), so the keystroke is consumed above `ShellView` and no raw key
+listener runs.
+
+**This was missed in the first pass of §2 — it checked the `Input` context
+and stopped there — and it blocked task 3 of the implementation.** The fix
+is the same `NoAction` mechanism as (d), scoped to Geode's own modal rather
+than applied app-wide: the modal panel carries a `"GeodeModal"` key context,
+and `tab`/`shift-tab` are bound to `NoAction` in it. Because
+`bindings_for_input` sorts matches by context depth before applying the
+`NoAction` suppression (`keymap.rs:188-190`, then `201-226`), the deeper
+`"GeodeModal"` match outranks `"Root"` and suppresses it — but only while
+focus sits inside a Geode modal. gpui-component's focus cycling survives
+everywhere else in the app, which app-wide suppression would have silently
+removed.
 
 **(c) `ctrl+f` dies on Windows and Linux.** `state.rs:255-257` binds
 `ctrl-f` to `Search` under `#[cfg(not(target_os = "macos"))]`, and

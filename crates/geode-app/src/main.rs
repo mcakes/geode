@@ -24,6 +24,13 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
+            // Scoped `tab`/`shift-tab` reclaim from gpui-component's `Root`
+            // focus-cycling (see that function's own doc comment for the full
+            // mechanism and why it's scoped rather than app-wide) — shared with
+            // `shell::tests::dialog_test_shell` so the settings dialog's own
+            // tests prove this, rather than merely assuming it holds here.
+            geode_shell::shell::dialog::init_geode_modal_keybindings(cx);
+
             fonts::register(cx); // bundled Inter/JetBrains Mono (Task 10) —
             // after init (installs the Theme global this edits), before the
             // window opens so the first frame already carries them.
