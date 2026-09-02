@@ -33,7 +33,7 @@ Ranking and the nav-key vocabulary, with no `gpui` anywhere — the piece both d
 
 **Files:**
 - Create: `crates/geode-shell/src/listfilter.rs`
-- Modify: `crates/geode-shell/src/lib.rs:21` (module list, alphabetical — `listfilter` sorts between `defaults` and `fonts`)
+- Modify: `crates/geode-shell/src/lib.rs` (module list, alphabetical — `pub mod listfilter;` goes between `pub mod keymap_edit;` and `pub mod palette;`)
 - Test: `crates/geode-shell/src/listfilter.rs` (inline `#[cfg(test)] mod tests`, the house pattern — see `vimnav.rs`)
 
 **Interfaces:**
@@ -203,7 +203,7 @@ mod tests {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p geode-shell listfilter`
-Expected: FAIL — the `todo!()` stubs panic (or the file does not compile until `lib.rs` declares the module; add `pub mod listfilter;` to `crates/geode-shell/src/lib.rs` first, between `pub mod defaults;` and `pub mod fonts;`).
+Expected: FAIL — the `todo!()` stubs panic (or the file does not compile until `lib.rs` declares the module; add `pub mod listfilter;` to `crates/geode-shell/src/lib.rs` first, between `pub mod keymap_edit;` and `pub mod palette;`).
 
 - [ ] **Step 3: Write the implementation**
 
