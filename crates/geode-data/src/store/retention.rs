@@ -131,7 +131,7 @@ pub fn checkpoint(conn: &Connection) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use crate::store::Store;
-    use chrono::{DateTime, Timelike, Utc};
+    use chrono::{DateTime, Datelike, Timelike, Utc};
     use geode_core::schema::Grain;
 
     /// Terse RFC 3339 literal for tests.
@@ -267,6 +267,53 @@ mod tests {
         )
         .unwrap();
         assert_eq!(report.oldest_remaining.unwrap().hour(), 8);
+    }
+
+    #[test]
+    fn the_oldest_remaining_bound_spans_every_grain_swept() {
+        // `oldest_remaining` answers "how far back can time travel go",
+        // and it folds across grains. Every other test here sweeps a
+        // single grain, where folding a lone value with `min` and with
+        // `max` are the same thing — so the fold itself was never
+        // exercised, and reporting the *newest* grain's oldest row would
+        // have understated the history actually held.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_snapshot_underlying_archive(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);",
+            )
+            .unwrap();
+        fill(&store, 3);
+
+        // The underlying archive reaches further back than the position
+        // one, so the two grains disagree and the fold has to choose.
+        store
+            .writer()
+            .execute(
+                "insert into risk_snapshot_underlying_archive values (?, ?, ?, ?)",
+                duckdb::params!["BK000", "BK000", 1i64, ts("2026-08-29T02:00:00Z")],
+            )
+            .unwrap();
+
+        let report = sweep(
+            store.writer(),
+            "risk_snapshot",
+            &[Grain::Position, Grain::Underlying],
+            &RetentionPolicy::default(),
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+
+        let oldest = report.oldest_remaining.expect("history is held");
+        assert_eq!(
+            (oldest.day(), oldest.hour()),
+            (29, 2),
+            "the bound is the oldest row across every grain, not the \
+             oldest of whichever grain was swept last"
+        );
     }
 
     #[test]

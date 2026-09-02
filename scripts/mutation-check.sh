@@ -164,6 +164,46 @@ run_mutation "as-of: source-time tie breaks on gen_id" \
   'order by source_time desc, gen_id desc' \
   'order by source_time desc'
 
+# Retention deletes. A wrong query shows a wrong number and can be
+# re-run; a wrong sweep destroys history that no longer exists to be
+# re-read. These entries are here because this file had exactly one, and
+# it is the least recoverable code in the data layer.
+
+run_mutation "retention: an empty policy evicts nothing" \
+  crates/geode-data/src/store/retention.rs \
+  '        if !policy.is_empty() {' \
+  '        if true {'
+
+run_mutation "retention: the bookless partition is matchable by its keys" \
+  crates/geode-data/src/store/retention.rs \
+  '                       and k.book is not distinct from a.book' \
+  '                       and k.book = a.book'
+
+run_mutation "retention: age keeps the recent, not the ancient" \
+  crates/geode-data/src/store/retention.rs \
+  '                    "source_time >= '"'"'{}'"'"'::timestamptz",' \
+  '                    "source_time <= '"'"'{}'"'"'::timestamptz",'
+
+run_mutation "retention: every configured rule must be satisfied" \
+  crates/geode-data/src/store/retention.rs \
+  'keep = keep.join(" and "),' \
+  'keep = keep.join(" or "),'
+
+run_mutation "retention: the generation count bound is what it says" \
+  crates/geode-data/src/store/retention.rs \
+  'keep.push(format!("rn <= {n}"));' \
+  'keep.push(format!("rn <= {}", n + 1));'
+
+run_mutation "retention: the remaining bound is the oldest, not the newest" \
+  crates/geode-data/src/store/retention.rs \
+  '            (Some(a), Some(b)) => Some(a.min(b)),' \
+  '            (Some(a), Some(b)) => Some(a.max(b)),'
+
+run_mutation "retention: eviction is counted from the rows actually removed" \
+  crates/geode-data/src/store/retention.rs \
+  'report.evicted_rows += (before - after).max(0) as usize;' \
+  'report.evicted_rows += 0;'
+
 run_mutation "retention: source-time tie breaks on gen_id" \
   crates/geode-data/src/store/retention.rs \
   'order by source_time desc, gen_id desc' \
