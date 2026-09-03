@@ -8,7 +8,9 @@ Geode is the everything-tool for an index exotic equity derivatives desk: risk, 
 
 **Phase 2 (DataService) is complete**, governed by `docs/superpowers/specs/2026-08-30-geode-phase-2-data-design.md`. Phase 2a built storage and ingest: sentinel-gated discovery, CSV → DuckDB load, the grain split (`Position`/`Instrument`/`Underlying`/`UnderlyingPair`, so `SUM` cannot double-count), per-file generations with a live/archive pair per `(dataset, grain)`, `(dataset, batch, book)` partitioning, retention, and the freshness catalog. Phase 2b built the query path: the restricted scope grammar and its compiler, views and derived dimensions, `Attribution`/`ScopeSemantics`, the grain-aware tree compiler (one statement per view, `GROUPING SETS` bounded to the expanded depth), cross-dataset joins, ENUM dictionary encoding, the query pool with cancellation and coalescing, as-of routing, `Snapshot`, and the `DataService` facade. The §7.1 <50ms requery contract holds at 1M rows — numbers in `docs/perf.md`.
 
-**Phase 3 (blotter) is next.** It deletes the throwaway data probe (`geode-shell::dataprobe` + `geode-app/src/probe.rs`, `mod+shift+d`, opt-in via `GEODE_PROBE_DIR`), which exists only because the §7.1 budget is specified through a painted frame and the benchmarks stop at the snapshot. The probe can be run against a working sample config: see `examples/probe-config/datasets.toml`. Two known follow-ups: cold start and a real config surface for `[sources]`.
+**Phase 3 (blotter) is next, and its prerequisites are done** — `docs/phase-3-prerequisites.md` records what was fixed and the three items deliberately not implemented as written. Phase 3 deletes the throwaway data probe (`geode-shell::dataprobe` + `geode-app/src/probe.rs`, `mod+shift+d`, opt-in via `GEODE_PROBE_DIR`), which exists only because the §7.1 budget is specified through a painted frame and the benchmarks stop at the snapshot. The probe can be run against a working sample config: see `examples/probe-config/datasets.toml`.
+
+**Sequencing constraint: `[sources]` has to land before the probe is deleted.** `sources` is a recognised config doc name in `config/merge.rs`, but nothing reads it — the only place outside `geode-data`'s internals that builds a `SourceSpec` from user configuration is `probe.rs`, from `GEODE_PROBE_DIR`. Delete the probe first and nothing can ingest.
 
 **Cold start is on hold pending measurement — read `docs/ingest-cold-start-handoff.md` before touching it.** The 1.87× parallel-staging figure in `docs/perf.md` measures `read_csv` alone, not the real staging path (`read_csv` + `split_by_grain`), so it describes a narrower operation than the change would affect. That handoff also records what implementation hits — chiefly that `staging_raw` and `staging_{grain}` are fixed global names created with `create or replace table`, so concurrent staging would overwrite itself.
 
@@ -28,6 +30,8 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warn
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
 cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
+zsh scripts/mutation-check.sh                          # mutation harness (89 entries) — see below
+zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 ```
 
 CI (`.github/workflows/ci.yml`) runs all four checks on **both macOS and Windows** — keep both platforms building.
@@ -50,6 +54,8 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 **Threading model (spec §2):** UI thread (gpui — renders, owns entity state, only ever reads prepared immutable snapshots) / query pool (DuckDB read connections, results delivered as immutable columnar snapshots over channels) / ingest (background writers publishing generation-stamped tables). Performance budgets in spec §7 are contracts: <8ms pure-UI actions, <50ms requery at 1M rows, ingest never drops a foreground frame.
 
 **Testing strategy (spec §10.3):** test weight goes data layer ≫ shell logic ≫ modules. Shell logic (tiling tree, keymap resolution, config merging) is pure logic designed to be testable without a window; modules use gpui `TestAppContext`. TDD per house rules.
+
+**A green suite proves less here than you would expect, and `scripts/mutation-check.sh` is the answer.** Five review rounds on the query path each found Critical, silent wrong-data defects, and the cause was the same every time: a fixture that could not reach the defect. The harness breaks one load-bearing behaviour at a time and runs the suite — a `SURVIVED` line is a branch no test can see. Run it after touching the compiler, scope lowering, as-of routing, publish, retention, discovery or the grain vocabulary, and **add an entry for every behaviour you change**. Its header documents the rules learned the hard way; the two worth knowing up front are that a test asserting on *markers* will not notice a wrong *value*, and that an entry can lie in three ways — no test behind it, two defences overlapping so neither is isolated, or a mutation that breaks something other than what its name claims and is "caught" for the wrong reason. **Commit before you mutate:** restoring a mutated file with `git checkout` discards uncommitted work with it.
 
 ## Workspace invariants and gotchas
 
