@@ -64,7 +64,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{ActiveTheme as _, IconName, Sizable as _, box_shadow, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
 use crate::keymap::Keystroke;
@@ -319,21 +319,46 @@ pub fn open_shell_dialog_with_key<F>(
 /// standing in for it — the palette's own `input_row` idiom
 /// (`palette::render`), so the three filtering surfaces look alike.
 ///
+/// A muted [`IconName::Search`] rides in the input's `prefix` slot rather
+/// than a `"filter"` placeholder (user direction). That is also
+/// gpui-component's own idiom for this exact surface — its command
+/// palette builds the identical `Input::prefix(Icon::new(IconName::Search)
+/// .text_color(muted_foreground))` + `appearance(false)` pair (pinned
+/// checkout, `crates/ui/src/command/state.rs:838-846`) — so the icon is
+/// left at its default size to match. `prefix` survives
+/// `appearance(false)`: that flag guards only the background and border
+/// (`crates/ui/src/input/input.rs:578-584`), never the prefix child.
+///
 /// `frozen` renders a muted, static copy of the query *instead of* the
 /// live input: the keybinding dialog passes `Some(query)` while it is
 /// listening for a binding, when the input is blurred and a caret would
-/// be a lie about where keystrokes are going.
+/// be a lie about where keystrokes are going. It keeps the icon, and
+/// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
+/// `input.rs:504-508`), so entering and leaving capture doesn't shift the
+/// query text sideways.
 pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let row = div().w_full().border_b_1().border_color(theme.border);
+    let search_icon = || Icon::new(IconName::Search).text_color(theme.muted_foreground);
     match frozen {
         Some(query) => row
             .py_1()
-            .text_color(theme.muted_foreground)
-            .child(query.to_string())
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(theme.muted_foreground)
+                    .child(search_icon())
+                    .child(query.to_string()),
+            )
             .into_any_element(),
         None => row
-            .child(Input::new(input).appearance(false).w_full())
+            .child(
+                Input::new(input)
+                    .appearance(false)
+                    .prefix(search_icon())
+                    .w_full(),
+            )
             .into_any_element(),
     }
 }

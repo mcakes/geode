@@ -488,7 +488,7 @@ use gpui::{
     Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
 use crate::fonts;
 
@@ -698,10 +698,18 @@ pub fn render(
         }
     }
 
-    // No placeholder helper text (plan constraint: removed entirely) — an
-    // empty query renders as a bare, empty `Input`, caret first, rather than
-    // falling back to hint text. `.appearance(false)` strips `Input`'s own
-    // border/background (see this function's doc comment); the bottom
+    // A muted search icon in the `prefix` slot, and still no placeholder
+    // helper text: an empty query shows the icon and a caret, never hint
+    // text. This is gpui-component's own idiom for this exact surface —
+    // its command palette builds the identical `prefix` +
+    // `appearance(false)` pair (pinned checkout, `crates/ui/src/command/
+    // state.rs:838-846`), which is why the icon keeps its default size —
+    // and the same one `shell::dialog::filter_row` wears, so all three
+    // filtering surfaces read alike.
+    //
+    // `.appearance(false)` strips `Input`'s own border/background (see
+    // this function's doc comment) but not its prefix, which that flag
+    // never guards (`crates/ui/src/input/input.rs:578-584`); the bottom
     // border below is `input_row`'s own, standing in for the chrome
     // `appearance(true)` would otherwise have drawn, just scoped to
     // separating the query row from `list` rather than boxing the input
@@ -710,7 +718,12 @@ pub fn render(
         .w_full()
         .border_b_1()
         .border_color(theme.border)
-        .child(Input::new(query_input).appearance(false).w_full());
+        .child(
+            Input::new(query_input)
+                .appearance(false)
+                .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                .w_full(),
+        );
 
     div()
         .absolute()

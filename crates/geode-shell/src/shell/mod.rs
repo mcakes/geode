@@ -530,8 +530,10 @@ impl ShellView {
 
         // The toolbar's filter field (Task 4): built once here, not per
         // render, so `Input`'s own cursor/selection/focus state survives
-        // across frames.
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter"));
+        // across frames. No placeholder — `toolbar::toolbar` names the
+        // field with a search icon in the `Input`'s prefix slot instead,
+        // the same way the palette and the dialogs' filter row do.
+        let filter_input = cx.new(|cx| InputState::new(window, cx));
 
         // The palette's own query field (palette-input-polish task) — see
         // the `palette_input` field's own doc comment for the full
@@ -565,8 +567,10 @@ impl ShellView {
         .detach();
 
         // The dialogs' shared filter field — same lifecycle as
-        // `palette_input` above (see that field's doc comment).
-        let dialog_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter"));
+        // `palette_input` above (see that field's doc comment), and the
+        // same no-placeholder rule: `dialog::filter_row` puts a search
+        // icon in the `Input`'s prefix slot instead.
+        let dialog_input = cx.new(|cx| InputState::new(window, cx));
         cx.subscribe_in(&dialog_input, window, |view, input, event, _window, cx| {
             if !matches!(event, InputEvent::Change) {
                 return;
