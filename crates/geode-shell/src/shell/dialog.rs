@@ -314,6 +314,32 @@ pub fn open_shell_dialog_with_key<F>(
     cx.notify();
 }
 
+/// The drop shadow every floating overlay panel in this shell wears —
+/// [`render_modal`]'s panel and the command palette's
+/// (`palette::render`), so the two read as siblings rather than as two
+/// unrelated components. Lifted here from `render_modal`, which used to
+/// build it inline, when the palette adopted it.
+///
+/// It is the exact double shadow gpui-component's own `Dialog` builds in
+/// its `with_animation("slide-down", ..)` closure (pinned checkout,
+/// `crates/ui/src/dialog/dialog.rs`), evaluated at `delta = 1.0` — that
+/// animation's fully-open state, which is the only state Geode's own
+/// instant modals and palette ever have. Keeping the values identical is
+/// what lets our self-owned chrome sit next to that crate's own popovers
+/// without looking like a different design system.
+///
+/// The `hsla(0., 0., 0., 0.1)` here is a *shadow*, not a UI color: it is
+/// the same neutral black-at-10% in either theme mode, which is why it is
+/// a literal rather than a `cx.theme()` token (there is no shadow token to
+/// read, and tinting a shadow with a theme color is what would actually
+/// look wrong).
+pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        box_shadow(px(0.), px(20.), px(25.), px(-5.), hsla(0., 0., 0., 0.1)),
+        box_shadow(px(0.), px(8.), px(10.), px(-6.), hsla(0., 0., 0., 0.1)),
+    ]
+}
+
 /// The filter row every list dialog wears at the top: the shared
 /// `Input`, chrome stripped (`appearance(false)`) with a bottom border
 /// standing in for it — the palette's own `input_row` idiom
@@ -443,14 +469,7 @@ pub(crate) fn render_modal(
     let border = theme.border;
     let radius = theme.radius_lg;
 
-    // The exact double shadow `Dialog`'s own `with_animation("slide-down",
-    // ..)` closure builds (pinned checkout, same file), evaluated at
-    // `delta = 1.0` — its fully-open state, which is this modal's *only*
-    // state.
-    let shadow = vec![
-        box_shadow(px(0.), px(20.), px(25.), px(-5.), hsla(0., 0., 0., 0.1)),
-        box_shadow(px(0.), px(8.), px(10.), px(-6.), hsla(0., 0., 0., 0.1)),
-    ];
+    let shadow = overlay_panel_shadow();
 
     let title_row = h_flex()
         .w_full()

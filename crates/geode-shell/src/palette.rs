@@ -734,11 +734,30 @@ pub fn render(
         .flex_col()
         .gap_2()
         .p_2()
+        // The same panel frame `dialog::render_modal` wears — background,
+        // text, border, radius token and drop shadow — so the palette and
+        // the dialogs read as siblings (user direction: "unify the
+        // appearance"). The radius was a hardcoded `px(8.)` before this;
+        // `theme.radius_lg` is the same idea but follows the theme, which
+        // is what every other rounded surface in this crate already does.
+        //
+        // What deliberately still differs: the interior rhythm (this is a
+        // denser surface — `ROW_HEIGHT` 28px against the dialogs' 44px, so
+        // matching their `px_4`/`gap_3` would loosen it into looking like a
+        // different component), the absent title row (a palette has no
+        // title to show), and the undimmed backdrop — see the click-catcher
+        // in `ShellView::render` for why that one is a decision, not an
+        // omission.
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(8.))
+        .rounded(theme.radius_lg)
+        .shadow(crate::shell::dialog::overlay_panel_shadow())
+        // Blocks hover and scroll under the panel, not just the clicks the
+        // `on_mouse_down` below already stops — `render_modal`'s panel has
+        // had this from the start; the palette simply never grew it.
+        .occlude()
         // Test-only, see `list`'s `debug_selector` comment above — lets a
         // `#[gpui::test]` recover the panel's own painted bounds to click
         // inside it (precedent: `dialog::render_modal`'s
