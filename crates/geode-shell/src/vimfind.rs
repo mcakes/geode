@@ -61,11 +61,16 @@ use crate::keymap::{Keystroke, Modifiers};
 /// state machine serves both — `/` starts the session and query editing is
 /// byte-for-byte identical either way; what differs is what the *caller*
 /// does with the query (jump the selection vs. narrow the rendered rows —
-/// the keybinding dialog's `press_while_finding` vs.
-/// `press_while_finding_fzf`). Mirrors [`crate::fontsize::FontSize`]'s
-/// shape exactly: `config_value`/`label`/`from_value`/`from_config` plus a
-/// [`persist_to_user_config`] sibling, so the settings control, startup
-/// resolution, and hot reload all ride the same paths font size does.
+/// [`press_while_finding`] vs. [`press_while_finding_fzf`]). Neither driver
+/// has a caller today — the filter-first dialog rewrite (spec
+/// `2026-09-01-dialog-filter-input-design.md` §8-9) retired the settings
+/// dialog's `/` session, their last one — but both stay in the crate,
+/// intact and tested, for Phase 3's blotter, which is expected to want
+/// this whole vim-jump-vs-filter choice again. Mirrors
+/// [`crate::fontsize::FontSize`]'s shape exactly: `config_value`/`label`/
+/// `from_value`/`from_config` plus a [`persist_to_user_config`] sibling, so
+/// the settings control, startup resolution, and hot reload all ride the
+/// same paths font size does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FindStyle {
     #[default]
@@ -326,16 +331,20 @@ pub fn find_match(
 // ---------------------------------------------------------------------
 // Shared session drivers (extracted from `keybindings_view` by the
 // settings-dialog rewrite): the press-by-press semantics of an ACTIVE
-// find session, over a caller's `(selection, anchor)` pair. Both dialogs
-// — keybindings and settings — hold a `VimFind` + `selected: usize` +
-// `find_anchor: Option<usize>` and delegate every mid-session keystroke
-// here; only what *picking* a row means differs (keybindings starts
-// rebind listening, settings just keeps the selection), which is why
-// [`press_while_finding_fzf`] reports an [`FzfOutcome`] for the caller to
-// interpret instead of taking a callback. The fields are three `&mut`
-// parameters rather than a trait or a shared struct: both callers keep
-// their own state types (each with dialog-specific extras alongside), and
-// a borrow of exactly the three fields involved is the whole contract.
+// find session, over a caller's `(selection, anchor)` pair. When both
+// dialogs still had a `/` session, keybindings and settings each held a
+// `VimFind` + `selected: usize` + `find_anchor: Option<usize>` and
+// delegated every mid-session keystroke here; only what *picking* a row
+// meant differed (keybindings started rebind listening, settings just
+// kept the selection), which is why [`press_while_finding_fzf`] reports
+// an [`FzfOutcome`] for the caller to interpret instead of taking a
+// callback. Neither dialog holds that state any more (the filter-first
+// rewrite retired both `/` sessions — see the module doc), but the
+// contract is unchanged for whichever caller picks these drivers back up
+// (Phase 3's blotter — §9 of the design doc): three `&mut` parameters
+// rather than a trait or a shared struct, so a caller can keep its own
+// state type (with dialog-specific extras alongside) and hand over a
+// borrow of exactly the three fields involved.
 // ---------------------------------------------------------------------
 
 /// Feed one keystroke to an ACTIVE find session in **vim** style and move
@@ -419,9 +428,9 @@ pub fn filter_matches(texts: &[String], query: &str) -> Vec<usize> {
 }
 
 /// What one keystroke did to an active **fzf**-style session — the pick
-/// seam [`press_while_finding_fzf`]'s two callers interpret differently
-/// (see the section comment above): the driver itself has no idea what a
-/// dialog does with a picked row, only that one was picked.
+/// seam a future caller of [`press_while_finding_fzf`] interprets for
+/// itself (see the section comment above): the driver itself has no idea
+/// what a dialog does with a picked row, only that one was picked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FzfOutcome {
     /// The session continues: a query edit (selection re-anchored to the
@@ -738,10 +747,13 @@ mod tests {
     //
     // These tests moved here with the code they pin (the settings-dialog
     // rewrite promoted the session-press semantics out of
-    // `keybindings_view` so both dialogs share one driver); the
-    // keybindings-specific halves — what *picking* means there (rebind
-    // listening starts), searchable-text philosophy — stayed behind in
-    // `keybindings_view::tests`, exercised through its thin wrappers.
+    // `keybindings_view` so both dialogs could share one driver). They
+    // are now the only tests of these drivers: both dialogs have since
+    // moved to an always-focused fuzzy filter (the settings dialog was
+    // the drivers' last caller), so `press_while_finding` and
+    // `press_while_finding_fzf` have no caller outside this module today
+    // — retained whole, and tested here, for Phase 3's blotter (see the
+    // module doc and `FindStyle`'s).
 
     /// A session mid-flight: `find` started, anchor saved at `selected` —
     /// the exact state a caller is in right after handling `/`.

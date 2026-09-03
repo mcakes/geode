@@ -36,6 +36,7 @@ use crate::defaults::mod_alias_from_config;
 use crate::fonts;
 use crate::fontsize::{self, FontSize};
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
+use crate::listfilter;
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::perf::{self, FrameHistogram};
 use crate::reload;
@@ -248,13 +249,18 @@ pub struct ShellView {
     /// the settings control via `settings_view::set_font_size`, config hot
     /// reload) — see the `fontsize` module doc.
     font_size: FontSize,
-    /// The effective `/`-find behavior for list dialogs (vim jump vs. fzf
+    /// The `/`-find behavior setting for list dialogs (vim jump vs. fzf
     /// filter — `[ui] find_style`, see `vimfind::FindStyle`). Same
     /// lifecycle as `font_size` above: resolved at startup, re-resolved on
     /// config hot reload, set directly by the settings control
     /// (`settings_view::set_find_style`) — minus the render-time apply,
-    /// since there is nothing window-level to apply: `keybindings_view`'s
-    /// key handler and render just read it.
+    /// since there is nothing window-level to apply. Neither dialog reads
+    /// it for behaviour any more: the filter-first rewrite (spec
+    /// `2026-09-01-dialog-filter-input-design.md` §8) retired both `/`
+    /// sessions this setting used to steer. The field, its config
+    /// plumbing, and the settings row that steps it all survive whole —
+    /// on purpose, for Phase 3's blotter (§9) — so this is honestly a
+    /// setting with no reader today, not a live behavior switch.
     find_style: FindStyle,
     focus_handle: FocusHandle,
     /// The open command palette's state (Task 6), or `None` when closed.
@@ -283,7 +289,7 @@ pub struct ShellView {
     /// `ShellModal::build`'s doc comment) and by its
     /// [`dialog::ModalKeyHandler`] (`keybindings_view::handle_key`, reached
     /// through `handle_key_down`'s modal branch). Deliberately holds no
-    /// `gpui` types itself (`vimnav::VimListNav`, a selection index, and the
+    /// `gpui` types itself (a selection index, the filter query, and the
     /// in-progress capture sequence only) so it stays unit-testable without
     /// a window, the same way `PaletteState` does — the dialog's
     /// `ScrollHandle` lives in the sibling `keybindings_scroll` field below
@@ -296,8 +302,9 @@ pub struct ShellView {
     keybindings_scroll: ScrollHandle,
     /// The open settings dialog's own pure state (the settings-dialog
     /// rewrite: the keybinding dialog's pattern applied to settings —
-    /// selection, `vimnav` accumulator, `/` find session), or `None` when
-    /// closed/never opened. Set fresh by [`settings_view::open`] each time
+    /// selection and filter query, the same shape `KeybindingsState` has
+    /// minus the capture sequence), or `None` when closed/never opened.
+    /// Set fresh by [`settings_view::open`] each time
     /// and read/mutated by that module's `build` closure and
     /// [`dialog::ModalKeyHandler`], exactly the `keybindings` field's own
     /// contract two fields up — including holding no `gpui` types, for the
@@ -371,6 +378,24 @@ pub struct ShellView {
     /// propagating past it so the window's separate IME/text-input phase
     /// still delivers it to this field).
     palette_input: Entity<InputState>,
+    /// The two list dialogs' shared filter field (the filter-first dialog
+    /// UX). One entity, not one per dialog: only one modal is ever open —
+    /// each dialog's own `open` returns early when `view.modal.is_some()`
+    /// (`keybindings_view::open`, `settings_view::open`; the shared door
+    /// `dialog::open_shell_dialog_with_key` does not guard this itself,
+    /// it assigns `view.modal` unconditionally) — so they can never both
+    /// want it at once. Built once here
+    /// and reset by value on every open, exactly like `palette_input`
+    /// above and for the same reasons — a stable `FocusHandle` across
+    /// close/reopen, and one `InputEvent::Change` subscription for the
+    /// life of the window instead of one per open.
+    ///
+    /// Deliberately blurred while the keybinding dialog is listening for
+    /// a new binding: a focused `Input` consumes bare letters as text
+    /// before any raw key listener sees them, so capture would be
+    /// impossible otherwise (see `keybindings_view`'s module doc,
+    /// "Rebind capture").
+    dialog_input: Entity<InputState>,
     /// Desk and user config directories the reload watcher polls (Task
     /// 1c-1). Owned here (not just captured by the background task) so the
     /// watcher's own loop re-reads them fresh from the entity each poll —
@@ -505,8 +530,10 @@ impl ShellView {
 
         // The toolbar's filter field (Task 4): built once here, not per
         // render, so `Input`'s own cursor/selection/focus state survives
-        // across frames.
-        let filter_input = cx.new(|cx| InputState::new(window, cx).placeholder("filter"));
+        // across frames. No placeholder — `toolbar::toolbar` names the
+        // field with a search icon in the `Input`'s prefix slot instead,
+        // the same way the palette and the dialogs' filter row do.
+        let filter_input = cx.new(|cx| InputState::new(window, cx));
 
         // The palette's own query field (palette-input-polish task) — see
         // the `palette_input` field's own doc comment for the full
@@ -535,6 +562,31 @@ impl ShellView {
             };
             palette.set_query(input.read(cx).value().to_string());
             view.sync_palette_scroll();
+            cx.notify();
+        })
+        .detach();
+
+        // The dialogs' shared filter field — same lifecycle as
+        // `palette_input` above (see that field's doc comment), and the
+        // same no-placeholder rule: `dialog::filter_row` puts a search
+        // icon in the `Input`'s prefix slot instead.
+        let dialog_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe_in(&dialog_input, window, |view, input, event, _window, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            let query = input.read(cx).value().to_string();
+            // Route to whichever dialog is actually open. `close_modal`
+            // clears both fields, so at most one is `Some` here — the
+            // routing cannot land in a stale state left over from an
+            // earlier open.
+            if let Some(state) = view.keybindings.as_mut() {
+                state.set_query(query);
+                view.keybindings_scroll.scroll_to_item(0);
+            } else if let Some(state) = view.settings.as_mut() {
+                state.set_query(query);
+                view.settings_scroll.scroll_to_item(0);
+            }
             cx.notify();
         })
         .detach();
@@ -676,6 +728,7 @@ impl ShellView {
             settings_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
             palette_input,
+            dialog_input,
             desk_dir,
             user_dir,
             last_snapshot: reload::Snapshot::default(),
@@ -898,6 +951,27 @@ impl ShellView {
     fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette = None;
         self.focus_handle.focus(window, cx);
+    }
+
+    /// Close whatever modal is open and hand focus back to the shell root
+    /// — the modal-side twin of [`close_palette`](Self::close_palette),
+    /// added by the filter-first dialog UX because a dialog's filter
+    /// field may currently hold focus and nothing else would give it
+    /// back. The one standard door for closing a modal: the escape arm in
+    /// `handle_key_down`, and `dialog::render_modal`'s close-button and
+    /// backdrop listeners, all go through this rather than setting
+    /// `self.modal = None` directly.
+    ///
+    /// Also clears both dialogs' state. That is not tidiness: the shared
+    /// `dialog_input` subscription routes by "whichever state is `Some`",
+    /// so a stale `settings` left behind by an earlier open would
+    /// swallow the *keybinding* dialog's queries.
+    pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.modal = None;
+        self.settings = None;
+        self.keybindings = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     /// Scroll the palette's results viewport so the currently selected row
@@ -1212,9 +1286,12 @@ impl ShellView {
     /// guard (below) only ever routes here what the `Input` didn't already
     /// consume.
     ///
-    /// This method now does exactly two things: act on the short list of
+    /// This method now does exactly two things: act on the list of
     /// navigation/close keys the palette still owns (up/down, ctrl+p/
-    /// ctrl+n, enter, escape), and otherwise do *nothing* — deliberately
+    /// ctrl+n, enter, escape, plus the larger steps — ctrl+d/u ±5, ctrl+f/b
+    /// and pageup/pagedown ±10 — that Task 5 added as a fallback arm so
+    /// this filtered list surface reads the same as the two dialogs', spec
+    /// §3, "The command palette"), and otherwise do *nothing* — deliberately
     /// not `cx.stop_propagation()`, which would be the wrong kind of
     /// "swallow": a bare typed character reaches this method too (no
     /// `KeyBinding` at all matches it inside `Input`'s own "Input" context,
@@ -1227,6 +1304,17 @@ impl ShellView {
     /// `if self.palette.is_some() { self.handle_palette_key(..); return; }`
     /// guard is a plain Rust-level branch that never falls through to
     /// `self.matcher.press` regardless of what happens in here.
+    ///
+    /// The named up/down/ctrl+p/ctrl+n arms below keep wrapping
+    /// (`PaletteState::move_selection`, unchanged since before Task 5),
+    /// while the larger steps in the fallback arm clamp
+    /// (`crate::vimnav::apply`) — a page jump that teleported from the top
+    /// of a long result list to the bottom would read as a glitch, not a
+    /// feature. That split falls out of arm order alone: the ±1 keys
+    /// return from their own arms before the fallback arm is ever reached,
+    /// so nothing there has to inspect the resolved delta to pick a rule —
+    /// reaching the fallback arm at all already means the key was none of
+    /// those four.
     ///
     /// Reads gpui's own `Keystroke` directly (`event.keystroke`, not the
     /// shell-native one `convert_keystroke` produces) because it needs the
@@ -1275,14 +1363,33 @@ impl ShellView {
                 }
                 self.sync_palette_scroll();
             }
-            // Every other bubbled key — most commonly a bare typed
-            // character, but also e.g. tab/home/end, none of which this
-            // palette gives any shell-level meaning to — is a genuine no-op
-            // here. See this method's own doc comment for why that's
-            // correct rather than an oversight: doing nothing is what lets
-            // the keystroke keep propagating to the input's own text
-            // insertion, while still never reaching `self.matcher`.
-            _ => {}
+            // Everything the named arms above did not take. Two outcomes:
+            // a larger navigation step (the vocabulary the two list
+            // dialogs use, adopted here so all three filtered surfaces
+            // read the same — spec §3, "The command palette"), or a
+            // genuine no-op.
+            //
+            // These clamp, while the ±1 arms above wrap: reaching this
+            // arm at all means the key was NOT up/down/ctrl+p/ctrl+n, so
+            // nothing here has to inspect the delta to pick a rule. A
+            // page jump that teleports from the top of a long result list
+            // to the bottom reads as a glitch, not as a feature.
+            //
+            // A bare typed character lands here too, and must stay a true
+            // no-op — deliberately not `cx.stop_propagation()`, so the
+            // window's separate text-input phase still delivers it to the
+            // focused `palette_input` (see this method's doc comment).
+            _ => {
+                if let Some(ks) = convert_keystroke(&event.keystroke)
+                    && let Some(cmd) = listfilter::nav_command(&ks)
+                    && let Some(palette) = self.palette.as_mut()
+                {
+                    let len = palette.filtered().len();
+                    let next = crate::vimnav::apply(palette.selected(), len, cmd);
+                    palette.set_selected(next);
+                    self.sync_palette_scroll();
+                }
+            }
         }
     }
 
@@ -1317,13 +1424,17 @@ impl ShellView {
         // scoped to its dialog's focused root): our modal is plain chrome,
         // not an action-dispatch layer, so this is the only place Escape
         // gets handled for it — after the modal's own `on_key` handler
-        // (below) has had first refusal, which is how both dialogs' find
-        // sessions swallow an Escape as "cancel" without closing.
+        // (below) has had first refusal, which is how a dialog swallows an
+        // Escape as "cancel" without closing: today that is only the
+        // keybinding dialog's rebind capture (`keybindings_view`'s
+        // `listening` branch) — the settings dialog claims no keys of its
+        // own on Escape, so it always falls through to this branch's
+        // close.
         if self.modal.is_some() || window.has_active_dialog(cx) {
             if self.modal.is_some() {
-                // Part B: offer the modal's own key handler (if any) first
-                // refusal — the keybinding dialog's vim nav/rebind-capture
-                // seam (`dialog::ModalKeyHandler`, see its own doc comment
+                // Offer the modal's own key handler (if any) first
+                // refusal — the keybinding dialog's rebind-capture seam
+                // (`dialog::ModalKeyHandler`, see its own doc comment
                 // for why this is the shell-native `Keystroke`, not gpui's
                 // raw one). `on_key` is cloned out of `self.modal` before
                 // being called for the same reentrancy reason `render`
@@ -1337,12 +1448,25 @@ impl ShellView {
                         .is_some_and(|ks| handler(self, &ks, window, cx))
                 });
                 if handled {
+                    // A key the modal claimed must not also reach the
+                    // window's text-input phase. That phase is what a
+                    // focused `Input` actually inserts characters from
+                    // (`Window::dispatch_keystroke`: it runs only when the
+                    // key event still `propagate`s after every listener),
+                    // and the dialogs' shared filter field is focused
+                    // whenever a list dialog is open — so without this,
+                    // `enter` (`key_char = "\n"`) would land in the filter
+                    // right after the dialog acted on it, and the
+                    // resulting `InputEvent::Change` would reset the very
+                    // state the keystroke just set up. Keys the handler
+                    // did NOT claim deliberately keep propagating: that is
+                    // how a typed character reaches the filter at all.
+                    cx.stop_propagation();
                     cx.notify();
                     return;
                 }
                 if event.keystroke.key == "escape" {
-                    self.modal = None;
-                    cx.notify();
+                    self.close_modal(window, cx);
                 }
             }
             return;
@@ -6202,6 +6326,106 @@ mod tests {
         );
     }
 
+    /// The palette gains the dialogs' larger steps (spec §3): ctrl+d/u
+    /// move ±5, ctrl+f/b and pageup/pagedown ±10.
+    #[gpui::test]
+    fn the_palette_takes_the_larger_navigation_steps(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().unwrap().filtered().len()
+        });
+        assert!(
+            len >= 16,
+            "sanity: the last assertion below (ctrl+d then ctrl+f, landing \
+             at 15) needs at least 16 rows or it fails on ITS OWN clamp \
+             instead of proving the step size — a looser bound here would \
+             fail at the wrong assertion with a confusing message, got {len}"
+        );
+
+        cx.simulate_keystrokes("ctrl-d");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            5,
+            "ctrl+d moves down 5"
+        );
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            15,
+            "ctrl+f moves down 10 more"
+        );
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            10,
+            "ctrl+u moves back 5"
+        );
+        cx.simulate_keystrokes("pageup");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "pageup is ctrl+b's alias: back 10"
+        );
+    }
+
+    /// The split this change deliberately preserves (spec §3): the new
+    /// larger steps clamp, while the ±1 keys keep wrapping. This test and
+    /// its partner above (`the_palette_takes_the_larger_navigation_steps`)
+    /// are jointly, not individually, sufficient: that one alone would
+    /// pass against a `nav_command` that returned `Move(0)` for every key
+    /// (every assertion there stays put or moves by the size actually
+    /// under test, never wraps), and this one alone would pass against a
+    /// palette that ignored the new keys entirely (every clamp assertion
+    /// here is also satisfied by "nothing moved"). Together they pin both
+    /// that the new keys move the selection by the right amount AND that
+    /// the amount clamps rather than wraps — do not delete one believing
+    /// the other still covers navigation.
+    #[gpui::test]
+    fn palette_big_steps_clamp_while_arrows_still_wrap(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        let len = shell.read_with(&cx, |shell, _| {
+            shell.palette.as_ref().unwrap().filtered().len()
+        });
+
+        cx.simulate_keystrokes("ctrl-u");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            0,
+            "ctrl+u at the top clamps — a page jump must not teleport to the end"
+        );
+
+        cx.simulate_keystrokes("up");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "up at the top still wraps to the last result, exactly as before"
+        );
+
+        cx.simulate_keystrokes("ctrl-f");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
+            len - 1,
+            "and ctrl+f at the bottom clamps"
+        );
+    }
+
+    /// Typing still reaches the query field: the new arm must not swallow
+    /// characters on their way to the input.
+    #[gpui::test]
+    fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "palette::toggle");
+        cx.simulate_input("theme");
+        assert_eq!(
+            shell.read_with(&cx, |shell, _| shell
+                .palette
+                .as_ref()
+                .unwrap()
+                .query()
+                .to_string()),
+            "theme"
+        );
+    }
+
     /// Layers a user binding on top of the builtin keymap that rebinds
     /// `ctrl+k` (BUILTIN_KEYMAP's `palette::toggle` key) to
     /// `workspace::split_right` instead. Per the layering contract
@@ -7693,311 +7917,202 @@ mod tests {
         );
     }
 
-    /// The settings-dialog rewrite's replacement for the composite-era
-    /// "escape from the focused settings search input closes the modal"
-    /// test: the new dialog has no input entity (and no focus of its own)
-    /// at all — `/` opens a find session owned by the modal's own key
-    /// handler instead. The escape contract it must honor is the
-    /// keybinding dialog's: escape MID-SESSION cancels the session and
-    /// restores the anchor selection WITHOUT closing the modal (the
-    /// handler consumes it, so `handle_key_down`'s escape fallback never
-    /// runs), and only a bare escape with nothing pending falls through
-    /// and closes the modal — real keystrokes, end to end.
     #[gpui::test]
-    fn escape_cancels_a_settings_find_session_before_closing_the_modal(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
-
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.simulate_keystrokes("ctrl-,");
+    fn opening_the_settings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        assert!(shell.read_with(&cx, |shell, _| shell.settings.is_some()));
         assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: ctrl-, should have opened the settings modal"
-        );
-
-        // `/key` jumps to the one Keyboard-category row (Find style,
-        // index 3) — proving the session is live and moved the selection.
-        cx.simulate_keystrokes("/ k e y");
-        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
-            let state = shell.settings.as_ref().expect("dialog open");
-            (state.selected, state.find.is_active())
-        });
-        assert_eq!(
-            (selected, find_active),
-            (3, true),
-            "sanity: '/key' should have jumped to the Find style row with \
-             the session still live"
-        );
-
-        cx.simulate_keystrokes("escape");
-        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
-            let state = shell.settings.as_ref().expect("dialog open");
-            (state.selected, state.find.is_active())
-        });
-        assert_eq!(
-            (selected, find_active),
-            (0, false),
-            "escape mid-session should cancel the find and restore the \
-             anchor selection"
-        );
-        assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "escape mid-session must NOT close the modal"
-        );
-
-        cx.simulate_keystrokes("escape");
-        assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
-            "escape with no session pending should fall through and close \
-             the modal"
+            filter_is_focused(&shell, &mut cx),
+            "the filter must own focus the moment the dialog opens"
         );
     }
 
-    /// `h`/`l` (and the arrow aliases) step the selected settings row's
-    /// value through the live setter cores, end to end through real
-    /// keystrokes: `j j` moves the selection to the Font size row, `l`
-    /// steps Medium → Large, `h h` steps back down to Small, and `right`
-    /// proves the arrow alias — asserting `ShellView::font_size` itself,
-    /// so what's proven is the wiring from key dispatch through
-    /// `settings_view`'s `step` to shell state (the pure stepping
-    /// semantics, wrap included, are `settings_view::tests`'). The tail
-    /// then walks the other rows — `k` up to Dark mode (`enter` cycles =
-    /// a toggle, asserted against the theme service's live mode), `k`
-    /// again to Theme (`l` steps to a different family), and `shift+g` to
-    /// the bottom Find style row (`l` flips vim → fzf) — so every one of
-    /// `apply_setting`'s four arms is exercised through the real dialog
-    /// path, not just the setter-core test wrappers.
+    /// Typing filters; the old `h`/`l` stepping keys are now just text,
+    /// and must not step anything on their way into the query.
     #[gpui::test]
-    fn h_and_l_step_a_settings_row_and_apply_the_setter(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
+    fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+        cx.simulate_input("dark");
+        let (query, selected) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().unwrap();
+            (state.query.clone(), state.selected)
         });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.simulate_keystrokes("ctrl-,");
-        assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: ctrl-, should have opened the settings modal"
-        );
-
-        // j j: Theme (0) → Dark mode (1) → Font size (2).
-        cx.simulate_keystrokes("j j");
+        assert_eq!(query, "dark");
+        assert_eq!(selected, 0, "a query selects the top match");
         assert_eq!(
-            shell.read_with(&cx, |shell, _| shell
-                .settings
-                .as_ref()
-                .expect("dialog open")
-                .selected),
-            2,
-            "sanity: selection should sit on the Font size row"
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark()),
+            before,
+            "typing must never apply a setting — the old h/l/enter stepping \
+             keys are plain text now"
         );
+    }
+
+    /// tab steps the selected row's value forward and shift+tab back,
+    /// through the same apply path a click takes. Narrowed to the Font
+    /// size row rather than the (two-value) Dark mode row deliberately:
+    /// on a two-value row `step(2, current, Left)` and
+    /// `step(2, current, Right)` land on the same value, so asserting
+    /// only "the value changed" either direction can't tell a correct
+    /// `StepDirection::Left`/`Right` mapping in `handle_key` from an
+    /// accidentally swapped one. Font size has three values
+    /// (Small/Medium/Large), so asserting the EXACT target after each
+    /// key -- not just "it changed" -- genuinely pins the direction: a
+    /// swapped mapping would land tab on Small, not Large.
+    #[gpui::test]
+    fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        cx.simulate_input("font");
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell.font_size),
             crate::fontsize::FontSize::Medium,
             "sanity: the test shell starts at the Medium default"
         );
 
-        cx.simulate_keystrokes("l");
+        cx.simulate_keystrokes("tab");
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell.font_size),
             crate::fontsize::FontSize::Large,
-            "l should step the Font size row's value forward"
+            "tab should step Font size forward, Medium -> Large"
         );
 
-        cx.simulate_keystrokes("h h");
-        assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.font_size),
-            crate::fontsize::FontSize::Small,
-            "h h should step back down through Medium to Small"
-        );
-
-        cx.simulate_keystrokes("right");
+        cx.simulate_keystrokes("shift-tab");
         assert_eq!(
             shell.read_with(&cx, |shell, _| shell.font_size),
             crate::fontsize::FontSize::Medium,
-            "right should alias l and step forward again"
-        );
-
-        // k: up to Dark mode (1); enter cycles a two-value row, i.e.
-        // toggles — asserted relative to whatever mode the shell started
-        // in rather than assuming a bundled default.
-        let dark_before =
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
-        cx.simulate_keystrokes("k enter");
-        let dark_after =
-            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
-        assert_ne!(
-            dark_after, dark_before,
-            "enter on the Dark mode row should toggle the live theme mode"
-        );
-
-        // k: up to Theme (0); l steps to a neighboring family, live.
-        let name_before = shell.read_with(&cx, |shell, _| {
-            shell.services.theme.active_name().to_string()
-        });
-        cx.simulate_keystrokes("k l");
-        let name_after = shell.read_with(&cx, |shell, _| {
-            shell.services.theme.active_name().to_string()
-        });
-        assert_ne!(
-            name_after, name_before,
-            "l on the Theme row should step to a different theme family"
-        );
-
-        // shift+g: bottom row is Find style (3); l flips vim → fzf.
-        assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.find_style),
-            crate::vimfind::FindStyle::Vim,
-            "sanity: find style defaults to vim"
-        );
-        cx.simulate_keystrokes("shift-g l");
-        assert_eq!(
-            shell.read_with(&cx, |shell, _| shell.find_style),
-            crate::vimfind::FindStyle::Fzf,
-            "l on the Find style row should flip the live find style"
+            "shift+tab should step it back, Large -> Medium"
         );
     }
 
-    /// The settings dialog honors `[ui] find_style = "fzf"` end to end:
-    /// `/find` filters the painted list down to the one matching row
-    /// (Find style — a non-matching row is genuinely not painted
-    /// mid-session), and `enter` picks: the session ends, the full list
-    /// returns to the frame, and the selection stays on the picked row
-    /// with the modal still open. Unlike the keybinding dialog's pick,
-    /// nothing further starts — the settings counterpart of
-    /// `fzf_find_filters_and_enter_picks_through_real_keystrokes`.
+    /// The three `apply_setting` arms `tab_and_shift_tab_step_the_
+    /// selected_value` doesn't reach (that test covers Font size) --
+    /// Theme, Dark mode, Find style -- each stepped once through a real
+    /// `tab` keystroke, so a mis-wired arm (e.g. `SettingId::Theme =>
+    /// set_font_size_on`) is caught here rather than nowhere: `
+    /// apply_setting` takes `&mut ShellView` and has no pure unit test of
+    /// its own. One fresh dialog per row rather than one dialog walked
+    /// with `j`/`k` (as the retired vim-nav version of this test did):
+    /// selecting a different row now means typing a different filter
+    /// query, and there's no key that clears the shared field back to
+    /// empty mid-session, so three small dialogs are simpler than one
+    /// that fights its own filter.
     #[gpui::test]
-    fn settings_fzf_find_filters_rows_and_enter_picks(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before = shell.read_with(&cx, |shell, _| {
+                shell.services.theme.active_name().to_string()
+            });
+            cx.simulate_input("theme");
+            cx.simulate_keystrokes("tab");
+            let after = shell.read_with(&cx, |shell, _| {
+                shell.services.theme.active_name().to_string()
+            });
+            assert_ne!(
+                after, before,
+                "tab on the Theme row should step to a different theme"
+            );
+        }
 
-        let mut services = test_services();
-        services.config = Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
-            desk: None,
-            user: None,
-        });
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before =
+                shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+            cx.simulate_input("dark");
+            cx.simulate_keystrokes("tab");
+            let after =
+                shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+            assert_eq!(after, !before, "tab on the Dark mode row should toggle it");
+        }
 
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
+        {
+            let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+            let before = shell.read_with(&cx, |shell, _| shell.find_style);
+            cx.simulate_input("keyboard");
+            cx.simulate_keystrokes("tab");
+            let after = shell.read_with(&cx, |shell, _| shell.find_style);
+            assert_ne!(
+                after, before,
+                "tab on the Find style row should flip vim/fzf"
+            );
+        }
+    }
 
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.simulate_keystrokes("ctrl-,");
-        assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "sanity: ctrl-, should have opened the settings modal"
-        );
-
-        // "find" matches only the Find style row (index 3) — by title,
-        // since searchable text is title + category, never value labels.
-        cx.simulate_keystrokes("/ f i n d");
-        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
-            let state = shell.settings.as_ref().expect("dialog open");
-            (state.selected, state.find.is_active())
-        });
-        assert_eq!(
-            (selected, find_active),
-            (3, true),
-            "the fzf query should re-select its one match with the \
-             session live"
-        );
-
-        // Mid-session draw: only the matching row paints.
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        assert!(
-            cx.debug_bounds("settings-row-3").is_some(),
-            "the matching Find style row should be painted during the \
-             fzf session"
-        );
-        assert!(
-            cx.debug_bounds("settings-row-0").is_none(),
-            "the non-matching Theme row must NOT be painted while the \
-             fzf filter narrows the list"
-        );
+    /// Enter is inert and reserved here (spec §3): it must not step a
+    /// value, and must not close the dialog either.
+    #[gpui::test]
+    fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        cx.simulate_input("dark");
+        let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
 
         cx.simulate_keystrokes("enter");
-        let (selected, find_active) = shell.read_with(&cx, |shell, _| {
-            let state = shell.settings.as_ref().expect("dialog open");
-            (state.selected, state.find.is_active())
+        shell.read_with(&cx, |shell, _| {
+            assert_eq!(
+                shell.services.theme.active_mode().is_dark(),
+                before,
+                "enter must not step the value"
+            );
+            assert!(shell.modal.is_some(), "and must not close the dialog");
         });
-        assert_eq!(
-            (selected, find_active),
-            (3, false),
-            "enter should pick: session over, selection on the picked row"
-        );
-        assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "an fzf pick must leave the modal open"
-        );
+    }
 
-        // The full list is back after the pick.
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
+    /// The full inertness contract for the reserved `enter` (spec §3):
+    /// with a focused `Input`, `handle_key` returning `false` for it would
+    /// NOT make it inert — `enter` would reach the filter, be normalized
+    /// away to an empty edit, but still fire an unconditional
+    /// `InputEvent::Change` that resets `selected` back to the top match
+    /// via `SettingsState::set_query`. `handle_key` claims it instead (see
+    /// its own doc comment). Unlike `enter_does_nothing_in_the_settings_
+    /// dialog` above, this moves the selection off the top row FIRST, so
+    /// a reset back to 0 is actually observable.
+    #[gpui::test]
+    fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        cx.simulate_keystrokes("down down");
+        let selected_before =
+            shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected);
+        assert_eq!(
+            selected_before, 2,
+            "sanity: two downs land on the third row"
+        );
+        let dark_before =
+            shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+
+        cx.simulate_keystrokes("enter");
+
+        let (query, selected, dark_after, open) = shell.read_with(&cx, |shell, _| {
+            let state = shell.settings.as_ref().unwrap();
+            (
+                state.query.clone(),
+                state.selected,
+                shell.services.theme.active_mode().is_dark(),
+                shell.modal.is_some(),
+            )
         });
         assert!(
-            cx.debug_bounds("settings-row-0").is_some(),
-            "the full list (Theme row included) should paint again once \
-             the session ends"
+            query.is_empty(),
+            "enter must not leave any character in the filter"
+        );
+        assert_eq!(
+            selected, selected_before,
+            "enter must not reset the selection to the top match"
+        );
+        assert_eq!(dark_after, dark_before, "enter must not step any value");
+        assert!(open, "enter must not close the dialog");
+    }
+
+    #[gpui::test]
+    fn escape_closes_the_settings_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+        cx.simulate_keystrokes("escape");
+        shell.read_with(&cx, |shell, _| {
+            assert!(shell.modal.is_none());
+            assert!(shell.settings.is_none(), "close_modal clears dialog state");
+        });
+        assert!(
+            cx.update(|window, cx| shell.read(cx).focus_handle.is_focused(window)),
+            "focus lands back on the shell root"
         );
     }
 
@@ -8843,14 +8958,20 @@ mod tests {
         );
     }
 
-    /// Vim `/` find, end to end through real keystrokes: `/focus` jumps
-    /// the selection to a matching row live, `enter` commits, `n` and
-    /// `shift+n` repeat forward/backward — the wiring around the pure
-    /// cores `vimfind::tests` and `keybindings_view::tests` already prove.
-    #[gpui::test]
-    fn slash_find_jumps_to_a_matching_row_and_n_repeats(cx: &mut gpui::TestAppContext) {
+    /// Open a real window with a real `ShellView`, draw a frame, dispatch
+    /// `action`, draw again — the preamble every dialog test here needs.
+    fn dialog_test_shell(
+        cx: &mut gpui::TestAppContext,
+        action: &str,
+    ) -> (Entity<ShellView>, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
-
+        // Same reclaimed keybindings `main` registers in production
+        // (`dialog::init_reclaimed_keybindings`'s own doc comment has the
+        // full mechanism for each) — without this, a dialog test that
+        // presses tab would prove nothing: gpui-component's `Root` would
+        // still silently consume it exactly as it does in an unpatched
+        // window.
+        cx.update(dialog::init_reclaimed_keybindings);
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
@@ -8859,315 +8980,139 @@ mod tests {
                 })
             })
             .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
+        let root = window.root(&mut vcx).unwrap();
+        let shell = root.read_with(&vcx, |root, _cx| {
             root.view()
                 .clone()
                 .downcast::<ShellView>()
                 .unwrap_or_else(|_| panic!("root view is not a ShellView"))
         });
-
-        cx.update(|window, cx| {
+        vcx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId(action.to_string()), window, cx);
             });
         });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (shell, vcx)
+    }
 
-        let selected_text = |cx: &gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, _| {
-                let rows =
-                    keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
-                let selected = shell.keybindings.as_ref().expect("dialog open").selected;
-                keybindings_view::searchable_text(&rows[selected])
-            })
-        };
+    /// Does the shared dialog filter currently hold focus?
+    fn filter_is_focused(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> bool {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .dialog_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    }
 
-        cx.simulate_keystrokes("/ f o c u s");
-        let live = selected_text(&cx);
+    /// Opening the dialog focuses the shared filter, so the first
+    /// character typed filters instead of falling on the floor.
+    #[gpui::test]
+    fn opening_the_keybindings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
         assert!(
-            live.to_lowercase().contains("focus"),
-            "the incremental jump should already sit on a 'focus' row before \
-             enter, got {live:?}"
+            shell.read_with(&cx, |shell, _| shell.keybindings.is_some()),
+            "sanity: keybindings::open should have opened the dialog"
         );
-
-        cx.simulate_keystrokes("enter");
-        let committed = selected_text(&cx);
-        assert_eq!(committed, live, "enter keeps the incremental match");
-
-        cx.simulate_keystrokes("n");
-        let next = selected_text(&cx);
         assert!(
-            next.to_lowercase().contains("focus") && next != committed,
-            "n should advance to a DIFFERENT matching row, got {next:?}"
-        );
-
-        cx.simulate_keystrokes("shift-n");
-        assert_eq!(
-            selected_text(&cx),
-            committed,
-            "shift+n should step back to the previous match"
+            filter_is_focused(&shell, &mut cx),
+            "the filter must own focus the moment the dialog opens"
         );
     }
 
-    /// With `[ui] find_style = "fzf"`, `/` runs the filter idiom end to
-    /// end through real keystrokes: every edit re-selects the FIRST match,
-    /// `down` steps through the matches, and `enter` picks the row and
-    /// starts rebind listening — the wiring over the pure transitions
-    /// `keybindings_view::tests`' fzf block already proves
-    /// (`handle_key`'s gate on `ShellView::find_style` is exactly what
-    /// this exercises).
+    /// The retired vim motion is now plain text: `j` types a `j` and
+    /// leaves the selection where it was.
     #[gpui::test]
-    fn fzf_find_filters_and_enter_picks_through_real_keystrokes(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-
-        let mut services = test_services();
-        services.config = Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
-            desk: None,
-            user: None,
+    fn typing_j_filters_rather_than_moving_the_selection(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_input("j");
+        let (query, selected) = shell.read_with(&cx, |shell, _| {
+            let state = shell.keybindings.as_ref().unwrap();
+            (state.query.clone(), state.selected)
         });
-
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
-            });
-        });
-
-        // The full-list indices of the 'focus' matches — what the narrowed
-        // list will render, in order.
-        let matches = shell.read_with(&cx, |shell, _| {
-            let rows =
-                keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
-            let texts: Vec<String> = rows.iter().map(keybindings_view::searchable_text).collect();
-            keybindings_view::filter_matches(&texts, "focus")
-        });
-        assert!(
-            matches.len() >= 2,
-            "sanity: expected at least two 'focus' rows, got {matches:?}"
-        );
-
-        let state_of = |cx: &gpui::VisualTestContext| {
-            shell.read_with(cx, |shell, _| {
-                let state = shell.keybindings.as_ref().expect("dialog open");
-                (
-                    state.selected,
-                    state.find.is_active(),
-                    state.listening.is_some(),
-                )
-            })
-        };
-
-        // A draw with the dialog idle exercises the fzf footer hints
-        // (`chip("up")`/`chip("down")`/`chip("enter")` must all parse).
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        cx.simulate_keystrokes("/ f o c u s");
-        assert_eq!(
-            state_of(&cx),
-            (matches[0], true, false),
-            "each edit should re-select the FIRST match, session live"
-        );
-
-        // Mid-session draw: the list must now paint ONLY matching rows.
-        // Row selectors are keyed by full-list index, so a match row is
-        // painted and the first non-match row (near the top of the full
-        // list, i.e. well within the viewport when unfiltered) is not.
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-        let first_non_match = (0..).find(|ix| !matches.contains(ix)).unwrap();
-        // `debug_bounds` takes `&'static str`; leak the two dynamic
-        // selectors (test-only, a few bytes).
-        let match_selector: &'static str =
-            Box::leak(format!("keybindings-row-{}", matches[0]).into_boxed_str());
-        let non_match_selector: &'static str =
-            Box::leak(format!("keybindings-row-{first_non_match}").into_boxed_str());
-        assert!(
-            cx.debug_bounds(match_selector).is_some(),
-            "the first matching row should be painted during the fzf session"
-        );
-        assert!(
-            cx.debug_bounds(non_match_selector).is_none(),
-            "a non-matching row (index {first_non_match}) must NOT be \
-             painted while the fzf filter narrows the list"
-        );
-
-        cx.simulate_keystrokes("down");
-        assert_eq!(
-            state_of(&cx),
-            (matches[1], true, false),
-            "down should step to the second match"
-        );
-
-        cx.simulate_keystrokes("enter");
-        assert_eq!(
-            state_of(&cx),
-            (matches[1], false, true),
-            "enter should end the session on the picked row and start \
-             rebind listening immediately"
-        );
+        assert_eq!(query, "j", "j must reach the filter as text");
+        assert_eq!(selected, 0, "j must not move the selection any more");
     }
 
-    /// j/5j/gg/G/ctrl+d move the selection through `vimnav`, exactly as
-    /// `vimnav::tests` proves the pure core does — this proves the wiring
-    /// end to end, through a real keystroke and `ShellView::keybindings`.
+    /// Arrow and ctrl motions still move the selection, and do it without
+    /// disturbing the filter's focus or its text.
     #[gpui::test]
-    fn vim_navigation_moves_the_selection(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
-
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
-        });
-
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
-            });
-        });
-
-        let row_count = shell.read_with(&cx, |shell, _| {
-            keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap).len()
-        });
-        assert!(
-            row_count >= 5,
-            "sanity: expected several rows, got {row_count}"
-        );
-
-        fn selected_row(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
-            shell.read_with(cx, |shell, _| shell.keybindings.as_ref().unwrap().selected)
-        }
+    fn arrows_and_ctrl_motions_move_the_selection(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_keystrokes("down down");
         assert_eq!(
-            selected_row(&shell, &cx),
-            0,
-            "sanity: starts at the top row"
+            shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected),
+            2,
+            "two downs should land on the third row"
         );
-
-        cx.simulate_keystrokes("j");
-        assert_eq!(selected_row(&shell, &cx), 1, "j should move down by one");
-
-        cx.simulate_keystrokes("5 j");
-        assert_eq!(
-            selected_row(&shell, &cx),
-            6,
-            "5j should move down by five more"
-        );
-
-        cx.simulate_keystrokes("shift-g");
-        assert_eq!(
-            selected_row(&shell, &cx),
-            row_count - 1,
-            "shift+g (G) should jump to the last row"
-        );
-
-        cx.simulate_keystrokes("g g");
-        assert_eq!(
-            selected_row(&shell, &cx),
-            0,
-            "gg should jump back to the top row"
-        );
-
-        cx.simulate_keystrokes("ctrl-d");
-        assert_eq!(
-            selected_row(&shell, &cx),
-            5,
-            "ctrl+d should move down by five"
-        );
-
         cx.simulate_keystrokes("ctrl-u");
         assert_eq!(
-            selected_row(&shell, &cx),
+            shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected),
             0,
-            "ctrl+u should move back up by five, clamped at 0"
+            "ctrl+u steps back 5, clamped at the top of the list"
+        );
+        assert!(
+            shell.read_with(&cx, |shell, _| shell
+                .keybindings
+                .as_ref()
+                .unwrap()
+                .query
+                .is_empty()),
+            "navigation must not put anything in the filter"
+        );
+        assert!(
+            filter_is_focused(&shell, &mut cx),
+            "navigation must not steal focus from the filter"
         );
     }
 
-    /// `space` on the selected row starts listening; `escape` while
-    /// listening cancels the capture WITHOUT closing the modal (falls back
-    /// to ordinary dialog nav) — distinct from `escape` with nothing
-    /// pending, which does close the modal (covered separately below).
+    /// `tab` is reserved here (it steps values in the settings dialog,
+    /// which has nothing to step) and must be genuinely inert: with a
+    /// focused `Input`, `handle_key` returning `false` for it would NOT
+    /// make it inert — the key would continue to the filter's own
+    /// text-input phase, and `InputState::normalize_input` strips only
+    /// `\n`/`\r`, not `\t`, so it would land as a literal tab character
+    /// and collapse the list to "no matches". `handle_key` claims it
+    /// instead (see its own doc comment).
     #[gpui::test]
-    fn space_starts_listening_and_escape_while_listening_cancels_without_closing(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
+    fn tab_is_reserved_and_leaves_the_keybindings_dialog_untouched(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_keystrokes("down down");
+        let selected_before =
+            shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected);
+        assert_eq!(
+            selected_before, 2,
+            "sanity: two downs land on the third row"
+        );
 
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
+        cx.simulate_keystrokes("tab");
 
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        cx.update(|window, cx| {
-            let _ = window.draw(cx);
+        let (query, selected) = shell.read_with(&cx, |shell, _| {
+            let state = shell.keybindings.as_ref().unwrap();
+            (state.query.clone(), state.selected)
         });
+        assert!(
+            query.is_empty(),
+            "tab must not leak a literal tab character into the filter"
+        );
+        assert_eq!(selected, selected_before, "tab must not move the selection");
+    }
 
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
-            });
-        });
-
-        cx.simulate_keystrokes("space");
+    /// Enter blurs the filter so rebind capture sees raw keys: the letter
+    /// lands in the pending binding, NOT in the query.
+    #[gpui::test]
+    fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_keystrokes("enter");
         assert!(
             shell.read_with(&cx, |shell, _| shell
                 .keybindings
@@ -9175,78 +9120,123 @@ mod tests {
                 .unwrap()
                 .listening
                 .is_some()),
-            "space should have started listening"
+            "enter should start listening on the selected row"
+        );
+        assert!(
+            !filter_is_focused(&shell, &mut cx),
+            "listening must blur the filter, or the capture can never see a letter"
         );
 
-        cx.simulate_keystrokes("ctrl-alt-x");
+        cx.simulate_input("j");
+        let (pending, query) = shell.read_with(&cx, |shell, _| {
+            let state = shell.keybindings.as_ref().unwrap();
+            (state.listening.clone(), state.query.clone())
+        });
         assert_eq!(
-            shell.read_with(&cx, |shell, _| shell
-                .keybindings
-                .as_ref()
-                .unwrap()
-                .listening
-                .as_ref()
-                .unwrap()
-                .len()),
-            1,
-            "the keystroke should have appended to the pending capture"
-        );
-
-        cx.simulate_keystrokes("escape");
-        assert!(
-            shell.read_with(&cx, |shell, _| shell
-                .keybindings
-                .as_ref()
-                .unwrap()
-                .listening
-                .is_none()),
-            "escape while listening should cancel the capture"
+            pending.as_deref().map(<[_]>::len),
+            Some(1),
+            "the letter must be captured as the new binding"
         );
         assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_some()),
-            "escape while listening must NOT close the modal"
+            query.is_empty(),
+            "and must NOT have been typed into the filter"
         );
     }
 
-    /// `escape` with nothing pending (ordinary nav mode) closes the modal —
-    /// same contract as every other Geode modal.
+    /// Escape cancels the capture, refocuses the filter, and leaves both
+    /// the query and the dialog itself alone.
     #[gpui::test]
-    fn escape_outside_listening_closes_the_modal(cx: &mut gpui::TestAppContext) {
-        cx.update(gpui_component::init);
+    fn escape_cancels_a_capture_without_closing_the_dialog(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_input("f");
+        cx.simulate_keystrokes("enter");
+        cx.simulate_input("j");
+        cx.simulate_keystrokes("escape");
 
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
+        let (listening, query, open) = shell.read_with(&cx, |shell, _| {
+            let state = shell.keybindings.as_ref().unwrap();
+            (
+                state.listening.is_some(),
+                state.query.clone(),
+                shell.modal.is_some(),
+            )
+        });
+        assert!(!listening, "escape should cancel the capture");
+        assert!(open, "and must not also close the dialog behind it");
+        assert_eq!(query, "f", "the filter text survives a cancelled capture");
+        assert!(
+            filter_is_focused(&shell, &mut cx),
+            "cancelling hands focus back to the filter"
+        );
+    }
 
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    /// Escape from the resting state closes the dialog and returns focus
+    /// to the shell root, so shell chords work again immediately.
+    #[gpui::test]
+    fn escape_closes_the_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_keystrokes("escape");
+        shell.read_with(&cx, |shell, _| {
+            assert!(shell.modal.is_none(), "escape should close the modal");
+            assert!(
+                shell.keybindings.is_none(),
+                "close_modal must clear the dialog state too, or the shared \
+                 input's subscription can route into a stale dialog"
+            );
+        });
+        assert!(
+            !filter_is_focused(&shell, &mut cx),
+            "focus must leave the filter on close"
+        );
+        assert!(
+            cx.update(|window, cx| shell.read(cx).focus_handle.is_focused(window)),
+            "and land back on the shell root"
+        );
+    }
+
+    /// The filter narrows what actually *paints*, and the narrowed list
+    /// renders its fuzzy highlights without blowing up — the painted half
+    /// of this dialog's conversion, re-expressing what the retired fzf
+    /// find test used to prove about its own narrowed list. Row selectors
+    /// stay keyed by full-list index, so a surviving row and a hidden one
+    /// can be addressed by identity.
+    #[gpui::test]
+    fn typing_a_query_narrows_the_rows_that_paint(cx: &mut gpui::TestAppContext) {
+        let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+        cx.simulate_input("focus");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
 
-        let root = window.root(&mut cx).unwrap();
-        let shell = root.read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+        let (visible, row_count) = shell.read_with(&cx, |shell, _| {
+            let rows =
+                keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+            let state = shell.keybindings.as_ref().expect("dialog open");
+            let visible: Vec<usize> = keybindings_view::visible_rows(state, &rows)
+                .iter()
+                .map(|m| m.row)
+                .collect();
+            (visible, rows.len())
         });
-
-        cx.update(|window, cx| {
-            shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
-            });
-        });
-        assert!(shell.read_with(&cx, |shell, _| shell.modal.is_some()));
-
-        cx.simulate_keystrokes("escape");
         assert!(
-            shell.read_with(&cx, |shell, _| shell.modal.is_none()),
-            "escape with nothing pending should close the modal"
+            !visible.is_empty() && visible.len() < row_count,
+            "sanity: 'focus' should match some rows but not all, got {visible:?} of {row_count}"
+        );
+
+        let first_hidden = (0..row_count).find(|ix| !visible.contains(ix)).unwrap();
+        // `debug_bounds` takes `&'static str`; leak the two dynamic
+        // selectors (test-only, a few bytes).
+        let match_selector: &'static str =
+            Box::leak(format!("keybindings-row-{}", visible[0]).into_boxed_str());
+        let hidden_selector: &'static str =
+            Box::leak(format!("keybindings-row-{first_hidden}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(match_selector).is_some(),
+            "a matching row must still paint under the filter"
+        );
+        assert!(
+            cx.debug_bounds(hidden_selector).is_none(),
+            "a non-matching row (index {first_hidden}) must not paint under the filter"
         );
     }
 
@@ -9304,7 +9294,7 @@ mod tests {
                 .clone()
         });
 
-        cx.simulate_keystrokes("space");
+        cx.simulate_keystrokes("enter");
         // A two-keystroke sequence, proving multi-keystroke capture works,
         // not just a single chord.
         cx.simulate_keystrokes("ctrl-alt-x");

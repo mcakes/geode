@@ -24,6 +24,18 @@ fn main() {
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx); // must run before any component use
+            // Reclaim `tab`/`shift-tab` (from gpui-component's `Root` focus
+            // cycling) and `ctrl-f` (from its editor `Search` action, which
+            // otherwise swallows the list dialogs' and command palette's
+            // "page down" on Windows and Linux) — see that function's own
+            // doc comment for the full mechanism per key and why each is
+            // scoped the way it is. Shared with
+            // `shell::tests::dialog_test_shell` so the dialogs' own tests
+            // prove the `tab` reclaim, rather than merely assuming it holds
+            // here; `ctrl-f` has no such test (see the function's doc
+            // comment).
+            geode_shell::shell::dialog::init_reclaimed_keybindings(cx);
+
             fonts::register(cx); // bundled Inter/JetBrains Mono (Task 10) —
             // after init (installs the Theme global this edits), before the
             // window opens so the first frame already carries them.

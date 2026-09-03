@@ -160,6 +160,13 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
 /// Empty `indices` (an empty query, per [`fuzzy_match`]'s doc) yields no
 /// runs at all.
 ///
+/// `pub(crate)` since the filter-first dialog UX:
+/// `keybindings_view::highlighted_text` paints its rows' fuzzy matches
+/// through this same conversion rather than growing a second copy — and
+/// it leans on the out-of-range guard below deliberately, since it feeds
+/// one row's indices to two separate label lines (title, then category)
+/// and each pass must simply skip the other line's.
+///
 /// **Out-of-range guard** (fix-round nit): the indices are positions in
 /// the *lowered* match text while `boundaries` comes from the
 /// original-case `title`, and `str::to_lowercase` is not always
@@ -173,7 +180,7 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
 /// highlight, and free-form theme names would be all it takes. Indices
 /// that fall outside the title are therefore skipped (the in-range
 /// characters still highlight normally) instead of indexing.
-fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Range<usize>> {
     if indices.is_empty() {
         return Vec::new();
     }
@@ -481,7 +488,7 @@ use gpui::{
     Window, div, px,
 };
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, h_flex, v_flex};
 
 use crate::fonts;
 
@@ -691,10 +698,18 @@ pub fn render(
         }
     }
 
-    // No placeholder helper text (plan constraint: removed entirely) — an
-    // empty query renders as a bare, empty `Input`, caret first, rather than
-    // falling back to hint text. `.appearance(false)` strips `Input`'s own
-    // border/background (see this function's doc comment); the bottom
+    // A muted search icon in the `prefix` slot, and still no placeholder
+    // helper text: an empty query shows the icon and a caret, never hint
+    // text. This is gpui-component's own idiom for this exact surface —
+    // its command palette builds the identical `prefix` +
+    // `appearance(false)` pair (pinned checkout, `crates/ui/src/command/
+    // state.rs:838-846`), which is why the icon keeps its default size —
+    // and the same one `shell::dialog::filter_row` wears, so all three
+    // filtering surfaces read alike.
+    //
+    // `.appearance(false)` strips `Input`'s own border/background (see
+    // this function's doc comment) but not its prefix, which that flag
+    // never guards (`crates/ui/src/input/input.rs:578-584`); the bottom
     // border below is `input_row`'s own, standing in for the chrome
     // `appearance(true)` would otherwise have drawn, just scoped to
     // separating the query row from `list` rather than boxing the input
@@ -703,7 +718,12 @@ pub fn render(
         .w_full()
         .border_b_1()
         .border_color(theme.border)
-        .child(Input::new(query_input).appearance(false).w_full());
+        .child(
+            Input::new(query_input)
+                .appearance(false)
+                .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                .w_full(),
+        );
 
     div()
         .absolute()
@@ -714,11 +734,30 @@ pub fn render(
         .flex_col()
         .gap_2()
         .p_2()
+        // The same panel frame `dialog::render_modal` wears — background,
+        // text, border, radius token and drop shadow — so the palette and
+        // the dialogs read as siblings (user direction: "unify the
+        // appearance"). The radius was a hardcoded `px(8.)` before this;
+        // `theme.radius_lg` is the same idea but follows the theme, which
+        // is what every other rounded surface in this crate already does.
+        //
+        // What deliberately still differs: the interior rhythm (this is a
+        // denser surface — `ROW_HEIGHT` 28px against the dialogs' 44px, so
+        // matching their `px_4`/`gap_3` would loosen it into looking like a
+        // different component), the absent title row (a palette has no
+        // title to show), and the undimmed backdrop — see the click-catcher
+        // in `ShellView::render` for why that one is a decision, not an
+        // omission.
         .bg(theme.popover)
         .text_color(theme.popover_foreground)
         .border_1()
         .border_color(theme.border)
-        .rounded(px(8.))
+        .rounded(theme.radius_lg)
+        .shadow(crate::shell::dialog::overlay_panel_shadow())
+        // Blocks hover and scroll under the panel, not just the clicks the
+        // `on_mouse_down` below already stops — `render_modal`'s panel has
+        // had this from the start; the palette simply never grew it.
+        .occlude()
         // Test-only, see `list`'s `debug_selector` comment above — lets a
         // `#[gpui::test]` recover the panel's own painted bounds to click
         // inside it (precedent: `dialog::render_modal`'s

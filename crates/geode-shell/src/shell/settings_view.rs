@@ -9,8 +9,10 @@
 //! The old dialog was the one surface in Geode that didn't speak the
 //! shell's own language: mouse-first controls (a dropdown popup, a switch,
 //! button groups), its own search input with its own focus, none of the
-//! vim vocabulary every other list surface here has (`crate::vimnav`
-//! motions, `/` find via `crate::vimfind`), and a stack of documented
+//! vim vocabulary every other list surface here HAD AT THE TIME
+//! (`crate::vimnav` motions, `/` find via `crate::vimfind` — both since
+//! retired from every dialog by the filter-first rewrite, see
+//! `keybindings_view`'s module doc), and a stack of documented
 //! layout workarounds just to keep the composite from collapsing inside
 //! our own modal chrome (see `dialog::render_modal`'s height-contract doc
 //! comment for the scar tissue that remains). The keybinding dialog
@@ -27,16 +29,19 @@
 //! Font size under **Appearance**, Find style under **Keyboard**. Each row
 //! is one enumerated setting — an ordered list of value labels plus the
 //! index of the currently-active one — and editing is *stepping*:
-//! `h`/`left` and `l`/`right` step the selected row's value (wrapping at
-//! both ends, [`step`]), `enter`/`space` cycle forward, and a click on the
-//! already-selected row cycles forward too (the mirror of keybindings'
-//! click-to-listen). A step applies IMMEDIATELY through the same
-//! apply-then-persist seams the old dialog's controls used
+//! `tab`/`shift+tab` step the selected row's value forward/back (wrapping
+//! at both ends, [`step`]), and a click on the already-selected row
+//! cycles forward too (the mirror of keybindings' click-to-listen). A
+//! step applies IMMEDIATELY through the same apply-then-persist seams the
+//! old dialog's controls used
 //! ([`set_theme`]/[`set_dark_mode`]/[`set_font_size`]/[`set_find_style`]'s
 //! shared `*_on` cores) — theme stepping is a live preview, and
 //! persistence stays on the existing background paths
 //! (`ShellView::persist_theme` and friends; no I/O lands on the render
-//! thread here).
+//! thread here). `enter` is deliberately inert and reserved (a step
+//! already applies the instant it happens, so there is nothing for enter
+//! to confirm) — see the "Filter" section below for why `tab` rather than
+//! the retired `h`/`l`/arrow keys is what reaches this dialog at all.
 //!
 //! The old dialog's read-only content — the "Mod key: …" line and the
 //! "saved to your app.toml" caption — survives as muted inert footer
@@ -54,19 +59,25 @@
 //! and must not reenter the entity via `Entity::update`) can apply the
 //! identical path.
 //!
-//! ## Find (`/`), both styles
+//! ## Filter
 //!
-//! Identical semantics to the keybinding dialog, via the shared session
-//! drivers in [`crate::vimfind`] (promoted out of `keybindings_view` by
-//! this same rewrite): vim style jumps the selection incrementally from
-//! the anchor with `n`/`shift+n` repeats; fzf style narrows the rendered
-//! list, `up`/`down` step the matches, and `enter` picks — with the one
-//! settings-specific meaning of *picking*: the session just ends, full
-//! list back, selection on the picked row (there is no "listening" to
-//! start here — [`vimfind::FzfOutcome::Picked`] needs no extra work at
-//! all). Searchable text per row is title + category
-//! ([`searchable_text`]) — exactly what the row displays, matching
-//! keybindings' philosophy of never matching invisible text.
+//! `docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md`
+//! replaced this dialog's vim motions and `/` find (both styles) with the
+//! keybinding dialog's own always-focused fuzzy filter: opening the
+//! dialog focuses `ShellView::dialog_input`, so the first character typed
+//! narrows the list ([`visible_rows`] over [`searchable_text`]) rather
+//! than falling on the floor, and what this dialog itself still claims is
+//! the short vocabulary a focused `Input` leaves free
+//! ([`crate::listfilter::nav_command`]: `up`/`down`/`ctrl+p`/`ctrl+n` ∓1,
+//! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus
+//! `tab`/`shift+tab` for stepping — reaching this dialog at all needs
+//! more than the `Input`'s own gating (see [`handle_key`]'s doc comment
+//! and `dialog::init_reclaimed_keybindings`). The `[ui] find_style`
+//! setting and its
+//! row are untouched by this — `FindStyle` still exists, is still
+//! rendered and still steppable like any other row (spec §8) — this
+//! dialog (and the keybinding dialog) simply stop *reading* it to steer
+//! their own navigation.
 
 use std::rc::Rc;
 
@@ -77,13 +88,14 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use crate::fontsize::FontSize;
 use crate::keymap::Keystroke;
 use crate::keymap::Modifiers;
+use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
 use crate::theme::Mode;
-use crate::vimfind::{self, FindDirection, FindStyle, VimFind, filter_matches};
-use crate::vimnav::{self, NavResult, VimListNav};
+use crate::vimfind::FindStyle;
+use crate::vimnav;
 
-use super::keybindings_view::{highlighted_text, key_chip};
+use super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
 // ---------------------------------------------------------------------
 // Pure core — no gpui. Row derivation, value stepping, session state.
@@ -179,8 +191,13 @@ pub fn derive_rows(
     ]
 }
 
-/// Which way a value step goes — `h`/`left` vs. `l`/`right` (and
-/// `enter`/`space`/same-row click, which cycle forward = `Right`).
+/// Which way a value step goes — `tab` (forward, `Right`) vs. `shift+tab`
+/// (back, `Left`), and a click on the already-selected row (forward,
+/// mirroring `tab`). The old dialog's `h`/`left`/`l`/`right` motions and
+/// its `enter`/`space` cycle-forward keys are retired along with the vim
+/// vocabulary this dialog no longer speaks (see the module doc); `enter`
+/// is deliberately inert now rather than aliased onto `Right` — see
+/// [`handle_key`]'s own doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepDirection {
     Left,
@@ -190,9 +207,10 @@ pub enum StepDirection {
 /// The value index one step from `current` in a `len`-value list,
 /// WRAPPING at both ends — deliberately unlike `vimnav::apply`'s clamped
 /// list navigation: a settings value is a cycle (fzf → vim → fzf), not a
-/// list with ends, and wrap is what makes `enter`'s cycle-forward reach
-/// every value. `len == 0` yields 0 (unreachable for real rows — every
-/// setting has at least two values — but deterministic).
+/// list with ends, and wrap is what lets a run of `tab` presses (or
+/// repeated clicks on the same row) reach every value without ever
+/// hitting a dead end. `len == 0` yields 0 (unreachable for real rows —
+/// every setting has at least two values — but deterministic).
 pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
     if len == 0 {
         return 0;
@@ -212,48 +230,73 @@ pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
 /// without a window.
 #[derive(Debug, Default)]
 pub struct SettingsState {
+    /// Index into the **filtered** row list ([`visible_rows`]), not the
+    /// full one — the same convention `KeybindingsState::selected` uses.
     pub selected: usize,
-    pub nav: VimListNav,
-    /// Vim-style `/` find over the rows ([`crate::vimfind`]): the session
-    /// state machine plus the committed query for vim-style `n`/`N`.
-    pub find: VimFind,
-    /// The selection when `/` was pressed — the incremental jump's origin,
-    /// and what `escape` restores. `None` outside a find session.
-    pub find_anchor: Option<usize>,
+    /// The filter query, mirrored from `ShellView::dialog_input`.
+    pub query: String,
 }
 
 impl SettingsState {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Replace the query and reset the selection to the top match — the
+    /// pure half of the `InputEvent::Change` subscription in
+    /// `ShellView::new`.
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.selected = 0;
+    }
 }
 
-/// The text one row exposes to `/` find: title and category — exactly
+/// The text one row exposes to the filter: title and category — exactly
 /// what the row displays as its identity, and nothing more. The value
 /// labels deliberately do NOT participate (same philosophy as
 /// keybindings' `searchable_text` excluding the invisible action id, one
-/// step further: values ARE visible, but `/gruvbox` jumping to the Theme
-/// row only when Gruvbox happens to be active — and `/large` matching
-/// Font size only sometimes — would make matching depend on current
-/// state rather than on what the row *is*).
+/// step further: values ARE visible, but `gruvbox` matching the Theme
+/// row only when Gruvbox happens to be active — and `large` matching Font
+/// size only sometimes — would make matching depend on current state
+/// rather than on what the row *is*).
 pub fn searchable_text(row: &SettingRow) -> String {
     format!("{} {}", row.title, row.category)
 }
 
-/// What a click on row `clicked_ix` does to already-open dialog state:
-/// clicking any other row selects it (cancelling any in-progress find
-/// session or pending nav gesture — the click wins, same as keybindings'
-/// `click_selects_or_listens`); clicking the already-selected row means
-/// "cycle this row's value forward" — returns `true` so the gpui caller
-/// ([`on_row_clicked`]) applies the step, keeping this function pure.
+/// The rows this dialog currently shows, ranked — the settings twin of
+/// `keybindings_view::visible_rows`, over [`searchable_text`] (title and
+/// category; the value labels deliberately do not participate — see that
+/// function's doc comment).
+pub fn visible_rows(state: &SettingsState, rows: &[SettingRow]) -> Vec<Ranked> {
+    let texts: Vec<String> = rows.iter().map(searchable_text).collect();
+    listfilter::rank(&texts, &state.query)
+}
+
+/// Where the row for `clicked` currently sits in the *filtered* list, or
+/// `None` if the filter is hiding it — the settings twin of
+/// `keybindings_view::filtered_position`, keyed by [`SettingId`] rather
+/// than `ActionId` for the same identity-not-position reason.
+pub fn filtered_position(
+    visible: &[Ranked],
+    rows: &[SettingRow],
+    clicked: SettingId,
+) -> Option<usize> {
+    visible
+        .iter()
+        .position(|m| rows.get(m.row).is_some_and(|r| r.id == clicked))
+}
+
+/// What a click on filtered position `clicked_ix` does to already-open
+/// dialog state: clicking any other row selects it (the click wins, same
+/// as keybindings' `click_selects_or_listens`); clicking the
+/// already-selected row means "cycle this row's value forward" — returns
+/// `true` so the gpui caller ([`on_row_clicked`]) applies the step,
+/// keeping this function pure.
 pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> bool {
-    state.find.cancel();
-    state.find_anchor = None;
     if state.selected == clicked_ix {
         true
     } else {
         state.selected = clicked_ix;
-        state.nav.cancel();
         false
     }
 }
@@ -328,10 +371,12 @@ fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<Shel
 }
 
 /// [`set_theme_on`]'s sibling for find style. Nothing to apply beyond the
-/// state itself: both list dialogs read `ShellView::find_style` fresh on
-/// every keystroke and render — including THIS one, so stepping the row
-/// re-labels its own value and swaps the dialog's own find behavior (and
-/// its footer's find hints) on the very next render.
+/// state itself, and honestly nothing downstream either: neither dialog
+/// reads `ShellView::find_style` for behaviour any more (the filter-first
+/// rewrite retired both `/` sessions it used to choose between — spec
+/// `2026-09-01-dialog-filter-input-design.md` §8). Stepping this row only
+/// re-labels its own value and persists the setting; it steers nothing
+/// until Phase 3's blotter reads it (§9).
 fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<ShellView>) {
     shell.find_style = style;
     shell.persist_find_style(cx);
@@ -343,12 +388,12 @@ fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<S
 /// handler for tests, since the old dropdown's popup overlay couldn't be
 /// clicked from a `#[gpui::test]` — still holds, and `shell::mod`'s tests
 /// still call it). Now a thin `Entity::update` wrapper over
-/// [`set_theme_on`], the same core this dialog's `h`/`l` stepping applies
-/// through. Only test code calls these four wrappers since the rewrite
-/// (the dialog itself already holds `&mut ShellView` mid-key-dispatch and
-/// must use the cores directly), hence the not-test `dead_code`
-/// allowance rather than `#[cfg(test)]`: they stay compiled, documented,
-/// and reachable for any future non-modal caller.
+/// [`set_theme_on`], the same core this dialog's `tab`/`shift+tab`
+/// stepping applies through. Only test code calls these four wrappers
+/// since the rewrite (the dialog itself already holds `&mut ShellView`
+/// mid-key-dispatch and must use the cores directly), hence the not-test
+/// `dead_code` allowance rather than `#[cfg(test)]`: they stay compiled,
+/// documented, and reachable for any future non-modal caller.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
     view.update(cx, |shell, cx| set_theme_on(shell, name, cx));
@@ -427,7 +472,8 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
 /// close/reopen — the same contract as the palette and the keybinding
 /// dialog. Goes through [`dialog::open_shell_dialog_with_key`] (the one
 /// standard door, with the Part B key seam): this dialog needs first
-/// refusal on every keystroke for vim nav, `/` find, and value stepping.
+/// refusal on every keystroke for the filter-nav vocabulary
+/// ([`listfilter::nav_command`]) and `tab`/`shift+tab` value stepping.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
@@ -441,26 +487,37 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
+        true,
     );
 }
 
 /// The [`dialog::ModalKeyHandler`] for this dialog, mirroring
-/// `keybindings_view::handle_key`'s priority order with stepping in place
-/// of rebind capture:
+/// `keybindings_view::handle_key` with value stepping in place of rebind
+/// capture:
 ///
-/// 1. an active find session owns every keystroke (vim or fzf per
-///    `ShellView::find_style`, via the shared `vimfind` drivers — an fzf
-///    pick needs nothing extra here, the session ending IS the pick);
-/// 2. `/` starts a session; `n`/`shift+n` repeat-find in vim style only;
-/// 3. `vimnav` motions (j/k with counts, gg/G, ctrl+d/u/f/b);
-/// 4. bare `h`/`left` and `l`/`right` step the selected row's value
-///    (wrapping), bare `enter`/`space` cycle it forward — applied
-///    immediately through [`apply_setting`]. Reached only when `vimnav`
-///    reported `NotNav`, which also means a pending count/`g` gesture
-///    aborts on these keys rather than combining with them (`5l` steps
-///    once — counts belong to j/k alone, same rule as everywhere else);
-/// 5. anything else — bare `escape` included — returns `false`, falling
-///    through to `handle_key_down`'s own "escape closes the modal".
+/// 1. [`listfilter::nav_command`] motions move the selection within the
+///    *filtered* list;
+/// 2. `tab` / `shift+tab` step the selected row's value forward / back,
+///    wrapping, applied immediately through [`apply_setting`]. `left`/
+///    `right`, the old stepping keys, are swallowed unconditionally by a
+///    focused single-line `Input` and can never reach this handler again.
+///    `tab` itself clears the `Input`'s own gating for the same reason
+///    (single-line, spec §2b) but is NOT enough on its own — gpui-
+///    component's `Root` also binds it unconditionally to its own
+///    focus-cycling, above `ShellView` in the dispatch tree, and that
+///    would swallow it too were it not for `dialog::
+///    init_reclaimed_keybindings`'s scoped `NoAction` reclaim (spec
+///    §2b2), which the modal panel's `"GeodeModal"` key context makes
+///    possible;
+/// 3. bare `enter` is claimed and dropped — returns `true` without acting.
+///    It is deliberately inert and reserved: settings apply the instant
+///    they are stepped, so there is nothing to confirm. Claiming it (not
+///    just ignoring it) is required, not cosmetic: with a focused `Input`,
+///    an unclaimed key continues to the window's text-input phase (spec
+///    §3) rather than simply vanishing, and `enter` reaching the input
+///    fires an `InputEvent::Change` that would reset `selected` back to
+///    the top match even though the text itself is unchanged;
+/// 4. everything else, bare `escape` included, returns `false`.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -468,147 +525,83 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     let rows = rows_for(shell);
-    let find_style = shell.find_style;
     let Some(state) = shell.settings.as_mut() else {
         return false;
     };
+    let visible = visible_rows(state, &rows);
 
-    // Find mode — priority 1: an active session owns every keystroke
-    // (even ones it ignores, so stray chords can't leak into list nav or
-    // value stepping mid-search).
-    if state.find.is_active() {
-        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-        match find_style {
-            FindStyle::Vim => vimfind::press_while_finding(
-                &mut state.find,
-                &mut state.selected,
-                &mut state.find_anchor,
-                &texts,
-                ks,
-            ),
-            FindStyle::Fzf => {
-                // `Picked` needs no interpretation here (module doc: the
-                // session ending, anchor dropped, selection on the picked
-                // row — all done inside the driver — IS the pick).
-                let _ = vimfind::press_while_finding_fzf(
-                    &mut state.find,
-                    &mut state.selected,
-                    &mut state.find_anchor,
-                    &texts,
-                    ks,
-                );
-            }
-        }
-        // Scroll within whatever list is actually rendered — the narrowed
-        // match list during a live fzf session, the full list otherwise
-        // (same position mapping as keybindings').
-        let scroll_ix = if find_style == FindStyle::Fzf && state.find.is_active() {
-            filter_matches(&texts, state.find.query().unwrap_or(""))
-                .iter()
-                .position(|&ix| ix == state.selected)
-                .unwrap_or(0)
-        } else {
-            state.selected
-        };
-        shell.settings_scroll.scroll_to_item(scroll_ix);
+    if let Some(cmd) = listfilter::nav_command(ks) {
+        state.selected = vimnav::apply(state.selected, visible.len(), cmd);
+        let selected = state.selected;
+        shell.settings_scroll.scroll_to_item(selected);
         cx.notify();
         return true;
     }
-    if ks.mods == Modifiers::NONE && ks.key == "/" {
-        state.find_anchor = Some(state.selected);
-        state.find.start();
-        state.nav.cancel();
-        cx.notify();
+
+    // Bare `enter` is reserved and deliberately inert (see this
+    // function's own doc comment, item 3) — claimed and dropped rather
+    // than left unhandled, because leaving it unhandled would NOT make it
+    // inert: an unclaimed key continues past this handler to the filter's
+    // own text-input phase, where `enter` fires an `InputEvent::Change`
+    // that resets `selected` back to the top match.
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
         return true;
     }
-    // `n`/`shift+n` repeat-find is vim-mode-only (fzf sessions end by
-    // picking or cancelling; there is no committed query to repeat).
-    if find_style == FindStyle::Vim
-        && ks.key == "n"
-        && (ks.mods == Modifiers::NONE
-            || ks.mods
-                == Modifiers {
-                    shift: true,
-                    ..Modifiers::NONE
-                })
-    {
-        let dir = if ks.mods.shift {
-            FindDirection::Backward
-        } else {
-            FindDirection::Forward
-        };
-        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-        if vimfind::repeat_find(&state.find, &mut state.selected, &texts, dir) {
-            let selected = state.selected;
-            shell.settings_scroll.scroll_to_item(selected);
-            cx.notify();
-            return true;
-        }
-    }
 
-    match state.nav.press(ks) {
-        NavResult::Command(cmd) => {
-            state.selected = vimnav::apply(state.selected, rows.len(), cmd);
-            let selected = state.selected;
-            shell.settings_scroll.scroll_to_item(selected);
-            cx.notify();
-            true
+    let dir = match (ks.mods, ks.key.as_str()) {
+        (Modifiers::NONE, "tab") => StepDirection::Right,
+        (m, "tab")
+            if m == (Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            }) =>
+        {
+            StepDirection::Left
         }
-        NavResult::Pending => {
-            cx.notify();
-            true
-        }
-        NavResult::NotNav => {
-            let dir = match (ks.mods == Modifiers::NONE, ks.key.as_str()) {
-                (true, "h" | "left") => Some(StepDirection::Left),
-                (true, "l" | "right" | "enter" | "space") => Some(StepDirection::Right),
-                _ => None,
-            };
-            let Some(dir) = dir else {
-                return false;
-            };
-            let Some(row) = rows.get(state.selected) else {
-                return false;
-            };
-            let (id, new_ix) = (row.id, step(row.values.len(), row.current, dir));
-            apply_setting(shell, id, new_ix, cx);
-            cx.notify();
-            true
-        }
-    }
+        _ => return false,
+    };
+    let selected = state.selected;
+    let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) else {
+        return false;
+    };
+    let (id, new_ix) = (row.id, step(row.values.len(), row.current, dir));
+    apply_setting(shell, id, new_ix, cx);
+    cx.notify();
+    true
 }
 
 /// Selection/step logic for a real mouse click on the row for `clicked`
-/// (`SettingId`, resolved back to an index against freshly derived rows —
-/// same identity-not-position keying as keybindings' `on_row_clicked`).
-/// The gpui-facing wrapper around the pure [`click_selects_or_steps`]: a
-/// `true` (already-selected row) cycles that row's value forward.
+/// (`SettingId`, resolved back to a position in the *filtered* list
+/// against freshly derived rows — same identity-not-position keying as
+/// keybindings' `on_row_clicked`). The gpui-facing wrapper around the
+/// pure [`click_selects_or_steps`]: a `true` (already-selected row)
+/// cycles that row's value forward.
 fn on_row_clicked(shell: &mut ShellView, clicked: SettingId, cx: &mut Context<ShellView>) {
     let rows = rows_for(shell);
-    let Some(ix) = rows.iter().position(|r| r.id == clicked) else {
+    let Some(state) = shell.settings.as_mut() else {
         return;
     };
-    let Some(state) = shell.settings.as_mut() else {
+    let visible = visible_rows(state, &rows);
+    let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
     };
     let cycle = click_selects_or_steps(state, ix);
     let selected = state.selected;
     shell.settings_scroll.scroll_to_item(selected);
-    if cycle {
-        let row = &rows[ix];
+    if cycle && let Some(row) = visible.get(ix).and_then(|m| rows.get(m.row)) {
         let new_ix = step(row.values.len(), row.current, StepDirection::Right);
         apply_setting(shell, row.id, new_ix, cx);
     }
     cx.notify();
 }
 
-/// The [`dialog::ShellModal::build`] closure body: a scrollable row list
-/// (title + muted category on the left, with find-match highlighting; the
-/// current value label on the right in the mono data face) plus the
-/// footer — the live `/query` line or the three-row chip hints, then the
-/// two muted inert lines the old dialog's read-only content became.
-/// `entity` is the `Entity<ShellView>` every row's click handler captures
-/// to reach [`on_row_clicked`] at click time; `shell` is this call's own
+/// The [`dialog::ShellModal::build`] closure body: the shared filter row
+/// (`dialog::filter_row`, never frozen — this dialog has no listening
+/// state to freeze it for) over a scrollable row list (title + muted
+/// category on the left, with fuzzy-match highlighting; the current value
+/// label on the right in the mono data face) plus a footer hint. `entity`
+/// is the `Entity<ShellView>` every row's click handler captures to reach
+/// [`on_row_clicked`] at click time; `shell` is this call's own
 /// plain-borrow read (see `ShellModal::build`'s doc comment for why both).
 fn build(
     shell: &ShellView,
@@ -623,19 +616,11 @@ fn build(
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
-    let hl_query = state.find.highlight_query();
 
-    // While an fzf find session is active the list renders ONLY the
-    // matching rows — same filter idiom, same full-list `debug_selector`
-    // indices, as the keybinding dialog (rows keep their identity across
-    // filtering because click handlers are keyed by `SettingId`).
-    let fzf_session = shell.find_style == FindStyle::Fzf && state.find.is_active();
-    let visible: Vec<usize> = if fzf_session {
-        let texts: Vec<String> = rows.iter().map(searchable_text).collect();
-        filter_matches(&texts, state.find.query().unwrap_or(""))
-    } else {
-        (0..rows.len()).collect()
-    };
+    // The list renders ONLY the rows that survive the filter. Safe
+    // because row click handlers are keyed by `SettingId`, not position
+    // (see [`filtered_position`]).
+    let visible = visible_rows(state, &rows);
 
     let mut list = v_flex()
         .id("settings-list")
@@ -647,9 +632,17 @@ fn build(
         .track_scroll(&shell.settings_scroll)
         .debug_selector(|| "settings-list".to_string());
 
-    for &i in &visible {
-        let row = &rows[i];
-        let is_selected = i == state.selected;
+    for (position, m) in visible.iter().enumerate() {
+        let row_ix = m.row;
+        let row = &rows[row_ix];
+        let is_selected = position == state.selected;
+
+        // `split_label_indices` (shared with `keybindings_view::build` —
+        // see its own doc comment for why this is one function, not two
+        // copies) splits the ranked char offsets back across the title
+        // and category lines they're painted on.
+        let title_len = row.title.chars().count();
+        let (title_ix, cat_ix) = split_label_indices(&m.indices, title_len);
 
         let mut row_el = h_flex()
             .w_full()
@@ -665,12 +658,12 @@ fn build(
 
         let label = v_flex()
             .gap_0p5()
-            .child(highlighted_text(row.title, hl_query, theme.primary))
+            .child(highlighted_text(row.title, &title_ix, theme.primary))
             .child(
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(highlighted_text(row.category, hl_query, theme.primary)),
+                    .child(highlighted_text(row.category, &cat_ix, theme.primary)),
             );
 
         // The current value, in the data face — a value readout, not
@@ -686,7 +679,7 @@ fn build(
         let row_el = row_el
             .child(label)
             .child(value_el)
-            .debug_selector(move || format!("settings-row-{i}"))
+            .debug_selector(move || format!("settings-row-{row_ix}"))
             .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
                 entity_for_row.update(cx, |shell, cx| {
                     on_row_clicked(shell, id, cx);
@@ -696,10 +689,10 @@ fn build(
         list = list.child(row_el);
     }
 
-    if fzf_session && visible.is_empty() {
-        // Zero matches: one muted line where the rows would be, same as
-        // keybindings — an empty filter reads as a state, not a glitch.
-        // Enter is inert here (the shared driver); the session stays live.
+    if visible.is_empty() {
+        // Zero matches: one muted line where the rows would be — the same
+        // muted treatment keybindings' empty filter gets, so an
+        // over-narrow filter reads as a state, not a rendering glitch.
         list = list.child(
             div()
                 .px_2()
@@ -719,65 +712,29 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
-    let hint_line: AnyElement = if let Some(find_display) = state.find.pending_display() {
-        // The live `/query` line, vim command-line style, both find
-        // styles — rendered in the data face so the query reads as typed
-        // input, not prose.
-        div()
-            .font_family(crate::fonts::MONO)
-            .child(find_display)
-            .into_any_element()
-    } else {
-        // Three rows, one idiom family each — motion, find, edit — same
-        // table shape as the keybinding dialog's hints (and the same
-        // "pending nav gestures don't take over this line" choice).
-        v_flex()
-            .gap_0p5()
-            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-                chip("j"),
-                chip("k"),
-                sep("move (counts: 5j) ·"),
-                chip("g"),
-                chip("g"),
-                sep("/"),
-                chip("shift+g"),
-                sep("top/bottom ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("page"),
-            ]))
-            .child(match shell.find_style {
-                FindStyle::Vim => h_flex().gap_1().items_center().flex_wrap().children(vec![
-                    chip("/"),
-                    sep("find,"),
-                    chip("n"),
-                    sep("/"),
-                    chip("shift+n"),
-                    sep("next"),
-                ]),
-                FindStyle::Fzf => h_flex().gap_1().items_center().flex_wrap().children(vec![
-                    chip("/"),
-                    sep("filter,"),
-                    chip("up"),
-                    sep("/"),
-                    chip("down"),
-                    sep("move,"),
-                    chip("enter"),
-                    sep("pick"),
-                ]),
-            })
-            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-                chip("h"),
-                sep("/"),
-                chip("l"),
-                sep("change value ·"),
-                chip("enter"),
-                sep("cycle"),
-            ]))
-            .into_any_element()
-    };
+    let hint_line: AnyElement = v_flex()
+        .gap_0p5()
+        .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
+            sep("type to filter ·"),
+            chip("up"),
+            chip("down"),
+            sep("move ·"),
+            chip("ctrl+d"),
+            chip("ctrl+u"),
+            sep("±5 ·"),
+            chip("ctrl+f"),
+            chip("ctrl+b"),
+            sep("±10"),
+        ]))
+        .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
+            chip("tab"),
+            sep("next value ·"),
+            chip("shift+tab"),
+            sep("previous value ·"),
+            chip("escape"),
+            sep("close"),
+        ]))
+        .into_any_element();
 
     let footer = v_flex()
         .w(px(WIDTH))
@@ -812,6 +769,7 @@ fn build(
 
     v_flex()
         .gap_2()
+        .child(dialog::filter_row(&shell.dialog_input, None, cx))
         .child(list)
         .child(footer)
         .into_any_element()
@@ -820,13 +778,6 @@ fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn key(k: &str) -> Keystroke {
-        Keystroke {
-            mods: Modifiers::NONE,
-            key: k.to_string(),
-        }
-    }
 
     fn names(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
@@ -912,7 +863,8 @@ mod tests {
 
     #[test]
     fn stepping_a_two_value_row_is_a_toggle_either_way() {
-        // Bool rows are two-value enums — wrap makes h and l both toggle.
+        // Bool rows are two-value enums — wrap makes tab and shift+tab
+        // both toggle.
         assert_eq!(step(2, 0, StepDirection::Right), 1);
         assert_eq!(step(2, 1, StepDirection::Right), 0);
         assert_eq!(step(2, 0, StepDirection::Left), 1);
@@ -939,131 +891,88 @@ mod tests {
         );
     }
 
-    // -- find sessions over settings rows (the shared drivers) ----------
-
-    fn texts() -> Vec<String> {
-        rows().iter().map(searchable_text).collect()
-    }
-
-    fn finding_state(selected: usize) -> SettingsState {
-        let mut state = SettingsState {
-            selected,
-            find_anchor: Some(selected),
-            ..Default::default()
-        };
-        state.find.start();
-        state
-    }
+    // -- the filter (crate::listfilter) ---------------------------------
 
     #[test]
-    fn vim_find_jumps_the_selection_to_a_matching_row() {
-        let texts = texts();
-        let mut state = finding_state(0);
-        for k in ["k", "e", "y"] {
-            vimfind::press_while_finding(
-                &mut state.find,
-                &mut state.selected,
-                &mut state.find_anchor,
-                &texts,
-                &key(k),
-            );
-        }
+    fn an_empty_query_shows_every_settings_row() {
+        let rows = rows();
+        let state = SettingsState::new();
         assert_eq!(
-            state.selected, 3,
-            "'key' matches the Keyboard category — Find style's row"
+            visible_rows(&state, &rows)
+                .iter()
+                .map(|m| m.row)
+                .collect::<Vec<_>>(),
+            (0..rows.len()).collect::<Vec<_>>()
         );
-        vimfind::press_while_finding(
-            &mut state.find,
-            &mut state.selected,
-            &mut state.find_anchor,
-            &texts,
-            &key("escape"),
-        );
-        assert_eq!(state.selected, 0, "escape restores the anchor");
     }
 
     #[test]
-    fn fzf_pick_just_ends_the_session_with_selection_on_the_picked_row() {
-        // The settings-specific pick semantics (module doc): enter ends
-        // the session — full list back, selection kept — and nothing
-        // else. No listening state exists to start.
-        let texts = texts();
-        let mut state = finding_state(0);
-        vimfind::press_while_finding_fzf(
-            &mut state.find,
-            &mut state.selected,
-            &mut state.find_anchor,
-            &texts,
-            &key("f"),
-        );
-        assert_eq!(state.selected, 2, "first 'f' match is Font size");
-        let outcome = vimfind::press_while_finding_fzf(
-            &mut state.find,
-            &mut state.selected,
-            &mut state.find_anchor,
-            &texts,
-            &key("enter"),
-        );
-        assert_eq!(outcome, vimfind::FzfOutcome::Picked);
-        assert!(!state.find.is_active(), "the session is over");
-        assert_eq!(state.selected, 2, "selection stays on the picked row");
-        assert_eq!(state.find_anchor, None, "no anchor residue");
+    fn a_query_narrows_to_the_matching_rows() {
+        let rows = rows();
+        let mut state = SettingsState::new();
+        state.set_query("font".to_string());
+        let visible = visible_rows(&state, &rows);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(rows[visible[0].row].title, "Font size");
     }
 
     #[test]
-    fn fzf_enter_on_zero_matches_stays_inert() {
-        let texts = texts();
-        let mut state = finding_state(1);
-        for k in ["z", "z"] {
-            vimfind::press_while_finding_fzf(
-                &mut state.find,
-                &mut state.selected,
-                &mut state.find_anchor,
-                &texts,
-                &key(k),
-            );
-        }
-        let outcome = vimfind::press_while_finding_fzf(
-            &mut state.find,
-            &mut state.selected,
-            &mut state.find_anchor,
-            &texts,
-            &key("enter"),
+    fn setting_a_query_resets_the_selection_to_the_top_match() {
+        let mut state = SettingsState::new();
+        state.selected = 2;
+        state.set_query("dark".to_string());
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn a_click_resolves_a_setting_id_to_its_filtered_position() {
+        // The list the user clicks is the filtered one, so a row's click
+        // handler (keyed by SettingId, as it always was) must resolve to a
+        // position in THAT list, not in the full one — the settings twin
+        // of keybindings' `a_click_resolves_an_action_id_to_its_filtered_position`.
+        let rows = rows();
+        let mut state = SettingsState::new();
+        state.set_query(rows[2].title.to_string());
+        let visible = visible_rows(&state, &rows);
+        assert_eq!(
+            filtered_position(&visible, &rows, rows[2].id),
+            Some(0),
+            "the only match sits at filtered position 0, whatever its \
+             position in the full list"
         );
-        assert_eq!(outcome, vimfind::FzfOutcome::Continue);
-        assert!(state.find.is_active(), "no row to pick — session survives");
+    }
+
+    #[test]
+    fn a_click_on_a_row_the_filter_hid_resolves_to_nothing() {
+        let rows = rows();
+        let mut state = SettingsState::new();
+        state.set_query(rows[2].title.to_string());
+        let visible = visible_rows(&state, &rows);
+        let hidden = rows
+            .iter()
+            .find(|r| !visible.iter().any(|m| rows[m.row].id == r.id))
+            .expect("the query must hide at least one row");
+        assert_eq!(filtered_position(&visible, &rows, hidden.id), None);
     }
 
     // -- click_selects_or_steps ------------------------------------------
 
     #[test]
-    fn clicking_a_different_row_selects_it_without_stepping() {
-        let mut state = SettingsState {
-            selected: 0,
-            ..Default::default()
-        };
+    fn a_click_on_a_different_row_selects_it_without_stepping() {
+        let mut state = SettingsState::new();
         assert!(!click_selects_or_steps(&mut state, 2));
         assert_eq!(state.selected, 2);
     }
 
     #[test]
-    fn clicking_the_selected_row_asks_for_a_forward_cycle() {
-        let mut state = SettingsState {
-            selected: 2,
-            ..Default::default()
-        };
-        assert!(click_selects_or_steps(&mut state, 2));
-        assert_eq!(state.selected, 2);
-    }
-
-    #[test]
-    fn a_click_cancels_an_active_find_session() {
-        let mut state = finding_state(0);
-        assert!(state.find.is_active());
-        assert!(!click_selects_or_steps(&mut state, 1));
-        assert!(!state.find.is_active());
-        assert_eq!(state.find_anchor, None);
-        assert_eq!(state.selected, 1);
+    fn a_click_on_the_selected_row_asks_for_a_forward_cycle() {
+        let mut state = SettingsState::new();
+        state.selected = 1;
+        assert!(click_selects_or_steps(&mut state, 1));
+        assert_eq!(
+            state.selected, 1,
+            "a cycle click leaves the selection where it was"
+        );
     }
 
     // -- mod_alias_label -------------------------------------------------

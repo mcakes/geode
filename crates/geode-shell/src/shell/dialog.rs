@@ -57,10 +57,14 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, MouseButton, SharedString, Window, div, hsla, px};
+use gpui::{
+    AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window, div, hsla,
+    px,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::{Input, InputState};
 use gpui_component::scroll::ScrollableElement as _;
-use gpui_component::{ActiveTheme as _, IconName, Sizable as _, box_shadow, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
 use crate::keymap::Keystroke;
@@ -153,6 +157,75 @@ pub struct ShellModal {
     pub on_key: Option<ModalKeyHandler>,
 }
 
+/// Reclaim every key gpui-component binds by default that collides with
+/// Geode's own navigation vocabulary, via `gpui::NoAction` — `gpui`'s own
+/// mechanism for this: a `NoAction` binding suppresses every
+/// equal-or-weaker binding it outranks, so no action dispatches at all and
+/// the raw `KeyDownEvent` reaches our key listeners instead
+/// (`gpui::Keymap::bindings_for_input`, `crates/gpui/src/keymap.rs`, pinned
+/// checkout, sorts candidate bindings by context depth — deepest wins —
+/// before applying `NoAction` suppression). Two reclaims live here today,
+/// scoped differently on purpose:
+///
+/// 1. **`tab`/`shift-tab`**, scoped to `"GeodeModal"`. `Root` binds bare
+///    `tab`/`shift-tab` (unconditionally, no `cx.propagate()`) to its own
+///    focus-cycling actions in a `"Root"` key context wrapping the entire
+///    window (`crates/ui/src/root.rs`, pinned checkout) — so without a
+///    reclaim, those keystrokes are fully consumed there before
+///    `ShellView`'s own raw `on_key_down` (and so a modal's
+///    [`ModalKeyHandler`], e.g. the settings dialog's value-stepping) ever
+///    sees them (verified against `Window::dispatch_key_event`: an action
+///    binding that doesn't propagate returns before
+///    `finish_dispatch_key_event` — what fires raw key listeners — ever
+///    runs). Scoped to `"GeodeModal"` — the key context [`render_modal`]'s
+///    panel carries only while a Geode modal is on screen — rather than
+///    `"Root"` itself: `Root`'s focus cycling is a live affordance outside
+///    modals too, so reclaiming it app-wide would silently remove that
+///    everywhere, not just inside our own modals, which nobody asked for.
+///    `"GeodeModal"` sits deeper in the dispatch path than `"Root"`
+///    whenever it's present, so this binding outranks and suppresses
+///    `Root`'s Tab/TabPrev only then; outside a Geode modal `"GeodeModal"`
+///    is absent from the context stack, this binding is not enabled at
+///    all, and `Root`'s focus cycling is untouched.
+///
+/// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
+///    gpui-component binds `ctrl-f` to its editor `Search` action in the
+///    `"Input"` key context on non-macOS (`crates/base/src/input/base/
+///    state.rs`, pinned rev), and that handler returns without
+///    `cx.propagate()` when the input isn't searchable — so `ctrl+f`,
+///    which both list dialogs and (per Task 5) the command palette use for
+///    "page down" (`crate::listfilter::nav_command`), would work on macOS
+///    (where gpui-component doesn't bind it at all) and die silently on
+///    Windows and Linux. This one can't be scoped to `"GeodeModal"` the
+///    way `tab` is: the command palette is not a [`render_modal`] surface,
+///    so a `"GeodeModal"`-scoped binding would never reach it. Going
+///    app-wide instead costs nothing, because gpui-component's `Search`
+///    action is dead weight in this app — nothing here uses a searchable
+///    input — unlike `Root`'s Tab cycling, which is a real affordance this
+///    reclaim must not disturb outside modals. (A pass-through action of
+///    our own would NOT work here either: `gpui` dispatches every matched
+///    binding in sequence — `Window::dispatch_key_event`, pinned checkout
+///    — so calling `cx.propagate()` from our own action would simply hand
+///    the keystroke on to `Search` right after.)
+///
+/// Called once from `geode-app`'s `main` (after `gpui_component::init`,
+/// same ordering requirement — later registrations outrank earlier ones)
+/// AND from every test that opens a real modal window
+/// (`shell::tests::dialog_test_shell`) — one definition rather than copies
+/// that could drift, and the only way
+/// `tab_and_shift_tab_step_the_selected_value` (`shell::tests`) actually
+/// proves the `tab` mechanism instead of merely assuming it holds in
+/// production. There is no equivalent test for `ctrl-f`: the behaviour it
+/// fixes only manifests on a non-macOS build with a real focused input,
+/// which this environment cannot exercise.
+pub fn init_reclaimed_keybindings(cx: &mut App) {
+    cx.bind_keys([
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModal")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModal")),
+        gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
+    ]);
+}
+
 /// Open a modal through Geode's one standard door (Task 9's rule, unchanged
 /// by the switch away from gpui-component's `Dialog` — see the module doc).
 /// `build` renders the modal's content fresh each frame it's open; `title`
@@ -172,18 +245,27 @@ pub fn open_shell_dialog<F>(
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
-    open_shell_dialog_with_key(view, window, cx, title, build, None);
+    open_shell_dialog_with_key(view, window, cx, title, build, None, false);
 }
 
 /// [`open_shell_dialog`], plus an optional [`ModalKeyHandler`] (Part B: the
 /// keybinding dialog needs first refusal on every keystroke while it's
-/// open, to drive vim navigation and rebind-capture — see that type's own
-/// doc comment; the settings dialog joined it with the row-list rewrite,
-/// for vim nav/find/stepping). `open_shell_dialog` is simply this with
-/// `on_key: None` — no production modal uses it today, but it stays as the
-/// door for any future handler-less modal. Still the same one door, same
-/// open-time hygiene — this is the one place that constructs a
-/// [`ShellModal`], `open_shell_dialog` included.
+/// open, to drive rebind-capture and the shared list-navigation vocabulary
+/// — see that type's own doc comment; the settings dialog joined it with
+/// the row-list rewrite, for that same navigation plus value-stepping).
+/// `open_shell_dialog` is simply this with `on_key: None` — no production
+/// modal uses it today, but it stays as the door for any future
+/// handler-less modal. Still the same one door, same open-time hygiene —
+/// this is the one place that constructs a [`ShellModal`],
+/// `open_shell_dialog` included.
+///
+/// `focus_filter` focuses [`ShellView::dialog_input`] on open — every list
+/// dialog passes `true` (the filter-first dialog UX: the first character
+/// typed must reach the filter, not fall on the floor);
+/// `open_shell_dialog` passes `false`. A modal that passes `true` must
+/// actually render that input — [`filter_row`] — since gpui dispatches
+/// keys down the *rendered* focus path and would otherwise route them to
+/// the window root, past `ShellView`'s own key listener.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -191,6 +273,7 @@ pub fn open_shell_dialog_with_key<F>(
     title: impl Into<SharedString>,
     build: F,
     on_key: Option<ModalKeyHandler>,
+    focus_filter: bool,
 ) where
     F: Fn(&ShellView, &mut Window, &mut App) -> AnyElement + 'static,
 {
@@ -213,7 +296,97 @@ pub fn open_shell_dialog_with_key<F>(
         build: Rc::new(build),
         on_key,
     });
+
+    if focus_filter {
+        // Reset by value, not by rebuilding the entity — the same
+        // lifecycle `toggle_palette` gives `palette_input` (see
+        // `ShellView::dialog_input`'s own doc comment). `set_value` does
+        // not emit `InputEvent::Change` (checked against the pinned
+        // checkout, same as `toggle_palette`'s own comment records), so
+        // this reset never reaches the subscription; each dialog's fresh
+        // state already starts with an empty query.
+        view.dialog_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        let handle = view.dialog_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+    }
+
     cx.notify();
+}
+
+/// The drop shadow every floating overlay panel in this shell wears —
+/// [`render_modal`]'s panel and the command palette's
+/// (`palette::render`), so the two read as siblings rather than as two
+/// unrelated components. Lifted here from `render_modal`, which used to
+/// build it inline, when the palette adopted it.
+///
+/// It is the exact double shadow gpui-component's own `Dialog` builds in
+/// its `with_animation("slide-down", ..)` closure (pinned checkout,
+/// `crates/ui/src/dialog/dialog.rs`), evaluated at `delta = 1.0` — that
+/// animation's fully-open state, which is the only state Geode's own
+/// instant modals and palette ever have. Keeping the values identical is
+/// what lets our self-owned chrome sit next to that crate's own popovers
+/// without looking like a different design system.
+///
+/// The `hsla(0., 0., 0., 0.1)` here is a *shadow*, not a UI color: it is
+/// the same neutral black-at-10% in either theme mode, which is why it is
+/// a literal rather than a `cx.theme()` token (there is no shadow token to
+/// read, and tinting a shadow with a theme color is what would actually
+/// look wrong).
+pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
+    vec![
+        box_shadow(px(0.), px(20.), px(25.), px(-5.), hsla(0., 0., 0., 0.1)),
+        box_shadow(px(0.), px(8.), px(10.), px(-6.), hsla(0., 0., 0., 0.1)),
+    ]
+}
+
+/// The filter row every list dialog wears at the top: the shared
+/// `Input`, chrome stripped (`appearance(false)`) with a bottom border
+/// standing in for it — the palette's own `input_row` idiom
+/// (`palette::render`), so the three filtering surfaces look alike.
+///
+/// A muted [`IconName::Search`] rides in the input's `prefix` slot rather
+/// than a `"filter"` placeholder (user direction). That is also
+/// gpui-component's own idiom for this exact surface — its command
+/// palette builds the identical `Input::prefix(Icon::new(IconName::Search)
+/// .text_color(muted_foreground))` + `appearance(false)` pair (pinned
+/// checkout, `crates/ui/src/command/state.rs:838-846`) — so the icon is
+/// left at its default size to match. `prefix` survives
+/// `appearance(false)`: that flag guards only the background and border
+/// (`crates/ui/src/input/input.rs:578-584`), never the prefix child.
+///
+/// `frozen` renders a muted, static copy of the query *instead of* the
+/// live input: the keybinding dialog passes `Some(query)` while it is
+/// listening for a binding, when the input is blurred and a caret would
+/// be a lie about where keystrokes are going. It keeps the icon, and
+/// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
+/// `input.rs:504-508`), so entering and leaving capture doesn't shift the
+/// query text sideways.
+pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let row = div().w_full().border_b_1().border_color(theme.border);
+    let search_icon = || Icon::new(IconName::Search).text_color(theme.muted_foreground);
+    match frozen {
+        Some(query) => row
+            .py_1()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(theme.muted_foreground)
+                    .child(search_icon())
+                    .child(query.to_string()),
+            )
+            .into_any_element(),
+        None => row
+            .child(
+                Input::new(input)
+                    .appearance(false)
+                    .prefix(search_icon())
+                    .w_full(),
+            )
+            .into_any_element(),
+    }
 }
 
 /// Cap on the modal panel's height, as a fraction of the window's viewport
@@ -296,14 +469,7 @@ pub(crate) fn render_modal(
     let border = theme.border;
     let radius = theme.radius_lg;
 
-    // The exact double shadow `Dialog`'s own `with_animation("slide-down",
-    // ..)` closure builds (pinned checkout, same file), evaluated at
-    // `delta = 1.0` — its fully-open state, which is this modal's *only*
-    // state.
-    let shadow = vec![
-        box_shadow(px(0.), px(20.), px(25.), px(-5.), hsla(0., 0., 0., 0.1)),
-        box_shadow(px(0.), px(8.), px(10.), px(-6.), hsla(0., 0., 0., 0.1)),
-    ];
+    let shadow = overlay_panel_shadow();
 
     let title_row = h_flex()
         .w_full()
@@ -318,14 +484,35 @@ pub(crate) fn render_modal(
                 .small()
                 .ghost()
                 .icon(IconName::Close)
-                .on_click(cx.listener(|view, _event, _window, cx| {
-                    view.modal = None;
-                    cx.notify();
+                .on_click(cx.listener(|view, _event, window, cx| {
+                    view.close_modal(window, cx);
                 })),
         );
 
     let panel = v_flex()
         .id("shell-modal-panel")
+        // A key context, on a modal that is otherwise "plain chrome, not
+        // an action-dispatch layer" (see `handle_key_down`'s modal branch
+        // in `shell/mod.rs`) — added not to dispatch anything of our own,
+        // but to SUPPRESS one: gpui-component's `Root` binds bare
+        // `tab`/`shift-tab` to its own focus-cycling actions in a `"Root"`
+        // key context that wraps the entire window
+        // (`crates/ui/src/root.rs`, pinned checkout), unconditionally,
+        // and those handlers never call `cx.propagate()` — so a plain
+        // `tab` keystroke is fully consumed by `Root` before
+        // `ShellView`'s own raw `on_key_down` ever sees it (verified
+        // against `Window::dispatch_key_event`: an action binding that
+        // doesn't propagate returns before `finish_dispatch_key_event`,
+        // which is what fires raw key listeners, ever runs). `"GeodeModal"`
+        // is this panel's own, narrower context, present only while a
+        // Geode modal is on screen and sitting DEEPER in the dispatch
+        // path than `Root`'s outer wrapper — [`init_reclaimed_keybindings`]
+        // binds `tab`/`shift-tab` to `NoAction` here, which (being the
+        // deeper, and so higher-precedence, match — `gpui`'s
+        // `Keymap::bindings_for_input` sorts by context depth) suppresses
+        // `Root`'s binding while a modal is open and leaves it untouched
+        // everywhere else in the app.
+        .key_context("GeodeModal")
         .occlude()
         .gap_3()
         .pb_4()
@@ -367,9 +554,8 @@ pub(crate) fn render_modal(
         .debug_selector(|| "shell-modal-backdrop".to_string())
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|view, _event, _window, cx| {
-                view.modal = None;
-                cx.notify();
+            cx.listener(|view, _event, window, cx| {
+                view.close_modal(window, cx);
             }),
         )
         .child(panel)

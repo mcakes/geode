@@ -22,7 +22,7 @@
 use gpui::prelude::*;
 use gpui::{App, Entity, IntoElement, div, px};
 use gpui_component::input::{Input, InputState};
-use gpui_component::{ActiveTheme as _, TitleBar, h_flex};
+use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 /// Compact width of the filter field (brief: "~200px").
 const FILTER_WIDTH: f32 = 200.0;
@@ -39,6 +39,17 @@ pub fn toolbar(filter_input: &Entity<InputState>, cx: &App) -> impl IntoElement 
             // an empty flexing spacer keeps the filter pinned to the right
             // edge without hardcoding a gap.
             .child(div().flex_1())
-            .child(Input::new(filter_input).w(px(FILTER_WIDTH))),
+            // A muted search icon in the `prefix` slot rather than a
+            // "filter" placeholder (user direction), matching the palette
+            // and the dialogs' shared `dialog::filter_row` — every text
+            // field in the shell names itself the same way. This one keeps
+            // `Input`'s own chrome (no `appearance(false)`), since it sits
+            // on the title bar rather than inside a panel that already
+            // draws a border for it.
+            .child(
+                Input::new(filter_input)
+                    .prefix(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                    .w(px(FILTER_WIDTH)),
+            ),
     )
 }
