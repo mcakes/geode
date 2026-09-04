@@ -717,3 +717,15 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
             }
             continue;' \
   '            continue;'
+
+# ---- sources config (Phase 3 §5.2)
+
+run_mutation "sources: an undeclared dataset skips the source" \
+  crates/geode-data/src/source/config.rs \
+  '                Some(d) if schema.dataset(d).is_some() => d.to_string(),' \
+  '                Some(d) => d.to_string(),'
+
+run_mutation "sources: a pattern without a batch capture is dropped" \
+  crates/geode-data/src/source/config.rs \
+  '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
+  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),'
