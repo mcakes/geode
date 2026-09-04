@@ -703,3 +703,17 @@ run_mutation "service: replace_views actually replaces" \
   crates/geode-data/src/service.rs \
   '        self.config.views = views;' \
   '        let _ = views;'
+
+# ---- ingest runner (Phase 3 §2.5)
+
+run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            if !sink(IngestEvent::Failed {
+                dataset: item.dataset.clone(),
+                batch: item.batch.clone(),
+                reason: format!("dataset '"'"'{}'"'"' is not declared", item.dataset),
+            }) {
+                return;
+            }
+            continue;' \
+  '            continue;'
