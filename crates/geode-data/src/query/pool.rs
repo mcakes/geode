@@ -342,7 +342,7 @@ fn run_one(conn: &duckdb::Connection, req: &QueryRequest) -> Result<Snapshot, du
             scope_semantics: c.scope_semantics.clone(),
         })
         .collect();
-    Snapshot::from_batches(batches, meta, req.grouping.len(), req.provenance.clone())
+    Snapshot::from_batches(batches, meta, req.grouping.clone(), req.provenance.clone())
         .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
 }
 
@@ -607,7 +607,7 @@ mod tests {
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
             }],
-            1,
+            vec!["underlying_ref".into()],
             Provenance::default(),
         )
         .unwrap();
@@ -658,7 +658,7 @@ mod tests {
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
             }],
-            1,
+            vec!["qty".into()],
             Provenance::default(),
         )
         .unwrap();

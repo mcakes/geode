@@ -541,11 +541,12 @@ mod tests {
         p.grouping = Some(vec!["book".into()]);
         svc.query(&p).unwrap();
         let by_book = next(&rx).snapshot.unwrap();
-        // `Snapshot::grouping()` is added in Task 9; until then, the
-        // compiler's own contract (compile.rs: grouping columns are
-        // pushed first, in order) is checked directly against the column
-        // order, which is what the override actually has to change.
+        // Checked two ways: the compiler's own contract (compile.rs:
+        // grouping columns are pushed first, in order) against the column
+        // order, and `Snapshot::grouping()` directly — which is what the
+        // override actually has to change.
         assert_eq!(by_book.column_names().first().copied(), Some("book"));
+        assert_eq!(by_book.grouping(), &["book".to_string()]);
         let mut wrong = params(2, "tree", &Scope::default(), AsOf::Live, 1);
         wrong.grouping = Some(vec!["nonesuch".into()]);
         assert!(

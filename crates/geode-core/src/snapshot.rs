@@ -239,12 +239,157 @@ fn dictionary_cell<K: arrow::datatypes::ArrowDictionaryKeyType>(
     (code < values.len() && !values.is_null(code)).then(|| values.value(code))
 }
 
+/// One f64 cell out of whatever numeric shape the column arrived in.
+/// Shared by [`Snapshot::f64_value`] and [`Snapshot::f64_at`] so the two
+/// cannot drift into disagreeing about a type.
+fn f64_in(arr: &dyn Array, row: usize) -> Option<f64> {
+    if let Some(values) = arr.as_any().downcast_ref::<Float64Array>() {
+        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));
+    }
+    // A declared `i64` measure does not come back as an integer.
+    // `ColumnType::I64` is BIGINT, the default aggregate is `Sum`, and
+    // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
+    // `Decimal128(38, 0)`. Nothing forbids such a measure, so without
+    // this arm every one of its cells read blank, and under §6.3 a
+    // blank cell is a positive claim: "this number does not belong to
+    // this row". Turning "I cannot read this type" into that claim is
+    // the worst failure available here.
+    use arrow::array::Decimal128Array;
+    use arrow::datatypes::DataType;
+    if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {
+        if row >= values.len() || values.is_null(row) {
+            return None;
+        }
+        let scale = match arr.data_type() {
+            DataType::Decimal128(_, s) => *s,
+            _ => 0,
+        };
+        return Some(values.value(row) as f64 / 10f64.powi(scale as i32));
+    }
+    // A narrower float, or an integer measure that was not summed.
+    if let Some(v) = i64_in(arr, row) {
+        return Some(v as f64);
+    }
+    let values = arr.as_any().downcast_ref::<arrow::array::Float32Array>()?;
+    (row < values.len() && !values.is_null(row)).then(|| values.value(row) as f64)
+}
+
+/// One i64 cell, at any integer width DuckDB might have chosen. Shared by
+/// [`Snapshot::i64_value`] and [`Snapshot::i64_at`].
+fn i64_in(arr: &dyn Array, row: usize) -> Option<i64> {
+    use arrow::array::PrimitiveArray;
+    use arrow::datatypes::{
+        Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
+    };
+
+    macro_rules! read_at_width {
+        ($t:ty) => {
+            if let Some(a) = arr.as_any().downcast_ref::<PrimitiveArray<$t>>() {
+                if row >= a.len() || a.is_null(row) {
+                    return None;
+                }
+                return i64::try_from(a.value(row)).ok();
+            }
+        };
+    }
+    read_at_width!(Int64Type);
+    read_at_width!(Int32Type);
+    read_at_width!(Int16Type);
+    read_at_width!(Int8Type);
+    read_at_width!(UInt32Type);
+    read_at_width!(UInt16Type);
+    read_at_width!(UInt8Type);
+    None
+}
+
+/// The codes and dictionary of a dictionary-encoded column, at any key
+/// width. Shared by [`Snapshot::dict_column`] and
+/// [`Snapshot::dict_codes_at`].
+fn dict_column_in(arr: &dyn Array) -> Option<(DictCodes<'_>, &StringArray)> {
+    use arrow::array::DictionaryArray;
+    use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
+    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
+        let values = d.values().as_any().downcast_ref::<StringArray>()?;
+        return Some((DictCodes::U8(d.keys().values(), d.nulls()), values));
+    }
+    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+        let values = d.values().as_any().downcast_ref::<StringArray>()?;
+        return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));
+    }
+    let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;
+    let values = d.values().as_any().downcast_ref::<StringArray>()?;
+    Some((DictCodes::U32(d.keys().values(), d.nulls()), values))
+}
+
+/// One dictionary-encoded cell, resolved to its string. Shared by
+/// [`Snapshot::dict_value`] and [`text_in`].
+fn dict_cell_in(arr: &dyn Array, row: usize) -> Option<&str> {
+    use arrow::array::DictionaryArray;
+    use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
+    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
+        return dictionary_cell(d, row);
+    }
+    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+        return dictionary_cell(d, row);
+    }
+    dictionary_cell(
+        arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?,
+        row,
+    )
+}
+
+/// One plain-`StringArray` cell. Shared by [`Snapshot::str_value`] and
+/// [`text_in`].
+fn str_in(arr: &dyn Array, row: usize) -> Option<&str> {
+    let values = arr.as_any().downcast_ref::<StringArray>()?;
+    (row < values.len() && !values.is_null(row)).then(|| values.value(row))
+}
+
+/// One dimension cell as text, whatever encoding it arrived in. Shared by
+/// [`Snapshot::text_value`] and [`Snapshot::text_at`].
+fn text_in(arr: &dyn Array, row: usize) -> Option<&str> {
+    dict_cell_in(arr, row).or_else(|| str_in(arr, row))
+}
+
+/// One cell as display text, for the types no other accessor reads.
+/// Shared by [`Snapshot::display_value`] and [`Snapshot::display_at`].
+fn display_in(arr: &dyn Array, row: usize) -> Option<String> {
+    use arrow::array::{BooleanArray, Date32Array, Date64Array, TimestampMicrosecondArray};
+
+    if let Some(s) = text_in(arr, row) {
+        return Some(s.to_string());
+    }
+    let present = |a: &dyn Array| row < a.len() && !a.is_null(row);
+
+    if let Some(v) = arr.as_any().downcast_ref::<BooleanArray>() {
+        return present(v).then(|| v.value(row).to_string());
+    }
+    if let Some(v) = arr.as_any().downcast_ref::<Date32Array>() {
+        return present(v)
+            .then(|| v.value_as_date(row).map(|d| d.to_string()))
+            .flatten();
+    }
+    if let Some(v) = arr.as_any().downcast_ref::<Date64Array>() {
+        return present(v)
+            .then(|| v.value_as_date(row).map(|d| d.to_string()))
+            .flatten();
+    }
+    if let Some(v) = arr.as_any().downcast_ref::<TimestampMicrosecondArray>() {
+        return present(v)
+            .then(|| v.value_as_datetime(row).map(|d| d.to_string()))
+            .flatten();
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct Snapshot {
     batch: Option<RecordBatch>,
     meta: Vec<ColumnMeta>,
-    /// Number of grouping columns — the deepest level a row can carry.
-    grouping_len: usize,
+    /// The grouping columns in order; each prefix is one tree level.
+    grouping: Vec<String>,
+    /// Index of `row_depth`, resolved once. `None` for a flat result.
+    depth_col: Option<usize>,
     provenance: Provenance,
 }
 
@@ -252,17 +397,37 @@ impl Snapshot {
     pub fn from_batches(
         batches: Vec<RecordBatch>,
         meta: Vec<ColumnMeta>,
-        grouping_len: usize,
+        grouping: Vec<String>,
         provenance: Provenance,
     ) -> Result<Snapshot, arrow::error::ArrowError> {
         let batch = match batches.first() {
             None => None,
             Some(_) => Some(concat_preserving_dictionaries(&batches)?),
         };
+        // `meta[i]` must describe batch column `i`: the index accessors
+        // rely on it, and the by-name ones are implemented over them.
+        if let Some(b) = &batch {
+            let names: Vec<&str> = b
+                .schema_ref()
+                .fields()
+                .iter()
+                .map(|f| f.name().as_str())
+                .collect();
+            let described: Vec<&str> = meta.iter().map(|m| m.name.as_str()).collect();
+            if names != described {
+                return Err(arrow::error::ArrowError::SchemaError(format!(
+                    "snapshot meta {described:?} does not match batch columns {names:?}"
+                )));
+            }
+        }
+        let depth_col = batch
+            .as_ref()
+            .and_then(|b| b.schema().index_of("row_depth").ok());
         Ok(Snapshot {
             batch,
             meta,
-            grouping_len,
+            grouping,
+            depth_col,
             provenance,
         })
     }
@@ -275,6 +440,32 @@ impl Snapshot {
         self.meta.iter().map(|m| m.name.as_str()).collect()
     }
 
+    /// The grouping columns in order; each prefix is one tree level.
+    pub fn grouping(&self) -> &[String] {
+        &self.grouping
+    }
+
+    pub fn grouping_len(&self) -> usize {
+        self.grouping.len()
+    }
+
+    /// How many columns the snapshot carries — the valid range for the
+    /// `_at` accessors is `0..columns()`.
+    pub fn columns(&self) -> usize {
+        self.meta.len()
+    }
+
+    /// Resolve a column's index once; the blotter reads by index for the
+    /// rest of the snapshot's life rather than searching by name per cell
+    /// (spec §5.5).
+    pub fn column_index(&self, name: &str) -> Option<usize> {
+        self.meta.iter().position(|m| m.name == name)
+    }
+
+    pub fn meta_at(&self, idx: usize) -> Option<&ColumnMeta> {
+        self.meta.get(idx)
+    }
+
     pub fn meta(&self, name: &str) -> Option<&ColumnMeta> {
         self.meta.iter().find(|m| m.name == name)
     }
@@ -283,10 +474,13 @@ impl Snapshot {
         &self.provenance
     }
 
-    fn column(&self, name: &str) -> Option<&dyn Array> {
+    fn column_at(&self, idx: usize) -> Option<&dyn Array> {
         let batch = self.batch.as_ref()?;
-        let idx = batch.schema().index_of(name).ok()?;
-        Some(batch.column(idx).as_ref())
+        (idx < batch.num_columns()).then(|| batch.column(idx).as_ref())
+    }
+
+    fn column(&self, name: &str) -> Option<&dyn Array> {
+        self.column_at(self.column_index(name)?)
     }
 
     /// Zero-copy over the whole column. `None` when absent or not f64 —
@@ -318,36 +512,14 @@ impl Snapshot {
     /// the two apart prints a confident zero where the honest answer is
     /// "this number does not belong to this row".
     pub fn f64_value(&self, name: &str, row: usize) -> Option<f64> {
-        let arr = self.column(name)?;
-        if let Some(values) = arr.as_any().downcast_ref::<Float64Array>() {
-            return (row < values.len() && !values.is_null(row)).then(|| values.value(row));
-        }
-        // A declared `i64` measure does not come back as an integer.
-        // `ColumnType::I64` is BIGINT, the default aggregate is `Sum`, and
-        // DuckDB's `sum(BIGINT)` is HUGEINT — exported as
-        // `Decimal128(38, 0)`. Nothing forbids such a measure, so without
-        // this arm every one of its cells read blank, and under §6.3 a
-        // blank cell is a positive claim: "this number does not belong to
-        // this row". Turning "I cannot read this type" into that claim is
-        // the worst failure available here.
-        use arrow::array::Decimal128Array;
-        use arrow::datatypes::DataType;
-        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {
-            if row >= values.len() || values.is_null(row) {
-                return None;
-            }
-            let scale = match arr.data_type() {
-                DataType::Decimal128(_, s) => *s,
-                _ => 0,
-            };
-            return Some(values.value(row) as f64 / 10f64.powi(scale as i32));
-        }
-        // A narrower float, or an integer measure that was not summed.
-        if let Some(v) = self.i64_value(name, row) {
-            return Some(v as f64);
-        }
-        let values = arr.as_any().downcast_ref::<arrow::array::Float32Array>()?;
-        (row < values.len() && !values.is_null(row)).then(|| values.value(row) as f64)
+        f64_in(self.column(name)?, row)
+    }
+
+    /// The by-index twin of [`Self::f64_value`]. The blotter resolves a
+    /// column once via [`Self::column_index`] and reads every subsequent
+    /// row through this, never by name (spec §5.5).
+    pub fn f64_at(&self, idx: usize, row: usize) -> Option<f64> {
+        f64_in(self.column_at(idx)?, row)
     }
 
     /// Zero-copy over the whole column, **only when it is exactly Int64**.
@@ -376,30 +548,12 @@ impl Snapshot {
     /// back `Int64`. Matching only `Int64` made every real result's depth
     /// unreadable while every fixture built on `Int64Array` passed.
     pub fn i64_value(&self, name: &str, row: usize) -> Option<i64> {
-        use arrow::array::PrimitiveArray;
-        use arrow::datatypes::{
-            Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type,
-        };
-        let arr = self.column(name)?;
+        i64_in(self.column(name)?, row)
+    }
 
-        macro_rules! read_at_width {
-            ($t:ty) => {
-                if let Some(a) = arr.as_any().downcast_ref::<PrimitiveArray<$t>>() {
-                    if row >= a.len() || a.is_null(row) {
-                        return None;
-                    }
-                    return i64::try_from(a.value(row)).ok();
-                }
-            };
-        }
-        read_at_width!(Int64Type);
-        read_at_width!(Int32Type);
-        read_at_width!(Int16Type);
-        read_at_width!(Int8Type);
-        read_at_width!(UInt32Type);
-        read_at_width!(UInt16Type);
-        read_at_width!(UInt8Type);
-        None
+    /// The by-index twin of [`Self::i64_value`].
+    pub fn i64_at(&self, idx: usize, row: usize) -> Option<i64> {
+        i64_in(self.column_at(idx)?, row)
     }
 
     /// Strings are returned as the Arrow array: offsets make a `&[&str]`
@@ -424,20 +578,15 @@ impl Snapshot {
     /// would have stopped the next reader re-checking. If a further width
     /// ever appears, this is the third place to find out about it.
     pub fn dict_column(&self, name: &str) -> Option<(DictCodes<'_>, &StringArray)> {
-        use arrow::array::DictionaryArray;
-        use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
-        let arr = self.column(name)?;
-        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
-            let values = d.values().as_any().downcast_ref::<StringArray>()?;
-            return Some((DictCodes::U8(d.keys().values(), d.nulls()), values));
-        }
-        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
-            let values = d.values().as_any().downcast_ref::<StringArray>()?;
-            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));
-        }
-        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;
-        let values = d.values().as_any().downcast_ref::<StringArray>()?;
-        Some((DictCodes::U32(d.keys().values(), d.nulls()), values))
+        dict_column_in(self.column(name)?)
+    }
+
+    /// The by-index twin of [`Self::dict_column`]. `None` both when the
+    /// index is out of range and when the column at it is not
+    /// dictionary-encoded — the same "absent or wrong shape" answer every
+    /// other `_at` accessor gives.
+    pub fn dict_codes_at(&self, idx: usize) -> Option<(DictCodes<'_>, &StringArray)> {
+        dict_column_in(self.column_at(idx)?)
     }
 
     /// One string cell, or `None` when the column is absent, the value is
@@ -461,19 +610,7 @@ impl Snapshot {
     /// the grand-total row, which belongs to no book, displays a real book
     /// name.
     pub fn dict_value(&self, name: &str, row: usize) -> Option<&str> {
-        use arrow::array::DictionaryArray;
-        use arrow::datatypes::{UInt8Type, UInt16Type, UInt32Type};
-        let arr = self.column(name)?;
-        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt8Type>>() {
-            return dictionary_cell(d, row);
-        }
-        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
-            return dictionary_cell(d, row);
-        }
-        dictionary_cell(
-            arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?,
-            row,
-        )
+        dict_cell_in(self.column(name)?, row)
     }
 
     /// One dimension cell as text, whatever encoding it arrived in.
@@ -487,8 +624,12 @@ impl Snapshot {
     /// that anything changed. Anything rendering a dimension should come
     /// through here rather than choose for itself.
     pub fn text_value(&self, name: &str, row: usize) -> Option<&str> {
-        self.dict_value(name, row)
-            .or_else(|| self.str_value(name, row))
+        text_in(self.column(name)?, row)
+    }
+
+    /// The by-index twin of [`Self::text_value`].
+    pub fn text_at(&self, idx: usize, row: usize) -> Option<&str> {
+        text_in(self.column_at(idx)?, row)
     }
 
     /// One cell as display text, for the types no other accessor reads.
@@ -507,44 +648,27 @@ impl Snapshot {
     /// from. Numbers are deliberately not formatted here — precision is
     /// the renderer's decision, so it should ask `f64_value` first.
     pub fn display_value(&self, name: &str, row: usize) -> Option<String> {
-        use arrow::array::{BooleanArray, Date32Array, Date64Array, TimestampMicrosecondArray};
+        display_in(self.column(name)?, row)
+    }
 
-        if let Some(s) = self.text_value(name, row) {
-            return Some(s.to_string());
-        }
-        let arr = self.column(name)?;
-        let present = |a: &dyn Array| row < a.len() && !a.is_null(row);
-
-        if let Some(v) = arr.as_any().downcast_ref::<BooleanArray>() {
-            return present(v).then(|| v.value(row).to_string());
-        }
-        if let Some(v) = arr.as_any().downcast_ref::<Date32Array>() {
-            return present(v)
-                .then(|| v.value_as_date(row).map(|d| d.to_string()))
-                .flatten();
-        }
-        if let Some(v) = arr.as_any().downcast_ref::<Date64Array>() {
-            return present(v)
-                .then(|| v.value_as_date(row).map(|d| d.to_string()))
-                .flatten();
-        }
-        if let Some(v) = arr.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-            return present(v)
-                .then(|| v.value_as_datetime(row).map(|d| d.to_string()))
-                .flatten();
-        }
-        None
+    /// The by-index twin of [`Self::display_value`].
+    pub fn display_at(&self, idx: usize, row: usize) -> Option<String> {
+        display_in(self.column_at(idx)?, row)
     }
 
     /// How many grouping columns are present on this row — 0 is the grand
     /// total, `grouping_len` a leaf. The compiler emits it directly rather
     /// than as a `GROUPING()` bitmask, whose width would otherwise change
     /// with how deep the query was told to materialize.
+    ///
+    /// `row_depth`'s column index is resolved once at construction
+    /// ([`Self::from_batches`]) rather than searched by name here, so a
+    /// per-cell read costs one array access, not a name lookup too.
     pub fn depth_of_row(&self, row: usize) -> Option<usize> {
-        let depth = self.i64_value("row_depth", row)?;
+        let depth = self.i64_at(self.depth_col?, row)?;
         usize::try_from(depth)
             .ok()
-            .filter(|d| *d <= self.grouping_len)
+            .filter(|d| *d <= self.grouping.len())
     }
 }
 
@@ -635,6 +759,9 @@ impl Snapshot {
     /// premise is that nothing outside it names an Arrow type — so the
     /// fixture builder lives here rather than making every test crate
     /// reach for `arrow` and pin its version to match duckdb's.
+    ///
+    /// The first `grouping_len` columns are the grouping columns, which is
+    /// the order the compiler emits.
     pub fn for_tests(columns: Vec<(ColumnMeta, TestColumn)>, grouping_len: usize) -> Snapshot {
         use arrow::array::{ArrayRef, Float64Array, StringArray};
         use arrow::datatypes::{DataType, Field, Schema};
@@ -658,10 +785,15 @@ impl Snapshot {
                 (Field::new(&meta.name, ty, true), array)
             })
             .unzip();
+        let grouping = columns
+            .iter()
+            .take(grouping_len)
+            .map(|(m, _)| m.name.clone())
+            .collect();
         let meta = columns.into_iter().map(|(m, _)| m).collect();
         let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .expect("fixture columns must be the same length");
-        Snapshot::from_batches(vec![batch], meta, grouping_len, Provenance::default())
+        Snapshot::from_batches(vec![batch], meta, grouping, Provenance::default())
             .expect("fixture snapshot")
     }
 }
@@ -717,7 +849,13 @@ mod tests {
     }
 
     fn snapshot() -> Snapshot {
-        Snapshot::from_batches(batches(), meta(), 1, Provenance::default()).unwrap()
+        Snapshot::from_batches(
+            batches(),
+            meta(),
+            vec!["book".into()],
+            Provenance::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -842,7 +980,7 @@ mod tests {
         let s = Snapshot::from_batches(
             vec![batch],
             vec![dim("row_depth"), dim("wide")],
-            2,
+            vec!["wide".into(), "x".into()],
             Provenance::default(),
         )
         .unwrap();
@@ -958,8 +1096,13 @@ mod tests {
             true,
         )]));
         let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
-        let s = Snapshot::from_batches(vec![batch], vec![dim("qty")], 1, Provenance::default())
-            .unwrap();
+        let s = Snapshot::from_batches(
+            vec![batch],
+            vec![dim("qty")],
+            vec!["qty".into()],
+            Provenance::default(),
+        )
+        .unwrap();
 
         assert_eq!(s.f64_value("qty", 0), Some(1234.0));
         assert_eq!(s.f64_value("qty", 1), None, "a NULL is still a NULL");
@@ -991,7 +1134,7 @@ mod tests {
         let s = Snapshot::from_batches(
             vec![batch],
             vec![dim("business_date"), dim("is_live")],
-            1,
+            vec!["business_date".into()],
             Provenance::default(),
         )
         .unwrap();
@@ -1041,7 +1184,7 @@ mod tests {
             let s = Snapshot::from_batches(
                 vec![batch.clone(), batch],
                 vec![dim("underlying_ref")],
-                1,
+                vec!["underlying_ref".into()],
                 Provenance::default(),
             )
             .unwrap();
@@ -1069,7 +1212,7 @@ mod tests {
             as_of: Some("2026-08-30T07:00:00Z".into()),
             generation: 3,
         });
-        let s = Snapshot::from_batches(batches(), meta(), 1, p).unwrap();
+        let s = Snapshot::from_batches(batches(), meta(), vec!["book".into()], p).unwrap();
         assert_eq!(
             s.provenance().stalest().map(|f| f.dataset.as_str()),
             Some("implied_vol_summary")
@@ -1078,8 +1221,98 @@ mod tests {
 
     #[test]
     fn an_empty_result_is_a_valid_snapshot() {
-        let s = Snapshot::from_batches(Vec::new(), meta(), 1, Provenance::default()).unwrap();
+        let s = Snapshot::from_batches(
+            Vec::new(),
+            meta(),
+            vec!["book".into()],
+            Provenance::default(),
+        )
+        .unwrap();
         assert_eq!(s.rows(), 0);
         assert!(s.f64_column("delta01").is_none_or(|c| c.is_empty()));
+    }
+
+    #[test]
+    fn index_accessors_agree_with_their_by_name_twins_under_every_type() {
+        // The blotter resolves a column once and reads by index for the
+        // rest of the snapshot's life (§5.5). Every typed accessor here
+        // must answer exactly what its by-name twin answers, including
+        // NULL, past-the-end, and the narrow-integer and dictionary
+        // shapes DuckDB actually emits.
+        let s = Snapshot::for_tests(
+            vec![
+                (
+                    dim("book"),
+                    TestColumn::Dict(vec![Some("BK000".into()), None]),
+                ),
+                (dim("lhu"), TestColumn::Str(vec![Some("L1"), None])),
+                (dim("row_depth"), TestColumn::I32(vec![1, 0])),
+                (dim("delta01"), TestColumn::F64(vec![Some(1.5), None])),
+            ],
+            2,
+        );
+        assert_eq!(s.columns(), 4);
+        assert_eq!(s.column_index("book"), Some(0));
+        assert_eq!(s.column_index("delta01"), Some(3));
+        assert_eq!(s.column_index("nonesuch"), None);
+        assert_eq!(s.meta_at(3).map(|m| m.name.as_str()), Some("delta01"));
+        assert!(s.meta_at(4).is_none());
+
+        for row in 0..3 {
+            assert_eq!(
+                s.text_at(0, row),
+                s.text_value("book", row),
+                "book row {row}"
+            );
+            assert_eq!(s.text_at(1, row), s.text_value("lhu", row), "lhu row {row}");
+            assert_eq!(
+                s.i64_at(2, row),
+                s.i64_value("row_depth", row),
+                "depth row {row}"
+            );
+            assert_eq!(
+                s.f64_at(3, row),
+                s.f64_value("delta01", row),
+                "delta row {row}"
+            );
+            assert_eq!(
+                s.display_at(0, row),
+                s.display_value("book", row),
+                "display row {row}"
+            );
+        }
+        assert_eq!(s.f64_at(3, 1), None, "NULL is still NULL by index");
+        assert_eq!(
+            s.f64_at(9, 0),
+            None,
+            "an index past the end is None, not a panic"
+        );
+        assert!(s.dict_codes_at(0).is_some());
+        assert!(
+            s.dict_codes_at(1).is_none(),
+            "a plain string column has no codes"
+        );
+    }
+
+    #[test]
+    fn a_meta_list_that_disagrees_with_the_batch_is_refused() {
+        // Index accessors assume meta[i] describes batch column i. The
+        // compiler keeps them aligned; a fixture or a future refactor
+        // that does not must fail here, loudly, not read the wrong
+        // attribution for every cell.
+        let mut wrong = meta();
+        wrong.swap(0, 2);
+        let err =
+            Snapshot::from_batches(batches(), wrong, vec!["book".into()], Provenance::default());
+        assert!(err.is_err(), "misaligned meta must not build a snapshot");
+    }
+
+    #[test]
+    fn depth_is_read_through_the_cached_column() {
+        let s = snapshot();
+        assert_eq!(s.depth_of_row(0), Some(1));
+        assert_eq!(s.depth_of_row(1), Some(0));
+        let flat = Snapshot::for_tests(vec![(dim("delta01"), TestColumn::F64(vec![Some(1.0)]))], 0);
+        assert_eq!(flat.depth_of_row(0), None, "no depth column, no depth");
     }
 }
