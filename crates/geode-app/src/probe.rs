@@ -183,12 +183,12 @@ fn ingest(setup: &Setup) -> Result<(), String> {
         return Ok(());
     }
 
-    let (handle, events) = IngestRunner::spawn(store, ds, setup.dataset.clone());
+    let (handle, events) = IngestRunner::spawn_channel(store, setup.schema.clone());
     handle.submit(plan);
     // Drain to the first PlanComplete, then stop: the probe ingests once.
     while let Ok(event) = events.recv() {
         match event {
-            IngestEvent::Failed { batch, reason } => {
+            IngestEvent::Failed { batch, reason, .. } => {
                 eprintln!("[probe] ingest failed for {batch}: {reason}");
             }
             IngestEvent::PlanComplete => break,

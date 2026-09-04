@@ -1,10 +1,13 @@
-//! The ingest runner (spec §5.4–§5.7). Owns the writer connection on its
-//! own thread, works a priority-ordered queue, and never takes the app down.
+//! The ingest runner (spec §5.4–§5.7, Phase 3 §2.5). One thread owning
+//! the writer connection for **every** dataset, working a
+//! priority-ordered queue, never taking the app down.
 //!
-//! One thread, not a pool, deliberately: DuckDB is single-writer so every
-//! publish serializes anyway (spec §5.3). Whether parsing in parallel across
-//! separate connections buys anything is a benchmark question the spec
-//! declines to assume (spec §5.6), and Task 14 measures it.
+//! One thread, not a pool, and one for all datasets rather than one per
+//! dataset: DuckDB is single-writer, so every publish serializes anyway
+//! (spec §5.3), and a runner per dataset would make that discipline a
+//! convention held by whoever spawned them. The `Store` — and with it the
+//! writer — lives here; the service keeps only reader connections cloned
+//! before the store moved (Phase 3 §5.3).
 //!
 //! **Moving staging onto a pool is planned but on hold** — read
 //! `docs/ingest-cold-start-handoff.md` first. The 1.87× in `docs/perf.md`
@@ -22,8 +25,8 @@ use crate::ingest::load::{LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::{CandidateState, Priority};
 use crate::store::Store;
-use geode_core::schema::DatasetSpec;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use geode_core::schema::SchemaSpec;
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
@@ -39,12 +42,18 @@ pub enum IngestEvent {
         health: Health,
     },
     Failed {
+        dataset: String,
         batch: String,
         reason: String,
     },
     /// The queue drained. Not a terminal state — more work may be submitted.
     PlanComplete,
 }
+
+/// Where events go. `false` means nobody is listening, which stops the
+/// runner. Called from the runner's own thread with no lock held, so a
+/// sink must not block indefinitely — a channel send is fine.
+pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 
 #[derive(Default)]
 struct Queue {
@@ -60,27 +69,28 @@ pub struct IngestHandle {
 pub struct IngestRunner;
 
 impl IngestRunner {
-    pub fn spawn(
-        store: Store,
-        dataset: DatasetSpec,
-        dataset_name: String,
-    ) -> (IngestHandle, Receiver<IngestEvent>) {
-        let (tx, rx) = channel();
+    pub fn spawn(store: Store, schema: SchemaSpec, sink: IngestSink) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
-
         let thread = std::thread::Builder::new()
             .name("geode-ingest".into())
-            .spawn(move || run(store, dataset, dataset_name, worker_queue, tx))
+            .spawn(move || run(store, schema, worker_queue, sink))
             .expect("spawning the ingest thread");
+        IngestHandle {
+            queue,
+            thread: Mutex::new(Some(thread)),
+        }
+    }
 
-        (
-            IngestHandle {
-                queue,
-                thread: Mutex::new(Some(thread)),
-            },
-            rx,
-        )
+    /// A runner delivering into a channel, for callers that block on
+    /// events — tests and the cold-start bench.
+    pub fn spawn_channel(
+        store: Store,
+        schema: SchemaSpec,
+    ) -> (IngestHandle, Receiver<IngestEvent>) {
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        (Self::spawn(store, schema, sink), rx)
     }
 }
 
@@ -118,13 +128,7 @@ impl Drop for IngestHandle {
     }
 }
 
-fn run(
-    store: Store,
-    dataset: DatasetSpec,
-    dataset_name: String,
-    queue: Arc<(Mutex<Queue>, Condvar)>,
-    tx: Sender<IngestEvent>,
-) {
+fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, sink: IngestSink) {
     // PlanComplete is announced once per drain, on the transition from
     // working to idle — not on every wakeup. An idle runner would otherwise
     // push an event every poll interval, forever, into an unbounded channel.
@@ -144,7 +148,7 @@ fn run(
                 }
                 if !announced_idle {
                     announced_idle = true;
-                    if tx.send(IngestEvent::PlanComplete).is_err() {
+                    if !sink(IngestEvent::PlanComplete) {
                         return;
                     }
                 }
@@ -153,6 +157,19 @@ fn run(
                     .unwrap_or_else(|e| e.into_inner());
                 q = guard;
             }
+        };
+
+        // The dataset is resolved per item (Phase 3 §2.5). An undeclared
+        // one is this item's failure, named, and the runner carries on.
+        let Some(dataset) = schema.dataset(&item.dataset) else {
+            if !sink(IngestEvent::Failed {
+                dataset: item.dataset.clone(),
+                batch: item.batch.clone(),
+                reason: format!("dataset '{}' is not declared", item.dataset),
+            }) {
+                return;
+            }
+            continue;
         };
 
         // Panic boundary (spec §5.7): a panicking load degrades its file and
@@ -165,8 +182,8 @@ fn run(
             load_file(
                 &store,
                 &LoadRequest {
-                    dataset: &dataset,
-                    dataset_name: &dataset_name,
+                    dataset,
+                    dataset_name: &item.dataset,
                     csv_path: &item.candidate.csv_path,
                     sentinel,
                     batch: &item.batch,
@@ -177,7 +194,7 @@ fn run(
 
         let event = match outcome {
             Ok(Ok(loaded)) => IngestEvent::Published {
-                dataset: dataset_name.clone(),
+                dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 gen_id: loaded.gen_id,
                 // What the load actually wrote, not what the sentinel
@@ -191,15 +208,17 @@ fn run(
                 health: loaded.health,
             },
             Ok(Err(reason)) => IngestEvent::Failed {
+                dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason,
             },
             Err(_) => IngestEvent::Failed {
+                dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: "ingest task panicked".into(),
             },
         };
-        if tx.send(event).is_err() {
+        if !sink(event) {
             return; // receiver gone: nothing left to report to
         }
     }
@@ -216,7 +235,14 @@ pub fn is_preemptible(item: &WorkItem) -> bool {
 mod tests {
     use super::*;
     use crate::source::Priority;
+    use geode_core::schema::DatasetSpec;
     use std::time::Duration;
+
+    fn schema_of(ds: DatasetSpec) -> geode_core::schema::SchemaSpec {
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+        schema
+    }
 
     fn drain(rx: &Receiver<IngestEvent>, want_published: usize) -> Vec<IngestEvent> {
         let mut out = Vec::new();
@@ -269,7 +295,7 @@ mod tests {
         let expected = plan.items.len();
         assert!(expected > 0, "fixture must produce work");
 
-        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
         handle.submit(plan);
         let events = drain(&rx, expected);
         handle.shutdown();
@@ -312,7 +338,7 @@ mod tests {
         };
         let expected = plan.items.len() + 1;
 
-        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
         handle.submit(plan);
         handle.submit(WorkPlan {
             items: vec![current.clone()],
@@ -351,7 +377,7 @@ mod tests {
         broken.candidate.csv_path = broken.candidate.csv_path.with_file_name("gone.csv");
         plan.items.insert(0, broken);
 
-        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
         handle.submit(plan);
         let events = drain(&rx, good + 1);
         handle.shutdown();
@@ -375,7 +401,7 @@ mod tests {
     #[test]
     fn an_idle_runner_announces_completion_once_not_per_wakeup() {
         let (_db, _src, store, ds, _plan) = harness();
-        let (handle, rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
 
         // No work submitted: the runner idles. Give it many poll intervals.
         std::thread::sleep(Duration::from_millis(600));
@@ -394,8 +420,40 @@ mod tests {
     #[test]
     fn shutdown_is_idempotent_and_does_not_hang() {
         let (_db, _src, store, ds, _plan) = harness();
-        let (handle, _rx) = IngestRunner::spawn(store, ds, "risk_snapshot".into());
+        let (handle, _rx) = IngestRunner::spawn_channel(store, schema_of(ds));
         handle.shutdown();
+        handle.shutdown();
+    }
+
+    #[test]
+    fn an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues() {
+        // One runner serves every dataset (spec §2.5), so an item can name
+        // a dataset the schema does not declare — a sources.toml pointing
+        // at a dataset that a later datasets.toml edit removed. It must be
+        // reported as that item's failure, not a panic and not silence.
+        let (_db, _src, store, ds, plan) = harness();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        let mut wrong = plan.items[0].clone();
+        wrong.dataset = "nonesuch".into();
+        let good = plan.items[1].clone();
+        handle.submit(WorkPlan {
+            items: vec![wrong, good],
+        });
+        let events = drain(&rx, 2);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Failed { dataset, reason, .. }
+                    if dataset == "nonesuch" && reason.contains("not declared")
+            )),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::Published { .. })),
+            "the good item still loads: {events:?}"
+        );
         handle.shutdown();
     }
 }
