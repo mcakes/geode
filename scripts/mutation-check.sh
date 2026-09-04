@@ -771,8 +771,8 @@ run_mutation "service: a publish becomes a Published event" \
 
 run_mutation "handle: a refused request is counted" \
   crates/geode-data/src/handle.rs \
-  '                self.inner.dropped.fetch_add(1, Ordering::Relaxed);' \
-  '                let _ = Ordering::Relaxed;'
+  '                    self.dropped.fetch_add(1, Ordering::Relaxed);' \
+  '                    let _ = Ordering::Relaxed;'
 
 run_mutation "handle: a compile failure is delivered as the key's outcome" \
   crates/geode-data/src/handle.rs \
