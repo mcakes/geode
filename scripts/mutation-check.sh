@@ -791,3 +791,54 @@ run_mutation "snapshot: misaligned meta is refused" \
   '            if names != described {' \
   '            if false && names != described {' \
   geode-core
+
+# ---- tree index (Phase 3 §5.5)
+#
+# Two entries the plan proposed are not here, and the reason is the one
+# this file's header warns about: an entry can name a defence that no
+# fixture can reach.
+#
+#   "a parent is found by prefix, not by position" (`if prefix_eq(...)`
+#   -> `if true`) SURVIVED. `prefix_eq` runs only on a candidate the hash
+#   table already handed back, so it is purely a collision guard: with
+#   distinct FNV-1a hashes for distinct prefixes — which every fixture
+#   has — the first candidate is always the right parent and skipping the
+#   check changes nothing. Catching it would need an engineered 64-bit
+#   collision. The claim in its name is pinned below instead, at a point
+#   the fixtures do reach.
+#
+#   "NULL is not the empty string" (`feed(0x00)` -> `feed(0x01)`)
+#   SURVIVED, and so did the fallback the plan offered for it
+#   (`None => true` -> `None => false` in `prefix_eq`, whose absent-column
+#   arm no fixture evaluates: the one fixture with an absent grouping
+#   column has rows only at depths 0 and 1, so every `prefix_eq` call
+#   there is `take(0)` and `all()` returns true without reading an arm).
+#   NULL-vs-"" is defended twice — the hash token and `prefix_eq`'s
+#   `Option<&str>` comparison — and each defence rescues a mutation of the
+#   other, which is this file's "two defences overlapping so neither is
+#   isolated". No single-line mutation isolates it. The other half of the
+#   unplaced contract is pinned instead.
+
+run_mutation "tree: a child attaches to the row its prefix names, not to a neighbour" \
+  crates/geode-core/src/tree.rs \
+  '                        Some(p) => parent[row] = p,' \
+  '                        Some(_) => parent[row] = *by_depth[d - 1].last().unwrap(),' \
+  geode-core
+
+run_mutation "tree: an unplaced row is counted" \
+  crates/geode-core/src/tree.rs \
+  '                            unplaced += 1;' \
+  '                            unplaced += 0;' \
+  geode-core
+
+run_mutation "tree: an unplaced row still appears under the root" \
+  crates/geode-core/src/tree.rs \
+  '                            parent[row] = roots.first().copied().unwrap_or(NO_PARENT);' \
+  '                            parent[row] = NO_PARENT;' \
+  geode-core
+
+run_mutation "tree: children keep row order" \
+  crates/geode-core/src/tree.rs \
+  '        for (r, &p) in parent.iter().enumerate() {' \
+  '        for (r, &p) in parent.iter().enumerate().rev() {' \
+  geode-core
