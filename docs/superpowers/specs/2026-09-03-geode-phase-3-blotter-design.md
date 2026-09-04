@@ -172,6 +172,9 @@ pub trait TileContent {
                 window: &mut Window, cx: &mut App) -> bool;
     /// A `:` line, without the colon. `Err` is shown inline on the line.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
+    /// Candidates for the word under `cursor` on a `:` line (§3.4). The
+    /// shell ranks and shows them; the occupant only knows its vocabulary.
+    fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     /// Live `/` text as it is typed, and the committed query on Enter.
     fn find(&self, query: &str, committed: bool, window: &mut Window, cx: &mut App);
     /// A query result addressed to this tile (§5.1).
@@ -272,6 +275,22 @@ forwarded on every change (`find(query, false)`) and on Enter
 from `command` is shown in the danger token beside the prompt until the
 next keystroke. The strip carries no history; that is a later
 nicety.
+
+**Completions.** On every change to a `:` line the shell asks the
+occupant for `completions(line, cursor)` — the vocabulary for the word
+under the cursor: subcommands after `:sort` or `:group`, column names
+after `:sort`, `:group` and inside `:scope`, view names after `:view`,
+slot numbers after `:group slot`. The shell ranks them with
+`listfilter::rank`, the fuzzy matcher the palette and dialogs already
+share, and paints a popup of ranked rows with match highlighting
+directly above the strip, reusing the palette's row rendering. `tab`
+accepts the top row and cycles on repeat; `ctrl+n`/`ctrl+p` move the
+highlight; Enter with exactly one match accepts it and submits, so
+`:sort del` runs as `:sort delta01`. An ambiguous Enter is an inline
+error naming the matches — the line never guesses. A word with no
+candidates (a literal in `:scope`, a `desc`) has no popup. The
+occupant supplies words, nothing else: ranking, the popup and the
+key vocabulary are the shell's, so every module completes the same way.
 
 ### 3.5 Session persistence
 
@@ -381,7 +400,7 @@ globally, as §4.3 says a `:scope` from any tile should.
 | `:asof <time>` | Set the frame as-of. `HH:MM` means today; RFC 3339 for anything else. |
 | `:live` | Return to live. |
 | `:view <name>` | Show a different view in this tile. |
-| `:sort <column> [desc]` / `:sort clear` | Sort siblings by a column (§6.3). |
+| `:sort <column> [desc]` / `:sort clear` | Sort siblings by a column (§6.3); `s` on the cursor column is the no-typing form. |
 
 ### 4.4 The readout
 
@@ -675,8 +694,12 @@ are left-aligned in the UI face. Dates and booleans go through
 
 ### 6.3 Sorting
 
-`:sort delta01 desc` or a header click sets a tile-local sort. It is
-applied inside flatten to each sibling range: siblings are compared on
+`s` in normal mode cycles the cursor column through ascending,
+descending and cleared — `h`/`l` already put the cursor on the column,
+so the common case needs no typing. `:sort delta01 desc` (completed,
+§3.4) covers a column that is off-screen, and a header click does the
+same by mouse. All three set the same tile-local sort, shown as an
+arrow in the column header. It is applied inside flatten to each sibling range: siblings are compared on
 the column's value with NULL last, ties keep row order. This is
 view-shaping in-app (PHILOSOPHY §1 lists sorting as such) and it keeps
 the compiler's determinism order untouched. A `NonAttributable` cell
@@ -811,7 +834,9 @@ Test weight stays data ≫ shell logic ≫ module (§10.3).
   context, treats a leading `0` as a key, keeps the count across a
   `Pending`, clears it on `NoMatch` and `escape`, and caps it;
   session round trip with a `tiles` table and a dangling id; command
-  line prompt and routing; reclaimed `DataTable` bindings do not fire.
+  line prompt and routing; completions ranked, accepted on `tab`,
+  submitted on a unique Enter, refused inline on an ambiguous one;
+  reclaimed `DataTable` bindings do not fire.
 - **Module (`TestAppContext`):** a blotter tile with a `for_tests`
   snapshot and a `for_tests` handle: it paints (`debug_selector`); `j`
   moves the cursor and `5j` moves it five; `/` under each `find_style`
