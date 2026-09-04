@@ -673,8 +673,8 @@ returns an empty cell; it never formats.
 ```toml
 [[tree.columns]]
 name = "npv"
-format = { precision = 0, thousands = true, negative = "parens", colour = "sign" }
-label = "NPV"
+format = { precision = 0, thousands = true, negative = "parens", colour = "sign", scale = "k" }
+label = "NPV (k)"
 width = 110
 ```
 
@@ -684,8 +684,12 @@ width = 110
 | `thousands` | true | — |
 | `negative` | `"minus"` | — |
 | `colour` | `"sign"` | `"none"` |
+| `scale` | `"none"` | — |
 
-`colour = "sign"` paints negatives `chart_bearish` and positives
+`scale` is `"none"`, `"k"` or `"M"`: `k` divides the value by 1 000 and `M`
+by 1 000 000 before display, and `precision` applies to the divided
+number, so `scale = "k", precision = 0` shows 1 234 567.89 as `1,235`. The
+header shows the scale after the label. `colour = "sign"` paints negatives `chart_bearish` and positives
 `chart_bullish`, the tokens this repo's bundled themes already set for
 exactly this (`theme.rs` records the Nord adjustment). Zero is the
 foreground token. Numbers are `fonts::MONO`, right-aligned; dimensions
@@ -711,7 +715,7 @@ real for its row, and sorting siblings is not totalling.
 `y` in visual mode writes the range to the clipboard as TSV: a header
 line of column labels, then one line per visible row with the tree
 column indented by two spaces per depth, numbers at full precision
-(not the display format), blanks for NULL. Raw values are what a
+(not the display format, and unscaled), blanks for NULL. Raw values are what a
 spreadsheet paste wants; the display format is what a screen wants.
 `y` in normal mode yanks the cursor row.
 
