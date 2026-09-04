@@ -778,3 +778,17 @@ run_mutation "handle: a compile failure is delivered as the key's outcome" \
   crates/geode-data/src/handle.rs \
   '                if let Err(e) = service.query(&params) {' \
   '                if let Err(e) = service.query(&params) && false {'
+
+# ---- snapshot index accessors (Phase 3 §5.5)
+
+run_mutation "snapshot: f64_at honours the null bitmap" \
+  crates/geode-core/src/snapshot.rs \
+  '        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));' \
+  '        return (row < values.len()).then(|| values.value(row));' \
+  geode-core
+
+run_mutation "snapshot: misaligned meta is refused" \
+  crates/geode-core/src/snapshot.rs \
+  '            if names != described {' \
+  '            if false && names != described {' \
+  geode-core
