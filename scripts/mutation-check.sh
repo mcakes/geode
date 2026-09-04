@@ -671,3 +671,15 @@ run_mutation "snapshot: text reads a dimension under either era encoding" \
             .or_else(|| self.str_value(name, row))' \
   '        self.str_value(name, row)' \
   geode-core
+
+# ---- query pool (spec §2.4, §5.1)
+
+run_mutation "pool: coalescing is keyed on the tile, not the view" \
+  crates/geode-data/src/query/pool.rs \
+  '        q.pending.insert(req.key, (id, req));' \
+  '        let key = QueryKey(0); q.pending.insert(key, (id, req));'
+
+run_mutation "pool: the tag is echoed, not regenerated" \
+  crates/geode-data/src/query/pool.rs \
+  '            tag: req.tag,' \
+  '            tag: 0,'
