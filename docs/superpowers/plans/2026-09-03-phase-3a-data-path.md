@@ -693,7 +693,8 @@ goes through one sink. Tests and benches use `open_channel`.
   }
   pub type EventSink = Arc<dyn Fn(DataEvent) -> bool + Send + Sync>;
   pub struct QueryParams { pub key: QueryKey, pub tag: u64, pub submitted: Instant,
-                           pub view: String, pub scope: Scope, pub as_of: AsOf, pub max_depth: usize }
+                           pub view: String, pub grouping: Option<Vec<String>>,
+                           pub scope: Scope, pub as_of: AsOf, pub max_depth: usize }
   impl DataService {
       pub fn open(config: DataServiceConfig, sink: EventSink) -> Result<DataService, StoreError>;
       pub fn open_channel(config) -> Result<(DataService, Receiver<DataEvent>), StoreError>;
@@ -765,10 +766,29 @@ module, and add three tests:
             tag: key,
             submitted: Instant::now(),
             view: view.to_string(),
+            grouping: None,
             scope: scope.clone(),
             as_of,
             max_depth,
         }
+    }
+
+    #[test]
+    fn a_grouping_override_regroups_the_named_view() {
+        // The frame's active slot is applied per query (spec §5.1), not
+        // by registering a view per slot. Grouped by book alone the tree
+        // has 1 + books rows at depth ≤ 1; the view's own three-level
+        // grouping has many more.
+        let (_db, _src, svc, rx) = service();
+        let mut p = params(1, "tree", &Scope::default(), AsOf::Live, 1);
+        p.grouping = Some(vec!["book".into()]);
+        svc.query(&p).unwrap();
+        let by_book = next(&rx).snapshot.unwrap();
+        assert_eq!(by_book.grouping(), &["book".to_string()]);
+        let mut wrong = params(2, "tree", &Scope::default(), AsOf::Live, 1);
+        wrong.grouping = Some(vec!["nonesuch".into()]);
+        assert!(svc.query(&wrong).is_err(), "an undeclared column fails at compile time");
+        svc.shutdown();
     }
 
     #[test]
@@ -924,6 +944,10 @@ pub struct QueryParams {
     pub tag: u64,
     pub submitted: Instant,
     pub view: String,
+    /// Replaces the named view's own grouping for this query: the
+    /// frame's active slot or a tile's pin (spec §5.1). `None` keeps the
+    /// view's.
+    pub grouping: Option<Vec<String>>,
     pub scope: Scope,
     pub as_of: AsOf,
     pub max_depth: usize,
@@ -1032,6 +1056,28 @@ and the diagnostic is what says why. Silently dropping it would make a
                 source: duckdb::Error::InvalidParameterName(format!("unknown view '{view}'")),
             })?;
 
+        // A grouping override is a per-query copy of the spec with its
+        // grouping replaced; validation runs on the copy so an undeclared
+        // column is this query's error, named, not a binder error later.
+        let regrouped;
+        let spec = match &params.grouping {
+            None => spec,
+            Some(grouping) => {
+                regrouped = ViewSpec {
+                    grouping: grouping.clone(),
+                    ..spec.clone()
+                };
+                let diags = regrouped.validate(&self.config.schema, &self.config.dimensions);
+                if let Some(d) = diags.iter().find(|d| d.severity == geode_core::config::Severity::Error) {
+                    return Err(StoreError::Sql {
+                        statement: format!("query view '{view}' grouped by {grouping:?}"),
+                        source: duckdb::Error::InvalidParameterName(d.message.clone()),
+                    });
+                }
+                &regrouped
+            }
+        };
+
         let compiled = compile_view(
             &self.conn,
             spec,
@@ -1086,6 +1132,7 @@ fn requery(
         tag: 0,
         submitted: std::time::Instant::now(),
         view: view.to_string(),
+        grouping: None,
         scope: scope.clone(),
         as_of: AsOf::Live,
         max_depth,
@@ -1106,8 +1153,8 @@ every `requery(&svc, …)` call passing `&rx` after `&svc`.
 In `probe.rs`, `query_once` and `run` change minimally: `run` opens with
 `DataService::open_channel(...)` binding `(service, rx)`, passes `&rx` to
 `query_once`, which submits `QueryParams { key: QueryKey(1), tag: 0,
-submitted: Instant::now(), view: setup.view.clone(), scope:
-Scope::default(), as_of: AsOf::Live, max_depth: MAX_DEPTH }` and loops
+submitted: Instant::now(), view: setup.view.clone(), grouping: None,
+scope: Scope::default(), as_of: AsOf::Live, max_depth: MAX_DEPTH }` and loops
 on `rx.recv_timeout` until a `DataEvent::Query`. Add `sources:
 Vec::new()` to its `DataServiceConfig`.
 
@@ -1140,6 +1187,14 @@ run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
   '                    key: r.key,' \
   '                    key: QueryKey(0),'
+
+run_mutation "service: a grouping override is applied" \
+  crates/geode-data/src/service.rs \
+  '                regrouped = ViewSpec {
+                    grouping: grouping.clone(),
+                    ..spec.clone()
+                };' \
+  '                regrouped = spec.clone();'
 
 run_mutation "service: replace_views actually replaces" \
   crates/geode-data/src/service.rs \
@@ -2657,6 +2712,7 @@ mod tests {
             tag: 1,
             submitted: Instant::now(),
             view: view.to_string(),
+            grouping: None,
             scope: Scope::default(),
             as_of: AsOf::Live,
             max_depth: 1,
@@ -3273,6 +3329,7 @@ fn drain(
                     tag,
                     submitted: last_query,
                     view: view.clone(),
+                    grouping: None,
                     scope: Scope::default(),
                     as_of: AsOf::Live,
                     max_depth: MAX_DEPTH,

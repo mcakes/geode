@@ -443,8 +443,8 @@ one thread, as the probe already established. `DataHandle` is the
 pub struct DataHandle { requests: Sender<Request> /* bounded */ }
 
 pub enum Request {
-    Query { key: QueryKey, view: String, scope: Scope, as_of: AsOf,
-            max_depth: usize, tag: u64 },
+    Query { key: QueryKey, view: String, grouping: Option<Vec<String>>,
+            scope: Scope, as_of: AsOf, max_depth: usize, tag: u64 },
     Cancel { key: QueryKey },
     ReplaceViews { views: Vec<ViewSpec>, dimensions: DerivedDimensions },
     Shutdown,
@@ -479,6 +479,11 @@ The outbound channel is bounded (§7.3): one in-flight result per key
 bounds it by tile count, and `Published` storms coalesce because the
 frame only bumps a counter. A full channel drops the event and counts
 it; the count is a diagnostic.
+
+`grouping` overrides the named view's own grouping for this query: the
+frame's active slot, or a tile's pin, is applied here rather than by
+registering a view per slot. A column the schema does not declare fails
+at compile time as this key's `Err` outcome, like an unknown view.
 
 `geode-app`'s bridge drains the channel in one foreground task that
 awaits the receiver — gpui's executor wakes it on send, so delivery
