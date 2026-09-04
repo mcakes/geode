@@ -11,6 +11,7 @@
 //! rows are scanned inside DuckDB and never cross this boundary.
 
 use crate::attribution::{Attribution, ScopeSemantics};
+use crate::tree::TreeIndex;
 use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use arrow::buffer::NullBuffer;
 use arrow::record_batch::RecordBatch;
@@ -391,6 +392,9 @@ pub struct Snapshot {
     /// Index of `row_depth`, resolved once. `None` for a flat result.
     depth_col: Option<usize>,
     provenance: Provenance,
+    /// The parent/child structure, built once at construction on the
+    /// query worker rather than per frame (Phase 3 §5.5).
+    tree: TreeIndex,
 }
 
 impl Snapshot {
@@ -423,13 +427,16 @@ impl Snapshot {
         let depth_col = batch
             .as_ref()
             .and_then(|b| b.schema().index_of("row_depth").ok());
-        Ok(Snapshot {
+        let mut snapshot = Snapshot {
             batch,
             meta,
             grouping,
             depth_col,
             provenance,
-        })
+            tree: TreeIndex::default(),
+        };
+        snapshot.tree = TreeIndex::build(&snapshot);
+        Ok(snapshot)
     }
 
     pub fn rows(&self) -> usize {
@@ -670,6 +677,18 @@ impl Snapshot {
         usize::try_from(depth)
             .ok()
             .filter(|d| *d <= self.grouping.len())
+    }
+
+    /// Whether the result carries `row_depth` at all. A result without it
+    /// is flat — every row a root — and asking [`Self::depth_of_row`] row
+    /// by row cannot distinguish that from a column of NULLs.
+    pub fn has_depth_column(&self) -> bool {
+        self.depth_col.is_some()
+    }
+
+    /// The parent/child structure, built once here (Phase 3 §5.5).
+    pub fn tree(&self) -> &TreeIndex {
+        &self.tree
     }
 }
 
