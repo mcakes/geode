@@ -34,17 +34,56 @@ pub enum Request {
 }
 
 struct Inner {
-    tx: SyncSender<Request>,
+    tx: Mutex<Option<SyncSender<Request>>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     dropped: AtomicU64,
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        let _ = self.tx.try_send(Request::Shutdown);
+impl Inner {
+    fn send(&self, req: Request) -> bool {
+        let guard = self.tx.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(tx) => match tx.try_send(req) {
+                Ok(()) => true,
+                Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                    false
+                }
+            },
+            None => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                false
+            }
+        }
+    }
+
+    /// Stop accepting requests and end the service thread. A queued
+    /// `Shutdown` sentinel is not enough on its own: if the channel is
+    /// full the sentinel is refused, and `serve`'s blocking `rx.recv()`
+    /// would then wait forever for a request that never lands. What
+    /// actually guarantees the thread ends is dropping the sender —
+    /// `recv()` returns `Err` once the channel is empty and
+    /// disconnected, regardless of how full it was a moment before —
+    /// so the sender is taken out of the `Option` first (every later
+    /// `send` sees `None` and refuses), a `Shutdown` is offered
+    /// best-effort so a healthy loop can exit its `match` promptly
+    /// rather than via a wasted `recv` error path, and only then is the
+    /// sender dropped and the thread joined.
+    fn stop(&self) {
+        let taken = self.tx.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(tx) = taken {
+            let _ = tx.try_send(Request::Shutdown);
+            drop(tx);
+        }
         if let Some(t) = self.thread.lock().unwrap_or_else(|e| e.into_inner()).take() {
             let _ = t.join();
         }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -55,13 +94,7 @@ pub struct DataHandle {
 
 impl DataHandle {
     fn send(&self, req: Request) -> bool {
-        match self.inner.tx.try_send(req) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.inner.dropped.fetch_add(1, Ordering::Relaxed);
-                false
-            }
-        }
+        self.inner.send(req)
     }
 
     /// Queue a query. `false` means it was not queued — retry on the next
@@ -87,18 +120,11 @@ impl DataHandle {
     }
 
     /// Stop the service thread and wait for it. Idempotent; also runs
-    /// when the last handle drops.
+    /// when the last handle drops. Disconnecting the channel — not the
+    /// queued `Shutdown` sentinel — is what guarantees the thread ends:
+    /// see `Inner::stop`.
     pub fn shutdown(&self) {
-        let _ = self.inner.tx.try_send(Request::Shutdown);
-        if let Some(t) = self
-            .inner
-            .thread
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
-            let _ = t.join();
-        }
+        self.inner.stop();
     }
 
     /// A handle with no service behind it: the test is the service, and
@@ -109,7 +135,7 @@ impl DataHandle {
         (
             DataHandle {
                 inner: Arc::new(Inner {
-                    tx,
+                    tx: Mutex::new(Some(tx)),
                     thread: Mutex::new(None),
                     dropped: AtomicU64::new(0),
                 }),
@@ -132,7 +158,7 @@ impl DataService {
             .expect("spawning the data service thread");
         DataHandle {
             inner: Arc::new(Inner {
-                tx,
+                tx: Mutex::new(Some(tx)),
                 thread: Mutex::new(Some(thread)),
                 dropped: AtomicU64::new(0),
             }),
@@ -301,6 +327,63 @@ mod tests {
             !h.query(params(11, "tree")),
             "after shutdown nothing is accepted"
         );
+    }
+
+    #[test]
+    fn shutdown_completes_even_when_the_request_queue_is_full() {
+        // Reproduces: shutdown must disconnect the channel, not merely
+        // enqueue a Shutdown sentinel — a full queue drops that sentinel
+        // and `serve`'s `rx.recv()` then blocks forever, hanging `join`.
+        let (db, _src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
+        for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
+            let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+            let sentinel = crate::source::parse_sentinel(&text).unwrap();
+            let batch = crate::ingest::load::tests_support::batch_of(&file.csv_path);
+            let _ = crate::ingest::load_file(
+                &store,
+                &crate::ingest::LoadRequest {
+                    dataset: &ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &file.csv_path,
+                    sentinel: &sentinel,
+                    batch: &batch,
+                },
+            );
+        }
+        drop(store);
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let (tx, _rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let h = DataService::spawn(
+            DataServiceConfig {
+                db_path: db.path().join("geode.duckdb"),
+                schema,
+                views: vec![crate::ingest::load::tests_support::tree_view()],
+                dimensions: geode_core::dimensions::DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+            },
+            sink,
+        );
+
+        // Fill the queue immediately, before the service can have
+        // finished opening — some of these will be refused, which is
+        // fine; the point is the queue is full.
+        for _ in 0..(REQUEST_BOUND + 8) {
+            h.cancel(QueryKey(1));
+        }
+
+        let (done_tx, done_rx) = channel();
+        let h2 = h.clone();
+        std::thread::spawn(move || {
+            h2.shutdown();
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("shutdown must not hang on a full queue");
     }
 
     #[test]
