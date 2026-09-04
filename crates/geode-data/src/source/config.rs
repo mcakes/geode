@@ -15,15 +15,16 @@ const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
 /// a bare number has no unit and a fraction has no convention.
 pub fn parse_duration(s: &str) -> Option<Duration> {
     let s = s.trim();
-    let (digits, unit) = s.split_at(s.len().checked_sub(1)?);
+    let (idx, unit) = s.char_indices().last()?;
+    let digits = &s[..idx];
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     let n: u64 = digits.parse().ok()?;
     let secs = match unit {
-        "s" => n,
-        "m" => n.checked_mul(60)?,
-        "h" => n.checked_mul(3600)?,
+        's' => n,
+        'm' => n.checked_mul(60)?,
+        'h' => n.checked_mul(3600)?,
         _ => return None,
     };
     Some(Duration::from_secs(secs))
@@ -217,6 +218,12 @@ role = "key"
         assert_eq!(parse_duration("1.5h"), None, "integers only");
         assert_eq!(parse_duration("s"), None);
         assert_eq!(parse_duration(""), None);
+        assert_eq!(parse_duration("10µ"), None);
+        assert_eq!(
+            parse_duration("5€"),
+            None,
+            "a multi-byte unit is not a panic"
+        );
     }
 
     #[test]
