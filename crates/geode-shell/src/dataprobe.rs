@@ -45,7 +45,7 @@ const DETERMINED_MARK: &str = " †";
 #[derive(Default)]
 pub struct ProbeState {
     pub snapshot: Option<Arc<Snapshot>>,
-    /// `(book, as-of, generation)`, so per-book staleness is visible
+    /// `(dataset, as-of, generation)`, so per-dataset staleness is visible
     /// rather than collapsed into one headline time (spec §4.5).
     pub freshness: Vec<(String, String, i64)>,
     /// Submit-to-snapshot, the §7.1 path minus the paint.
@@ -125,7 +125,7 @@ pub fn render(state: &ProbeState, toolbar_height: f32, cx: &App) -> impl IntoEle
         // perf overlay, so a #[gpui::test] can confirm it painted.
         .debug_selector(|| "data-probe".to_string());
 
-    // Per-book freshness first: a result is only as meaningful as the
+    // Per-dataset freshness first: a result is only as meaningful as the
     // staleness of what fed it.
     let freshness = if state.freshness.is_empty() {
         "—".to_string()
@@ -133,7 +133,7 @@ pub fn render(state: &ProbeState, toolbar_height: f32, cx: &App) -> impl IntoEle
         state
             .freshness
             .iter()
-            .map(|(book, as_of, generation)| format!("{book} · {as_of} · gen {generation}"))
+            .map(|(dataset, as_of, generation)| format!("{dataset} · {as_of} · gen {generation}"))
             .collect::<Vec<_>>()
             .join("    ")
     };
