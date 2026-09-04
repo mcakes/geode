@@ -175,8 +175,8 @@ pub trait TileContent {
     /// Candidates for the word under `cursor` on a `:` line (§3.4). The
     /// shell ranks and shows them; the occupant only knows its vocabulary.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
-    /// Live `/` text as it is typed, and the committed query on Enter.
-    fn find(&self, query: &str, committed: bool, window: &mut Window, cx: &mut App);
+    /// `/` text as it changes, the committed query on Enter, or a cancel.
+    fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
     /// A query result addressed to this tile (§5.1).
     fn deliver(&self, outcome: QueryOutcome, window: &mut Window, cx: &mut App);
     /// Hidden tiles (workspace switched away, dock collapsed) may drop
@@ -188,7 +188,8 @@ pub trait TileContent {
 ```
 
 `QueryOutcome` is a `geode-core` value type (§5.1), so the shell can
-route it without naming the data crate.
+route it without naming the data crate. `FindEvent` is
+`Changed(String) | Committed(String) | Cancelled`.
 
 ### 3.2 The factory and the roster
 
@@ -265,13 +266,17 @@ which focus sits there.
 
 One `InputState` owned by `ShellView`, rendered as a single-line strip
 along the bottom edge of the focused tile, with the prompt character —
-`/` or `:` — in the muted token at its left. `blotter::find` and
-`blotter::command_line` open it with the matching prompt and focus it.
+`/` or `:` — in the muted token at its left. Two shell actions,
+`tile::find` and `tile::command_line`, bound to `/` and `:` in the
+`tile` context (any focused tile with an occupant), open it with the
+matching prompt and focus it; the line is the shell's, so the actions
+are too, and every module gets them without registering anything.
 While it is focused the shell's key handler treats `escape` as cancel
 and `enter` as commit, and lets everything else through to the input,
 exactly as it does for the toolbar's filter input today. `/` text is
-forwarded on every change (`find(query, false)`) and on Enter
-(`find(query, true)`); `:` text is forwarded on Enter only. An `Err`
+forwarded on every change (`FindEvent::Changed`), on Enter
+(`Committed`), and on `escape` (`Cancelled`); `:` text is forwarded on
+Enter only. An `Err`
 from `command` is shown in the danger token beside the prompt until the
 next keystroke. The strip carries no history; that is a later
 nicety.
