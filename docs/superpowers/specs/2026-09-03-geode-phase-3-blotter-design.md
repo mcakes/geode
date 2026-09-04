@@ -73,8 +73,6 @@ nothing left reading `GEODE_PROBE_DIR`.
 - `:filter` — a tile-local expression predicate (§4.2). The scope
   composition function accepts a tile layer from day one; nothing sets
   it yet.
-- Count prefixes on motions (`5j`). Actions carry no argument, and
-  `ctrl+d`/`ctrl+u`/`gg`/`G` cover long moves.
 - Atomic flip across tiles on a frame change (§4.3). Each tile is
   internally consistent; two tiles may repaint a frame apart.
 - The "reload data now?" prompt for unsafe config changes (§8). A change
@@ -95,23 +93,38 @@ The contract is unchanged in spirit: everything a module touches still
 arrives through one doorway; the doorway is the factory the app builds.
 
 **2.2 Foundation §3.2: `/` and `:` are typed into a shell-owned input,
-not captured keystroke by keystroke.** The dialog-filter-input design
-(2026-09-01) retired the raw-keystroke find model for dialogs because
-`Keystroke` carries a key name rather than a character, so shifted
-symbols append the base character. A blotter query can contain `-`,
-`_` and digits, so the same defect would bite here. The shell owns one
-`InputState` for the command line; `vimfind`'s pure helpers still
-implement `n`/`N` and the find-style semantics, and `VimFind`'s
-keystroke state machine is left in place, unused, as the design that
-kept it said.
+not captured keystroke by keystroke — and `find_style` still decides
+what `/` does.** The dialog-filter-input design (2026-09-01) retired
+the raw-keystroke find model for dialogs because `Keystroke` carries a
+key name rather than a character, so shifted symbols append the base
+character. A blotter query can contain `-`, `_` and digits, so the same
+defect would bite here. The shell therefore owns one `InputState` for
+the command line, and that is the only thing this amendment changes:
+the *typing surface*. The `[ui] find_style` setting — kept, with its
+settings row, for exactly this consumer — governs the behaviour in
+full (§6.1): under `vim` the query jumps the cursor to matches as it is
+typed and `n`/`N` repeat after commit, through `vimfind::find_match`
+and `repeat_find`; under `fzf` the visible rows are filtered by the
+query as it is typed, through `vimfind::filter_matches`, and `escape`
+restores them. `VimFind`'s keystroke state machine is left in place,
+unused, as the design that kept it said.
 
-**2.3 P2 §6.7: the coalescing key is the tile, not the view.** "One
+**2.3 Foundation §3.4: the keymap engine carries count prefixes.**
+"Modules never bind keys; they expose actions" leaves nowhere for a
+`5j` to live, since an `ActionId` carries no argument. Rather than let
+the blotter read raw digits — which is binding keys by another name —
+the engine gains counts as a first-class, per-context feature (§3.3).
+Every module that opts in gets `5j`, `3zo` and `12G` the way the
+dialogs' `VimListNav` already gave them, and the keymap stays the only
+thing that maps keys to behaviour.
+
+**2.4 P2 §6.7: the coalescing key is the tile, not the view.** "One
 in-flight query per view" was keyed on the view name. Two tiles showing
 the same view with different pins or expansion depth would supersede and
 cancel each other. The pool keys on a `QueryKey` the caller supplies —
 the tile id — and the view name is data on the request.
 
-**2.4 P2 §5.4–5.5: one ingest runner for all datasets, owning the
+**2.5 P2 §5.4–5.5: one ingest runner for all datasets, owning the
 `Store`.** The runner today is one thread per dataset taking the whole
 `Store`, so a second dataset would mean a second writer and the
 single-writer discipline of §5.3 would be a convention. Phase 3 makes
@@ -120,18 +133,18 @@ the dataset per work item; `DataService` keeps only reader connections
 cloned before the store moves. The probe's workaround — ingest once,
 close, then open the service — goes with the probe.
 
-**2.5 P2 §6.6: a `Snapshot` carries its tree index.** The parent and
+**2.6 P2 §6.6: a `Snapshot` carries its tree index.** The parent and
 child structure of a rollup result is a property of the result, not of
 the renderer, and building it for a 729k-row result on the render
 thread would spend the whole §7.1 budget. It is built in `from_batches`
 on the query worker, immutable and `Arc`-shared with the rest.
 
-**2.6 `AsOf` moves to `geode-core`.** The shell holds the frame's as-of
+**2.7 `AsOf` moves to `geode-core`.** The shell holds the frame's as-of
 and cannot name `geode-data`. `AsOf` is a value type like `Scope` and
 lives beside it; `geode-data` re-exports it. `geode-core` gains a
 `chrono` dependency, which `geode-data` already carries.
 
-**2.7 P2 §1.2's done state was not met as written.** "A file landing in
+**2.8 P2 §1.2's done state was not met as written.** "A file landing in
 that directory updates the tile" held only for files present before
 start: the probe ingests once and never discovers again. Phase 3 meets
 it (§1.2 above).
@@ -155,7 +168,8 @@ pub trait TileContent {
     /// e.g. `blotter` with `mode = normal | visual`.
     fn key_context(&self, cx: &App) -> KeyContext;
     /// An action the shell did not recognise. `true` if handled.
-    fn dispatch(&self, action: &ActionId, window: &mut Window, cx: &mut App) -> bool;
+    fn dispatch(&self, action: &ActionId, count: Option<u32>,
+                window: &mut Window, cx: &mut App) -> bool;
     /// A `:` line, without the colon. `Err` is shown inline on the line.
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
     /// Live `/` text as it is typed, and the committed query on Enter.
@@ -216,6 +230,23 @@ palette like any other, with their binding shown.
 The builtin keymap gains its first sequences (`gg`, `zc`, `zo`, `za`);
 the status bar already shows pending keystrokes and the which-key
 overlay already lists continuations, so both work for free.
+
+**Count prefixes** are the engine's, not the module's (§2.3). A
+`KeyContext` gains a `counts` flag; the blotter sets it in `normal` and
+`visual`. While the innermost context on the stack carries it, an
+unmodified digit with no binding pending accumulates into
+`Matcher::count` rather than being matched: `1`–`9` always, `0` only
+once a count has begun, exactly as vim does so that `0` stays bindable
+as a motion. The next resolved action is dispatched as
+`(ActionId, Option<u32>)`; `escape` or a `NoMatch` clears the count; a
+`Pending` keeps it (`3zo` is a count, then a sequence). The count shows
+in the status bar beside pending keystrokes and in the which-key
+overlay's header. Shell-side actions ignore the count today; workspace
+actions could take it later without any further engine change.
+`vimnav::apply` already takes a signed step, so `5j` is
+`Move(5)`, `12G` is a row index, and `3zo` opens three siblings down.
+The count is capped at four digits, which is more than any tree needs
+and stops a held key from overflowing anything.
 
 Focus is one gpui `FocusHandle` on the shell root, as today. `DataTable`
 tracks its own handle and gpui focuses a tracked element on mouse down,
@@ -425,7 +456,7 @@ the occupant whose tile id is the key through `TileContent::deliver`;
 `Published` bumps `Frame.versions.data`; `Health` updates the status
 bar; `Diagnostics` go to stderr and the status bar.
 
-The pool's coalescing map is keyed on `QueryKey` (§2.3). `tag` is the
+The pool's coalescing map is keyed on `QueryKey` (§2.4). `tag` is the
 tile's own request counter: a result whose `tag` is older than the
 tile's latest submission is dropped on arrival even if the pool let it
 through, so §7.3's "a stale result is never rendered" holds at both
@@ -466,7 +497,7 @@ Vec<Diagnostic>)` lives in `geode-data::source`, because `Readiness` and
 1. Open the `Store`; apply schemas; ensure catalog tables.
 2. Clone the reader connections the service needs: one for compilation,
    one per pool worker, one for discovery.
-3. Move the `Store` into the single ingest runner (§2.4) with the
+3. Move the `Store` into the single ingest runner (§2.5) with the
    `SchemaSpec`.
 4. Start the discovery thread (`geode-discovery`): a min-heap of
    `(next_due, source)`; on each wake, `discover` that source against
@@ -536,7 +567,7 @@ alone — the prerequisites document's standing warning.
   silently dropped.
 - **`ColumnFormat`** on `ViewColumn` (§6.2), parsed by
   `ViewSpec::from_doc`.
-- **`AsOf`** (§2.6).
+- **`AsOf`** (§2.7).
 
 ## 6. The blotter
 
@@ -578,7 +609,9 @@ collapsed ancestor — bounded and harmless.
 
 **Cursor.** `(visible_row, column)`. Row motion is `vimnav::apply` over
 the flattened length: `j`/`k`, `gg`/`G`, `ctrl+d`/`ctrl+u` as the
-existing vocabulary defines. `h`/`l` move the column; `home`/`end` go to
+existing vocabulary defines, each multiplied by the engine's count
+prefix (§3.3): `5j` moves five, `12G` goes to row 12, `3ctrl+d` pages
+three times. `h`/`l` move the column, also counted; `home`/`end` go to
 the first and last. The cursor's *path* is remembered across requery so a
 new snapshot puts the cursor back on the same node, falling back to a
 clamped index when the node is gone.
@@ -586,13 +619,19 @@ clamped index when the node is gone.
 **Visual mode.** `v` sets an anchor and enters `mode = visual`; motions
 extend; `escape` leaves; `y` yanks the range (§6.4) and leaves.
 
-**Find.** `/` opens the command line (§3.4). Under `find_style = vim`
-the query is matched with `vimfind::find_match` against the tree
-column's text of each visible row, the cursor jumps to the first match
-at or after it on commit, and `n`/`N` repeat with `repeat_find`. Under
-`fzf` the visible list is filtered to matching rows as the query
-changes and restored on `escape`. Matching is over the flattened list,
-so it is pure UI within the materialised depth; it does not requery.
+**Find.** `/` opens the command line (§3.4); `[ui] find_style` decides
+what typing into it does (§2.2). Under `vim` the query is matched with
+`vimfind::find_match` against the tree column's text of each visible
+row: the cursor jumps to the first match at or after it as the query
+changes, Enter commits and closes the line, `escape` returns the cursor
+to where it started, and `n`/`N` repeat with `repeat_find` (counted:
+`3n` is the third match on). Under `fzf` the visible list is narrowed
+with `vimfind::filter_matches` as the query changes, with the cursor on
+the best match; Enter keeps the narrowed list with the cursor where it
+is, `escape` restores the full list. `n`/`N` are vim-style only; under
+`fzf` every visible row is a match. Matching is over the flattened
+list, so it is pure UI within the materialised depth; it does not
+requery.
 
 **Format cache.** `Vec<Option<SharedString>>` sized visible rows ×
 columns for the current visible window, keyed by `(snapshot Arc pointer,
@@ -759,12 +798,16 @@ Test weight stays data ≫ shell logic ≫ module (§10.3).
   a full outbound channel counting drops.
 - **`geode-shell`:** `Frame` counters bump exactly the fields touched;
   `GroupingSlots::from_doc` with layered duplicates; context stack
-  includes the occupant's context; unknown action reaches the occupant;
+  includes the occupant's context; unknown action reaches the occupant
+  with its count; the matcher accumulates digits only under a `counts`
+  context, treats a leading `0` as a key, keeps the count across a
+  `Pending`, clears it on `NoMatch` and `escape`, and caps it;
   session round trip with a `tiles` table and a dangling id; command
   line prompt and routing; reclaimed `DataTable` bindings do not fire.
 - **Module (`TestAppContext`):** a blotter tile with a `for_tests`
   snapshot and a `for_tests` handle: it paints (`debug_selector`); `j`
-  moves the cursor; `zo` expands and the flattened length grows; a
+  moves the cursor and `5j` moves it five; `/` under each `find_style`
+  jumps or narrows; `zo` expands and the flattened length grows; a
   `NonAttributable` cell's element has no text; a
   `DeterminedNonAdditive` cell carries the dagger; a frame slot change
   submits exactly one `Query` with the new grouping; a stale-tag result
@@ -773,6 +816,7 @@ Test weight stays data ≫ shell logic ≫ module (§10.3).
 - **Mutation entries** for every behaviour above that a marker-only test
   could miss: tree index parent lookup, flatten's descent guard,
   `f64_at`'s null check, the tag comparison, the coalescing key, the
+  matcher's count gate and its leading-zero rule, the
   scheduler's re-arm, the format defaults.
 
 Timing is not asserted in CI. The recipe is `geode --demo 1000000`, the
