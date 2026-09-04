@@ -336,20 +336,25 @@ now:
 ```toml
 config_version = 1
 
-[by_book]
-slot = 1
-grouping = ["desk", "book", "lhu", "position_ref"]
-
-[by_underlying]
-slot = 2
-grouping = ["underlying_ref", "book", "position_ref"]
+1 = ["desk", "book", "lhu", "position_ref"]
+2 = ["underlying_ref", "book", "position_ref"]
 ```
 
-Named tables, so a user layer overrides a whole slot by name (§8). `slot`
-is 1–9. Two names claiming one slot is a warning and the higher layer
-wins, by provenance. A grouping naming a column no dataset declares is
-an error for that slot only. `GroupingSlots::from_doc` lives in
-`geode-core` beside the other config readers.
+Slots have no names. Users rebind them often, and inventing a name each
+time is friction for nothing; a slot is referred to everywhere by its
+number and its grouping string — `lhu / underlying_ref / position_ref`
+— which is what a trader would say out loud anyway. The keys are the
+slot numbers `1`–`9` as bare TOML keys, and the doc is atomic at depth
+one, so a user layer overriding `3` replaces only slot 3 and inherits
+the rest (§8). Any other key is a warning and ignored. A grouping naming
+a column no dataset declares is an error for that slot only.
+`GroupingSlots::from_doc` lives in `geode-core` beside the other config
+readers, and `GroupingSlots::label(n)` renders the grouping string.
+
+`:group save N` writes the tile's current grouping into slot N of the
+*user* layer's `groupings.toml`, through the same `toml_edit` write path
+theme, font size and find style already use, and updates the frame in
+place. Rebinding a slot is one line, no name required.
 
 `ctrl+1..9` → `frame::slot_1..9`; `ctrl+0` → `frame::slot_clear`,
 returning every following tile to its view's own grouping. Unlike
@@ -366,6 +371,7 @@ globally, as §4.3 says a `:scope` from any tile should.
 |---|---|
 | `:group a,b,c` | Pin this tile to that grouping; detaches it from the slot. |
 | `:group slot N` | Pin this tile to slot N regardless of the active slot. |
+| `:group save N` | Write this tile's current grouping into slot N of the user layer, and rebind the frame's slot. |
 | `:unpin` | Rejoin the frame's active slot. |
 | `:unscoped` | Toggle ignoring the frame scope (§4.2). |
 | `:scope <expr>` | Set the global expression filter, parsed by `parse_expr`, validated against the tile's dataset; a parse error shows at the caret offset on the line. |
@@ -380,7 +386,8 @@ globally, as §4.3 says a `:scope` from any tile should.
 ### 4.4 The readout
 
 The toolbar's reserved middle shows, left to right: the active slot as
-`slot 2 by_underlying` (number and name, or `view default`), the
+`2 · underlying_ref / book / position_ref` (number and grouping string,
+or `view default`), the
 scope as a compact summary (`book ∈ {3} · text "spx" · expr`), and, when
 as-of is set, `AS OF 14:05` in the warning token with a warning
 background across the whole readout. §4.5 asks for an unmissable
@@ -797,7 +804,8 @@ Test weight stays data ≫ shell logic ≫ module (§10.3).
   per-key coalescing with two keys on one view; `DataHandle` round trip;
   a full outbound channel counting drops.
 - **`geode-shell`:** `Frame` counters bump exactly the fields touched;
-  `GroupingSlots::from_doc` with layered duplicates; context stack
+  `GroupingSlots::from_doc` with a user layer overriding one slot and a
+  non-numeric key; `:group save` round-trips through the user file; context stack
   includes the occupant's context; unknown action reaches the occupant
   with its count; the matcher accumulates digits only under a `counts`
   context, treats a leading `0` as a key, keeps the count across a
