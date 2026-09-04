@@ -92,9 +92,18 @@ pub struct DataService {
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
     /// Field order is drop order. The pool joins its workers first; the
-    /// scheduler stops submitting; the runner drains and drops the
-    /// `Store` last, which is what holds the database open for everyone
-    /// above it (readers are `try_clone`s and share the handle).
+    /// scheduler stops submitting next; the runner drains its queue and
+    /// drops the `Store` before `conn` — the field listed last — drops
+    /// after everything else.
+    ///
+    /// `conn` dropping last is harmless, not accidental correctness:
+    /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and
+    /// `conn` is a `try_clone` of that same handle, so `duckdb_close`
+    /// only runs when the *last* reference goes, whichever field that
+    /// happens to be — dropping `conn` before the `Store` would just
+    /// issue one `duckdb_disconnect` and close nothing. An earlier
+    /// version of this comment wrongly called a different drop order a
+    /// live bug on the strength of this same detail.
     pool: QueryPool,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,

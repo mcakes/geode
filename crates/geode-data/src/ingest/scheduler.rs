@@ -113,15 +113,20 @@ fn run(
         }
         let spec = &sources[i];
 
-        // Discovery is a panic boundary too (spec §5.7): a bad glob or a
-        // share that hangs must degrade this source, not stop polling
-        // every other one.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            discover(spec, &Catalog::new(&conn), SystemTime::now())
-        }));
-
-        let delivered = match outcome {
-            Ok(Ok(candidates)) => {
+        // The whole poll is the panic boundary (spec §5.7), not just
+        // `discover`: building the plan, submitting it, and the sink
+        // calls all run inside `catch_unwind` too. A panic anywhere in
+        // here — a bad glob, a share that hangs, a sink that panics —
+        // must degrade this source and let the thread carry on to the
+        // next one. Left partly outside, a panic in `build_plan` or
+        // `ingest.submit` would unwind straight out of this thread; the
+        // `JoinHandle` from `spawn` is never inspected for `Err`, so the
+        // thread would die silently and every other source would stop
+        // being polled with nothing on the sink to say so — exactly the
+        // silence spec §5.7 forbids.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<bool, crate::store::StoreError> {
+                let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
                 let health = worst_health(&candidates);
                 let ok = match health {
                     Some((worst, detail)) => sink(SchedulerEvent::Health {
@@ -136,11 +141,16 @@ fn run(
                 if ready > 0 {
                     ingest.submit(plan);
                 }
-                ok && sink(SchedulerEvent::Polled {
-                    source: spec.name.clone(),
-                    ready,
-                })
-            }
+                Ok(ok
+                    && sink(SchedulerEvent::Polled {
+                        source: spec.name.clone(),
+                        ready,
+                    }))
+            },
+        ));
+
+        let delivered = match outcome {
+            Ok(Ok(delivered)) => delivered,
             Ok(Err(e)) => sink(SchedulerEvent::Health {
                 source: spec.name.clone(),
                 worst: Health::Failed {
@@ -293,7 +303,8 @@ mod tests {
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
         let mut polls = 0;
-        while polls < 5 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while polls < 5 && std::time::Instant::now() < deadline {
             if let Ok(SchedulerEvent::Polled { ready, .. }) =
                 sched_rx.recv_timeout(Duration::from_secs(10))
             {
@@ -301,6 +312,7 @@ mod tests {
                 polls += 1;
             }
         }
+        assert_eq!(polls, 5, "five polls within 30s");
         sched.shutdown();
         // The runner announced idle once at most and published nothing.
         while let Ok(e) = ingest_rx.try_recv() {
