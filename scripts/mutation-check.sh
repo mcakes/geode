@@ -842,3 +842,11 @@ run_mutation "tree: children keep row order" \
   '        for (r, &p) in parent.iter().enumerate() {' \
   '        for (r, &p) in parent.iter().enumerate().rev() {' \
   geode-core
+
+# ---- column presentation (Phase 3 §6.2)
+
+run_mutation "view: a format override applies over the kind default" \
+  crates/geode-core/src/view.rs \
+  '            precision: p.precision.unwrap_or(self.precision),' \
+  '            precision: self.precision,' \
+  geode-core
