@@ -450,7 +450,9 @@ impl Snapshot {
     }
 
     /// How many columns the snapshot carries — the valid range for the
-    /// `_at` accessors is `0..columns()`.
+    /// `_at` accessors is `0..columns()` when a batch is present. An
+    /// empty result carries no batch at all, in which case every `_at`
+    /// accessor returns `None` regardless of index.
     pub fn columns(&self) -> usize {
         self.meta.len()
     }
@@ -596,8 +598,7 @@ impl Snapshot {
     /// array — which would make every caller name an Arrow type and bring
     /// its traits into scope, exactly what this module exists to prevent.
     pub fn str_value(&self, name: &str, row: usize) -> Option<&str> {
-        let values = self.str_column(name)?;
-        (row < values.len() && !values.is_null(row)).then(|| values.value(row))
+        str_in(self.column(name)?, row)
     }
 
     /// One dictionary-encoded cell, resolved to its string. The codes are
@@ -1258,6 +1259,13 @@ mod tests {
         assert_eq!(s.meta_at(3).map(|m| m.name.as_str()), Some("delta01"));
         assert!(s.meta_at(4).is_none());
 
+        // Absolute values, not just by-name/by-index agreement: a shared
+        // off-by-one in both paths would agree with itself and still be
+        // wrong.
+        assert_eq!(s.text_at(0, 0), Some("BK000"));
+        assert_eq!(s.f64_at(3, 0), Some(1.5));
+        assert_eq!(s.i64_at(2, 1), Some(0));
+
         for row in 0..3 {
             assert_eq!(
                 s.text_at(0, row),
@@ -1304,7 +1312,10 @@ mod tests {
         wrong.swap(0, 2);
         let err =
             Snapshot::from_batches(batches(), wrong, vec!["book".into()], Provenance::default());
-        assert!(err.is_err(), "misaligned meta must not build a snapshot");
+        assert!(
+            matches!(err, Err(arrow::error::ArrowError::SchemaError(_))),
+            "misaligned meta must not build a snapshot: {err:?}"
+        );
     }
 
     #[test]

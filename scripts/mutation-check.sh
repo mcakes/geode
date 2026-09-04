@@ -385,14 +385,14 @@ run_mutation "snapshot: dimension codes report a null row as null" \
 
 run_mutation "snapshot: dimensions read at UInt32 key width" \
   crates/geode-core/src/snapshot.rs \
-  '        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
-  '        let d = None::<&DictionaryArray<UInt32Type>>?;' \
+  '    let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
+  '    let d = None::<&DictionaryArray<UInt32Type>>?;' \
   geode-core
 
 run_mutation "snapshot: a summed i64 measure is readable" \
   crates/geode-core/src/snapshot.rs \
-  '        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
-  '        if let Some(values) = None::<&Decimal128Array> {' \
+  '    if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
+  '    if let Some(values) = None::<&Decimal128Array> {' \
   geode-core
 
 run_mutation "pool: shutdown does not deliver its own interrupt" \
@@ -620,14 +620,14 @@ run_mutation "probe: a blanked cell renders blank, not 0.00" \
 
 run_mutation "snapshot: depth reads at DuckDB's own integer width" \
   crates/geode-core/src/snapshot.rs \
-  '        read_at_width!(Int64Type);
-        read_at_width!(Int32Type);' \
-  '        read_at_width!(Int64Type);' \
+  '    read_at_width!(Int64Type);
+    read_at_width!(Int32Type);' \
+  '    read_at_width!(Int64Type);' \
   geode-core
 
 run_mutation "snapshot: depth reads at DuckDB's own width, end to end" \
   crates/geode-core/src/snapshot.rs \
-  '        let depth = self.i64_value("row_depth", row)?;' \
+  '        let depth = self.i64_at(self.depth_col?, row)?;' \
   '        let depth = *self.i64_column("row_depth")?.get(row)?;'
 
 run_mutation "snapshot: a rolled-up dimension cell is null" \
@@ -638,18 +638,18 @@ run_mutation "snapshot: a rolled-up dimension cell is null" \
 
 run_mutation "snapshot: dimension cells read at UInt16 key width" \
   crates/geode-core/src/snapshot.rs \
-  '        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
-            return dictionary_cell(d, row);
-        }' \
-  '        if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
-            return dictionary_cell(d, row);
-        }' \
+  '    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+        return dictionary_cell(d, row);
+    }' \
+  '    if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
+        return dictionary_cell(d, row);
+    }' \
   geode-core
 
 run_mutation "snapshot: dictionary columns expose UInt16 codes" \
   crates/geode-core/src/snapshot.rs \
-  '            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
-  '            return None;' \
+  '        return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
+  '        return None;' \
   geode-core
 
 # No entry for the UInt16 arm of concat_preserving_dictionaries. Removing
@@ -667,9 +667,8 @@ run_mutation "snapshot: every batch contributes its dictionary keys" \
 
 run_mutation "snapshot: text reads a dimension under either era encoding" \
   crates/geode-core/src/snapshot.rs \
-  '        self.dict_value(name, row)
-            .or_else(|| self.str_value(name, row))' \
-  '        self.str_value(name, row)' \
+  '    dict_cell_in(arr, row).or_else(|| str_in(arr, row))' \
+  '    str_in(arr, row)' \
   geode-core
 
 # ---- query pool (spec §2.4, §5.1)
@@ -781,10 +780,10 @@ run_mutation "handle: a compile failure is delivered as the key's outcome" \
 
 # ---- snapshot index accessors (Phase 3 §5.5)
 
-run_mutation "snapshot: f64_at honours the null bitmap" \
+run_mutation "snapshot: column_at bounds-checks the index" \
   crates/geode-core/src/snapshot.rs \
-  '        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));' \
-  '        return (row < values.len()).then(|| values.value(row));' \
+  '        self.meta.iter().position(|m| m.name == name)' \
+  '        self.meta.iter().position(|m| m.name == name).map(|i| i.saturating_sub(1))' \
   geode-core
 
 run_mutation "snapshot: misaligned meta is refused" \
