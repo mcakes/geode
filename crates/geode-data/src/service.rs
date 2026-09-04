@@ -13,12 +13,14 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::QueryKey;
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::{Freshness, Provenance};
 use geode_core::view::ViewSpec;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -177,17 +179,21 @@ impl DataService {
             provenance.datasets.push(freshness);
         }
 
-        let grouping_len = compiled.grouping.len();
+        // Placeholder: Task 3 gives each caller its own key and tag.
         Ok(self.pool.submit(QueryRequest {
+            key: QueryKey(0),
+            tag: 0,
+            submitted: Instant::now(),
             view: ViewId(view.to_string()),
+            grouping: compiled.grouping.clone(),
             compiled,
-            grouping_len,
             provenance,
         }))
     }
 
-    pub fn cancel(&self, view: &str) {
-        self.pool.cancel(&ViewId(view.to_string()));
+    pub fn cancel(&self, _view: &str) {
+        // Placeholder: Task 3 cancels by the caller's own key.
+        self.pool.cancel(QueryKey(0));
     }
 
     pub fn query_results(&self) -> &Receiver<QueryResult> {
