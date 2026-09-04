@@ -185,6 +185,9 @@ impl DataService {
             tag: 0,
             submitted: Instant::now(),
             view: ViewId(view.to_string()),
+            // Cloned ahead of `compiled` below, which moves it: the field
+            // order here is why this line precedes `compiled` rather than
+            // sitting next to its other fields.
             grouping: compiled.grouping.clone(),
             compiled,
             provenance,

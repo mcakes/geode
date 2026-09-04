@@ -28,6 +28,10 @@ pub type QueryId = u64;
 
 /// Where results go. Returns `false` when nothing is listening any more,
 /// which stops the worker.
+///
+/// Called with the queue's own lock held (see the worker's delivery site),
+/// so a sink must not block and must not call back into this pool:
+/// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 
 pub struct QueryRequest {
@@ -276,8 +280,11 @@ fn worker(
         // The stale check and the send happen under one lock. Releasing it
         // between them let a newer request land in the gap and the older
         // result still be delivered, so a tile briefly painted data it had
-        // already superseded. `send` on an unbounded channel does not
-        // block, so holding the lock across it cannot deadlock.
+        // already superseded. Holding the lock across the sink call cannot
+        // deadlock — provided the sink does not block and does not call
+        // back into this pool (`submit`/`cancel` take the same lock; std
+        // `Mutex` is not re-entrant). The sink in use here, an unbounded
+        // `std::sync::mpsc::Sender::send`, satisfies that.
         let (lock, _) = &*queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
         if q.running.get(&req.key).is_some_and(|(rid, _)| *rid == id) {
