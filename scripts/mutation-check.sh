@@ -683,3 +683,23 @@ run_mutation "pool: the tag is echoed, not regenerated" \
   crates/geode-data/src/query/pool.rs \
   '            tag: req.tag,' \
   '            tag: 0,'
+
+# ---- service (spec §5.1)
+
+run_mutation "service: an outcome carries the caller's key" \
+  crates/geode-data/src/service.rs \
+  '                    key: r.key,' \
+  '                    key: QueryKey(0),'
+
+run_mutation "service: a grouping override is applied" \
+  crates/geode-data/src/service.rs \
+  '                regrouped = ViewSpec {
+                    grouping: grouping.clone(),
+                    ..spec.clone()
+                };' \
+  '                regrouped = spec.clone();'
+
+run_mutation "service: replace_views actually replaces" \
+  crates/geode-data/src/service.rs \
+  '        self.config.views = views;' \
+  '        let _ = views;'
