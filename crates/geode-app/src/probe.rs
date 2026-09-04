@@ -5,17 +5,23 @@
 //! (`geode_shell::dataprobe`) only renders what this pushes into it.
 //! Deleted along with the tile when the blotter lands.
 //!
-//! **Opt-in, and silent when off.** The probe runs only when
-//! `GEODE_PROBE_DIR` names a directory of source files *and* the layered
-//! config declares at least one dataset and one view. Absent any of those
-//! this returns without opening a database, because the shell must start
-//! normally for someone who has no data configured — invalid or missing
-//! config never stops the app (spec §10.1).
+//! **Opt-in, and silent when off.** The probe runs when a layered
+//! `sources.toml` is present, or `GEODE_PROBE_DIR` names a directory of
+//! source files — either way, only if the config also declares at least
+//! one dataset and one view. Absent all of that this returns without
+//! opening a database, because the shell must start normally for someone
+//! who has no data configured — invalid or missing config never stops
+//! the app (spec §10.1).
 //!
-//! An environment variable rather than a config key on purpose: a config
-//! key is a promise to keep, and this whole file is scheduled for
-//! deletion. Reading `[sources]` properly is the ingest scheduler's job,
-//! not the probe's.
+//! `sources.toml`, when present, is read properly through
+//! `SourceSpec::from_doc` — that is the ingest scheduler's real
+//! configuration surface, and reading it here is this file previewing
+//! what phase 3 makes permanent. `GEODE_PROBE_DIR` stays only as the
+//! throwaway shortcut it always was: a one-source-over-a-directory
+//! fallback for running the probe without writing a `sources.toml`,
+//! since this whole file is scheduled for deletion. Either way, once a
+//! source is built, the service's own scheduler does the ingesting —
+//! this file never does.
 //!
 //! **The probe is `DataHandle`'s first consumer** (Phase 3 §9 step 1).
 //! The service lives on its own thread behind the handle; this file only
@@ -81,6 +87,12 @@ fn setup(config: &Config) -> Option<Setup> {
     let source_dir = std::env::var_os("GEODE_PROBE_DIR").map(PathBuf::from);
     let has_sources_doc = config.doc("sources").is_some();
     if source_dir.is_none() && !has_sources_doc {
+        return None;
+    }
+    if let Some(dir) = &source_dir
+        && !dir.is_dir()
+    {
+        eprintln!("[probe] GEODE_PROBE_DIR is not a directory: {dir:?}");
         return None;
     }
     // `datasets` and `views` are what the probe is for, so their absence
