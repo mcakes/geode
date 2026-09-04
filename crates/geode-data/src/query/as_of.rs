@@ -10,17 +10,9 @@ use crate::store::StoreError;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AsOf {
-    Live,
-    At(DateTime<Utc>),
-}
-
-impl AsOf {
-    pub fn is_live(&self) -> bool {
-        matches!(self, AsOf::Live)
-    }
-}
+/// Re-exported from `geode-core` (spec §2.7): the shell holds the frame's
+/// as-of and cannot name this crate.
+pub use geode_core::query::AsOf;
 
 /// One partition's state at a point in time.
 #[derive(Debug, Clone, PartialEq, Eq)]
