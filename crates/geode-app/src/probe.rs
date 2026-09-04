@@ -31,10 +31,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use geode_core::config::Config;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::QueryKey;
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::ViewSpec;
+use geode_data::QueryParams;
 use geode_data::ingest::{IngestEvent, IngestRunner, build_plan};
 use geode_data::query::AsOf;
 use geode_data::service::{DataService, DataServiceConfig};
@@ -62,7 +64,7 @@ const DRAIN_INTERVAL: Duration = Duration::from_millis(250);
 
 /// What one probe cycle produced.
 struct Reading {
-    snapshot: Option<Snapshot>,
+    snapshot: Option<std::sync::Arc<Snapshot>>,
     freshness: Vec<(String, String, i64)>,
     query_micros: u64,
     error: Option<String>,
@@ -212,7 +214,11 @@ fn source_spec(setup: &Setup) -> SourceSpec {
 
 /// One submit-and-wait cycle, timed end to end — the §7.1 path minus the
 /// paint, which is the half the benchmarks already cover.
-fn query_once(service: &DataService, setup: &Setup) -> Reading {
+fn query_once(
+    service: &DataService,
+    rx: &std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    setup: &Setup,
+) -> Reading {
     let freshness = || {
         service
             .freshness(&setup.dataset, AsOf::Live)
@@ -233,7 +239,16 @@ fn query_once(service: &DataService, setup: &Setup) -> Reading {
     };
 
     let started = Instant::now();
-    if let Err(e) = service.query(&setup.view, &Scope::default(), AsOf::Live, MAX_DEPTH) {
+    if let Err(e) = service.query(&QueryParams {
+        key: QueryKey(1),
+        tag: 0,
+        submitted: started,
+        view: setup.view.clone(),
+        grouping: None,
+        scope: Scope::default(),
+        as_of: AsOf::Live,
+        max_depth: MAX_DEPTH,
+    }) {
         return Reading {
             snapshot: None,
             freshness: freshness(),
@@ -241,10 +256,14 @@ fn query_once(service: &DataService, setup: &Setup) -> Reading {
             error: Some(format!("{e:?}")),
         };
     }
-    let result = service
-        .query_results()
-        .recv_timeout(Duration::from_secs(30))
-        .ok();
+    let deadline = Duration::from_secs(30);
+    let result = loop {
+        match rx.recv_timeout(deadline) {
+            Ok(geode_data::DataEvent::Query(o)) => break Some(o),
+            Ok(_) => continue,
+            Err(_) => break None,
+        }
+    };
     let query_micros = started.elapsed().as_micros() as u64;
 
     let (snapshot, error) = match result {
@@ -274,14 +293,15 @@ fn run(setup: Setup, out: std::sync::mpsc::Sender<Reading>) {
         });
         return;
     }
-    let service = match DataService::open(DataServiceConfig {
+    let (service, rx) = match DataService::open_channel(DataServiceConfig {
         db_path: setup.db_path.clone(),
         schema: setup.schema.clone(),
         views: setup.views.clone(),
         dimensions: setup.dimensions.clone(),
         query_workers: 2,
+        sources: Vec::new(),
     }) {
-        Ok(service) => service,
+        Ok(opened) => opened,
         Err(e) => {
             let _ = out.send(Reading {
                 snapshot: None,
@@ -304,7 +324,7 @@ fn run(setup: Setup, out: std::sync::mpsc::Sender<Reading>) {
     // One stderr line per reading: the probe is opt-in and this is the
     // only way to confirm the whole path ran without watching the tile.
     while {
-        let reading = query_once(&service, &setup);
+        let reading = query_once(&service, &rx, &setup);
         match (&reading.snapshot, &reading.error) {
             (_, Some(error)) => eprintln!("[probe] {}: {error}", setup.view),
             (Some(snapshot), None) => eprintln!(
@@ -361,7 +381,7 @@ fn drain(rx: Receiver<Reading>, shell: Entity<ShellView>, cx: &mut App) {
                     let pushed = shell.update(cx, |shell, cx| {
                         shell.set_probe(
                             ProbeState {
-                                snapshot: reading.snapshot.map(std::sync::Arc::new),
+                                snapshot: reading.snapshot,
                                 freshness: reading.freshness,
                                 query_micros: reading.query_micros,
                                 error: reading.error,

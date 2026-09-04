@@ -9,9 +9,11 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::config::{LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::QueryKey;
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::{DimensionSelection, Scope};
 use geode_core::view::ViewSpec;
+use geode_data::QueryParams;
 use geode_data::ingest::{LoadRequest, load_file};
 use geode_data::query::AsOf;
 use geode_data::service::{DataService, DataServiceConfig};
@@ -149,7 +151,15 @@ kind = "measure"
 }
 
 /// Ingest `rows` rows into a fresh database and return a service over it.
-fn service(rows: usize) -> (tempfile::TempDir, tempfile::TempDir, DataService, usize) {
+fn service(
+    rows: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    DataService,
+    std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    usize,
+) {
     let db = tempfile::tempdir().unwrap();
     let src = tempfile::tempdir().unwrap();
     let schema = schema();
@@ -187,26 +197,47 @@ fn service(rows: usize) -> (tempfile::TempDir, tempfile::TempDir, DataService, u
     }
     drop(store);
 
-    let service = DataService::open(DataServiceConfig {
+    let (service, rx) = DataService::open_channel(DataServiceConfig {
         db_path: db.path().join("geode.duckdb"),
         schema,
         views: views(),
         dimensions: DerivedDimensions::default(),
         query_workers: 4,
+        sources: Vec::new(),
     })
     .unwrap();
-    (db, src, service, loaded)
+    (db, src, service, rx, loaded)
 }
 
 /// Submit and block until the snapshot arrives — the end-to-end path the
 /// §7.1 budget is written against, minus the paint.
-fn requery(svc: &DataService, view: &str, scope: &Scope, max_depth: usize) -> usize {
-    svc.query(view, scope, AsOf::Live, max_depth).unwrap();
-    let r = svc
-        .query_results()
-        .recv_timeout(Duration::from_secs(120))
-        .expect("no result");
-    r.snapshot.expect("query failed").rows()
+fn requery(
+    svc: &DataService,
+    rx: &std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    view: &str,
+    scope: &Scope,
+    max_depth: usize,
+) -> usize {
+    svc.query(&QueryParams {
+        key: QueryKey(1),
+        tag: 0,
+        submitted: std::time::Instant::now(),
+        view: view.to_string(),
+        grouping: None,
+        scope: scope.clone(),
+        as_of: AsOf::Live,
+        max_depth,
+    })
+    .unwrap();
+    loop {
+        match rx
+            .recv_timeout(Duration::from_secs(120))
+            .expect("no result")
+        {
+            geode_data::DataEvent::Query(o) => return o.snapshot.expect("query failed").rows(),
+            _ => continue,
+        }
+    }
 }
 
 fn book_scope() -> Scope {
@@ -224,7 +255,7 @@ fn bench_requery(c: &mut Criterion) {
     group.sample_size(20);
 
     for rows in [100_000usize, 1_000_000] {
-        let (_db, _src, svc, loaded) = service(rows);
+        let (_db, _src, svc, rx, loaded) = service(rows);
         assert!(loaded > 0, "fixture ingested nothing");
 
         // Result sizes, printed once per fixture: a latency number is
@@ -234,12 +265,13 @@ fn bench_requery(c: &mut Criterion) {
             "\n[{rows} rows ingested {loaded}] result rows — \
              tree/scoped/d1 {} · tree/scoped/d2 {} · \
              tree/scoped {} · shallow/scoped {} · tree/wide {} · tree/unscoped {}",
-            requery(&svc, "tree", &book_scope(), 1),
-            requery(&svc, "tree", &book_scope(), 2),
-            requery(&svc, "tree", &book_scope(), usize::MAX),
-            requery(&svc, "shallow", &book_scope(), usize::MAX),
+            requery(&svc, &rx, "tree", &book_scope(), 1),
+            requery(&svc, &rx, "tree", &book_scope(), 2),
+            requery(&svc, &rx, "tree", &book_scope(), usize::MAX),
+            requery(&svc, &rx, "shallow", &book_scope(), usize::MAX),
             requery(
                 &svc,
+                &rx,
                 "tree",
                 &Scope {
                     dimensions: vec![DimensionSelection {
@@ -250,12 +282,12 @@ fn bench_requery(c: &mut Criterion) {
                 },
                 usize::MAX,
             ),
-            requery(&svc, "tree", &Scope::default(), usize::MAX),
+            requery(&svc, &rx, "tree", &Scope::default(), usize::MAX),
         );
 
         // The §7.1 contract: three levels, two measure grains, scoped.
         group.bench_function(format!("{rows}_rows_grouped_scoped"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &book_scope(), usize::MAX)))
+            b.iter(|| black_box(requery(&svc, &rx, "tree", &book_scope(), usize::MAX)))
         });
 
         // The same view bounded to what a collapsed tree actually shows:
@@ -263,13 +295,13 @@ fn bench_requery(c: &mut Criterion) {
         // the blotter opens with, and the one the §7.1 budget has to hold
         // for on every keystroke.
         group.bench_function(format!("{rows}_rows_grouped_scoped_depth_2"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &book_scope(), 2)))
+            b.iter(|| black_box(requery(&svc, &rx, "tree", &book_scope(), 2)))
         });
 
         // A regroup is a different grouping over the same data — what
         // Ctrl+1..9 does.
         group.bench_function(format!("{rows}_rows_regroup"), |b| {
-            b.iter(|| black_box(requery(&svc, "shallow", &book_scope(), usize::MAX)))
+            b.iter(|| black_box(requery(&svc, &rx, "shallow", &book_scope(), usize::MAX)))
         });
 
         // A rescope is the same grouping with a different selection.
@@ -281,12 +313,12 @@ fn bench_requery(c: &mut Criterion) {
             ..Scope::default()
         };
         group.bench_function(format!("{rows}_rows_rescope"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &wide, usize::MAX)))
+            b.iter(|| black_box(requery(&svc, &rx, "tree", &wide, usize::MAX)))
         });
 
         // Unscoped, so the scope predicate is not doing the work.
         group.bench_function(format!("{rows}_rows_unscoped"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &Scope::default(), usize::MAX)))
+            b.iter(|| black_box(requery(&svc, &rx, "tree", &Scope::default(), usize::MAX)))
         });
 
         // The unscoped tree is the one shape that misses the §7.1 budget
@@ -294,7 +326,7 @@ fn bench_requery(c: &mut Criterion) {
         // collapsed tree shows, the scan is unchanged but the result is
         // not, which is the whole claim depth bounding makes.
         group.bench_function(format!("{rows}_rows_unscoped_depth_2"), |b| {
-            b.iter(|| black_box(requery(&svc, "tree", &Scope::default(), 2)))
+            b.iter(|| black_box(requery(&svc, &rx, "tree", &Scope::default(), 2)))
         });
 
         svc.shutdown();
