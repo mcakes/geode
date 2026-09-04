@@ -6,6 +6,8 @@
 //! evolution rather than a rewrite (§2).
 
 use crate::health::Health;
+use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
+use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
 use crate::query::compile::compile_view;
 use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ResultSink, ViewId};
@@ -89,28 +91,15 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    // Task 6 hands this to the runner and scheduler.
-    #[allow(dead_code)]
-    sink: EventSink,
-    /// Field order is drop order. `QueryPool` joins its workers in `Drop`,
-    /// and those workers hold read connections to this database, so the
-    /// pool is listed first: the workers are joined before the connections
-    /// they read through and the store that owns the database handle.
-    ///
-    /// The previous order was not a live bug, and an earlier version of
-    /// this comment wrongly said it was. duckdb-rs holds the database as
-    /// `Arc<Mutex<DatabaseHandle>>` and `try_clone` clones that `Arc`, so
-    /// dropping `_store` first issued one `duckdb_disconnect` and closed
-    /// nothing — `duckdb_close` runs only when the last reference goes.
-    /// The order here is still the right one, because it makes the
-    /// lifetime obvious instead of resting on a refcounting detail of a
-    /// pinned third-party binding.
+    /// Field order is drop order. The pool joins its workers first; the
+    /// scheduler stops submitting; the runner drains and drops the
+    /// `Store` last, which is what holds the database open for everyone
+    /// above it (readers are `try_clone`s and share the handle).
     pool: QueryPool,
-    /// A dedicated connection for compilation and catalog reads.
+    scheduler: Scheduler,
+    ingest: Arc<IngestHandle>,
+    /// A dedicated read connection for compilation and catalog reads.
     conn: duckdb::Connection,
-    /// The store stays owned here so the database outlives the pool's
-    /// connections. Never used to run a view query.
-    _store: Store,
 }
 
 impl DataService {
@@ -120,7 +109,11 @@ impl DataService {
             store.apply_schema(ds)?;
         }
         Catalog::new(store.writer()).ensure_tables()?;
+
+        // Every reader the service will ever need is cloned before the
+        // store moves onto the ingest thread (Phase 3 §2.5).
         let conn = store.reader()?;
+        let discovery_conn = store.reader()?;
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |r: QueryResult| {
@@ -133,6 +126,64 @@ impl DataService {
             })
         };
         let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
+
+        let ingest_sink: IngestSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |e: IngestEvent| match e {
+                IngestEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                    ..
+                } => sink(DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                }),
+                IngestEvent::Failed {
+                    dataset,
+                    batch,
+                    reason,
+                } => sink(DataEvent::Health {
+                    source: dataset,
+                    worst: Health::Failed {
+                        reason: reason.clone(),
+                    },
+                    detail: format!("{batch}: {reason}"),
+                }),
+                IngestEvent::PlanComplete => true,
+            })
+        };
+        let ingest = Arc::new(IngestRunner::spawn(
+            store,
+            config.schema.clone(),
+            ingest_sink,
+        ));
+
+        let scheduler_sink: SchedulerSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |e: SchedulerEvent| match e {
+                SchedulerEvent::Polled { .. } => true,
+                SchedulerEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => sink(DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                }),
+            })
+        };
+        let scheduler = Scheduler::spawn(
+            config.sources.clone(),
+            discovery_conn,
+            Arc::clone(&ingest),
+            scheduler_sink,
+        );
+
         // Validate here, not at first query: a misconfigured view otherwise
         // surfaces as a DuckDB binder error from inside a pool worker,
         // attributed to whichever tile happened to submit it, with the
@@ -150,10 +201,10 @@ impl DataService {
         Ok(DataService {
             config,
             diagnostics,
-            sink,
-            _store: store,
-            conn,
             pool,
+            scheduler,
+            ingest,
+            conn,
         })
     }
 
@@ -398,6 +449,8 @@ impl DataService {
 
     pub fn shutdown(&self) {
         self.pool.shutdown();
+        self.scheduler.shutdown();
+        self.ingest.shutdown();
     }
 }
 
@@ -712,13 +765,16 @@ mod tests {
         // point of §5.4 — can no longer tell one input from another.
         let (_db, _src, svc, rx) = service();
         // A month-old generation of a partition nothing else covers,
-        // written through the service's own store. An earlier version of
-        // this test opened a second `Connection` on the file — a separate
+        // written through a clone of the service's own connection. A
+        // `try_clone` shares the same database handle — it is not a
+        // separate database instance, which is the trap `Connection::open`
+        // on the path would be. An earlier version of this test did that:
+        // it opened a second `Connection` on the file — a separate
         // database instance whose writes the service never saw — and
         // `.ok()`ed an insert that failed anyway on its column count. It
         // then passed against an empty archive, vacuously.
-        svc._store
-            .writer()
+        let writer = svc.conn.try_clone().unwrap();
+        writer
             .execute_batch(
                 "insert into risk_snapshot_position_archive
                    select * replace ('ghost' as batch, 99 as gen_id,
@@ -783,6 +839,63 @@ mod tests {
     fn shutdown_is_idempotent() {
         let (_db, _src, svc, _rx) = service();
         svc.shutdown();
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_configured_source_is_discovered_loaded_and_announced() {
+        // Cold start through the real door: a service opened over an
+        // empty database with one source, and nothing else.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 500,
+            seed: 3,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(src.path());
+        opts.leave_one_pending = false;
+        let emitted = geode_demo_data::emit_directory(&batch, &opts).unwrap();
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![crate::ingest::load::tests_support::tree_view()],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_secs(3600),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let mut published = 0;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while published < emitted.files.len() && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(DataEvent::Published { dataset, .. }) => {
+                    assert_eq!(dataset, "risk_snapshot");
+                    published += 1;
+                }
+                Ok(DataEvent::Health { detail, .. }) => panic!("{detail}"),
+                _ => {}
+            }
+        }
+        assert_eq!(published, emitted.files.len());
+
+        svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        assert!(next(&rx).snapshot.unwrap().rows() > 1, "data is queryable");
         svc.shutdown();
     }
 }

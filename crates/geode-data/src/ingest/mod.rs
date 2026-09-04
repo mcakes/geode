@@ -4,6 +4,7 @@
 pub mod load;
 pub mod plan;
 pub mod runner;
+pub mod scheduler;
 pub mod split;
 
 pub use runner::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
