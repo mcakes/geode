@@ -729,3 +729,40 @@ run_mutation "sources: a pattern without a batch capture is dropped" \
   crates/geode-data/src/source/config.rs \
   '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
   '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),'
+
+# ---- discovery scheduler (Phase 3 §5.3)
+
+run_mutation "scheduler: every source is polled immediately at start" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '.map(|i| (Instant::now(), i))' \
+  '.map(|i| (Instant::now() + std::time::Duration::from_secs(15), i))'
+
+run_mutation "scheduler: the poll re-arms" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '        due[0] = (Instant::now() + spec.poll_interval, i);' \
+  '        due[0] = (Instant::now() + std::time::Duration::from_secs(70), i);'
+
+run_mutation "scheduler: ready files reach the runner" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                if ready > 0 {
+                    ingest.submit(plan);
+                }' \
+  '                let _ = plan;'
+
+run_mutation "scheduler: pending-too-long surfaces as health" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            CandidateState::PendingTooLong => Health::PendingTooLong,' \
+  '            CandidateState::PendingTooLong => continue,'
+
+run_mutation "service: a publish becomes a Published event" \
+  crates/geode-data/src/service.rs \
+  '                } => sink(DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                }),' \
+  '                } => {
+                    let _ = (dataset, batch, gen_id, books);
+                    true
+                }'
