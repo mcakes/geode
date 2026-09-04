@@ -7,6 +7,9 @@ publish.workspace = true
 [lib]
 bench = false
 
+[features]
+test-support = []
+
 [dependencies]
 geode-core.workspace = true
 chrono = "0.4.42"
