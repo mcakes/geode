@@ -766,3 +766,15 @@ run_mutation "service: a publish becomes a Published event" \
                     let _ = (dataset, batch, gen_id, books);
                     true
                 }'
+
+# ---- data handle (Phase 3 §5.1)
+
+run_mutation "handle: a refused request is counted" \
+  crates/geode-data/src/handle.rs \
+  '                self.inner.dropped.fetch_add(1, Ordering::Relaxed);' \
+  '                let _ = Ordering::Relaxed;'
+
+run_mutation "handle: a compile failure is delivered as the key's outcome" \
+  crates/geode-data/src/handle.rs \
+  '                if let Err(e) = service.query(&params) {' \
+  '                if let Err(e) = service.query(&params) && false {'
