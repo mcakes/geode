@@ -1132,6 +1132,13 @@ run_mutation "commandline: escape on a find is a cancel" \
   geode-shell \
   slash_streams_find_events_and_escape_cancels
 
+run_mutation "commandline: a tile mouse-down cancels an open line (fix round 1)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                                view.cancel_command_line(window, cx);' \
+  '                                let _ = window;' \
+  geode-shell \
+  a_mouse_down_on_another_tile_cancels_an_open_command_line
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
