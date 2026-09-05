@@ -1246,6 +1246,15 @@ run_mutation "theme: write_atomic's temp name derives from the target file, not 
   geode-shell \
   the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml
 
+# ---- blotter core (Phase 3 §6)
+
+run_mutation "plan: attribution is per depth" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            .and_then(|c| c.attribution.get(depth).copied())' \
+  '            .and_then(|c| c.attribution.first().copied())' \
+  geode-blotter \
+  attribution_is_per_column_per_depth_and_semi_joined_dimensions_are_named
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
