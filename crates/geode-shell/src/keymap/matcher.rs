@@ -1,19 +1,35 @@
-use super::{KeyContext, Keymap, Keystroke, UNBOUND_ACTION};
+use super::context::COUNTS;
+use super::{KeyContext, Keymap, Keystroke, Modifiers, UNBOUND_ACTION};
 use crate::actions::ActionId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchResult {
-    Matched(ActionId),
-    /// The keystrokes so far are a prefix of at least one binding; awaiting more.
+    Matched {
+        action: ActionId,
+        /// The count prefix typed before the binding, if any (§3.3).
+        count: Option<u32>,
+    },
+    /// The keystrokes so far are a prefix of at least one binding — or a
+    /// count is being typed — awaiting more.
     Pending,
     NoMatch,
 }
 
+/// Four digits: more than any tree needs, and a held key cannot
+/// overflow anything.
+pub const MAX_COUNT: u32 = 9999;
+
 /// Sequence-aware key matcher. One per focus target is unnecessary — the
 /// shell holds one and feeds it the active context stack per press.
+///
+/// Counts are the engine's, not a module's (Phase 3 §2.3): `ActionId`
+/// carries no argument, so `5j` has to be assembled here and handed to
+/// the action, or every module would end up reading raw digits — which
+/// is binding keys by another name.
 #[derive(Debug, Default)]
 pub struct Matcher {
     pending: Vec<Keystroke>,
+    count: Option<u32>,
 }
 
 impl Matcher {
@@ -23,6 +39,25 @@ impl Matcher {
         keystroke: Keystroke,
         stack: &[KeyContext],
     ) -> MatchResult {
+        // A bare digit with nothing pending, under a counting context,
+        // is a count digit — except a leading `0`, which vim keeps as a
+        // motion. Once a sequence has begun, digits are keys again.
+        if self.pending.is_empty()
+            && keystroke.mods == Modifiers::NONE
+            && stack.last().is_some_and(|c| c.has_flag(COUNTS))
+            && let Some(digit) = count_digit(&keystroke.key)
+            && (digit != 0 || self.count.is_some())
+        {
+            let so_far = self.count.unwrap_or(0);
+            self.count = Some(
+                so_far
+                    .saturating_mul(10)
+                    .saturating_add(digit)
+                    .min(MAX_COUNT),
+            );
+            return MatchResult::Pending;
+        }
+
         self.pending.push(keystroke);
         let mut exact: Option<&super::Binding> = None;
         let mut has_longer_candidate = false;
@@ -41,15 +76,20 @@ impl Matcher {
         }
         if let Some(binding) = exact {
             self.pending.clear();
+            let count = self.count.take();
             if binding.action.0 == UNBOUND_ACTION {
                 return MatchResult::NoMatch;
             }
-            return MatchResult::Matched(binding.action.clone());
+            return MatchResult::Matched {
+                action: binding.action.clone(),
+                count,
+            };
         }
         if has_longer_candidate {
             return MatchResult::Pending;
         }
         self.pending.clear();
+        self.count = None;
         MatchResult::NoMatch
     }
 
@@ -57,8 +97,22 @@ impl Matcher {
         &self.pending
     }
 
+    /// The count typed so far, while one is in flight.
+    pub fn count(&self) -> Option<u32> {
+        self.count
+    }
+
     pub fn cancel(&mut self) {
         self.pending.clear();
+        self.count = None;
+    }
+}
+
+fn count_digit(key: &str) -> Option<u32> {
+    let mut chars = key.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) => c.to_digit(10),
+        _ => None,
     }
 }
 
@@ -105,6 +159,23 @@ mod tests {
         vec![KeyContext::new("workspace")]
     }
 
+    fn counting() -> Vec<KeyContext> {
+        vec![
+            KeyContext::new("workspace"),
+            KeyContext::new("blotter").pair("mode", "normal").counts(),
+        ]
+    }
+
+    fn km_counts() -> Keymap {
+        keymap(
+            &[(
+                Layer::Builtin,
+                "[[bindings]]\ncontext = \"blotter\"\n[bindings.keys]\n\"j\" = \"b::down\"\n\"g g\" = \"b::top\"\n\"0\" = \"b::first_col\"\n",
+            )],
+            &["b::down", "b::top", "b::first_col"],
+        )
+    }
+
     #[test]
     fn simple_match() {
         let km = keymap(
@@ -117,7 +188,10 @@ mod tests {
         let mut m = Matcher::default();
         assert_eq!(
             m.press(&km, ks("mod+h"), &ws()),
-            MatchResult::Matched(ActionId("a::left".into()))
+            MatchResult::Matched {
+                action: ActionId("a::left".into()),
+                count: None
+            }
         );
         assert!(m.pending().is_empty());
     }
@@ -140,7 +214,10 @@ mod tests {
         let mut m = Matcher::default();
         assert_eq!(
             m.press(&km, ks("mod+h"), &ws()),
-            MatchResult::Matched(ActionId("a::right".into()))
+            MatchResult::Matched {
+                action: ActionId("a::right".into()),
+                count: None
+            }
         );
     }
 
@@ -178,7 +255,10 @@ mod tests {
         assert_eq!(m.pending().len(), 1);
         assert_eq!(
             m.press(&km, ks("g"), &ws()),
-            MatchResult::Matched(ActionId("a::top".into()))
+            MatchResult::Matched {
+                action: ActionId("a::top".into()),
+                count: None
+            }
         );
         assert!(m.pending().is_empty());
     }
@@ -200,7 +280,10 @@ mod tests {
         // But a fresh "x" now matches.
         assert_eq!(
             m.press(&km, ks("x"), &ws()),
-            MatchResult::Matched(ActionId("a::x".into()))
+            MatchResult::Matched {
+                action: ActionId("a::x".into()),
+                count: None
+            }
         );
     }
 
@@ -216,7 +299,10 @@ mod tests {
         let mut m = Matcher::default();
         assert_eq!(
             m.press(&km, ks("g"), &ws()),
-            MatchResult::Matched(ActionId("a::g".into()))
+            MatchResult::Matched {
+                action: ActionId("a::g".into()),
+                count: None
+            }
         );
     }
 
@@ -234,7 +320,10 @@ mod tests {
         let blotter = vec![KeyContext::new("workspace"), KeyContext::new("blotter")];
         assert_eq!(
             m.press(&km, ks("j"), &blotter),
-            MatchResult::Matched(ActionId("b::down".into()))
+            MatchResult::Matched {
+                action: ActionId("b::down".into()),
+                count: None
+            }
         );
     }
 
@@ -252,5 +341,126 @@ mod tests {
         m.cancel();
         assert!(m.pending().is_empty());
         assert_eq!(m.press(&km, ks("g"), &ws()), MatchResult::Pending);
+    }
+
+    #[test]
+    fn digits_accumulate_under_a_counting_context_and_ride_the_action() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(m.press(&km, ks("1"), &counting()), MatchResult::Pending);
+        assert_eq!(m.count(), Some(1));
+        assert_eq!(m.press(&km, ks("2"), &counting()), MatchResult::Pending);
+        assert_eq!(m.count(), Some(12));
+        assert_eq!(
+            m.press(&km, ks("j"), &counting()),
+            MatchResult::Matched {
+                action: ActionId("b::down".into()),
+                count: Some(12)
+            }
+        );
+        assert_eq!(m.count(), None, "consumed by the action");
+        assert!(m.pending().is_empty());
+    }
+
+    #[test]
+    fn digits_are_ordinary_keys_outside_a_counting_context() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(m.press(&km, ks("5"), &ws()), MatchResult::NoMatch);
+        assert_eq!(m.count(), None);
+        // The innermost context decides: a counting frame below a
+        // non-counting one does not count.
+        let stack = vec![
+            KeyContext::new("blotter").counts(),
+            KeyContext::new("palette"),
+        ];
+        assert_eq!(m.press(&km, ks("5"), &stack), MatchResult::NoMatch);
+    }
+
+    #[test]
+    fn a_leading_zero_is_a_key_and_a_later_zero_is_a_digit() {
+        // vim: `0` is a motion unless a count has begun.
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(
+            m.press(&km, ks("0"), &counting()),
+            MatchResult::Matched {
+                action: ActionId("b::first_col".into()),
+                count: None
+            }
+        );
+        assert_eq!(m.press(&km, ks("1"), &counting()), MatchResult::Pending);
+        assert_eq!(m.press(&km, ks("0"), &counting()), MatchResult::Pending);
+        assert_eq!(m.count(), Some(10));
+        assert_eq!(
+            m.press(&km, ks("j"), &counting()),
+            MatchResult::Matched {
+                action: ActionId("b::down".into()),
+                count: Some(10)
+            }
+        );
+    }
+
+    #[test]
+    fn a_count_survives_a_pending_sequence_and_dies_with_a_dead_end() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(m.press(&km, ks("3"), &counting()), MatchResult::Pending);
+        assert_eq!(m.press(&km, ks("g"), &counting()), MatchResult::Pending);
+        assert_eq!(m.count(), Some(3), "still counting through the sequence");
+        assert_eq!(
+            m.press(&km, ks("g"), &counting()),
+            MatchResult::Matched {
+                action: ActionId("b::top".into()),
+                count: Some(3)
+            }
+        );
+
+        assert_eq!(m.press(&km, ks("4"), &counting()), MatchResult::Pending);
+        assert_eq!(m.press(&km, ks("x"), &counting()), MatchResult::NoMatch);
+        assert_eq!(m.count(), None, "a dead end clears the count");
+    }
+
+    #[test]
+    fn a_digit_inside_a_pending_sequence_is_a_key_not_a_count() {
+        // `g 1` is not `1g`: once a sequence has begun, digits are keys.
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(m.press(&km, ks("g"), &counting()), MatchResult::Pending);
+        assert_eq!(m.press(&km, ks("1"), &counting()), MatchResult::NoMatch);
+        assert_eq!(m.count(), None);
+    }
+
+    #[test]
+    fn escape_cancel_and_a_modified_digit() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        assert_eq!(m.press(&km, ks("7"), &counting()), MatchResult::Pending);
+        assert_eq!(
+            m.press(&km, ks("escape"), &counting()),
+            MatchResult::NoMatch
+        );
+        assert_eq!(m.count(), None);
+
+        assert_eq!(m.press(&km, ks("7"), &counting()), MatchResult::Pending);
+        m.cancel();
+        assert_eq!(m.count(), None);
+
+        // ctrl+1 is a chord, never a count digit.
+        assert_eq!(
+            m.press(&km, ks("ctrl+1"), &counting()),
+            MatchResult::NoMatch
+        );
+        assert_eq!(m.count(), None);
+    }
+
+    #[test]
+    fn the_count_is_capped() {
+        let km = km_counts();
+        let mut m = Matcher::default();
+        for _ in 0..8 {
+            assert_eq!(m.press(&km, ks("9"), &counting()), MatchResult::Pending);
+        }
+        assert_eq!(m.count(), Some(MAX_COUNT));
     }
 }

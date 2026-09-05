@@ -44,7 +44,10 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     // Desk override beats builtin.
     assert_eq!(
         matcher.press(&keymap, ks("mod+h"), &stack),
-        MatchResult::Matched(ActionId("workspace::split_down".into()))
+        MatchResult::Matched {
+            action: ActionId("workspace::split_down".into()),
+            count: None
+        }
     );
     // User unbind swallows the builtin binding.
     assert_eq!(
@@ -55,12 +58,18 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     // mod+j binding (replacing the Phase 1c "ctrl+w j" chord).
     assert_eq!(
         matcher.press(&keymap, ks("mod+j"), &stack),
-        MatchResult::Matched(ActionId("workspace::focus_down".into()))
+        MatchResult::Matched {
+            action: ActionId("workspace::focus_down".into()),
+            count: None
+        }
     );
     // Move-tile is the direct ctrl+alt+arrow binding.
     assert_eq!(
         matcher.press(&keymap, ks("ctrl+alt+down"), &stack),
-        MatchResult::Matched(ActionId("workspace::move_down".into()))
+        MatchResult::Matched {
+            action: ActionId("workspace::move_down".into()),
+            count: None
+        }
     );
     // Desk-added sequence: pending, then match.
     assert_eq!(
@@ -69,6 +78,9 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     );
     assert_eq!(
         matcher.press(&keymap, ks("g"), &stack),
-        MatchResult::Matched(ActionId("workspace::focus_up".into()))
+        MatchResult::Matched {
+            action: ActionId("workspace::focus_up".into()),
+            count: None
+        }
     );
 }

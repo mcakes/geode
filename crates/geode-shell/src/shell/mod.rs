@@ -1013,7 +1013,16 @@ impl ShellView {
     /// ~500ms tick (see `new`'s loop and `take_dirty_session_write`) — Task
     /// 3 fix round 1: writing synchronously here, once per dispatch, could
     /// stall the render thread under OS key-repeat on a slow filesystem.
-    fn dispatch(&mut self, action: &ActionId, window: &mut Window, cx: &mut Context<Self>) {
+    fn dispatch(
+        &mut self,
+        action: &ActionId,
+        count: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Unused until Task 3's fall-through wires a count-aware verb in;
+        // every arm below ignores it for now (Phase 3 §2.3, §3.3).
+        let _ = count;
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
             self.session_dirty = true;
@@ -1261,7 +1270,7 @@ impl ShellView {
     ) {
         match item {
             PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
-            PaletteItem::Action(id, ..) => self.dispatch(id, window, cx),
+            PaletteItem::Action(id, ..) => self.dispatch(id, None, window, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
                 // Dark"), which `ThemeService::resolve` matches outright
@@ -1569,8 +1578,8 @@ impl ShellView {
         };
         let stack = self.context_stack();
         match self.matcher.press(&self.services.keymap, keystroke, &stack) {
-            MatchResult::Matched(action) => {
-                self.dispatch(&action, window, cx);
+            MatchResult::Matched { action, count } => {
+                self.dispatch(&action, count, window, cx);
                 cx.notify();
             }
             MatchResult::Pending | MatchResult::NoMatch => {
@@ -2507,6 +2516,7 @@ impl Render for ShellView {
         let reload_message = self.last_reload.status_message();
         let status_bar = status::status_bar(
             self.matcher.pending(),
+            self.matcher.count(),
             reload_message.as_deref(),
             self.services.theme.active_name(),
             cx,
@@ -2903,6 +2913,7 @@ impl Render for ShellView {
             .when_some(which_key_continuations, |el, continuations| {
                 el.child(whichkey::render(
                     &continuations,
+                    self.matcher.count(),
                     registry,
                     width,
                     status::HEIGHT,
@@ -4912,8 +4923,18 @@ mod tests {
         // refuse the drop.
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("workspace::switch_2".to_string()), window, cx);
-                shell.dispatch(&ActionId("workspace::switch_1".to_string()), window, cx);
+                shell.dispatch(
+                    &ActionId("workspace::switch_2".to_string()),
+                    None,
+                    window,
+                    cx,
+                );
+                shell.dispatch(
+                    &ActionId("workspace::switch_1".to_string()),
+                    None,
+                    window,
+                    cx,
+                );
             });
             assert_eq!(
                 shell.read(cx).services.workspaces.active_index(),
@@ -7618,7 +7639,7 @@ mod tests {
         let open_and_measure = |cx: &mut gpui::VisualTestContext, action: &str| {
             cx.update(|window, cx| {
                 shell.update(cx, |shell, cx| {
-                    shell.dispatch(&ActionId(action.to_string()), window, cx);
+                    shell.dispatch(&ActionId(action.to_string()), None, window, cx);
                 });
             });
             cx.update(|window, cx| {
@@ -7662,7 +7683,7 @@ mod tests {
         // the captured backdrop origin is the shared reference point.
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("palette::toggle".to_string()), window, cx);
+                shell.dispatch(&ActionId("palette::toggle".to_string()), None, window, cx);
             });
         });
         cx.update(|window, cx| {
@@ -7721,7 +7742,7 @@ mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("settings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId("settings::open".to_string()), None, window, cx);
             });
         });
 
@@ -8717,7 +8738,7 @@ mod tests {
         // (the one standard dialog door, keyed since the row-list rewrite).
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("settings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId("settings::open".to_string()), None, window, cx);
             });
         });
 
@@ -8927,7 +8948,7 @@ mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId("keybindings::open".to_string()), None, window, cx);
             });
         });
 
@@ -8993,7 +9014,7 @@ mod tests {
         });
         vcx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId(action.to_string()), window, cx);
+                shell.dispatch(&ActionId(action.to_string()), None, window, cx);
             });
         });
         vcx.update(|window, cx| {
@@ -9282,7 +9303,7 @@ mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId("keybindings::open".to_string()), None, window, cx);
             });
         });
 
@@ -9383,7 +9404,7 @@ mod tests {
 
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("keybindings::open".to_string()), window, cx);
+                shell.dispatch(&ActionId("keybindings::open".to_string()), None, window, cx);
             });
         });
         cx.update(|window, cx| {
@@ -9648,7 +9669,7 @@ mod tests {
         // notify it issues flushes into a fresh (recorded) repaint.
         cx.update(|window, cx| {
             shell.update(cx, |shell, cx| {
-                shell.dispatch(&ActionId("perf::reset".to_string()), window, cx);
+                shell.dispatch(&ActionId("perf::reset".to_string()), None, window, cx);
                 assert_eq!(
                     shell.perf.count(),
                     0,

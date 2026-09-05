@@ -118,10 +118,13 @@ const MARGIN: f32 = 8.0;
 
 /// Render the which-key overlay: a small `popover`-toned panel anchored to
 /// the bottom-right, sitting just above the status bar, listing each
-/// continuation as `key → title`. Caller (`ShellView::render`) only calls
-/// this when `matcher.pending()` is non-empty.
+/// continuation as `key → title`. When `count` is `Some`, the panel's
+/// first row shows the count in flight (§3.3) ahead of the continuations.
+/// Caller (`ShellView::render`) only calls this when `matcher.pending()`
+/// is non-empty.
 pub fn render(
     continuations: &[(Keystroke, ActionId)],
+    count: Option<u32>,
     registry: &ActionRegistry,
     viewport_width: f32,
     status_bar_height: f32,
@@ -131,6 +134,13 @@ pub fn render(
     let width = WIDTH.min((viewport_width - 2.0 * MARGIN).max(120.0));
 
     let mut list = v_flex().w_full().gap_1();
+    if let Some(count) = count {
+        list = list.child(
+            div()
+                .text_color(theme.muted_foreground)
+                .child(format!("count {count}")),
+        );
+    }
     for (keystroke, action) in continuations {
         list = list.child(
             h_flex()

@@ -38,6 +38,18 @@ impl KeyContext {
     }
 }
 
+/// The flag a context sets to opt into count prefixes (Phase 3 §3.3):
+/// while the innermost context on the stack carries it, bare digits
+/// accumulate in the matcher instead of being matched.
+pub const COUNTS: &str = "counts";
+
+impl KeyContext {
+    /// Opt this context into count prefixes.
+    pub fn counts(self) -> Self {
+        self.flag(COUNTS)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Predicate {
     Flag(String),

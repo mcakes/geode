@@ -81,7 +81,12 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |view, _event, window, cx| {
-                        view.dispatch(&ActionId(format!("workspace::switch_{n}")), window, cx);
+                        view.dispatch(
+                            &ActionId(format!("workspace::switch_{n}")),
+                            None,
+                            window,
+                            cx,
+                        );
                         cx.notify();
                     }),
                 )
@@ -123,7 +128,7 @@ pub fn sidebar(active: u8, non_empty: &[u8], cx: &Context<ShellView>) -> impl In
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(|view, _event, window, cx| {
-                view.dispatch(&ActionId("settings::open".to_string()), window, cx);
+                view.dispatch(&ActionId("settings::open".to_string()), None, window, cx);
                 cx.notify();
             }),
         )
