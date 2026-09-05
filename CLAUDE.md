@@ -34,6 +34,7 @@ cargo bench -p geode-demo-data                         # run criterion benchmark
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
 zsh scripts/mutation-check.sh                          # mutation harness (111 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
+zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 ```
 
 CI (`.github/workflows/ci.yml`) runs all four checks on **both macOS and Windows** — keep both platforms building.
@@ -57,7 +58,7 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 
 **Testing strategy (spec §10.3):** test weight goes data layer ≫ shell logic ≫ modules. Shell logic (tiling tree, keymap resolution, config merging) is pure logic designed to be testable without a window; modules use gpui `TestAppContext`. TDD per house rules.
 
-**A green suite proves less here than you would expect, and `scripts/mutation-check.sh` is the answer.** Five review rounds on the query path each found Critical, silent wrong-data defects, and the cause was the same every time: a fixture that could not reach the defect. The harness breaks one load-bearing behaviour at a time and runs the suite — a `SURVIVED` line is a branch no test can see. Run it after touching the compiler, scope lowering, as-of routing, publish, retention, discovery or the grain vocabulary, and **add an entry for every behaviour you change**. Its header documents the rules learned the hard way; the two worth knowing up front are that a test asserting on *markers* will not notice a wrong *value*, and that an entry can lie in three ways — no test behind it, two defences overlapping so neither is isolated, or a mutation that breaks something other than what its name claims and is "caught" for the wrong reason. **Commit before you mutate:** restoring a mutated file with `git checkout` discards uncommitted work with it.
+**A green suite proves less here than you would expect, and `scripts/mutation-check.sh` is the answer.** Five review rounds on the query path each found Critical, silent wrong-data defects, and the cause was the same every time: a fixture that could not reach the defect. The harness breaks one load-bearing behaviour at a time and runs the suite — a `SURVIVED` line is a branch no test can see. Run it after touching the compiler, scope lowering, as-of routing, publish, retention, discovery or the grain vocabulary, and **add an entry for every behaviour you change**. Its header documents the rules learned the hard way; the two worth knowing up front are that a test asserting on *markers* will not notice a wrong *value*, and that an entry can lie in three ways — no test behind it, two defences overlapping so neither is isolated, or a mutation that breaks something other than what its name claims and is "caught" for the wrong reason. An entry's optional 6th argument names the specific test expected to catch it, so day-to-day runs (especially `--changed`) check that one test before falling back to the full crate suite. **Commit before you mutate:** restoring a mutated file with `git checkout` discards uncommitted work with it.
 
 ## Workspace invariants and gotchas
 
