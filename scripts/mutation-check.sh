@@ -1074,6 +1074,13 @@ run_mutation "hosting: leaving the screen is announced" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
+  '            let state = restored.as_ref().map(|r| &r.state);' \
+  geode-shell \
+  a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

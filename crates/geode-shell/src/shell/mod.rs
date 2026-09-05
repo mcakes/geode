@@ -520,6 +520,15 @@ pub struct ShellView {
     /// The tiles painted last frame, to diff visibility without touching
     /// every occupant every frame.
     visible_tiles: HashSet<TileId>,
+    /// Scratch storage for `ensure_occupants`'s per-frame tile-set diff
+    /// (fix-round finding: `all_tiles`/`active_tiles` used to allocate a
+    /// fresh `HashSet` every render). Always cleared and refilled there;
+    /// empty at rest between renders, but its heap allocation survives so
+    /// nothing is allocated once warm.
+    scratch_all_tiles: HashSet<TileId>,
+    /// Same purpose as `scratch_all_tiles`, for the active-tiles half of
+    /// the diff.
+    scratch_active_tiles: HashSet<TileId>,
 }
 
 /// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
@@ -796,6 +805,8 @@ impl ShellView {
             frame,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
+            scratch_all_tiles: HashSet::new(),
+            scratch_active_tiles: HashSet::new(),
         }
     }
 
@@ -1326,28 +1337,31 @@ impl ShellView {
         }
     }
 
-    /// Every tile id in every workspace, main trees and docks.
-    fn all_tiles(&self) -> HashSet<TileId> {
-        let mut out = HashSet::new();
+    /// Every tile id in every workspace, main trees and docks, written
+    /// into `out` (cleared first). A method rather than a `HashSet`
+    /// return so `ensure_occupants` can reuse a scratch allocation across
+    /// frames instead of allocating one every render.
+    fn fill_all_tiles(&self, out: &mut HashSet<TileId>) {
+        out.clear();
         for (_, ws) in self.services.workspaces.spaces() {
             out.extend(ws.tree().tiles());
             for (_, dock) in ws.docks().iter() {
                 out.extend(dock.tree().tiles());
             }
         }
-        out
     }
 
-    /// The tiles of the active workspace: what is on screen.
-    fn active_tiles(&self) -> HashSet<TileId> {
+    /// The tiles of the active workspace: what is on screen. Same
+    /// out-parameter shape as `fill_all_tiles`, same reason.
+    fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
+        out.clear();
         let ws = self.services.workspaces.active();
-        let mut out: HashSet<TileId> = ws.tree().tiles().into_iter().collect();
+        out.extend(ws.tree().tiles());
         for (_, dock) in ws.docks().iter() {
             if dock.visible() {
                 out.extend(dock.tree().tiles());
             }
         }
-        out
     }
 
     /// Create occupants for tiles that lack one, drop occupants whose tile
@@ -1355,26 +1369,36 @@ impl ShellView {
     /// Runs at the top of `render`, the one place with a `Window` on every
     /// path that can change the tile set (a split, a close, a restore, a
     /// workspace switch).
+    ///
+    /// The all-tiles/active-tiles sets are computed into `scratch_all_tiles`
+    /// / `scratch_active_tiles`, reused every frame so nothing is allocated
+    /// once warm (fix-round finding: this used to allocate two fresh
+    /// `HashSet`s per render). Each is taken out of `self` for the
+    /// duration of the borrow-heavy loop below (`f.create` needs `&mut
+    /// self.services`/`cx`, which a live borrow of a `self` field would
+    /// block) and put back before returning.
     fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let all = self.all_tiles();
+        let mut all = std::mem::take(&mut self.scratch_all_tiles);
+        self.fill_all_tiles(&mut all);
         self.occupants.retain(|id, _| all.contains(id));
         for id in &all {
             if self.occupants.contains_key(id) {
                 continue;
             }
             let restored = self.services.restored_tiles.remove(&id.0);
-            let factory = restored
+            // A factory found by the record's own `kind` is a real match —
+            // its `kind()` equals `restored.kind` by construction, so the
+            // restored state is meant for it. Any fallback (no factory
+            // registered for that kind, or no record at all) hands the
+            // chosen factory a tile it does not recognise, so it must not
+            // see state shaped for a different module (fix-round finding).
+            let matched = restored
                 .as_ref()
-                .and_then(|r| self.services.roster.factory(&r.kind))
-                .or_else(|| self.services.roster.default_factory());
+                .and_then(|r| self.services.roster.factory(&r.kind));
+            let state = matched.and(restored.as_ref()).map(|r| &r.state);
+            let factory = matched.or_else(|| self.services.roster.default_factory());
             let occupant = match factory {
-                Some(f) => f.create(
-                    *id,
-                    restored.as_ref().map(|r| &r.state),
-                    self.frame.clone(),
-                    window,
-                    cx,
-                ),
+                Some(f) => f.create(*id, state, self.frame.clone(), window, cx),
                 None => crate::module::placeholder::PlaceholderFactory.create(
                     *id,
                     None,
@@ -1385,7 +1409,10 @@ impl ShellView {
             };
             self.occupants.insert(*id, occupant);
         }
-        let active = self.active_tiles();
+        self.scratch_all_tiles = all;
+
+        let mut active = std::mem::take(&mut self.scratch_active_tiles);
+        self.fill_active_tiles(&mut active);
         for id in self.visible_tiles.difference(&active) {
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
@@ -1396,7 +1423,9 @@ impl ShellView {
                 o.content.set_visible(true, cx);
             }
         }
-        self.visible_tiles = active;
+        self.visible_tiles.clear();
+        self.visible_tiles.extend(active.iter().copied());
+        self.scratch_active_tiles = active;
     }
 
     /// Hand the probe a new reading (spec §7's vertical slice).
@@ -2558,6 +2587,12 @@ impl Render for ShellView {
                             {
                                 view.session_dirty = true;
                             }
+                            // Docked tiles get real occupants too (a
+                            // focus-tracking occupant like the recording
+                            // module can steal focus on this same
+                            // mouse-down) — re-arm the identical restore
+                            // the tree-tile listener above uses (§3.3).
+                            view.pending_focus_restore = true;
                             cx.notify();
                         }),
                     ));
@@ -3217,6 +3252,51 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The record names a kind nothing in the roster registers, so
+        // `ensure_occupants` falls back to the roster's default ("rec")
+        // — but the fallback factory did not produce that state and must
+        // not be handed it (fix-round finding).
+        let (mut services, log) = services_with_recorder();
+        let mut state = toml::Table::new();
+        state.insert(
+            "last_command".into(),
+            toml::Value::String("state for a different module".into()),
+        );
+        services.restored_tiles.insert(
+            1,
+            crate::session::TileRecord {
+                kind: "unregistered-kind".into(),
+                state,
+            },
+        );
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert_eq!(tile, TileId(1), "the first split always allocates tile 1");
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+            Some("rec"),
+            "the default factory still hosts the tile"
+        );
+        assert!(
+            log.borrow().iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
+            ),
+            "the fallback factory got no state: {:?}",
+            log.borrow()
+        );
+    }
+
+    #[gpui::test]
     fn a_split_creates_an_occupant_of_the_default_kind_and_paints_it(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -3328,6 +3408,50 @@ mod tests {
         let (services, _log) = services_with_recorder();
         let (window, mut cx) = open_shell(cx, services);
         cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        // `debug_bounds` takes `&'static str`; leak the dynamic selector
+        // (test-only, a few bytes).
+        let selector: &'static str = Box::leak(format!("tile-content-{}", tile.0).into_boxed_str());
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.simulate_mouse_down(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let focused = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "the shell root has focus again"
+        );
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Same hazard as the tree-tile test above, but for a tile parked
+        // in a dock (fix-round finding: the dock-tile `on_mouse_down`
+        // listener did not re-arm `pending_focus_restore`, so a
+        // focus-tracking occupant docked instead of tiled would leave
+        // shell chords dead after a click).
+        let (services, _log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-{");
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
