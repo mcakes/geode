@@ -1406,7 +1406,7 @@ run_mutation "delegate: narrowed values are positions into visible, not row ids"
 run_mutation "delegate: narrowing invalidates the cache" \
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), cols);
-        self.cache.invalidate();
+        self.invalidate_cells();
     }' \
   '        self.cursor.clamp(self.shown.len(), cols);
     }' \
@@ -1423,12 +1423,24 @@ run_mutation "delegate: apply_snapshot prunes expansion to the new grouping" \
 run_mutation "delegate: apply_snapshot invalidates the cache even without narrowing" \
   crates/geode-blotter/src/delegate.rs \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
-        self.cache.invalidate();
+        self.invalidate_cells();
     }' \
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
     }' \
   geode-blotter \
   apply_snapshot_invalidates_the_cache_even_without_narrowing
+
+run_mutation "delegate: invalidate_cells also clears the cached tree glyphs" \
+  crates/geode-blotter/src/delegate.rs \
+  '    fn invalidate_cells(&mut self) {
+        self.cache.invalidate();
+        self.glyphs.clear();
+    }' \
+  '    fn invalidate_cells(&mut self) {
+        self.cache.invalidate();
+    }' \
+  geode-blotter \
+  a_regroup_that_keeps_the_window_clears_the_cached_glyphs
 
 run_mutation "delegate: any_determined reflects the whole cached window" \
   crates/geode-blotter/src/delegate.rs \
