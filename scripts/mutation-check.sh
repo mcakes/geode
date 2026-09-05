@@ -1139,6 +1139,15 @@ run_mutation "commandline: a tile mouse-down cancels an open line (fix round 1)"
   geode-shell \
   a_mouse_down_on_another_tile_cancels_an_open_command_line
 
+# ---- frame keys, the readout, and config reload (Phase 3 §4.2, §4.5)
+
+run_mutation "frame: a sources change is a restart, not a silent apply" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let restart = ["sources", "datasets"]' \
+  '            let restart = ["nonesuch"]' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
