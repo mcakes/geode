@@ -16,6 +16,10 @@ bench = false
 # the backend-less `profiling` facade, and this workspace deliberately
 # adds no backend dependency. Enable via geode-app's same-named feature.
 profiling = ["gpui/profiler"]
+# Exposes `module::recording`, the shell-hosting test double, outside this
+# crate's own `#[cfg(test)]` — so Plan 3c's blotter tests can host a
+# recorded neighbour without depending on geode-shell's dev-dependencies.
+test-support = []
 
 [dependencies]
 geode-core.workspace = true

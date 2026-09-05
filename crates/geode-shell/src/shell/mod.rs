@@ -20,13 +20,14 @@ pub mod whichkey;
 
 pub use keys::convert_keystroke;
 
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ScrollHandle, Window, div, px,
+    AnyView, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
@@ -35,8 +36,10 @@ use crate::actions::{ActionId, ActionRegistry};
 use crate::defaults::mod_alias_from_config;
 use crate::fonts;
 use crate::fontsize::{self, FontSize};
+use crate::frame::Frame;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::listfilter;
+use crate::module::{ModuleFactory as _, ModuleRoster, TileOccupant};
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::perf::{self, FrameHistogram};
 use crate::reload;
@@ -50,6 +53,10 @@ use crate::tiling::{
 };
 use crate::vimfind::{self, FindStyle};
 use geode_core::config::{Config, LayerDoc};
+use geode_core::dimensions::DerivedDimensions;
+use geode_core::groupings::GroupingSlots;
+use geode_core::query::QueryOutcome;
+use geode_core::schema::SchemaSpec;
 
 /// How often the background reload watcher polls the watched config
 /// directories' `*.toml` mtimes (brief: "~500ms"). File scanning and
@@ -84,6 +91,12 @@ pub struct ShellServices {
     /// in contexts with no writable user config dir (e.g. some test setups)
     /// — session persistence is then just skipped, never a panic.
     pub session_path: Option<PathBuf>,
+    /// The modules the app compiled in (§9.1); the shell creates tile
+    /// occupants through it and never names a module crate.
+    pub roster: ModuleRoster,
+    /// Per-tile module kind and state restored from `session.toml`
+    /// (Task 4); consumed as occupants are created.
+    pub restored_tiles: BTreeMap<u64, crate::session::TileRecord>,
 }
 
 /// What an in-flight divider drag is resizing (drag-splitters task): a
@@ -499,6 +512,14 @@ pub struct ShellView {
     /// for itself: it does not depend on `geode-data` (CLAUDE.md), so
     /// `geode-app` owns the service and calls [`ShellView::set_probe`].
     probe: crate::dataprobe::ProbeState,
+    /// The shared frame (§4), created here so every occupant can hold it.
+    frame: Entity<Frame>,
+    /// Who lives in each tile. Created lazily in `ensure_occupants` and
+    /// dropped when the tile is gone from every workspace.
+    occupants: HashMap<TileId, TileOccupant>,
+    /// The tiles painted last frame, to diff visibility without touching
+    /// every occupant every frame.
+    visible_tiles: HashSet<TileId>,
 }
 
 /// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
@@ -714,6 +735,35 @@ impl ShellView {
         let font_size = FontSize::from_config(&services.config);
         let find_style = FindStyle::from_config(&services.config);
 
+        // The shared frame (§4): built from whatever `[groupings]` (plus
+        // the `datasets`/`dimensions` docs it validates slots against)
+        // config resolved to. A missing doc just means an empty schema/
+        // dimension set — `(SchemaSpec, Vec<Diagnostic>)` and its
+        // `DerivedDimensions` twin are both `Default`, so `unwrap_or_
+        // default` is a real, valid "nothing configured yet" state, not a
+        // workaround.
+        let frame = {
+            let (schema, _) = services
+                .config
+                .doc("datasets")
+                .map(SchemaSpec::from_doc)
+                .unwrap_or_default();
+            let (dims, _) = services
+                .config
+                .doc("dimensions")
+                .map(DerivedDimensions::from_doc)
+                .unwrap_or_default();
+            let (slots, diags) = services
+                .config
+                .doc("groupings")
+                .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+                .unwrap_or_default();
+            for d in &diags {
+                eprintln!("[groupings] {d}");
+            }
+            cx.new(|_| Frame::new(slots, user_dir.clone()))
+        };
+
         Self {
             services,
             matcher: Matcher::default(),
@@ -743,6 +793,9 @@ impl ShellView {
             perf_overlay: false,
             data_probe: false,
             probe: crate::dataprobe::ProbeState::default(),
+            frame,
+            occupants: HashMap::new(),
+            visible_tiles: HashSet::new(),
         }
     }
 
@@ -859,8 +912,17 @@ impl ShellView {
     /// one) — `handle_key_down` never reaches `self.matcher.press` while
     /// `self.palette` is `Some`, since palette-open key handling is
     /// exclusive (see that method's doc comment).
-    fn context_stack(&self) -> Vec<KeyContext> {
+    fn context_stack(&self, cx: &App) -> Vec<KeyContext> {
         let mut stack = vec![KeyContext::new("workspace")];
+        if let Some(tile) = self.services.workspaces.active().focused_tile()
+            && let Some(o) = self.occupants.get(&tile)
+        {
+            // `tile` is the shell's own frame for "some occupant has
+            // focus" (Task 5 binds `/` and `:` on it); the occupant's own
+            // context sits above it, innermost.
+            stack.push(KeyContext::new("tile"));
+            stack.push(o.content.key_context(cx));
+        }
         if self.palette.is_some() {
             stack.push(KeyContext::new("palette"));
         }
@@ -884,8 +946,8 @@ impl ShellView {
     /// would through the matcher. So this resolves that same winning
     /// binding and only treats the keystroke as the palette toggle when
     /// its action is `palette::toggle`.
-    fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke) -> bool {
-        let stack = self.context_stack();
+    fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke, cx: &App) -> bool {
+        let stack = self.context_stack(cx);
         let winner = self.services.keymap.bindings().iter().rfind(|binding| {
             binding.keystrokes.len() == 1
                 && binding.keystrokes[0] == *keystroke
@@ -1020,9 +1082,8 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Unused until Task 3's fall-through wires a count-aware verb in;
-        // every arm below ignores it for now (Phase 3 §2.3, §3.3).
-        let _ = count;
+        // Every workspace verb below ignores the count; only the module
+        // fall-through at the end (Phase 3 §3.3) is count-aware today.
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
         if handled {
             self.session_dirty = true;
@@ -1076,9 +1137,21 @@ impl ShellView {
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`
-            // feature; see `shell::profiling_hook`.
+            // feature; see `shell::profiling_hook`. Returns whether it
+            // recognised the id, so the module fall-through below still
+            // runs for anything it didn't claim.
             #[cfg(feature = "profiling")]
-            profiling_hook::dispatch(self, action, window, cx);
+            if profiling_hook::dispatch(self, action, window, cx) {
+                return;
+            }
+            // A module's own action (§3.3): hand it to the focused
+            // occupant. Unhandled ids fall off the end silently, as they
+            // always did.
+            if let Some(tile) = self.services.workspaces.active().focused_tile()
+                && let Some(o) = self.occupants.get(&tile)
+            {
+                o.content.dispatch(action, count, window, cx);
+            }
         }
     }
 
@@ -1231,6 +1304,99 @@ impl ShellView {
         if let Err(e) = session::save(path, &self.services.workspaces) {
             eprintln!("[session] warning: failed to save session: {e}");
         }
+    }
+
+    /// The shared frame entity every occupant holds (§4).
+    pub fn frame(&self) -> &Entity<Frame> {
+        &self.frame
+    }
+
+    /// The module kind occupying `tile`, or `None` if it has no occupant
+    /// (not a tile at all, or not yet created).
+    pub fn occupant_kind(&self, tile: TileId) -> Option<&'static str> {
+        self.occupants.get(&tile).map(|o| o.kind)
+    }
+
+    /// Route a query outcome to the tile whose id is its key (§5.1). The
+    /// app bridge calls this; an outcome for a tile that no longer exists
+    /// is dropped.
+    pub fn deliver(&mut self, outcome: QueryOutcome, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(o) = self.occupants.get(&TileId(outcome.key.0)) {
+            o.content.deliver(outcome, window, cx);
+        }
+    }
+
+    /// Every tile id in every workspace, main trees and docks.
+    fn all_tiles(&self) -> HashSet<TileId> {
+        let mut out = HashSet::new();
+        for (_, ws) in self.services.workspaces.spaces() {
+            out.extend(ws.tree().tiles());
+            for (_, dock) in ws.docks().iter() {
+                out.extend(dock.tree().tiles());
+            }
+        }
+        out
+    }
+
+    /// The tiles of the active workspace: what is on screen.
+    fn active_tiles(&self) -> HashSet<TileId> {
+        let ws = self.services.workspaces.active();
+        let mut out: HashSet<TileId> = ws.tree().tiles().into_iter().collect();
+        for (_, dock) in ws.docks().iter() {
+            if dock.visible() {
+                out.extend(dock.tree().tiles());
+            }
+        }
+        out
+    }
+
+    /// Create occupants for tiles that lack one, drop occupants whose tile
+    /// is gone, and tell occupants when they enter or leave the screen.
+    /// Runs at the top of `render`, the one place with a `Window` on every
+    /// path that can change the tile set (a split, a close, a restore, a
+    /// workspace switch).
+    fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let all = self.all_tiles();
+        self.occupants.retain(|id, _| all.contains(id));
+        for id in &all {
+            if self.occupants.contains_key(id) {
+                continue;
+            }
+            let restored = self.services.restored_tiles.remove(&id.0);
+            let factory = restored
+                .as_ref()
+                .and_then(|r| self.services.roster.factory(&r.kind))
+                .or_else(|| self.services.roster.default_factory());
+            let occupant = match factory {
+                Some(f) => f.create(
+                    *id,
+                    restored.as_ref().map(|r| &r.state),
+                    self.frame.clone(),
+                    window,
+                    cx,
+                ),
+                None => crate::module::placeholder::PlaceholderFactory.create(
+                    *id,
+                    None,
+                    self.frame.clone(),
+                    window,
+                    cx,
+                ),
+            };
+            self.occupants.insert(*id, occupant);
+        }
+        let active = self.active_tiles();
+        for id in self.visible_tiles.difference(&active) {
+            if let Some(o) = self.occupants.get(id) {
+                o.content.set_visible(false, cx);
+            }
+        }
+        for id in active.difference(&self.visible_tiles) {
+            if let Some(o) = self.occupants.get(id) {
+                o.content.set_visible(true, cx);
+            }
+        }
+        self.visible_tiles = active;
     }
 
     /// Hand the probe a new reading (spec §7's vertical slice).
@@ -1531,7 +1697,7 @@ impl ShellView {
         let keystroke = convert_keystroke(&event.keystroke);
 
         if let Some(ks) = &keystroke
-            && self.is_palette_toggle(ks)
+            && self.is_palette_toggle(ks, cx)
         {
             self.toggle_palette(window, cx);
             cx.notify();
@@ -1576,7 +1742,7 @@ impl ShellView {
         let Some(keystroke) = keystroke else {
             return;
         };
-        let stack = self.context_stack();
+        let stack = self.context_stack(cx);
         match self.matcher.press(&self.services.keymap, keystroke, &stack) {
             MatchResult::Matched { action, count } => {
                 self.dispatch(&action, count, window, cx);
@@ -1937,6 +2103,13 @@ impl Render for ShellView {
             self.focus_handle.focus(window, cx);
         }
 
+        // Create occupants for any tile that lacks one, drop occupants
+        // whose tile is gone, and tell occupants when they enter/leave the
+        // screen (Phase 3 §3.2) — the one place every path that can change
+        // the tile set (split, close, restore, workspace switch) reliably
+        // funnels through with a `Window` in hand.
+        self.ensure_occupants(window, cx);
+
         // Cancel an in-flight divider drag when the surface it was
         // resizing is no longer the one on screen (drag-splitters task):
         // the palette or a modal opened mid-drag (keyboard stays live
@@ -2217,16 +2390,17 @@ impl Render for ShellView {
         // as focused while `region == Main`, and a dock tile only when
         // focus lives in that dock AND the dock's own tree has it focused
         // (dock-trees task — a dock holds many tiles, one ring).
-        let tile_cell = |id: crate::tiling::TileId, r: Rect, is_focused: bool, cx: &App| {
+        let tile_cell = |id: crate::tiling::TileId,
+                         r: Rect,
+                         is_focused: bool,
+                         view: Option<AnyView>,
+                         cx: &App| {
             div()
                 .absolute()
                 .left(px(r.x + 1.0))
                 .top(px(r.y + 1.0))
                 .w(px((r.w - 2.0).max(0.0)))
                 .h(px((r.h - 2.0).max(0.0)))
-                .flex()
-                .items_center()
-                .justify_center()
                 .bg(cx.theme().background)
                 .border_color(if is_focused {
                     cx.theme().primary
@@ -2235,15 +2409,17 @@ impl Render for ShellView {
                 })
                 .when(is_focused, |el| el.border_2())
                 .when(!is_focused, |el| el.border_1())
-                // `fonts::MONO` (Task 10): this placeholder label
-                // stands in for real tile content until modules
-                // land — the phase-3 blotter is what will actually
-                // fill these tiles, and it'll use `fonts::MONO` for
-                // its cells too, so the placeholder previews that
-                // face rather than the default UI one.
-                .font_family(fonts::MONO)
-                .text_color(cx.theme().muted_foreground)
-                .child(format!("tile {}", id.0))
+                .overflow_hidden()
+                .map(|el| match view {
+                    Some(view) => el.child(view),
+                    None => el
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(fonts::MONO)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("tile {}", id.0)),
+                })
         };
 
         // Fixed-size (not `size_full`) so it never competes with the
@@ -2313,8 +2489,9 @@ impl Render for ShellView {
         } else {
             for (id, r) in rects {
                 let is_focused = region == crate::tiling::FocusRegion::Main && focused == Some(id);
+                let view = self.occupants.get(&id).map(|o| o.view.clone());
                 surface = surface.child(
-                    tile_cell(id, r, is_focused, cx)
+                    tile_cell(id, r, is_focused, view, cx)
                         // Click-to-focus is a convenience: keyboard (hjkl)
                         // remains the primary path through the same
                         // `Workspace::focus_main_tile` seam — a click on a
@@ -2334,6 +2511,15 @@ impl Render for ShellView {
                                 if view.services.workspaces.active_mut().focus_main_tile(id) {
                                     view.session_dirty = true;
                                 }
+                                // An occupant may track its own
+                                // `FocusHandle` (the recording module does
+                                // — `RecordingView` — and `DataTable` will
+                                // too) and take focus with this
+                                // mouse-down; without re-arming the same
+                                // restore `apply_reload` uses, the shell
+                                // root would never get focus back and
+                                // every shell chord would go dead (§3.3).
+                                view.pending_focus_restore = true;
                                 cx.notify();
                             }),
                         ),
@@ -2357,7 +2543,8 @@ impl Render for ShellView {
                     // Same mod+down drag-arming branch as the tree tiles
                     // above — a docked tile is the same kind of tile, and
                     // drags work from any source region.
-                    surface = surface.child(tile_cell(id, tr, is_focused, cx).on_mouse_down(
+                    let view = self.occupants.get(&id).map(|o| o.view.clone());
+                    surface = surface.child(tile_cell(id, tr, is_focused, view, cx).on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
                             if view.try_arm_tile_drag(id, event, cx) {
@@ -2543,7 +2730,7 @@ impl Render for ShellView {
         // does with the next keystroke.
         let pending = self.matcher.pending();
         let which_key_continuations = (!pending.is_empty()).then(|| {
-            whichkey::continuations(&self.services.keymap, pending, &self.context_stack())
+            whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
         });
         let registry = &self.services.registry;
 
@@ -2967,7 +3154,209 @@ mod tests {
             workspaces: Workspaces::new(),
             theme,
             session_path: None,
+            roster: crate::module::ModuleRoster::default(),
+            restored_tiles: BTreeMap::new(),
         }
+    }
+
+    /// `test_services` with a recording module as the default occupant.
+    fn services_with_recorder() -> (
+        ShellServices,
+        std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    ) {
+        let recorder = crate::module::recording::RecordingFactory::new("rec");
+        let log = recorder.log.clone();
+        let mut services = test_services();
+        let mut roster = crate::module::ModuleRoster::new("rec");
+        roster.add(Box::new(recorder));
+        roster.register_actions(&mut services.registry);
+        // The keymap must be rebuilt after the module's actions exist,
+        // exactly as `main.rs` orders it, plus a binding into the
+        // module's own context so a key can be seen to reach it.
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let module_doc = LayerDoc::builtin(
+            "keymap",
+            "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"j\" = \"rec::noop\"\n",
+        )
+        .unwrap();
+        let (keymap, diags) = build_keymap(&[doc, module_doc], default_mod(), &services.registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        services.keymap = keymap;
+        services.roster = roster;
+        (services, log)
+    }
+
+    fn open_shell(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::shell::dialog::init_reclaimed_keybindings);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (window, vcx)
+    }
+
+    fn shell_of(
+        window: &gpui::WindowHandle<Root>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Entity<ShellView> {
+        window.root(cx).unwrap().read_with(cx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        })
+    }
+
+    #[gpui::test]
+    fn a_split_creates_an_occupant_of_the_default_kind_and_paints_it(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+            Some("rec")
+        );
+        assert!(
+            log.borrow().iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
+            ),
+            "{:?}",
+            log.borrow()
+        );
+        // `debug_bounds` takes `&'static str`; leak the dynamic selector
+        // (test-only, a few bytes).
+        let selector: &'static str = Box::leak(format!("tile-content-{}", tile.0).into_boxed_str());
+        let bounds = cx.debug_bounds(selector);
+        assert!(
+            bounds.is_some_and(|b| b.size.width > px(0.0)),
+            "the occupant's view painted: {bounds:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("4 j");
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                crate::module::recording::Recorded::Dispatch(t, a, Some(4)) if *t == tile && a.0 == "rec::noop"
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    #[gpui::test]
+    fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+
+        cx.simulate_keystrokes("alt-2");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            log.borrow().iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::Visible(t, false) if *t == tile)
+            ),
+            "hidden on switch: {:?}",
+            log.borrow()
+        );
+        cx.simulate_keystrokes("alt-1");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            log.borrow().iter().any(
+                |r| matches!(r, crate::module::recording::Recorded::Visible(t, true) if *t == tile)
+            ),
+            "shown on return: {:?}",
+            log.borrow()
+        );
+
+        cx.simulate_keystrokes("ctrl-w");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+            None,
+            "occupant dropped with its tile"
+        );
+    }
+
+    #[gpui::test]
+    fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
+        // gpui focuses a tracked element on mouse down; an occupant that
+        // tracks its own handle (DataTable does) would take focus with it
+        // and every shell chord would go dead. The tile's click handler
+        // arms the same restore `apply_reload` uses (§3.3).
+        let (services, _log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        // `debug_bounds` takes `&'static str`; leak the dynamic selector
+        // (test-only, a few bytes).
+        let selector: &'static str = Box::leak(format!("tile-content-{}", tile.0).into_boxed_str());
+        let bounds = cx.debug_bounds(selector).unwrap();
+        cx.simulate_mouse_down(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.simulate_mouse_up(
+            bounds.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::default(),
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let focused = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "the shell root has focus again"
+        );
     }
 
     /// The empty-workspace hint (`"ctrl+h / ctrl+v to open a tile"`) paints
@@ -5404,6 +5793,8 @@ mod tests {
             workspaces: Workspaces::new(),
             theme,
             session_path: None,
+            roster: crate::module::ModuleRoster::default(),
+            restored_tiles: BTreeMap::new(),
         }
     }
 
@@ -6478,6 +6869,8 @@ mod tests {
             workspaces: Workspaces::new(),
             theme,
             session_path: None,
+            roster: crate::module::ModuleRoster::default(),
+            restored_tiles: BTreeMap::new(),
         }
     }
 
@@ -9461,30 +9854,6 @@ mod tests {
         );
     }
 
-    /// Boilerplate shared by the perf tests below: open a window, return
-    /// the `VisualTestContext` plus the downcast `ShellView` entity.
-    fn open_shell(
-        cx: &mut gpui::TestAppContext,
-    ) -> (gpui::VisualTestContext, gpui::Entity<ShellView>) {
-        cx.update(gpui_component::init);
-        let window = cx
-            .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
-                })
-            })
-            .unwrap();
-        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
-        let shell = window.root(&mut cx).unwrap().read_with(&cx, |root, _cx| {
-            root.view()
-                .clone()
-                .downcast::<ShellView>()
-                .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-        });
-        (cx, shell)
-    }
-
     /// Spec §7.4's debug overlay toggle, end to end through the real key
     /// pipeline: `mod+shift+p` (alt is the test/default mod) dispatches
     /// `perf::toggle_overlay`, which paints the readout panel; a second
@@ -9493,7 +9862,8 @@ mod tests {
     /// `empty_workspace_paints_the_hint`.
     #[gpui::test]
     fn perf_overlay_toggles_via_the_bound_action(cx: &mut gpui::TestAppContext) {
-        let (mut cx, shell) = open_shell(cx);
+        let (window, mut cx) = open_shell(cx, test_services());
+        let shell = shell_of(&window, &mut cx);
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -9536,7 +9906,8 @@ mod tests {
         use geode_core::attribution::{Attribution, ScopeSemantics};
         use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
 
-        let (mut cx, shell) = open_shell(cx);
+        let (window, mut cx) = open_shell(cx, test_services());
+        let shell = shell_of(&window, &mut cx);
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
@@ -9620,7 +9991,8 @@ mod tests {
     /// the number of draws driven, with no runaway extra frames.
     #[gpui::test]
     fn render_records_frame_samples_and_reset_clears_them(cx: &mut gpui::TestAppContext) {
-        let (mut cx, shell) = open_shell(cx);
+        let (window, mut cx) = open_shell(cx, test_services());
+        let shell = shell_of(&window, &mut cx);
         // Window-open itself already drew at least once (the very first
         // render records nothing — no previous render to measure from —
         // but any second one records), so take the count after an

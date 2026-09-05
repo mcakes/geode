@@ -108,6 +108,16 @@ use crate::tiling::{
 /// "assume current" rather than a hard failure).
 pub const SESSION_CONFIG_VERSION: i64 = 1;
 
+/// A tile's restored occupant kind and opaque module state (Phase 3 §3.5).
+/// Formalised here in Task 3 with `restored_tiles` always empty; Task 4
+/// fills it in from the session file's `[occupants]` table and
+/// `ShellView::ensure_occupants` consumes it as tiles get their occupants.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TileRecord {
+    pub kind: String,
+    pub state: toml::Table,
+}
+
 /// Serialize `workspaces` into a session TOML table (pure, no I/O — see
 /// [`save`] for the file-writing wrapper).
 pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
