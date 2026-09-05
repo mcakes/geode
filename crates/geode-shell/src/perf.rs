@@ -168,6 +168,16 @@ impl FrameHistogram {
     }
 }
 
+/// Requery timing (Phase 3 §6.8). Filled in by Task 7; the frame carries
+/// it from the start so its shape does not change.
+#[derive(Debug, Default)]
+pub struct RequeryStats {}
+impl RequeryStats {
+    pub const fn new() -> Self {
+        RequeryStats {}
+    }
+}
+
 /// Render a microsecond value as a short millisecond string for the debug
 /// overlay: `0.12ms` under 1ms, `4.6ms` under 10ms, `83ms` beyond. Returns
 /// a fresh small `String` — called only while the overlay renders (a

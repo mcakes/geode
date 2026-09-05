@@ -2613,6 +2613,7 @@ dependencies = [
 name = "geode-shell"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "criterion",
  "geode-core",
  "gpui",

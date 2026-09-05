@@ -9,6 +9,7 @@ pub mod dataprobe;
 pub mod defaults;
 pub mod fonts;
 pub mod fontsize;
+pub mod frame;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod listfilter;
