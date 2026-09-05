@@ -1,0 +1,605 @@
+//! Config hot reload applied through `apply_reload` directly (the real
+//! entity, the real method the watcher calls) plus the frame-slot keys.
+
+use super::*;
+// Explicit: this file's own `mod reload;` declaration in `tests/mod.rs`
+// shadows the glob-imported `crate::reload`, so the bare `reload::` paths
+// below need this to resolve to the real module rather than to `self`.
+use crate::reload;
+
+/// A clean reload (no error diagnostics) is applied: the mod alias
+/// (and therefore the keymap built from it) updates to match the new
+/// config, an open palette closes (brief: "must close on a successful
+/// reload"), and the outcome is recorded as `Applied`.
+#[gpui::test]
+fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    // Open the palette so we can prove a successful reload closes it.
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+    let new_config = config_with_mod("ctrl");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.mod_alias,
+            Modifiers::CTRL,
+            "a clean reload should rebuild the mod alias from the new config"
+        );
+        assert!(
+            shell.palette.is_none(),
+            "a successful reload must close an open palette"
+        );
+        assert_eq!(
+            shell.last_reload,
+            reload::ReloadOutcome::Applied { warnings: vec![] },
+            "a clean reload with no diagnostics should record Applied with no warnings"
+        );
+    });
+}
+
+/// An error-severity diagnostic in the new config (here: an
+/// unsupported `config_version`) means the entire previous `Config`
+/// (and everything built from it — mod alias, keymap) is kept
+/// untouched, and the outcome records the error for the status bar.
+/// A palette open at the time stays open — only a *successful* reload
+/// closes it.
+#[gpui::test]
+fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+    // A desk-layer doc with an unsupported config_version is an error
+    // diagnostic on `Config::load` itself (geode_core::config::load_layer).
+    let desk = tempfile::tempdir().unwrap();
+    std::fs::write(desk.path().join("app.toml"), "config_version = 99\n").unwrap();
+    let bad_config = Config::load(&ConfigSources {
+        builtin: vec![],
+        desk: Some(desk.path().to_path_buf()),
+        user: None,
+    });
+    assert!(
+        bad_config
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == geode_core::config::Severity::Error),
+        "sanity: the constructed config must actually carry an error diagnostic"
+    );
+
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.mod_alias, original_mod_alias,
+            "an error diagnostic must keep the previous mod alias/keymap untouched"
+        );
+        assert!(
+            shell.palette.is_some(),
+            "a rejected reload must not close the palette"
+        );
+        match &shell.last_reload {
+            reload::ReloadOutcome::KeptLastGood { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert!(errors[0].contains("config_version"));
+            }
+            other => panic!("expected KeptLastGood, got {other:?}"),
+        }
+    });
+}
+
+fn config_with_theme(name: &str, mode: &str) -> Config {
+    Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin(
+                "app",
+                &format!("[theme]\nname = \"{name}\"\nmode = \"{mode}\"\n"),
+            )
+            .unwrap(),
+        ],
+        desk: None,
+        user: None,
+    })
+}
+
+/// `apply_reload`'s theme-reapply guard, fired: when the new config's
+/// `[theme]` table genuinely differs from the old one's, the reload
+/// re-applies the theme, and the live `ThemeService` reflects the new
+/// value.
+#[gpui::test]
+fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let mut services = test_services();
+                services.config = config_with_theme("Gruvbox", "dark");
+                let view = cx.new(|cx| {
+                    // Mirrors what main.rs does before opening the
+                    // window: apply the theme the starting config
+                    // actually names, so this test's "old" state is a
+                    // real (config, active theme) pair, not just a
+                    // Default-Light service that happens to hold a
+                    // Gruvbox config it never applied.
+                    services.theme.apply_from_config(&services.config, cx);
+                    ShellView::new(services, None, None, window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Dark",
+        "sanity: the starting theme must actually be the one the old config names"
+    );
+
+    let new_config = config_with_theme("Default", "dark");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.theme.active_name(),
+            "Default Dark",
+            "a genuinely different [theme] table must be re-applied on reload"
+        );
+    });
+}
+
+/// `apply_reload`'s theme-reapply guard, holding: when the new config's
+/// `[theme]` table is identical to the old one's, the reload must NOT
+/// re-apply the theme — a runtime `theme::toggle_mode` done between the
+/// old config being applied and this reload survives untouched, rather
+/// than being silently reverted to what `[theme]` still says.
+#[gpui::test]
+fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let mut services = test_services();
+                services.config = config_with_theme("Gruvbox", "dark");
+                let view = cx.new(|cx| {
+                    services.theme.apply_from_config(&services.config, cx);
+                    ShellView::new(services, None, None, window, cx)
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    // A runtime toggle (mod+shift+t / theme::toggle_mode), independent
+    // of config, before any reload happens.
+    shell.update(&mut cx, |shell, cx| shell.services.theme.toggle_mode(cx));
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "sanity: toggling from Gruvbox Dark should flip to Gruvbox Light"
+    );
+
+    // Same [theme] table as the config already applied — a reload
+    // triggered by, say, an unrelated keymap.toml edit.
+    let new_config = config_with_theme("Gruvbox", "dark");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.theme.active_name(),
+            "Gruvbox Light",
+            "an unchanged [theme] table must not re-apply the theme, or the \
+             runtime toggle above would be silently reverted"
+        );
+        assert_eq!(
+            shell.last_reload,
+            reload::ReloadOutcome::Applied { warnings: vec![] },
+            "the reload itself still succeeds — only the theme re-apply is guarded"
+        );
+    });
+}
+
+/// Review fix round 1, Finding 2: an open palette must NOT close on a
+/// reload whose `[theme]` table is the only thing that changed — the
+/// palette's own items (Task 6: built from the registry + keymap
+/// bindings, `toggle_palette`) don't depend on `[theme]` at all, so
+/// closing it here would just be spurious churn. This is exactly the
+/// situation `theme::persist_to_user_config`'s own write triggers (see
+/// its doc comment): the app writes its own theme choice to disk, the
+/// watcher picks that up as "config changed", and this reload must not
+/// silently close a palette the user still has open.
+#[gpui::test]
+fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+    // `test_services()`'s starting config has no `[theme]` table at
+    // all (and no `[keymap]` table either — `config_with_theme` only
+    // ever writes an "app" doc's `[theme]` section, so this new
+    // config's `layered_docs("keymap")` is just as empty as the
+    // starting one's, and neither sets `[keymap] mod`).
+    let new_config = config_with_theme("Gruvbox", "dark");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.theme.active_name(),
+            "Gruvbox Dark",
+            "sanity: the theme-only change must still have been applied"
+        );
+        assert!(
+            shell.palette.is_some(),
+            "a theme-only reload must leave an open palette open"
+        );
+    });
+}
+
+/// The contrasting half of the Finding 2 pair above: a reload whose
+/// keymap docs genuinely differ (here, via `[keymap] mod`, which
+/// changes the resolved mod alias and therefore the bindings the
+/// palette would render) DOES close an open palette — its snapshot
+/// really is stale.
+#[gpui::test]
+fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+
+    let new_config = config_with_mod("ctrl");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.mod_alias,
+            Modifiers::CTRL,
+            "sanity: the mod alias must actually have changed"
+        );
+        assert!(
+            shell.palette.is_none(),
+            "a reload with genuinely different keymap docs must close an open palette"
+        );
+    });
+}
+
+/// Fix-round regression for the orphaned-`FocusId` finding on
+/// `apply_reload`'s palette-close path (see `pending_focus_restore`'s
+/// and that call site's own doc comments): a background reload closing
+/// the palette while its query `Input` genuinely holds window focus
+/// must still end up with focus back on the shell root — `apply_reload`
+/// itself has no `Window` to do that with directly, so this proves the
+/// `pending_focus_restore` flag actually gets consumed by the very next
+/// render, the same "assert the shell handle is focused after" pattern
+/// `escape_closes_the_palette_without_dispatching` uses for the
+/// ordinary key-driven close.
+#[gpui::test]
+fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+    let shell_focus_handle = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+    let palette_input = shell.read_with(&cx, |shell, _| shell.palette_input.clone());
+    let palette_input_focus_handle =
+        palette_input.read_with(&cx, |state, cx| state.focus_handle(cx));
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+        "sanity: ctrl+k opening the palette should have focused its query Input"
+    );
+
+    // A keymap-differing reload (not just a theme-only one — see the
+    // contrasting pair of tests above) closes the palette out from
+    // under that still-focused input, with no Window available to
+    // `apply_reload` itself to redirect focus.
+    let new_config = config_with_mod("ctrl");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+        "sanity: the keymap-differing reload should have closed the palette"
+    );
+
+    // `apply_reload` already calls `cx.notify()` unconditionally, so
+    // the next draw is exactly the render that should consume
+    // `pending_focus_restore`.
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(
+        !cx.update(|window, _cx| palette_input_focus_handle.is_focused(window)),
+        "the closed palette's query input must not still hold window focus"
+    );
+    assert!(
+        cx.update(|window, _cx| shell_focus_handle.is_focused(window)),
+        "a background reload closing a focused palette must still return \
+         focus to the shell root — otherwise handle_key_down's on_key_down \
+         listener never fires again until a mouse click claims focus"
+    );
+}
+
+// --- Task 6: frame keys, the readout, and config reload -------------
+
+#[gpui::test]
+fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    // Two slots through config, the way `new` reads them.
+    let groupings = LayerDoc::builtin("groupings", "1 = [\"book\"]\n2 = [\"lhu\"]\n").unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            groupings,
+            datasets,
+        ],
+        ..ConfigSources::default()
+    });
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-2");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        Some(2)
+    );
+    let v = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    cx.simulate_keystrokes("ctrl-5");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        Some(2),
+        "an empty slot is ignored"
+    );
+    assert_eq!(shell.read_with(&cx, |s, cx| s.frame.read(cx).versions()), v);
+    cx.simulate_keystrokes("ctrl-0");
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+        None
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("frame-readout").is_some(),
+        "the readout painted"
+    );
+}
+
+#[gpui::test]
+fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            sink.borrow_mut().push(event.clone())
+        })
+        .detach();
+    });
+
+    let mut new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("groupings", "3 = [\"book\"]\n").unwrap(),
+            LayerDoc::builtin("datasets", "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n").unwrap(),
+            LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut new_config), cx)
+    });
+    let (slots, versions) = shell.read_with(&cx, |s, cx| {
+        (
+            s.frame.read(cx).slots().clone(),
+            s.frame.read(cx).versions(),
+        )
+    });
+    assert_eq!(slots.label(3).as_deref(), Some("book"));
+    assert!(versions.config > v0.config);
+    assert!(
+        events.borrow().contains(&ShellEvent::ConfigReloaded),
+        "{:?}",
+        events.borrow()
+    );
+
+    // Now a sources change.
+    let mut with_sources = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "sources",
+                "[s]\ndataset = \"risk\"\npaths = [\"/x/*.csv\"]\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_sources), cx)
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("sources"))),
+        "{:?}",
+        events.borrow()
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.debug_bounds("restart-required").is_some(),
+        "the status bar says so"
+    );
+}
