@@ -160,7 +160,21 @@ impl BlotterDelegate {
             self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);
         }
         self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.invalidate_cells();
+    }
+
+    /// Invalidate the format cache and the cached tree glyphs together.
+    /// `FormatCache::invalidate` clears its rows but leaves `start`
+    /// unchanged, so `render_td`'s `glyphs` lookup (keyed off
+    /// `cache.window().start`) would otherwise keep serving a stale
+    /// glyph for a row whose text just went blank — exactly when the
+    /// visible row *range* doesn't change across a regroup/sort/narrow
+    /// (so `TableState` never calls `visible_rows_changed` to refill
+    /// either of them). Every `self.cache.invalidate()` call site must
+    /// go through this instead.
+    fn invalidate_cells(&mut self) {
         self.cache.invalidate();
+        self.glyphs.clear();
     }
 
     /// `narrowed` names *positions* into `visible` (the domain
@@ -186,7 +200,7 @@ impl BlotterDelegate {
         self.rebuild_shown();
         let cols = self.plan.as_ref().map_or(0, |p| p.columns.len());
         self.cursor.clamp(self.shown.len(), cols);
-        self.cache.invalidate();
+        self.invalidate_cells();
     }
 
     pub fn shown_texts(&self) -> Vec<String> {
@@ -286,6 +300,18 @@ impl BlotterDelegate {
         self.glyphs = window
             .map(|shown_row| tree_glyph(snapshot, plan, &self.expansion, shown, shown_row))
             .collect();
+    }
+
+    /// The exact lookup `render_td` performs, minus its "no glyph
+    /// cached" fallback — so a test can tell "a real glyph is cached"
+    /// apart from "nothing is cached" (both of which `render_td` paints
+    /// as `"·"`). Test-only: production code goes through `render_td`.
+    #[cfg(test)]
+    fn glyph_at(&self, row_ix: usize) -> Option<&'static str> {
+        row_ix
+            .checked_sub(self.cache.window().start)
+            .and_then(|i| self.glyphs.get(i))
+            .copied()
     }
 }
 
@@ -741,6 +767,41 @@ mod tests {
         assert!(
             d.cache.get(0, 1).is_none(),
             "apply_snapshot invalidates the cache on its own"
+        );
+    }
+
+    #[test]
+    fn a_regroup_that_keeps_the_window_clears_the_cached_glyphs() {
+        // Reviewer-caught defect: `FormatCache::invalidate` clears the
+        // cache's rows but leaves `start` unchanged, and neither
+        // `reflatten_keeping` nor `set_narrowed` touched `glyphs` when
+        // they called it — so a regroup/sort/narrow whose visible row
+        // range doesn't change (gpui-component's `TableState` only
+        // calls `visible_rows_changed` when the numeric range differs)
+        // left `render_td` painting the pre-invalidation glyph for a
+        // row whose cell text correctly went blank.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        // shown = [0, 1, 2]; row 1 (L1) has children (SPX, NDX) and is
+        // not open, so its disclosure glyph is the real "▸", not the
+        // "no glyph cached" fallback.
+        d.refill_window(0..3);
+        assert_eq!(
+            d.glyph_at(1),
+            Some("▸"),
+            "L1 has children, closed: a real disclosure glyph is cached"
+        );
+        // Re-apply the same snapshot/grouping without calling
+        // `refill_window` again: `shown`'s numeric range is unchanged,
+        // matching the scenario where `TableState` would not re-fire
+        // `visible_rows_changed` — but the cache itself was invalidated
+        // and the glyph must not survive stale.
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        assert_eq!(d.shown, vec![0, 1, 2], "the visible row range is unchanged");
+        assert_eq!(
+            d.glyph_at(1),
+            None,
+            "the cache was invalidated; the glyph must not paint stale"
         );
     }
 
