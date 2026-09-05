@@ -1054,35 +1054,35 @@ run_mutation "frame: a vanished active slot is cleared on reload" \
 # ---- module hosting (Phase 3 §3)
 
 run_mutation "hosting: an unknown action reaches the focused occupant with its count" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/input.rs \
   '                o.content.dispatch(action, count, window, cx);' \
   '                o.content.dispatch(action, None, window, cx);' \
   geode-shell \
   a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count
 
 run_mutation "hosting: a closed tile drops its occupant" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '        self.occupants.retain(|id, _| all.contains(id));' \
   '        let _ = &all;' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
 run_mutation "hosting: leaving the screen is announced" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '                o.content.set_visible(false, cx);' \
   '                let _ = o;' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
 run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
   '            let state = restored.as_ref().map(|r| &r.state);' \
   geode-shell \
   a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
 
 run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '            occupant.content.set_visible(active.contains(id), cx);' \
   '            occupant.content.set_visible(true, cx);' \
   geode-shell \
@@ -1110,7 +1110,7 @@ run_mutation "session: tile state round-trips" \
   tiles_round_trip_with_their_kind_and_opaque_state
 
 run_mutation "session: a state-only change alone still flushes" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/session_io.rs \
   '        if !self.session_dirty && tiles == self.last_tiles_written {' \
   '        if !self.session_dirty {' \
   geode-shell \
@@ -1133,7 +1133,7 @@ run_mutation "commandline: an exact word runs as typed" \
   submit_runs_accepts_or_refuses
 
 run_mutation "commandline: escape on a find is a cancel" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
   '            o.content.find(FindEvent::Cancelled, window, cx);' \
   '            let _ = o;' \
   geode-shell \
@@ -1158,21 +1158,21 @@ run_mutation "commandline: escape on a find is a cancel" \
 # describes.
 
 run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
   '                        c.word = c.word.start..cursor;' \
   '                        let _ = cursor;' \
   geode-shell \
   a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
 
 run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/render.rs \
   '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
   '            false' \
   geode-shell \
   switching_workspaces_cancels_an_open_command_line
 
 run_mutation "commandline: losing keyboard focus to another surface cancels an open line (I1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/render.rs \
   '                || !self
                     .command_input
                     .read(cx)
@@ -1185,21 +1185,21 @@ run_mutation "commandline: losing keyboard focus to another surface cancels an o
 # ---- frame keys, the readout, and config reload (Phase 3 §4.2, §4.5)
 
 run_mutation "frame: a sources change is a restart, not a silent apply" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '            let restart = ["sources", "datasets"]' \
   '            let restart = ["nonesuch"]' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
 run_mutation "frame: a groupings/datasets/dimensions change replaces the frame's slots (fix round 1)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '            if groupings_changed {' \
   '            if false {' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
 run_mutation "frame: a views/dimensions change reaches the frame and emits ConfigReloaded (fix round 1)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '            if views_changed {' \
   '            if false {' \
   geode-shell \
