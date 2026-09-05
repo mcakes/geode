@@ -67,6 +67,13 @@ pub enum DataEvent {
 /// an `EventSink` must not block and must not call back into
 /// `DataService`: a channel `send`/`try_send` is fine, a call into
 /// `DataService::query` or `cancel` from inside the sink is not.
+///
+/// The caller owns the outbound channel this closes over, and that
+/// channel must be bounded (spec §7.3) and fed with `try_send` — never
+/// `send` — so a slow or gone receiver cannot block the query worker
+/// that calls this. A refused event is counted and surfaced as a
+/// diagnostic on the caller's side; the service itself never blocks on
+/// delivery and never retries one.
 pub type EventSink = Arc<dyn Fn(DataEvent) -> bool + Send + Sync>;
 
 /// One query, as a module asks for it.

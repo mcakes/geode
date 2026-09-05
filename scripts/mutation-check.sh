@@ -780,10 +780,16 @@ run_mutation "handle: a compile failure is delivered as the key's outcome" \
 
 # ---- snapshot index accessors (Phase 3 §5.5)
 
-run_mutation "snapshot: column_at bounds-checks the index" \
+run_mutation "snapshot: column_index resolves the column it names" \
   crates/geode-core/src/snapshot.rs \
   '        self.meta.iter().position(|m| m.name == name)' \
   '        self.meta.iter().position(|m| m.name == name).map(|i| i.saturating_sub(1))' \
+  geode-core
+
+run_mutation "snapshot: column_at bounds-checks the index" \
+  crates/geode-core/src/snapshot.rs \
+  '        (idx < batch.num_columns()).then(|| batch.column(idx).as_ref())' \
+  '        Some(batch.column(idx.min(batch.num_columns() - 1)).as_ref())' \
   geode-core
 
 run_mutation "snapshot: misaligned meta is refused" \

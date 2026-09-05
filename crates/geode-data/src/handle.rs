@@ -82,6 +82,11 @@ impl Inner {
 }
 
 impl Drop for Inner {
+    /// Blocks until the service thread has stopped — see
+    /// [`DataHandle::shutdown`] for what that wait can cost (an
+    /// in-flight `load_file` or `discover`). This runs on whatever
+    /// thread drops the last `DataHandle`, so an app must not let that
+    /// be the UI thread.
     fn drop(&mut self) {
         self.stop();
     }
@@ -123,6 +128,15 @@ impl DataHandle {
     /// when the last handle drops. Disconnecting the channel — not the
     /// queued `Shutdown` sentinel — is what guarantees the thread ends:
     /// see `Inner::stop`.
+    ///
+    /// **This blocks the calling thread until the service thread has
+    /// actually stopped.** Once `serve`'s loop sees `Request::Shutdown`
+    /// it calls `DataService::shutdown`, which joins the scheduler and
+    /// ingest threads in turn — so this call waits out whatever either
+    /// of them is doing right now: an in-flight `load_file` (seconds,
+    /// for a large CSV) or an in-flight `discover` (unbounded, if the
+    /// share it is scanning is hung). Call this — and let the last
+    /// `DataHandle` drop — off the UI thread.
     pub fn shutdown(&self) {
         self.inner.stop();
     }
@@ -326,6 +340,11 @@ mod tests {
         assert!(
             !h.query(params(11, "tree")),
             "after shutdown nothing is accepted"
+        );
+        assert_eq!(
+            h.dropped_requests(),
+            1,
+            "the refused post-shutdown request is counted"
         );
     }
 
