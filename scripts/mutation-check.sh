@@ -1148,6 +1148,20 @@ run_mutation "frame: a sources change is a restart, not a silent apply" \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
+run_mutation "frame: a groupings/datasets/dimensions change replaces the frame's slots (fix round 1)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if groupings_changed {' \
+  '            if false {' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+run_mutation "frame: a views/dimensions change reaches the frame and emits ConfigReloaded (fix round 1)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if views_changed {' \
+  '            if false {' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
