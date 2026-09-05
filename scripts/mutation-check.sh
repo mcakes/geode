@@ -1109,6 +1109,29 @@ run_mutation "session: a state-only change alone still flushes" \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
+# ---- command line (Phase 3 §3.4)
+
+run_mutation "commandline: an ambiguous word is refused, never guessed" \
+  crates/geode-shell/src/commandline.rs \
+  '    if candidates.len() == 1 {' \
+  '    if !candidates.is_empty() {' \
+  geode-shell \
+  submit_runs_accepts_or_refuses
+
+run_mutation "commandline: an exact word runs as typed" \
+  crates/geode-shell/src/commandline.rs \
+  '    if typed.is_empty() || candidates.is_empty() || words.iter().any(|w| w == typed) {' \
+  '    if typed.is_empty() || candidates.is_empty() {' \
+  geode-shell \
+  submit_runs_accepts_or_refuses
+
+run_mutation "commandline: escape on a find is a cancel" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                o.content.find(FindEvent::Cancelled, window, cx);' \
+  '                let _ = o;' \
+  geode-shell \
+  slash_streams_find_events_and_escape_cancels
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
