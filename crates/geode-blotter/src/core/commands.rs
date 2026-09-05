@@ -119,7 +119,14 @@ pub struct Vocabulary {
 /// The candidates for the word at `cursor`. Sorted, so the shell's
 /// ranking of an empty word is stable.
 pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String> {
-    let cursor = cursor.min(line.len());
+    let mut cursor = cursor.min(line.len());
+    // The caller's cursor should always be on a char boundary, but this
+    // pure core must not depend on that — clamp down to the nearest
+    // boundary at or before it rather than panicking on the slice below
+    // (mirrors `commandline::word_at`'s guard for the same case).
+    while !line.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
     let before = &line[..cursor];
     // The words completed so far, and whether the cursor is at the start
     // of a fresh word.
@@ -300,6 +307,19 @@ mod tests {
             ],
             "the cursor's word, not the last"
         );
+    }
+
+    #[test]
+    fn completions_clamp_a_cursor_inside_a_multibyte_char() {
+        let v = Vocabulary {
+            columns: vec!["délta".into()],
+            views: vec![],
+        };
+        let line = "sort dé";
+        // `é` is two bytes; this cursor lands one byte past its start,
+        // inside the character, not on a char boundary.
+        let cursor = line.find('é').unwrap() + 1;
+        assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
     }
 
     #[test]
