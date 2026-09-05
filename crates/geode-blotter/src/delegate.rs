@@ -41,6 +41,13 @@ pub struct BlotterDelegate {
     /// Whether any painted cell carried the dagger, for the footer.
     pub any_determined: bool,
     pub semi_joined: Vec<String>,
+    /// The tree column's disclosure glyph for each *shown* row in
+    /// `cache`'s current window, aligned index-for-index with it
+    /// (`glyphs[i]` is `cache.window().start + i`) — resolved once per
+    /// window fill in `refill_window`, never in `render_td`, so
+    /// painting the tree column never calls `path_of` (an allocating
+    /// ancestor walk) per cell. Empty until the first `refill_window`.
+    glyphs: Vec<&'static str>,
 }
 
 impl Default for BlotterDelegate {
@@ -65,6 +72,7 @@ impl BlotterDelegate {
             unplaced: 0,
             any_determined: false,
             semi_joined: Vec::new(),
+            glyphs: Vec::new(),
         }
     }
 
@@ -142,11 +150,10 @@ impl BlotterDelegate {
         self.shown.clear();
         match &self.narrowed {
             None => self.shown.extend_from_slice(&self.visible),
-            Some(rows) => self.shown.extend(
-                self.visible
+            Some(positions) => self.shown.extend(
+                positions
                     .iter()
-                    .copied()
-                    .filter(|r| rows.contains(&(*r as usize))),
+                    .filter_map(|&i| self.visible.get(i).copied()),
             ),
         }
         if let Some(path) = keep {
@@ -156,23 +163,20 @@ impl BlotterDelegate {
         self.cache.invalidate();
     }
 
-    /// `narrowed` names *rows* (raw snapshot row indices, the same
-    /// domain as `visible`'s elements) rather than positions in any
-    /// list — `BlotterTile::find` (Task 7) maps a `FindState` match
-    /// position to a row via `shown[position]` before calling
-    /// `set_narrowed`, so what lands here is already a row. `shown`
-    /// becomes the subset of `visible` those rows name, in `visible`'s
-    /// own order (never the caller's order), so a stale or duplicate
-    /// row cannot reorder what's on screen.
+    /// `narrowed` names *positions* into `visible` (the domain
+    /// `FindState`'s fzf narrowing returns — positions into
+    /// `shown_texts()`, which is `visible`'s texts when a `/` session
+    /// begins with nothing narrowed yet), not row ids: `shown[k] =
+    /// visible[narrowed[k]]`, in the caller's order. A position past
+    /// the end of `visible` is dropped rather than panicking.
     fn rebuild_shown(&mut self) {
         self.shown.clear();
         match &self.narrowed {
             None => self.shown.extend_from_slice(&self.visible),
-            Some(rows) => self.shown.extend(
-                self.visible
+            Some(positions) => self.shown.extend(
+                positions
                     .iter()
-                    .copied()
-                    .filter(|r| rows.contains(&(*r as usize))),
+                    .filter_map(|&i| self.visible.get(i).copied()),
             ),
         }
     }
@@ -260,16 +264,63 @@ impl BlotterDelegate {
         };
         let cols = plan.columns.len();
         let shown = &self.shown;
-        let mut any_determined = false;
-        self.cache.set_window(window, cols, |shown_row, col| {
-            let row = *shown.get(shown_row)? as usize;
-            let c = cell(snapshot, plan, row, col)?;
-            if c.attribution == Attribution::DeterminedNonAdditive {
-                any_determined = true;
-            }
-            Some(c)
+        self.cache
+            .set_window(window.clone(), cols, |shown_row, col| {
+                let row = *shown.get(shown_row)? as usize;
+                cell(snapshot, plan, row, col)
+            });
+        // Scanned over the *whole* current window, not just the rows
+        // this call's `fill` closure actually ran for: `set_window`
+        // keeps overlapping rows without re-invoking `fill`, so a row
+        // that entered on an earlier call and stayed cached must still
+        // be able to hold the flag up after a scroll that brings in
+        // nothing but non-determined rows.
+        let determined_window = self.cache.window();
+        self.any_determined = determined_window.into_iter().any(|row: usize| {
+            (0..cols).any(|col| {
+                self.cache
+                    .get(row, col)
+                    .is_some_and(|c| c.attribution == Attribution::DeterminedNonAdditive)
+            })
         });
-        self.any_determined = any_determined;
+        self.glyphs = window
+            .map(|shown_row| tree_glyph(snapshot, plan, &self.expansion, shown, shown_row))
+            .collect();
+    }
+}
+
+/// The tree column's disclosure glyph for one *shown* row (§6.5's blank/
+/// dagger/⋈ markers are separate; this is only the `▸`/`▾`/`…`/`·`
+/// expand-state glyph). Resolved once per window fill
+/// (`BlotterDelegate::refill_window`) rather than per paint, since
+/// `path_of` walks and allocates one `Option<String>` per ancestor —
+/// exactly the per-frame heap churn `render_td` must never do.
+fn tree_glyph(
+    snapshot: &Snapshot,
+    plan: &ColumnPlan,
+    expansion: &Expansion,
+    shown: &[u32],
+    shown_row: usize,
+) -> &'static str {
+    let Some(&row) = shown.get(shown_row) else {
+        return "·";
+    };
+    let row = row as usize;
+    let tree = snapshot.tree();
+    let depth = tree.depth(row);
+    if depth >= snapshot.grouping_len() {
+        return "·";
+    }
+    if tree.has_children(row) {
+        if expansion.is_open(&path_of(snapshot, plan, row)) {
+            "▾"
+        } else {
+            "▸"
+        }
+    } else if expansion.is_open(&path_of(snapshot, plan, row)) {
+        "…" // open, not yet materialised: a requery is in flight
+    } else {
+        "▸"
     }
 }
 
@@ -403,30 +454,19 @@ impl TableDelegate for BlotterDelegate {
             });
 
         // The tree column: indent and a disclosure glyph, then the text.
+        // The glyph itself is never computed here — `path_of` (which
+        // `tree_glyph` calls) allocates one `Option<String>` per
+        // ancestor, and `refill_window` has already resolved it for
+        // every row in `cache`'s current window.
         if kind == Some(ColumnKind::Tree)
             && let (Some(snapshot), Some(&row)) = (&self.snapshot, self.shown.get(row_ix))
         {
-            let tree = snapshot.tree();
-            let row = row as usize;
-            let depth = tree.depth(row);
-            let could = depth < snapshot.grouping_len();
-            let glyph = if !could {
-                "·"
-            } else if tree.has_children(row) {
-                let open = self
-                    .plan
-                    .as_ref()
-                    .is_some_and(|p| self.expansion.is_open(&path_of(snapshot, p, row)));
-                if open { "▾" } else { "▸" }
-            } else if self
-                .plan
-                .as_ref()
-                .is_some_and(|p| self.expansion.is_open(&path_of(snapshot, p, row)))
-            {
-                "…" // open, not yet materialised: a requery is in flight
-            } else {
-                "▸"
-            };
+            let depth = snapshot.tree().depth(row as usize);
+            let glyph = row_ix
+                .checked_sub(self.cache.window().start)
+                .and_then(|i| self.glyphs.get(i))
+                .copied()
+                .unwrap_or("·");
             el = el.pl(px(depth as f32 * INDENT)).child(
                 div()
                     .w(px(14.))
@@ -588,7 +628,9 @@ mod tests {
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.cursor.row = 1;
         d.expand_cursor(Some(true));
-        d.set_narrowed(Some(vec![3, 4]));
+        // visible is now [0, 1, 3, 4, 2]; SPX and NDX sit at *positions*
+        // 2 and 3 (their row ids, 3 and 4, are not their positions).
+        d.set_narrowed(Some(vec![2, 3]));
         assert_eq!(d.shown, vec![3, 4]);
         assert_eq!(d.shown_texts(), vec!["SPX".to_string(), "NDX".to_string()]);
         d.refill_window(0..2);
@@ -605,6 +647,188 @@ mod tests {
         assert!(
             d.cache.get(1, 0).is_none(),
             "invalidated with the narrowing"
+        );
+    }
+
+    #[test]
+    fn narrowing_uses_positions_into_visible_not_row_ids_even_when_they_differ() {
+        // Regression for a reviewer-caught defect: `set_narrowed`'s
+        // argument is *positions* into `visible` (what `FindState`'s
+        // fzf narrowing returns — positions into `shown_texts()`, which
+        // is `visible`'s texts when narrowing begins), not raw row ids.
+        // Pick a fixture where a row's position in `visible` differs
+        // from its row id, so a row-id-based (wrong) implementation and
+        // a position-based (right) one disagree.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.cursor.row = 1; // L1
+        d.expand_cursor(Some(true));
+        // visible = [0, 1, 3, 4, 2]: L2 (row id 2) sits at position 4,
+        // not position 2 — id and position disagree for this row.
+        assert_eq!(d.visible, vec![0, 1, 3, 4, 2]);
+        d.set_narrowed(Some(vec![4]));
+        assert_eq!(
+            d.shown,
+            vec![2],
+            "position 4 in `visible` is row id 2 (L2); a row-id filter \
+             would have kept nothing, since 4 is SPX's row id but SPX \
+             sits at position 3, not 4"
+        );
+        assert_eq!(d.shown_texts(), vec!["L2".to_string()]);
+    }
+
+    #[test]
+    fn a_regroup_to_a_shallower_grouping_prunes_a_path_deeper_than_it_can_reach() {
+        // `depth_bound` alone can't distinguish a pruned from an
+        // unpruned expansion when another open path already sits at
+        // exactly the new grouping length (its `.min(grouping_len)` cap
+        // masks the difference) — this fixture keeps the deep path the
+        // *only* thing open, so the mutation this guards against would
+        // otherwise slip past `a_regroup_prunes_expansion_and_rebuilds_the_plan`.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        // A length-3 path, opened directly (no navigation needed): one
+        // level deeper than `snapshot()`'s own materialised rows go, but
+        // `Expansion` tracks paths, not rows, so this is legal on its own.
+        d.expansion.open(vec![
+            Some("L1".to_string()),
+            Some("SPX".to_string()),
+            Some("POS1".to_string()),
+        ]);
+        let by_two = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1"), s("L2")])),
+                (
+                    dim("underlying_ref"),
+                    TestColumn::Dict(vec![None, None, None]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            2,
+        ));
+        d.apply_snapshot(
+            by_two,
+            &view(),
+            &["lhu".to_string(), "underlying_ref".to_string()],
+        );
+        assert_eq!(
+            d.depth_bound(2),
+            1,
+            "the length-3 path was pruned; nothing open reaches depth 2, \
+             so the bound falls back to the first level"
+        );
+    }
+
+    #[test]
+    fn apply_snapshot_invalidates_the_cache_even_without_narrowing() {
+        // The cache-invalidation entry the reviewer asked for: distinct
+        // from `narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows`,
+        // whose final assertion goes through `set_narrowed`'s own
+        // `invalidate()` call, not `apply_snapshot`'s.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        assert!(
+            d.cache.get(0, 1).is_some(),
+            "the grand total's delta01 is cached"
+        );
+        assert_eq!(d.narrowed, None, "narrowing plays no part in this");
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        assert!(
+            d.cache.get(0, 1).is_none(),
+            "apply_snapshot invalidates the cache on its own"
+        );
+    }
+
+    #[test]
+    fn any_determined_reflects_the_whole_window_not_just_newly_entered_rows() {
+        // A determined cell that stays cached across a scroll must keep
+        // `any_determined` true even when nothing newly entered is
+        // itself determined — `FormatCache::set_window` keeps
+        // overlapping rows without re-invoking the fill closure, so a
+        // delta-only computation (only rows the closure actually ran
+        // for) would wrongly drop the flag.
+        //
+        // delta01 is DeterminedNonAdditive at depth 2 (rows 2-5, the
+        // A/B/C/D leaves) and Additive above it (rows 0-1); the `dim`
+        // helper only ever gives Additive, so this builds its own
+        // per-depth attribution directly.
+        let determined = |depth: usize| {
+            if depth == 2 {
+                Attribution::DeterminedNonAdditive
+            } else {
+                Attribution::Additive
+            }
+        };
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n[[t.columns]]\nname = \"delta01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let mut d = BlotterDelegate::new();
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    ColumnMeta {
+                        name: "lhu".into(),
+                        attribution_by_depth: vec![Attribution::Additive; 4],
+                        scope_semantics: ScopeSemantics::Direct,
+                    },
+                    TestColumn::Dict(vec![None, s("L1"), s("SPX"), s("SPX"), s("SPX"), s("SPX")]),
+                ),
+                (
+                    ColumnMeta {
+                        name: "underlying_ref".into(),
+                        attribution_by_depth: vec![Attribution::Additive; 4],
+                        scope_semantics: ScopeSemantics::Direct,
+                    },
+                    TestColumn::Dict(vec![None, None, s("A"), s("B"), s("C"), s("D")]),
+                ),
+                (
+                    ColumnMeta {
+                        name: "row_depth".into(),
+                        attribution_by_depth: vec![Attribution::Additive; 4],
+                        scope_semantics: ScopeSemantics::Direct,
+                    },
+                    TestColumn::I32(vec![0, 1, 2, 2, 2, 2]),
+                ),
+                (
+                    ColumnMeta {
+                        name: "delta01".into(),
+                        attribution_by_depth: (0..4).map(determined).collect(),
+                        scope_semantics: ScopeSemantics::Direct,
+                    },
+                    TestColumn::F64(vec![
+                        Some(9.0),
+                        Some(9.0),
+                        Some(1.0),
+                        Some(2.0),
+                        Some(3.0),
+                        Some(4.0),
+                    ]),
+                ),
+            ],
+            2,
+        ));
+        d.apply_snapshot(
+            snap,
+            &view,
+            &["lhu".to_string(), "underlying_ref".to_string()],
+        );
+        d.cursor.row = 1; // L1
+        d.expand_cursor(Some(true));
+        // shown = [root(0), L1(1), A(2), B(3), C(4), D(5)]; A..D are
+        // DeterminedNonAdditive (depth 2).
+        assert_eq!(d.shown, vec![0, 1, 2, 3, 4, 5]);
+        d.refill_window(2..6); // A, B, C, D: all determined
+        assert!(d.any_determined);
+        d.refill_window(1..5); // L1 enters (not determined); A, B, C stay cached
+        assert!(
+            d.any_determined,
+            "A/B/C stayed cached and determined even though only L1 \
+             (not determined) newly entered"
         );
     }
 }
