@@ -277,3 +277,38 @@ rather than scanned from one table. DuckDB handled the double reference
 within budget; `as materialized` on the aggregate CTEs is the lever if a
 future view shape does not. The depth-0 full scan is gone: the grand-total
 row is a constant.
+
+## Phase 3a: tree index (`cargo bench -p geode-core`)
+
+`TreeIndex::build` (`crates/geode-core/src/tree.rs`, Phase 3 §5.5) at the
+three result shapes the requery table above records, measured with
+`cargo bench -p geode-core -- tree_index_build` (criterion, 10 samples;
+the fixture in `crates/geode-core/benches/tree.rs` builds each shape as a
+three-level lhu > underlying > position tree with dictionary-encoded
+grouping columns, siblings interleaved within a depth as a declared sort
+produces them):
+
+| shape | rows | median |
+| --- | ---: | ---: |
+| bounded to depth 2 | 133 | **11.09 µs** |
+| scoped to three books, all depths | 135,733 | **12.63 ms** |
+| unscoped, all depths | 720,881 | **65.85 ms** |
+
+The earlier figures in this table (7.94 µs / 11.15 ms / 61.86 ms) were
+the string-hashing path, resolving each grouping cell's text per row;
+these are the code-hashing path (spec §5.5's "dictionary codes where
+present, strings under as-of"), which keys a dictionary-encoded column
+on its per-row code instead.
+
+The build runs on the query worker inside `Snapshot::from_batches`, not
+on the render thread, so none of this is frame time — it is added to the
+requery latency the §7.1 <50ms contract governs. **The 729k build does
+not fit that budget on its own** (65.85 ms), but the 729k shape is the
+unscoped query that already misses §7.1 by a wide margin for its own
+reasons, recorded above. The shapes the blotter actually submits do fit
+comfortably: the bounded tree pays 11.09 µs against a 4–8 ms query, and
+the scoped 136k tree pays 12.63 ms on top of ~31 ms — inside 50 ms, with
+no room wasted. The cost is linear in rows × depth (one FNV-1a hash of
+the grouping prefix per row per level, then a CSR fill), so it scales
+with the result the compiler was told to materialize, which is what the
+depth bound exists to keep small.

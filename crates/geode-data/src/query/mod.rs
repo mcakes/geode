@@ -17,4 +17,4 @@ pub mod as_of;
 pub use as_of::{AsOf, generation_predicate, resolve_generations};
 pub mod pool;
 
-pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
+pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, ResultSink, ViewId};

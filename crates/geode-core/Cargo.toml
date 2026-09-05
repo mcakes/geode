@@ -21,6 +21,17 @@ toml = "1.1.4"
 # `RecordBatch` there are different types. Check with
 # `cargo tree -p geode-data -i arrow` before bumping.
 arrow = "58.4.0"
+chrono = "0.4.42"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+criterion = "0.8.2"
+# Enables `test-support` for this crate's own benches (cargo permits a
+# self dev-dependency for exactly this), so `Snapshot::for_tests` is
+# available to `benches/tree.rs` under the plain `cargo bench --workspace
+# --no-run` CI runs.
+geode-core = { path = ".", features = ["test-support"] }
+
+[[bench]]
+name = "tree"
+harness = false

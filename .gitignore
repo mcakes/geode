@@ -5,3 +5,6 @@
 # workspace. Ignored so `git add -A` cannot commit it as an embedded
 # repository — which it silently did once.
 /gpuchart/
+
+# Subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/

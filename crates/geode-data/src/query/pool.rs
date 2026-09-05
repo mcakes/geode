@@ -1,43 +1,71 @@
 //! The read pool (spec §6.7, §7.3). Owns the read connections so the UI
-//! thread never holds one, coalesces latest-wins per view, tags every
+//! thread never holds one, coalesces latest-wins per **key**, tags every
 //! request and result so a stale arrival can be dropped, and interrupts a
 //! superseded query rather than awaiting it.
+//!
+//! The key is the caller's (spec §2.4) — a tile id in practice — not the
+//! view name. Two tiles showing one view must not supersede each other.
+//!
+//! Results leave through a sink closure rather than a channel the pool
+//! owns (spec §5.1): the service hands the pool a closure onto its one
+//! outbound channel, so no forwarding thread sits between a worker and
+//! the UI. `spawn` still builds a channel for callers that want one.
 
 use crate::query::compile::CompiledQuery;
 use crate::store::Store;
+use geode_core::query::QueryKey;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ViewId(pub String);
 
 pub type QueryId = u64;
 
+/// Where results go. Returns `false` when nothing is listening any more,
+/// which stops the worker.
+///
+/// Called with the queue's own lock held (see the worker's delivery site),
+/// so a sink must not block and must not call back into this pool:
+/// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
+pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
+
 pub struct QueryRequest {
+    pub key: QueryKey,
+    /// The submitter's own counter, echoed back untouched.
+    pub tag: u64,
+    pub submitted: Instant,
+    /// The view compiled, for messages. Not a coalescing key.
     pub view: ViewId,
     pub compiled: CompiledQuery,
-    pub grouping_len: usize,
+    /// The grouping columns in order; the snapshot builds its tree from
+    /// them (spec §5.5).
+    pub grouping: Vec<String>,
     pub provenance: Provenance,
 }
 
 pub struct QueryResult {
     pub id: QueryId,
+    pub key: QueryKey,
+    pub tag: u64,
+    pub submitted: Instant,
     pub view: ViewId,
-    /// `Err` carries the failure: a bad query degrades its own view and
+    /// `Err` carries the failure: a bad query degrades its own key and
     /// leaves the pool running (spec §10.1).
     pub snapshot: Result<Snapshot, String>,
 }
 
 #[derive(Default)]
 struct Queue {
-    /// At most one pending request per view: a newer submit replaces the
+    /// At most one pending request per key: a newer submit replaces the
     /// pending one outright, which is what makes coalescing latest-wins.
-    pending: HashMap<ViewId, (QueryId, QueryRequest)>,
+    pending: HashMap<QueryKey, (QueryId, QueryRequest)>,
     /// Interrupt handles for queries currently running.
-    running: HashMap<ViewId, (QueryId, Arc<duckdb::InterruptHandle>)>,
+    running: HashMap<QueryKey, (QueryId, Arc<duckdb::InterruptHandle>)>,
     /// Queries interrupted by `cancel`. The worker drops their result
     /// instead of delivering it: an interrupt the caller asked for comes
     /// back from DuckDB as an `Interrupted` error, and reporting that as a
@@ -48,7 +76,7 @@ struct Queue {
     /// that allocating outside the lock is not expressible: ids and
     /// insertion order cannot disagree if they are produced under the same
     /// guard. It was an `AtomicU64` incremented before the lock was taken,
-    /// which let two concurrent submits for one view insert out of id
+    /// which let two concurrent submits for one key insert out of id
     /// order and leave the *older* request pending — a race no test can
     /// force reliably (measured: caught on 2 runs in 8), so making it
     /// unrepresentable beats testing for it.
@@ -71,19 +99,31 @@ impl QueryPool {
     /// Each worker gets its own connection, created here and moved in:
     /// duckdb's `Connection` is `Send` but not `Sync`, so the pool cannot
     /// hand out connections from a shared `Store` after spawning.
+    pub fn spawn_with_sink(
+        store: &Store,
+        workers: usize,
+        sink: ResultSink,
+    ) -> Result<QueryPool, crate::store::StoreError> {
+        Self::spawn_with_run(store, workers, sink, run_one)
+    }
+
+    /// A pool delivering into a channel, for callers that block on
+    /// results — tests and benches.
     pub fn spawn(
         store: &Store,
         workers: usize,
     ) -> Result<(QueryPool, Receiver<QueryResult>), crate::store::StoreError> {
-        Self::spawn_with(store, workers, run_one)
+        let (tx, rx) = channel();
+        let sink: ResultSink = Arc::new(move |r| tx.send(r).is_ok());
+        Ok((Self::spawn_with_sink(store, workers, sink)?, rx))
     }
 
-    fn spawn_with(
+    fn spawn_with_run(
         store: &Store,
         workers: usize,
+        sink: ResultSink,
         run: RunFn,
-    ) -> Result<(QueryPool, Receiver<QueryResult>), crate::store::StoreError> {
-        let (tx, rx) = channel();
+    ) -> Result<QueryPool, crate::store::StoreError> {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let mut threads = Vec::new();
 
@@ -94,10 +134,10 @@ impl QueryPool {
             // the ones already spawned to stop, join them, and report.
             let spawned = store.reader().and_then(|conn| {
                 let q = Arc::clone(&queue);
-                let tx = tx.clone();
+                let sink = Arc::clone(&sink);
                 std::thread::Builder::new()
                     .name(format!("geode-query-{i}"))
-                    .spawn(move || worker(conn, q, tx, run))
+                    .spawn(move || worker(conn, q, sink, run))
                     .map_err(|source| crate::store::StoreError::SpawnWorker { source })
             });
             match spawned {
@@ -117,16 +157,13 @@ impl QueryPool {
             }
         }
 
-        Ok((
-            QueryPool {
-                queue,
-                threads: Mutex::new(threads),
-            },
-            rx,
-        ))
+        Ok(QueryPool {
+            queue,
+            threads: Mutex::new(threads),
+        })
     }
 
-    /// Replace this view's pending request. Returns the id assigned, which
+    /// Replace this key's pending request. Returns the id assigned, which
     /// increases monotonically so callers can discard stale arrivals.
     pub fn submit(&self, req: QueryRequest) -> QueryId {
         let (lock, cvar) = &*self.queue;
@@ -139,21 +176,21 @@ impl QueryPool {
             return id;
         }
         // A superseded query is interrupted, not awaited (spec §7.3).
-        if let Some((running_id, handle)) = q.running.get(&req.view)
+        if let Some((running_id, handle)) = q.running.get(&req.key)
             && *running_id < id
         {
             handle.interrupt();
         }
-        q.pending.insert(req.view.clone(), (id, req));
+        q.pending.insert(req.key, (id, req));
         cvar.notify_all();
         id
     }
 
-    pub fn cancel(&self, view: &ViewId) {
+    pub fn cancel(&self, key: QueryKey) {
         let (lock, _) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        q.pending.remove(view);
-        if let Some((id, handle)) = q.running.get(view) {
+        q.pending.remove(&key);
+        if let Some((id, handle)) = q.running.get(&key) {
             // Record before interrupting: the resulting `Interrupted` is
             // this cancel's own doing, not a query failure, and must not
             // reach the UI as one.
@@ -193,7 +230,7 @@ impl Drop for QueryPool {
 fn worker(
     conn: duckdb::Connection,
     queue: Arc<(Mutex<Queue>, Condvar)>,
-    tx: Sender<QueryResult>,
+    sink: ResultSink,
     run: RunFn,
 ) {
     let handle = conn.interrupt_handle();
@@ -206,18 +243,18 @@ fn worker(
                 if q.shutdown {
                     return;
                 }
-                // One in-flight query per view (spec §7.3). Without this,
-                // several workers can run the same view concurrently and
+                // One in-flight query per key (spec §7.3). Without this,
+                // several workers can run the same key concurrently and
                 // finish in any order, so a superseded result can land
                 // after the one that replaced it.
                 let next = q
                     .pending
                     .keys()
-                    .find(|v| !q.running.contains_key(*v))
-                    .cloned();
-                if let Some(view) = next {
-                    let (id, req) = q.pending.remove(&view).expect("just observed");
-                    q.running.insert(view, (id, Arc::clone(&handle)));
+                    .find(|k| !q.running.contains_key(*k))
+                    .copied();
+                if let Some(key) = next {
+                    let (id, req) = q.pending.remove(&key).expect("just observed");
+                    q.running.insert(key, (id, Arc::clone(&handle)));
                     break (id, req);
                 }
                 let (guard, _) = cvar
@@ -228,7 +265,7 @@ fn worker(
         };
 
         // A panic in the query must not escape this loop. Unwinding out of
-        // `worker` would leave this view's entry in `running` forever —
+        // `worker` would leave this key's entry in `running` forever —
         // no later request for it is ever scheduled, so the tile silently
         // stops updating for the rest of the session — and would take the
         // worker with it, shrinking the pool with nothing reported. §10.1
@@ -243,16 +280,19 @@ fn worker(
         // The stale check and the send happen under one lock. Releasing it
         // between them let a newer request land in the gap and the older
         // result still be delivered, so a tile briefly painted data it had
-        // already superseded. `send` on an unbounded channel does not
-        // block, so holding the lock across it cannot deadlock.
+        // already superseded. Holding the lock across the sink call cannot
+        // deadlock — provided the sink does not block and does not call
+        // back into this pool (`submit`/`cancel` take the same lock; std
+        // `Mutex` is not re-entrant). The sink in use here, an unbounded
+        // `std::sync::mpsc::Sender::send`, satisfies that.
         let (lock, _) = &*queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        if q.running.get(&req.view).is_some_and(|(rid, _)| *rid == id) {
-            q.running.remove(&req.view);
+        if q.running.get(&req.key).is_some_and(|(rid, _)| *rid == id) {
+            q.running.remove(&req.key);
         }
-        // A newer request for this view arrived while we ran: our result is
+        // A newer request for this key arrived while we ran: our result is
         // stale, so drop it rather than delivering it out of order (§7.3).
-        let stale = q.pending.get(&req.view).is_some_and(|(pid, _)| *pid > id);
+        let stale = q.pending.get(&req.key).is_some_and(|(pid, _)| *pid > id);
         let cancelled = q.cancelled.remove(&id);
         // `shutdown` interrupts every running query exactly as `cancel`
         // does, so its `Interrupted` is equally self-inflicted. Delivering
@@ -262,14 +302,15 @@ fn worker(
         if stale || cancelled || q.shutdown {
             continue;
         }
-        if tx
-            .send(QueryResult {
-                id,
-                view: req.view.clone(),
-                snapshot: outcome,
-            })
-            .is_err()
-        {
+        let delivered = sink(QueryResult {
+            id,
+            key: req.key,
+            tag: req.tag,
+            submitted: req.submitted,
+            view: req.view.clone(),
+            snapshot: outcome,
+        });
+        if !delivered {
             return;
         }
     }
@@ -301,7 +342,7 @@ fn run_one(conn: &duckdb::Connection, req: &QueryRequest) -> Result<Snapshot, du
             scope_semantics: c.scope_semantics.clone(),
         })
         .collect();
-    Snapshot::from_batches(batches, meta, req.grouping_len, req.provenance.clone())
+    Snapshot::from_batches(batches, meta, req.grouping.clone(), req.provenance.clone())
         .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string()))
 }
 
@@ -348,20 +389,32 @@ mod tests {
         }
     }
 
-    fn request(view: &str, sql: &str) -> QueryRequest {
+    fn request(key: u64, view: &str, sql: &str) -> QueryRequest {
         QueryRequest {
+            key: QueryKey(key),
+            tag: key * 100,
+            submitted: std::time::Instant::now(),
             view: ViewId(view.to_string()),
             compiled: query(sql),
-            grouping_len: 0,
+            grouping: Vec::new(),
             provenance: Provenance::default(),
         }
+    }
+
+    /// A pool delivering into a channel, built on an injected `run` — for
+    /// tests that need to control what a query does (panic, block on a
+    /// gate) rather than run real SQL.
+    fn channel_pool_with(store: &Store, run: RunFn) -> (QueryPool, Receiver<QueryResult>) {
+        let (tx, rx) = channel();
+        let sink: ResultSink = Arc::new(move |r| tx.send(r).is_ok());
+        (QueryPool::spawn_with_run(store, 1, sink, run).unwrap(), rx)
     }
 
     #[test]
     fn a_submitted_query_returns_a_snapshot() {
         let (_d, store) = fixture(1_000);
         let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let result = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(result.view, ViewId("v1".into()));
         assert_eq!(result.snapshot.unwrap().rows(), 1);
@@ -369,11 +422,66 @@ mod tests {
     }
 
     #[test]
+    fn two_keys_on_one_view_do_not_coalesce() {
+        // Two tiles showing the same view (spec §2.4). Keyed on the view
+        // name, the second submit replaced the first and the first tile
+        // never got its result.
+        let (_d, store) = fixture(1_000);
+        let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
+        pool.submit(request(1, "tree", "select sum(v) as v from t"));
+        pool.submit(request(2, "tree", "select sum(v) as v from t"));
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            keys.push(rx.recv_timeout(Duration::from_secs(30)).unwrap().key);
+        }
+        keys.sort();
+        assert_eq!(keys, vec![QueryKey(1), QueryKey(2)]);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn the_tag_and_submission_time_are_echoed() {
+        let (_d, store) = fixture(100);
+        let (pool, rx) = QueryPool::spawn(&store, 1).unwrap();
+        let req = request(7, "v", "select sum(v) as v from t");
+        let submitted = req.submitted;
+        pool.submit(req);
+        let r = rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        assert_eq!(r.key, QueryKey(7));
+        assert_eq!(r.tag, 700);
+        assert_eq!(r.submitted, submitted);
+        pool.shutdown();
+    }
+
+    #[test]
+    fn a_sink_receives_what_a_channel_would() {
+        let (_d, store) = fixture(100);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink: ResultSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |r: QueryResult| {
+                seen.lock().unwrap().push(r.key);
+                true
+            })
+        };
+        let pool = QueryPool::spawn_with_sink(&store, 1, sink).unwrap();
+        pool.submit(request(9, "v", "select sum(v) as v from t"));
+        for _ in 0..3000 {
+            if !seen.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        pool.shutdown();
+        assert_eq!(*seen.lock().unwrap(), vec![QueryKey(9)]);
+    }
+
+    #[test]
     fn different_views_do_not_coalesce_with_each_other() {
         let (_d, store) = fixture(1_000);
         let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
-        pool.submit(request("v1", "select sum(v) as v from t"));
-        pool.submit(request("v2", "select count(*)::double as v from t"));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        pool.submit(request(2, "v2", "select count(*)::double as v from t"));
         let mut seen = Vec::new();
         for _ in 0..2 {
             seen.push(rx.recv_timeout(Duration::from_secs(30)).unwrap().view);
@@ -390,7 +498,7 @@ mod tests {
         let (_d, store) = fixture(200_000);
         let (pool, rx) = QueryPool::spawn(&store, 4).unwrap();
         for _ in 0..6 {
-            pool.submit(request("v1", "select sum(v) as v from t"));
+            pool.submit(request(1, "v1", "select sum(v) as v from t"));
         }
         let mut delivered = Vec::new();
         while let Ok(r) = rx.recv_timeout(Duration::from_secs(10)) {
@@ -409,7 +517,7 @@ mod tests {
         let (_d, store) = fixture(200_000);
         let (pool, rx) = QueryPool::spawn(&store, 1).unwrap();
         for _ in 0..20 {
-            pool.submit(request("v1", "select sum(v) as v from t"));
+            pool.submit(request(1, "v1", "select sum(v) as v from t"));
         }
         let mut delivered = 0;
         while rx.recv_timeout(Duration::from_secs(10)).is_ok() {
@@ -426,8 +534,8 @@ mod tests {
     fn a_failing_query_reports_rather_than_killing_the_pool() {
         let (_d, store) = fixture(100);
         let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
-        pool.submit(request("bad", "select * from no_such_table"));
-        pool.submit(request("good", "select sum(v) as v from t"));
+        pool.submit(request(1, "bad", "select * from no_such_table"));
+        pool.submit(request(2, "good", "select sum(v) as v from t"));
         let mut views = Vec::new();
         for _ in 0..2 {
             if let Ok(r) = rx.recv_timeout(Duration::from_secs(30)) {
@@ -453,8 +561,8 @@ mod tests {
     fn cancelling_a_view_does_not_hang() {
         let (_d, store) = fixture(500_000);
         let (pool, rx) = QueryPool::spawn(&store, 2).unwrap();
-        pool.submit(request("v1", "select sum(v) as v from t"));
-        pool.cancel(&ViewId("v1".into()));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        pool.cancel(QueryKey(1));
         let _ = rx.recv_timeout(Duration::from_secs(30));
         pool.shutdown();
     }
@@ -499,7 +607,7 @@ mod tests {
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
             }],
-            1,
+            vec!["underlying_ref".into()],
             Provenance::default(),
         )
         .unwrap();
@@ -550,7 +658,7 @@ mod tests {
                 attribution_by_depth: vec![geode_core::attribution::Attribution::Additive],
                 scope_semantics: geode_core::attribution::ScopeSemantics::Direct,
             }],
-            1,
+            vec!["qty".into()],
             Provenance::default(),
         )
         .unwrap();
@@ -582,9 +690,9 @@ mod tests {
         let (_d, store) = fixture(100);
         // One worker, so a lost worker means a dead pool and the second
         // submit below could not be answered by a survivor.
-        let (pool, rx) = QueryPool::spawn_with(&store, 1, boom).unwrap();
+        let (pool, rx) = channel_pool_with(&store, boom);
 
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let first = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(first.view, ViewId("v1".into()));
         let message = first.snapshot.unwrap_err();
@@ -594,7 +702,7 @@ mod tests {
         );
 
         // The same view is still schedulable: this is the wedge.
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
         let second = rx.recv_timeout(Duration::from_secs(30)).unwrap();
         assert_eq!(second.view, ViewId("v1".into()));
         assert!(second.id > first.id);
@@ -622,8 +730,8 @@ mod tests {
 
         CANCEL_GATE.store(false, Ordering::SeqCst);
         let (_d, store) = fixture(100);
-        let (pool, rx) = QueryPool::spawn_with(&store, 1, gated).unwrap();
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        let (pool, rx) = channel_pool_with(&store, gated);
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
 
         // Cancel only records an id it finds in `running`, so wait until
         // the worker has actually picked the request up.
@@ -641,7 +749,7 @@ mod tests {
         }
         assert!(running, "the query never started, so nothing was cancelled");
 
-        pool.cancel(&ViewId("v1".into()));
+        pool.cancel(QueryKey(1));
         CANCEL_GATE.store(true, Ordering::SeqCst);
 
         assert!(
@@ -670,8 +778,8 @@ mod tests {
 
         SHUTDOWN_GATE.store(false, Ordering::SeqCst);
         let (_d, store) = fixture(100);
-        let (pool, rx) = QueryPool::spawn_with(&store, 1, gated).unwrap();
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        let (pool, rx) = channel_pool_with(&store, gated);
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
 
         let mut running = false;
         for _ in 0..2000 {
@@ -707,7 +815,7 @@ mod tests {
         let (_d, store) = fixture(100);
         let (pool, rx) = QueryPool::spawn(&store, 1).unwrap();
         pool.shutdown();
-        pool.submit(request("v1", "select sum(v) as v from t"));
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
         {
             let (lock, _) = &*pool.queue;
             let q = lock.lock().unwrap_or_else(|e| e.into_inner());

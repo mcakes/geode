@@ -5,20 +5,27 @@
 //! detail, which is what makes the future sidecar-process split an
 //! evolution rather than a rewrite (§2).
 
+use crate::health::Health;
+use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
+use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
 use crate::query::compile::compile_view;
-use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ViewId};
+use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ResultSink, ViewId};
+use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::{QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::{Freshness, Provenance};
 use geode_core::view::ViewSpec;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -26,6 +33,63 @@ pub struct DataServiceConfig {
     pub views: Vec<ViewSpec>,
     pub dimensions: DerivedDimensions,
     pub query_workers: usize,
+    /// Configured sources (spec §5.2). Empty means nothing is ever
+    /// ingested — a warm database is queried as it stands.
+    pub sources: Vec<SourceSpec>,
+}
+
+/// Everything the service produces, on one channel (spec §5.1).
+#[derive(Debug)]
+pub enum DataEvent {
+    Query(QueryOutcome),
+    /// A file was published: the frame bumps its data generation and every
+    /// visible tile requeries. A burst coalesces there.
+    Published {
+        dataset: String,
+        batch: String,
+        gen_id: i64,
+        books: Vec<Option<String>>,
+    },
+    /// The worst state discovery found for a source on its last poll.
+    Health {
+        source: String,
+        worst: Health,
+        detail: String,
+    },
+    /// Config problems found at open or on a view reload (§10.1).
+    Diagnostics(Vec<Diagnostic>),
+}
+
+/// Where events go. `false` means nobody is listening.
+///
+/// Called synchronously from inside the query pool's worker delivery
+/// site, which holds the pool's queue lock (see `pool::ResultSink`), so
+/// an `EventSink` must not block and must not call back into
+/// `DataService`: a channel `send`/`try_send` is fine, a call into
+/// `DataService::query` or `cancel` from inside the sink is not.
+///
+/// The caller owns the outbound channel this closes over, and that
+/// channel must be bounded (spec §7.3) and fed with `try_send` — never
+/// `send` — so a slow or gone receiver cannot block the query worker
+/// that calls this. A refused event is counted and surfaced as a
+/// diagnostic on the caller's side; the service itself never blocks on
+/// delivery and never retries one.
+pub type EventSink = Arc<dyn Fn(DataEvent) -> bool + Send + Sync>;
+
+/// One query, as a module asks for it.
+#[derive(Debug, Clone)]
+pub struct QueryParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub submitted: Instant,
+    pub view: String,
+    /// Replaces the named view's own grouping for this query: the
+    /// frame's active slot or a tile's pin (spec §5.1). `None` keeps the
+    /// view's.
+    pub grouping: Option<Vec<String>>,
+    pub scope: Scope,
+    pub as_of: AsOf,
+    pub max_depth: usize,
 }
 
 pub struct DataService {
@@ -34,37 +98,108 @@ pub struct DataService {
     /// returned so `open` keeps its signature and a caller that does not
     /// surface diagnostics still gets a working service.
     diagnostics: Vec<Diagnostic>,
-    /// Field order is drop order. `QueryPool` joins its workers in `Drop`,
-    /// and those workers hold read connections to this database, so the
-    /// pool is listed first: the workers are joined before the connections
-    /// they read through and the store that owns the database handle.
+    /// Field order is drop order. The pool joins its workers first; the
+    /// scheduler stops submitting next; the runner drains its queue and
+    /// drops the `Store` before `conn` — the field listed last — drops
+    /// after everything else.
     ///
-    /// The previous order was not a live bug, and an earlier version of
-    /// this comment wrongly said it was. duckdb-rs holds the database as
-    /// `Arc<Mutex<DatabaseHandle>>` and `try_clone` clones that `Arc`, so
-    /// dropping `_store` first issued one `duckdb_disconnect` and closed
-    /// nothing — `duckdb_close` runs only when the last reference goes.
-    /// The order here is still the right one, because it makes the
-    /// lifetime obvious instead of resting on a refcounting detail of a
-    /// pinned third-party binding.
+    /// `conn` dropping last is harmless, not accidental correctness:
+    /// duckdb-rs holds the database as `Arc<Mutex<DatabaseHandle>>`, and
+    /// `conn` is a `try_clone` of that same handle, so `duckdb_close`
+    /// only runs when the *last* reference goes, whichever field that
+    /// happens to be — dropping `conn` before the `Store` would just
+    /// issue one `duckdb_disconnect` and close nothing. An earlier
+    /// version of this comment wrongly called a different drop order a
+    /// live bug on the strength of this same detail.
     pool: QueryPool,
-    results: Receiver<QueryResult>,
-    /// A dedicated connection for compilation and catalog reads.
+    scheduler: Scheduler,
+    ingest: Arc<IngestHandle>,
+    /// A dedicated read connection for compilation and catalog reads.
     conn: duckdb::Connection,
-    /// The store stays owned here so the database outlives the pool's
-    /// connections. Never used to run a view query.
-    _store: Store,
 }
 
 impl DataService {
-    pub fn open(config: DataServiceConfig) -> Result<DataService, StoreError> {
+    pub fn open(config: DataServiceConfig, sink: EventSink) -> Result<DataService, StoreError> {
         let store = Store::open(&config.db_path)?;
         for ds in &config.schema.datasets {
             store.apply_schema(ds)?;
         }
         Catalog::new(store.writer()).ensure_tables()?;
+
+        // Every reader the service will ever need is cloned before the
+        // store moves onto the ingest thread (Phase 3 §2.5).
         let conn = store.reader()?;
-        let (pool, results) = QueryPool::spawn(&store, config.query_workers.max(1))?;
+        let discovery_conn = store.reader()?;
+        let result_sink: ResultSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |r: QueryResult| {
+                sink(DataEvent::Query(QueryOutcome {
+                    key: r.key,
+                    tag: r.tag,
+                    snapshot: r.snapshot.map(Arc::new),
+                    submitted: r.submitted,
+                }))
+            })
+        };
+        let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
+
+        let ingest_sink: IngestSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |e: IngestEvent| match e {
+                IngestEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                    ..
+                } => sink(DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                }),
+                IngestEvent::Failed {
+                    dataset,
+                    batch,
+                    reason,
+                } => sink(DataEvent::Health {
+                    source: dataset,
+                    worst: Health::Failed {
+                        reason: reason.clone(),
+                    },
+                    detail: format!("{batch}: {reason}"),
+                }),
+                IngestEvent::PlanComplete => true,
+            })
+        };
+        let ingest = Arc::new(IngestRunner::spawn(
+            store,
+            config.schema.clone(),
+            ingest_sink,
+        ));
+
+        let scheduler_sink: SchedulerSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |e: SchedulerEvent| match e {
+                SchedulerEvent::Polled { .. } => true,
+                SchedulerEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => sink(DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                }),
+            })
+        };
+        let scheduler = Scheduler::spawn(
+            config.sources.clone(),
+            discovery_conn,
+            Arc::clone(&ingest),
+            scheduler_sink,
+        );
+
         // Validate here, not at first query: a misconfigured view otherwise
         // surfaces as a DuckDB binder error from inside a pool worker,
         // attributed to whichever tile happened to submit it, with the
@@ -82,11 +217,21 @@ impl DataService {
         Ok(DataService {
             config,
             diagnostics,
-            _store: store,
-            conn,
             pool,
-            results,
+            scheduler,
+            ingest,
+            conn,
         })
+    }
+
+    /// A service delivering into a channel, for callers that block on
+    /// events — tests, benches, and the probe.
+    pub fn open_channel(
+        config: DataServiceConfig,
+    ) -> Result<(DataService, Receiver<DataEvent>), StoreError> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        Ok((Self::open(config, sink)?, rx))
     }
 
     /// What validation found at open: config errors that would otherwise
@@ -94,6 +239,24 @@ impl DataService {
     /// every view checks out.
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
+    }
+
+    /// Swap the view set (a safe hot reload, foundation §8). Returns what
+    /// validation found; a broken view is reported and skipped, the rest
+    /// take effect.
+    pub fn replace_views(
+        &mut self,
+        views: Vec<ViewSpec>,
+        dimensions: DerivedDimensions,
+    ) -> Vec<Diagnostic> {
+        self.config.dimensions = dimensions;
+        let diagnostics: Vec<Diagnostic> = views
+            .iter()
+            .flat_map(|v| v.validate(&self.config.schema, &self.config.dimensions))
+            .collect();
+        self.config.views = views;
+        self.diagnostics = diagnostics.clone();
+        diagnostics
     }
 
     /// Check a scope before it is compiled, so a bad column is reported
@@ -106,20 +269,15 @@ impl DataService {
         }
     }
 
-    /// Compile and submit. Results arrive on [`Self::query_results`];
-    /// a newer query for the same view supersedes an older one.
+    /// Compile and submit. Results arrive on the sink `open` was given;
+    /// a newer query for the same key supersedes an older one.
     /// `max_depth` is the deepest grouping level to materialize. Pass one
     /// more than what the tree has expanded: a single-step expand is then
     /// already in the snapshot, and only a deeper one costs a requery.
     /// Materializing everything makes the caller.s flatten walk
     /// proportional to the whole tree rather than to what is on screen.
-    pub fn query(
-        &self,
-        view: &str,
-        scope: &Scope,
-        as_of: AsOf,
-        max_depth: usize,
-    ) -> Result<QueryId, StoreError> {
+    pub fn query(&self, params: &QueryParams) -> Result<QueryId, StoreError> {
+        let view = params.view.as_str();
         let spec = self
             .config
             .views
@@ -130,20 +288,45 @@ impl DataService {
                 source: duckdb::Error::InvalidParameterName(format!("unknown view '{view}'")),
             })?;
 
+        // A grouping override is a per-query copy of the spec with its
+        // grouping replaced; validation runs on the copy so an undeclared
+        // column is this query's error, named, not a binder error later.
+        let regrouped;
+        let spec = match &params.grouping {
+            None => spec,
+            Some(grouping) => {
+                regrouped = ViewSpec {
+                    grouping: grouping.clone(),
+                    ..spec.clone()
+                };
+                let diags = regrouped.validate(&self.config.schema, &self.config.dimensions);
+                if let Some(d) = diags
+                    .iter()
+                    .find(|d| d.severity == geode_core::config::Severity::Error)
+                {
+                    return Err(StoreError::Sql {
+                        statement: format!("query view '{view}' grouped by {grouping:?}"),
+                        source: duckdb::Error::InvalidParameterName(d.message.clone()),
+                    });
+                }
+                &regrouped
+            }
+        };
+
         let compiled = compile_view(
             &self.conn,
             spec,
             &self.config.schema,
-            scope,
+            &params.scope,
             &self.config.dimensions,
-            &as_of,
-            max_depth,
+            &params.as_of,
+            params.max_depth,
         )?;
 
         // Freshness travels with the result, so §5.4's stalest-input rule
         // reaches the UI without every module reimplementing it.
         let mut provenance = Provenance {
-            as_of_request: match &as_of {
+            as_of_request: match &params.as_of {
                 AsOf::Live => None,
                 AsOf::At(t) => Some(t.to_rfc3339()),
             },
@@ -156,7 +339,7 @@ impl DataService {
             // `latest_gen_id` is the newest generation in the database, so
             // both describe *now* — reporting them beside an as-of result
             // inverts the very rule §5.4 exists for.
-            let freshness = match &as_of {
+            let freshness = match &params.as_of {
                 AsOf::Live => Freshness {
                     dataset: dataset.clone(),
                     as_of: catalog.dataset_as_of(dataset, &[])?.map(|t| t.to_rfc3339()),
@@ -177,21 +360,22 @@ impl DataService {
             provenance.datasets.push(freshness);
         }
 
-        let grouping_len = compiled.grouping.len();
         Ok(self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: params.submitted,
             view: ViewId(view.to_string()),
+            // Cloned ahead of `compiled` below, which moves it: the field
+            // order here is why this line precedes `compiled` rather than
+            // sitting next to its other fields.
+            grouping: compiled.grouping.clone(),
             compiled,
-            grouping_len,
             provenance,
         }))
     }
 
-    pub fn cancel(&self, view: &str) {
-        self.pool.cancel(&ViewId(view.to_string()));
-    }
-
-    pub fn query_results(&self) -> &Receiver<QueryResult> {
-        &self.results
+    pub fn cancel(&self, key: QueryKey) {
+        self.pool.cancel(key);
     }
 
     /// Per-book freshness for a dataset (spec §4.5).
@@ -281,6 +465,8 @@ impl DataService {
 
     pub fn shutdown(&self) {
         self.pool.shutdown();
+        self.scheduler.shutdown();
+        self.ingest.shutdown();
     }
 }
 
@@ -290,7 +476,12 @@ mod tests {
     use geode_core::scope::{DimensionSelection, Scope};
     use std::time::Duration;
 
-    fn service() -> (tempfile::TempDir, tempfile::TempDir, DataService) {
+    fn service() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let (db, src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
         for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
             let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
@@ -311,21 +502,132 @@ mod tests {
 
         let mut schema = SchemaSpec::default();
         schema.datasets.push(ds);
-        let service = DataService::open(DataServiceConfig {
+        let (service, rx) = DataService::open_channel(DataServiceConfig {
             db_path: db.path().join("geode.duckdb"),
             schema,
             views: vec![crate::ingest::load::tests_support::tree_view()],
             dimensions: DerivedDimensions::default(),
             query_workers: 2,
+            sources: Vec::new(),
         })
         .unwrap();
-        (db, src, service)
+        (db, src, service, rx)
     }
 
-    fn next(svc: &DataService) -> QueryResult {
-        svc.query_results()
-            .recv_timeout(Duration::from_secs(60))
-            .unwrap()
+    /// The next query outcome, skipping any other event.
+    fn next(rx: &std::sync::mpsc::Receiver<DataEvent>) -> QueryOutcome {
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Query(o) => return o,
+                _ => continue,
+            }
+        }
+    }
+
+    fn params(key: u64, view: &str, scope: &Scope, as_of: AsOf, max_depth: usize) -> QueryParams {
+        QueryParams {
+            key: QueryKey(key),
+            tag: key,
+            submitted: Instant::now(),
+            view: view.to_string(),
+            grouping: None,
+            scope: scope.clone(),
+            as_of,
+            max_depth,
+        }
+    }
+
+    #[test]
+    fn a_grouping_override_regroups_the_named_view() {
+        // The frame's active slot is applied per query (spec §5.1), not
+        // by registering a view per slot. Grouped by book alone the tree
+        // has 1 + books rows at depth ≤ 1; the view's own three-level
+        // grouping has many more.
+        let (_db, _src, svc, rx) = service();
+        let mut p = params(1, "tree", &Scope::default(), AsOf::Live, 1);
+        p.grouping = Some(vec!["book".into()]);
+        svc.query(&p).unwrap();
+        let by_book = next(&rx).snapshot.unwrap();
+        // Checked two ways: the compiler's own contract (compile.rs:
+        // grouping columns are pushed first, in order) against the column
+        // order, and `Snapshot::grouping()` directly — which is what the
+        // override actually has to change.
+        assert_eq!(by_book.column_names().first().copied(), Some("book"));
+        assert_eq!(by_book.grouping(), &["book".to_string()]);
+        let mut wrong = params(2, "tree", &Scope::default(), AsOf::Live, 1);
+        wrong.grouping = Some(vec!["nonesuch".into()]);
+        assert!(
+            svc.query(&wrong).is_err(),
+            "an undeclared column fails at compile time"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn an_outcome_is_addressed_to_the_key_that_asked() {
+        let (_db, _src, svc, rx) = service();
+        svc.query(&params(42, "tree", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        let o = next(&rx);
+        assert_eq!(o.key, QueryKey(42));
+        assert_eq!(o.tag, 42);
+        assert!(o.snapshot.unwrap().rows() > 0);
+        svc.shutdown();
+    }
+
+    #[test]
+    fn replacing_views_makes_a_new_view_queryable_and_reports_a_bad_one() {
+        let (_db, _src, mut svc, rx) = service();
+        let mut renamed = crate::ingest::load::tests_support::tree_view();
+        renamed.name = "tree2".into();
+        let mut broken = crate::ingest::load::tests_support::tree_view();
+        broken.name = "broken".into();
+        broken.grouping.push("nosuchcolumn".into());
+
+        let diags = svc.replace_views(vec![renamed, broken], DerivedDimensions::default());
+        assert!(
+            diags.iter().any(|d| d.message.contains("broken")),
+            "{diags:?}"
+        );
+        assert!(
+            svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
+                .is_err(),
+            "the old view name is gone"
+        );
+        svc.query(&params(2, "tree2", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        assert!(next(&rx).snapshot.is_ok());
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_sink_that_reports_nobody_listening_does_not_wedge_the_service() {
+        // A closed sink is how the UI goes away. The service must keep
+        // accepting requests without panicking; results simply have
+        // nowhere to go.
+        let (db, _src, svc, rx) = service();
+        svc.shutdown();
+        drop(rx);
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let sink: EventSink = Arc::new(|_| false);
+        let svc = DataService::open(
+            DataServiceConfig {
+                db_path: db.path().join("geode.duckdb"),
+                schema,
+                views: vec![crate::ingest::load::tests_support::tree_view()],
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+            },
+            sink,
+        )
+        .unwrap();
+        svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        svc.shutdown();
     }
 
     #[test]
@@ -335,7 +637,7 @@ mod tests {
         // submitted it, with nothing naming the view or the config that
         // caused it (§10.1). And it failed at first query, not at load, so
         // a view nobody opened looked healthy.
-        let (db, _src, _svc) = service();
+        let (db, _src, _svc, _rx) = service();
         let ds = crate::ingest::load::tests_support::fixture().3;
         let mut schema = SchemaSpec::default();
         schema.datasets.push(ds);
@@ -344,16 +646,18 @@ mod tests {
         broken.name = "broken".into();
         broken.grouping.push("nosuchcolumn".into());
 
-        let svc = DataService::open(DataServiceConfig {
+        let diags = DataService::open_channel(DataServiceConfig {
             db_path: db.path().join("geode.duckdb"),
             schema,
             views: vec![broken],
             dimensions: DerivedDimensions::default(),
             query_workers: 1,
+            sources: Vec::new(),
         })
-        .expect("a broken view must not stop the service opening");
-
-        let diags = svc.diagnostics();
+        .expect("a broken view must not stop the service opening")
+        .0
+        .diagnostics()
+        .to_vec();
         assert!(
             diags
                 .iter()
@@ -364,7 +668,7 @@ mod tests {
 
     #[test]
     fn a_scope_naming_an_unknown_column_is_reported_against_the_scope() {
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, _rx) = service();
         let scope = Scope {
             dimensions: vec![geode_core::scope::DimensionSelection {
                 column: "nosuchcolumn".into(),
@@ -386,31 +690,49 @@ mod tests {
 
     #[test]
     fn a_query_by_view_name_returns_a_snapshot() {
-        let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
-            .unwrap();
-        let r = next(&svc);
-        let snap = r.snapshot.expect("query failed");
+        let (_db, _src, svc, rx) = service();
+        svc.query(&params(
+            1,
+            "tree",
+            &Scope::default(),
+            AsOf::Live,
+            usize::MAX,
+        ))
+        .unwrap();
+        let o = next(&rx);
+        let snap = o.snapshot.expect("query failed");
         assert!(snap.rows() > 0);
         svc.shutdown();
     }
 
     #[test]
     fn an_unknown_view_is_an_error_not_a_panic() {
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, _rx) = service();
         assert!(
-            svc.query("nonesuch", &Scope::default(), AsOf::Live, usize::MAX)
-                .is_err()
+            svc.query(&params(
+                1,
+                "nonesuch",
+                &Scope::default(),
+                AsOf::Live,
+                usize::MAX
+            ))
+            .is_err()
         );
         svc.shutdown();
     }
 
     #[test]
     fn a_scope_narrows_the_result() {
-        let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
-            .unwrap();
-        let all = next(&svc).snapshot.unwrap().rows();
+        let (_db, _src, svc, rx) = service();
+        svc.query(&params(
+            1,
+            "tree",
+            &Scope::default(),
+            AsOf::Live,
+            usize::MAX,
+        ))
+        .unwrap();
+        let all = next(&rx).snapshot.unwrap().rows();
 
         let scoped = Scope {
             dimensions: vec![DimensionSelection {
@@ -419,18 +741,25 @@ mod tests {
             }],
             ..Scope::default()
         };
-        svc.query("tree", &scoped, AsOf::Live, usize::MAX).unwrap();
-        let narrowed = next(&svc).snapshot.unwrap().rows();
+        svc.query(&params(2, "tree", &scoped, AsOf::Live, usize::MAX))
+            .unwrap();
+        let narrowed = next(&rx).snapshot.unwrap().rows();
         assert!(narrowed < all, "{narrowed} should be fewer than {all}");
         svc.shutdown();
     }
 
     #[test]
     fn the_snapshot_carries_per_dataset_freshness() {
-        let (_db, _src, svc) = service();
-        svc.query("tree", &Scope::default(), AsOf::Live, usize::MAX)
-            .unwrap();
-        let snap = next(&svc).snapshot.unwrap();
+        let (_db, _src, svc, rx) = service();
+        svc.query(&params(
+            1,
+            "tree",
+            &Scope::default(),
+            AsOf::Live,
+            usize::MAX,
+        ))
+        .unwrap();
+        let snap = next(&rx).snapshot.unwrap();
         let p = snap.provenance();
         assert!(!p.datasets.is_empty(), "freshness must reach the snapshot");
         assert!(p.stalest().is_some());
@@ -439,7 +768,7 @@ mod tests {
 
     #[test]
     fn freshness_is_reported_per_book() {
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, _rx) = service();
         let books = svc.freshness("risk_snapshot", AsOf::Live).unwrap();
         assert!(!books.is_empty(), "books must have freshness recorded");
         svc.shutdown();
@@ -451,15 +780,18 @@ mod tests {
         // published a month ago must report the month-old time, or every
         // dataset carries the same value and `stalest()` — the whole
         // point of §5.4 — can no longer tell one input from another.
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, rx) = service();
         // A month-old generation of a partition nothing else covers,
-        // written through the service's own store. An earlier version of
-        // this test opened a second `Connection` on the file — a separate
+        // written through a clone of the service's own connection. A
+        // `try_clone` shares the same database handle — it is not a
+        // separate database instance, which is the trap `Connection::open`
+        // on the path would be. An earlier version of this test did that:
+        // it opened a second `Connection` on the file — a separate
         // database instance whose writes the service never saw — and
         // `.ok()`ed an insert that failed anyway on its column count. It
         // then passed against an empty archive, vacuously.
-        svc._store
-            .writer()
+        let writer = svc.conn.try_clone().unwrap();
+        writer
             .execute_batch(
                 "insert into risk_snapshot_position_archive
                    select * replace ('ghost' as batch, 99 as gen_id,
@@ -471,9 +803,15 @@ mod tests {
         let requested = chrono::DateTime::parse_from_rfc3339("2026-08-30T00:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
-        svc.query("tree", &Scope::default(), AsOf::At(requested), usize::MAX)
-            .unwrap();
-        let snap = next(&svc).snapshot.expect("query failed");
+        svc.query(&params(
+            1,
+            "tree",
+            &Scope::default(),
+            AsOf::At(requested),
+            usize::MAX,
+        ))
+        .unwrap();
+        let snap = next(&rx).snapshot.expect("query failed");
         let p = snap.provenance();
         assert_eq!(
             p.as_of_request.as_deref(),
@@ -498,7 +836,7 @@ mod tests {
         // A first load writes only to live — and that generation *is*
         // readable as-of any instant since it was published, so the bound
         // starts there rather than at the first superseded generation.
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, _rx) = service();
         let oldest_live = svc
             .freshness("risk_snapshot", AsOf::Live)
             .unwrap()
@@ -516,8 +854,65 @@ mod tests {
 
     #[test]
     fn shutdown_is_idempotent() {
-        let (_db, _src, svc) = service();
+        let (_db, _src, svc, _rx) = service();
         svc.shutdown();
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_configured_source_is_discovered_loaded_and_announced() {
+        // Cold start through the real door: a service opened over an
+        // empty database with one source, and nothing else.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 500,
+            seed: 3,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(src.path());
+        opts.leave_one_pending = false;
+        let emitted = geode_demo_data::emit_directory(&batch, &opts).unwrap();
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: vec![crate::ingest::load::tests_support::tree_view()],
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_secs(3600),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let mut published = 0;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while published < emitted.files.len() && Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(DataEvent::Published { dataset, .. }) => {
+                    assert_eq!(dataset, "risk_snapshot");
+                    published += 1;
+                }
+                Ok(DataEvent::Health { detail, .. }) => panic!("{detail}"),
+                _ => {}
+            }
+        }
+        assert_eq!(published, emitted.files.len());
+
+        svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
+            .unwrap();
+        assert!(next(&rx).snapshot.unwrap().rows() > 1, "data is queryable");
         svc.shutdown();
     }
 }

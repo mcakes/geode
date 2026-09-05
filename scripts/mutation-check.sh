@@ -385,14 +385,14 @@ run_mutation "snapshot: dimension codes report a null row as null" \
 
 run_mutation "snapshot: dimensions read at UInt32 key width" \
   crates/geode-core/src/snapshot.rs \
-  '        let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
-  '        let d = None::<&DictionaryArray<UInt32Type>>?;' \
+  '    let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
+  '    let d = None::<&DictionaryArray<UInt32Type>>?;' \
   geode-core
 
 run_mutation "snapshot: a summed i64 measure is readable" \
   crates/geode-core/src/snapshot.rs \
-  '        if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
-  '        if let Some(values) = None::<&Decimal128Array> {' \
+  '    if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
+  '    if let Some(values) = None::<&Decimal128Array> {' \
   geode-core
 
 run_mutation "pool: shutdown does not deliver its own interrupt" \
@@ -620,14 +620,14 @@ run_mutation "probe: a blanked cell renders blank, not 0.00" \
 
 run_mutation "snapshot: depth reads at DuckDB's own integer width" \
   crates/geode-core/src/snapshot.rs \
-  '        read_at_width!(Int64Type);
-        read_at_width!(Int32Type);' \
-  '        read_at_width!(Int64Type);' \
+  '    read_at_width!(Int64Type);
+    read_at_width!(Int32Type);' \
+  '    read_at_width!(Int64Type);' \
   geode-core
 
 run_mutation "snapshot: depth reads at DuckDB's own width, end to end" \
   crates/geode-core/src/snapshot.rs \
-  '        let depth = self.i64_value("row_depth", row)?;' \
+  '        let depth = self.i64_at(self.depth_col?, row)?;' \
   '        let depth = *self.i64_column("row_depth")?.get(row)?;'
 
 run_mutation "snapshot: a rolled-up dimension cell is null" \
@@ -638,18 +638,18 @@ run_mutation "snapshot: a rolled-up dimension cell is null" \
 
 run_mutation "snapshot: dimension cells read at UInt16 key width" \
   crates/geode-core/src/snapshot.rs \
-  '        if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
-            return dictionary_cell(d, row);
-        }' \
-  '        if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
-            return dictionary_cell(d, row);
-        }' \
+  '    if let Some(d) = arr.as_any().downcast_ref::<DictionaryArray<UInt16Type>>() {
+        return dictionary_cell(d, row);
+    }' \
+  '    if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
+        return dictionary_cell(d, row);
+    }' \
   geode-core
 
 run_mutation "snapshot: dictionary columns expose UInt16 codes" \
   crates/geode-core/src/snapshot.rs \
-  '            return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
-  '            return None;' \
+  '        return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
+  '        return None;' \
   geode-core
 
 # No entry for the UInt16 arm of concat_preserving_dictionaries. Removing
@@ -667,7 +667,192 @@ run_mutation "snapshot: every batch contributes its dictionary keys" \
 
 run_mutation "snapshot: text reads a dimension under either era encoding" \
   crates/geode-core/src/snapshot.rs \
-  '        self.dict_value(name, row)
-            .or_else(|| self.str_value(name, row))' \
-  '        self.str_value(name, row)' \
+  '    dict_cell_in(arr, row).or_else(|| str_in(arr, row))' \
+  '    str_in(arr, row)' \
+  geode-core
+
+# ---- query pool (spec §2.4, §5.1)
+
+run_mutation "pool: coalescing is keyed on the tile, not the view" \
+  crates/geode-data/src/query/pool.rs \
+  '        q.pending.insert(req.key, (id, req));' \
+  '        let key = QueryKey(0); q.pending.insert(key, (id, req));'
+
+run_mutation "pool: the tag is echoed, not regenerated" \
+  crates/geode-data/src/query/pool.rs \
+  '            tag: req.tag,' \
+  '            tag: 0,'
+
+# ---- service (spec §5.1)
+
+run_mutation "service: an outcome carries the caller's key" \
+  crates/geode-data/src/service.rs \
+  '                    key: r.key,' \
+  '                    key: QueryKey(0),'
+
+run_mutation "service: a grouping override is applied" \
+  crates/geode-data/src/service.rs \
+  '                regrouped = ViewSpec {
+                    grouping: grouping.clone(),
+                    ..spec.clone()
+                };' \
+  '                regrouped = spec.clone();'
+
+run_mutation "service: replace_views actually replaces" \
+  crates/geode-data/src/service.rs \
+  '        self.config.views = views;' \
+  '        let _ = views;'
+
+# ---- ingest runner (Phase 3 §2.5)
+
+run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            if !sink(IngestEvent::Failed {
+                dataset: item.dataset.clone(),
+                batch: item.batch.clone(),
+                reason: format!("dataset '"'"'{}'"'"' is not declared", item.dataset),
+            }) {
+                return;
+            }
+            continue;' \
+  '            continue;'
+
+# ---- sources config (Phase 3 §5.2)
+
+run_mutation "sources: an undeclared dataset skips the source" \
+  crates/geode-data/src/source/config.rs \
+  '                Some(d) if schema.dataset(d).is_some() => d.to_string(),' \
+  '                Some(d) => d.to_string(),'
+
+run_mutation "sources: a pattern without a batch capture is dropped" \
+  crates/geode-data/src/source/config.rs \
+  '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
+  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),'
+
+# ---- discovery scheduler (Phase 3 §5.3)
+
+run_mutation "scheduler: every source is polled immediately at start" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '.map(|i| (Instant::now(), i))' \
+  '.map(|i| (Instant::now() + std::time::Duration::from_secs(15), i))'
+
+run_mutation "scheduler: the poll re-arms" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '        due[0] = (Instant::now() + spec.poll_interval, i);' \
+  '        due[0] = (Instant::now() + std::time::Duration::from_secs(70), i);'
+
+run_mutation "scheduler: ready files reach the runner" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                if ready > 0 {
+                    ingest.submit(plan);
+                }' \
+  '                let _ = plan;'
+
+run_mutation "scheduler: pending-too-long surfaces as health" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            CandidateState::PendingTooLong => Health::PendingTooLong,' \
+  '            CandidateState::PendingTooLong => continue,'
+
+run_mutation "service: a publish becomes a Published event" \
+  crates/geode-data/src/service.rs \
+  '                } => sink(DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    books,
+                }),' \
+  '                } => {
+                    let _ = (dataset, batch, gen_id, books);
+                    true
+                }'
+
+# ---- data handle (Phase 3 §5.1)
+
+run_mutation "handle: a refused request is counted" \
+  crates/geode-data/src/handle.rs \
+  '                    self.dropped.fetch_add(1, Ordering::Relaxed);' \
+  '                    let _ = Ordering::Relaxed;'
+
+run_mutation "handle: a compile failure is delivered as the key's outcome" \
+  crates/geode-data/src/handle.rs \
+  '                if let Err(e) = service.query(&params) {' \
+  '                if let Err(e) = service.query(&params) && false {'
+
+# ---- snapshot index accessors (Phase 3 §5.5)
+
+run_mutation "snapshot: column_index resolves the column it names" \
+  crates/geode-core/src/snapshot.rs \
+  '        self.meta.iter().position(|m| m.name == name)' \
+  '        self.meta.iter().position(|m| m.name == name).map(|i| i.saturating_sub(1))' \
+  geode-core
+
+run_mutation "snapshot: column_at bounds-checks the index" \
+  crates/geode-core/src/snapshot.rs \
+  '        (idx < batch.num_columns()).then(|| batch.column(idx).as_ref())' \
+  '        Some(batch.column(idx.min(batch.num_columns() - 1)).as_ref())' \
+  geode-core
+
+run_mutation "snapshot: misaligned meta is refused" \
+  crates/geode-core/src/snapshot.rs \
+  '            if names != described {' \
+  '            if false && names != described {' \
+  geode-core
+
+# ---- tree index (Phase 3 §5.5)
+#
+# Two entries the plan proposed are not here, and the reason is the one
+# this file's header warns about: an entry can name a defence that no
+# fixture can reach.
+#
+#   "a parent is found by prefix, not by position" (`if prefix_eq(...)`
+#   -> `if true`) SURVIVED. `prefix_eq` runs only on a candidate the hash
+#   table already handed back, so it is purely a collision guard: with
+#   distinct FNV-1a hashes for distinct prefixes — which every fixture
+#   has — the first candidate is always the right parent and skipping the
+#   check changes nothing. Catching it would need an engineered 64-bit
+#   collision. The claim in its name is pinned below instead, at a point
+#   the fixtures do reach.
+#
+#   "NULL is not the empty string" (`feed(0x00)` -> `feed(0x01)`)
+#   SURVIVED, and so did the fallback the plan offered for it
+#   (`None => true` -> `None => false` in `prefix_eq`, whose absent-column
+#   arm no fixture evaluates: the one fixture with an absent grouping
+#   column has rows only at depths 0 and 1, so every `prefix_eq` call
+#   there is `take(0)` and `all()` returns true without reading an arm).
+#   NULL-vs-"" is defended twice — the hash token and `prefix_eq`'s
+#   `Option<&str>` comparison — and each defence rescues a mutation of the
+#   other, which is this file's "two defences overlapping so neither is
+#   isolated". No single-line mutation isolates it. The other half of the
+#   unplaced contract is pinned instead.
+
+run_mutation "tree: a child attaches to the row its prefix names, not to a neighbour" \
+  crates/geode-core/src/tree.rs \
+  '                        Some(p) => parent[row] = p,' \
+  '                        Some(_) => parent[row] = *by_depth[d - 1].last().unwrap(),' \
+  geode-core
+
+run_mutation "tree: an unplaced row is counted" \
+  crates/geode-core/src/tree.rs \
+  '                            unplaced += 1;' \
+  '                            unplaced += 0;' \
+  geode-core
+
+run_mutation "tree: an unplaced row still appears under the root" \
+  crates/geode-core/src/tree.rs \
+  '                            parent[row] = roots.first().copied().unwrap_or(NO_PARENT);' \
+  '                            parent[row] = NO_PARENT;' \
+  geode-core
+
+run_mutation "tree: children keep row order" \
+  crates/geode-core/src/tree.rs \
+  '        for (r, &p) in parent.iter().enumerate() {' \
+  '        for (r, &p) in parent.iter().enumerate().rev() {' \
+  geode-core
+
+# ---- column presentation (Phase 3 §6.2)
+
+run_mutation "view: a format override applies over the kind default" \
+  crates/geode-core/src/view.rs \
+  '            precision: p.precision.unwrap_or(self.precision),' \
+  '            precision: self.precision,' \
   geode-core

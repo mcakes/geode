@@ -4280,7 +4280,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 /// Outbound events queued before the sink refuses (§7.3). Tiles × a
-/// small burst; a full channel is counted by `DataHandle`.
+/// small burst; a full channel is counted by `DataHandle`. The sink
+/// below must `try_send`, never block, and a refusal is counted into a
+/// `dropped_events` counter surfaced through `set_data_status` — never
+/// silently lost.
 const EVENT_BOUND: usize = 256;
 
 pub struct DataSetup {
@@ -4444,6 +4447,12 @@ the `warning` token (like `restart_required`), `debug_selector`
 `route_outcome`-style `deliver` needs the `Window`, which is why the
 outcome path goes through `window.update` and the others through
 `cx.update`.
+
+The last `DataHandle` must be shut down off the UI thread —
+`DataHandle::shutdown` joins the service thread, which waits for
+in-flight ingest and discovery — so the quit hook spawns
+`handle.shutdown()` on `cx.background_executor()` rather than dropping
+it on the main thread.
 
 - [ ] **Step 6: `main.rs`**
 

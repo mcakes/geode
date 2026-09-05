@@ -4,7 +4,9 @@
 pub mod attribution;
 pub mod config;
 pub mod dimensions;
+pub mod query;
 pub mod schema;
 pub mod scope;
 pub mod snapshot;
+pub mod tree;
 pub mod view;

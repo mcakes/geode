@@ -6,6 +6,8 @@
 //! A view is data, not code — it names columns and expressions, and the
 //! compiler (geode-data) turns it into one statement.
 
+use std::collections::BTreeMap;
+
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
 use crate::schema::{ColumnRole, Grain, SchemaSpec};
@@ -48,6 +50,104 @@ pub struct SortKey {
     pub descending: bool,
 }
 
+/// How a negative number is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Negative {
+    Minus,
+    Parens,
+}
+
+/// Whether a number's sign colours the cell (`chart_bullish` /
+/// `chart_bearish` in the theme).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Colour {
+    None,
+    Sign,
+}
+
+/// Divide before display: `k` by a thousand, `M` by a million.
+/// `precision` applies to the divided number (Phase 3 §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scale {
+    None,
+    Thousands,
+    Millions,
+}
+
+impl Scale {
+    pub fn divisor(self) -> f64 {
+        match self {
+            Scale::None => 1.0,
+            Scale::Thousands => 1_000.0,
+            Scale::Millions => 1_000_000.0,
+        }
+    }
+
+    /// What the header shows after the label.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Scale::None => "",
+            Scale::Thousands => "k",
+            Scale::Millions => "M",
+        }
+    }
+}
+
+/// A resolved format: every field decided (Phase 3 §6.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColumnFormat {
+    pub precision: u8,
+    pub thousands: bool,
+    pub negative: Negative,
+    pub colour: Colour,
+    pub scale: Scale,
+}
+
+impl ColumnFormat {
+    /// The default for a measure or derived number.
+    pub const MEASURE: ColumnFormat = ColumnFormat {
+        precision: 2,
+        thousands: true,
+        negative: Negative::Minus,
+        colour: Colour::Sign,
+        scale: Scale::None,
+    };
+    /// The default for a dimension or attribute.
+    pub const TEXT: ColumnFormat = ColumnFormat {
+        precision: 0,
+        thousands: false,
+        negative: Negative::Minus,
+        colour: Colour::None,
+        scale: Scale::None,
+    };
+
+    /// This default with the presentation's overrides applied.
+    pub fn with(self, p: &ColumnPresentation) -> ColumnFormat {
+        ColumnFormat {
+            precision: p.precision.unwrap_or(self.precision),
+            thousands: p.thousands.unwrap_or(self.thousands),
+            negative: p.negative.unwrap_or(self.negative),
+            colour: p.colour.unwrap_or(self.colour),
+            scale: p.scale.unwrap_or(self.scale),
+        }
+    }
+}
+
+/// What a view says about how a column looks — each field optional, so
+/// a per-kind default fills the rest at plan time. Keyed by column name
+/// on the view rather than carried on `ViewColumn`, so the compiler's
+/// matching on that enum is untouched.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ColumnPresentation {
+    pub precision: Option<u8>,
+    pub thousands: Option<bool>,
+    pub negative: Option<Negative>,
+    pub colour: Option<Colour>,
+    pub scale: Option<Scale>,
+    pub label: Option<String>,
+    pub width: Option<f32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ViewSpec {
     pub name: String,
@@ -57,6 +157,7 @@ pub struct ViewSpec {
     /// Ordered: each prefix is one level of the rollup tree (§6.3).
     pub grouping: Vec<String>,
     pub sort: Vec<SortKey>,
+    pub presentation: BTreeMap<String, ColumnPresentation>,
 }
 
 impl ViewSpec {
@@ -79,6 +180,11 @@ impl ViewSpec {
         out.sort_unstable();
         out.dedup();
         out
+    }
+
+    /// The presentation declared for a column, or the empty one.
+    pub fn presentation_of(&self, column: &str) -> ColumnPresentation {
+        self.presentation.get(column).cloned().unwrap_or_default()
     }
 
     /// Check the view against the schema it will compile against.
@@ -268,6 +374,78 @@ impl ViewSpec {
                         }
                     };
                     view.columns.push(column);
+
+                    let mut p = ColumnPresentation::default();
+                    let warn = |m: String| bad(format!("column '{col_name}': {m}"));
+                    if let Some(f) = c.get("format") {
+                        match f.as_table() {
+                            None => diags.push(warn("'format' is not a table".into())),
+                            Some(f) => {
+                                match f.get("precision") {
+                                    None => {}
+                                    Some(v) => match v.as_integer() {
+                                        Some(n) if (0..=12).contains(&n) => {
+                                            p.precision = Some(n as u8)
+                                        }
+                                        _ => diags.push(warn(format!(
+                                            "'precision' must be an integer 0–12 (got {v})"
+                                        ))),
+                                    },
+                                }
+                                match f.get("thousands") {
+                                    None => {}
+                                    Some(v) => match v.as_bool() {
+                                        Some(b) => p.thousands = Some(b),
+                                        None => diags.push(warn(format!(
+                                            "'thousands' must be true or false (got {v})"
+                                        ))),
+                                    },
+                                }
+                                match f.get("negative").and_then(|v| v.as_str()) {
+                                    None if f.get("negative").is_none() => {}
+                                    Some("minus") => p.negative = Some(Negative::Minus),
+                                    Some("parens") => p.negative = Some(Negative::Parens),
+                                    other => diags.push(warn(format!(
+                                        "'negative' must be \"minus\" or \"parens\" (got {other:?})"
+                                    ))),
+                                }
+                                let colour = f.get("colour").or_else(|| f.get("color"));
+                                match colour.and_then(|v| v.as_str()) {
+                                    None if colour.is_none() => {}
+                                    Some("none") => p.colour = Some(Colour::None),
+                                    Some("sign") => p.colour = Some(Colour::Sign),
+                                    other => diags.push(warn(format!(
+                                        "'colour' must be \"none\" or \"sign\" (got {other:?})"
+                                    ))),
+                                }
+                                match f.get("scale").and_then(|v| v.as_str()) {
+                                    None if f.get("scale").is_none() => {}
+                                    Some("none") => p.scale = Some(Scale::None),
+                                    Some("k") => p.scale = Some(Scale::Thousands),
+                                    Some("M") => p.scale = Some(Scale::Millions),
+                                    other => diags.push(warn(format!(
+                                        "'scale' must be \"none\", \"k\" or \"M\" (got {other:?})"
+                                    ))),
+                                }
+                            }
+                        }
+                    }
+                    if let Some(l) = c.get("label") {
+                        match l.as_str() {
+                            Some(s) => p.label = Some(s.to_string()),
+                            None => diags.push(warn("'label' must be a string".into())),
+                        }
+                    }
+                    if let Some(w) = c.get("width") {
+                        match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
+                            Some(x) if x > 0.0 => p.width = Some(x as f32),
+                            _ => diags
+                                .push(warn(format!("'width' must be a positive number (got {w})"))),
+                        }
+                    }
+                    if p != ColumnPresentation::default() {
+                        view.presentation.insert(col_name.to_string(), p);
+                    }
                 }
             }
 
@@ -519,5 +697,83 @@ grain = "instrument"
             views[0].measure_grains(&ds),
             vec![crate::schema::Grain::Underlying]
         );
+    }
+
+    #[test]
+    fn presentation_is_parsed_per_column_and_defaults_are_per_kind() {
+        let (views, diags) = ViewSpec::from_doc(&doc(r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[tree.columns]]
+name = "npv"
+format = { precision = 0, thousands = true, negative = "parens", colour = "sign", scale = "k" }
+label = "NPV"
+width = 110
+[[tree.columns]]
+name = "delta01"
+format = { precision = 4 }
+[[tree.columns]]
+name = "lhu"
+kind = "dimension"
+"#));
+        assert!(diags.is_empty(), "{diags:?}");
+        let v = &views[0];
+        let npv = v.presentation_of("npv");
+        assert_eq!(npv.label.as_deref(), Some("NPV"));
+        assert_eq!(npv.width, Some(110.0));
+        let f = ColumnFormat::MEASURE.with(&npv);
+        assert_eq!(f.precision, 0);
+        assert!(f.thousands);
+        assert_eq!(f.negative, Negative::Parens);
+        assert_eq!(f.colour, Colour::Sign);
+        assert_eq!(f.scale, Scale::Thousands);
+        assert_eq!(Scale::Thousands.divisor(), 1_000.0);
+        assert_eq!(Scale::Millions.divisor(), 1_000_000.0);
+        assert_eq!(Scale::None.divisor(), 1.0);
+        assert_eq!(Scale::Thousands.suffix(), "k");
+        assert_eq!(Scale::Millions.suffix(), "M");
+        assert_eq!(Scale::None.suffix(), "");
+
+        let d = ColumnFormat::MEASURE.with(&v.presentation_of("delta01"));
+        assert_eq!(d.precision, 4, "one field overrides, the rest default");
+        assert!(d.thousands);
+        assert_eq!(d.negative, Negative::Minus);
+        assert_eq!(d.scale, Scale::None, "unscaled by default");
+
+        let l = ColumnFormat::TEXT.with(&v.presentation_of("lhu"));
+        assert_eq!(l.colour, Colour::None);
+        assert_eq!(v.presentation_of("nonesuch"), ColumnPresentation::default());
+    }
+
+    #[test]
+    fn bad_presentation_values_warn_and_are_ignored() {
+        let (views, diags) = ViewSpec::from_doc(&doc(r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[tree.columns]]
+name = "npv"
+format = { precision = 40, negative = "red", colour = "loud", thousands = "yes", scale = "bn" }
+width = -5
+"#));
+        let p = views[0].presentation_of("npv");
+        assert_eq!(p, ColumnPresentation::default(), "{p:?}");
+        assert_eq!(diags.len(), 6, "{diags:?}");
+        assert!(diags.iter().all(|d| d.message.contains("npv")));
+    }
+
+    #[test]
+    fn color_is_accepted_as_a_spelling_of_colour() {
+        let (views, diags) = ViewSpec::from_doc(&doc(r#"
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu"]
+[[tree.columns]]
+name = "npv"
+format = { color = "none" }
+"#));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::None));
     }
 }

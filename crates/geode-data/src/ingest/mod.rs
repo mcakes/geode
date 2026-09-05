@@ -4,9 +4,10 @@
 pub mod load;
 pub mod plan;
 pub mod runner;
+pub mod scheduler;
 pub mod split;
 
-pub use runner::{IngestEvent, IngestHandle, IngestRunner};
+pub use runner::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 
 pub use load::{LoadError, LoadOutcome, LoadRequest, load_file};
 pub use plan::{WorkItem, WorkPlan, build_plan};

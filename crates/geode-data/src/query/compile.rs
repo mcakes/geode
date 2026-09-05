@@ -2398,8 +2398,8 @@ kind = "measure"
             ),
             "Int32"
         );
-        let snap =
-            Snapshot::from_batches(batches, meta, v.grouping.len(), Provenance::default()).unwrap();
+        let snap = Snapshot::from_batches(batches, meta, v.grouping.clone(), Provenance::default())
+            .unwrap();
 
         let mut blanked = 0;
         for row in 0..snap.rows() {
