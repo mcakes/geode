@@ -2,6 +2,7 @@
 //! window. Each module lands with the Plan 3c task that needs it.
 
 pub mod cache;
+pub mod commands;
 pub mod cursor;
 pub mod expansion;
 pub mod find;
