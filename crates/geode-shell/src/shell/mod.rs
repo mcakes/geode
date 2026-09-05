@@ -1016,7 +1016,18 @@ impl ShellView {
     /// `PaletteState::new` a few lines below) and focusing it, so typing
     /// reaches the query field the instant the palette appears rather than
     /// requiring a click first.
+    ///
+    /// Cancels an open command line first, unconditionally, on either arm
+    /// (fix round 1, finding 1): `ctrl+k` is a shipped, always-reachable
+    /// binding — `handle_key_down`'s command-line branch carves out an
+    /// explicit exception for it so it still reaches here even while the
+    /// line has focus (see that branch's own comment) — and without this,
+    /// the palette would open over a command line still holding the
+    /// input's focus and still (per its own doc comment) claiming every
+    /// key, which the palette's own key handling assumes it owns
+    /// exclusively.
     fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_command_line(window, cx);
         if self.palette.is_some() {
             self.close_palette(window, cx);
             return;
@@ -1117,6 +1128,34 @@ impl ShellView {
         cx.notify();
     }
 
+    /// Close the command line exactly as pressing Escape on it would
+    /// (§3.4): a `Find` prompt tells the occupant it was cancelled first
+    /// (`FindEvent::Cancelled`); either prompt then just closes. A no-op
+    /// when none is open.
+    ///
+    /// This is the one door every OTHER exclusive-focus surface uses to
+    /// take the command line's input away from under it — mirroring
+    /// `close_palette`'s own call sites: `handle_command_line_key`'s own
+    /// escape arm, `toggle_palette` (opening OR closing the palette while
+    /// the line is open), `dialog::open_shell_dialog_with_key` (a modal
+    /// opening over an open line), and both tile mouse-down handlers in
+    /// `render` (fix round 1, findings 1 and 2). Without this, the line
+    /// stayed `Some` and painted but stopped receiving any of its own
+    /// keys the moment a newer surface's branch in `handle_key_down`
+    /// started winning ahead of it, or repainted at whatever tile the
+    /// workspace's focus had silently moved to underneath it.
+    fn cancel_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self.command_line.as_ref() else {
+            return;
+        };
+        if line.prompt == Prompt::Find
+            && let Some(o) = self.occupants.get(&line.tile)
+        {
+            o.content.find(FindEvent::Cancelled, window, cx);
+        }
+        self.close_command_line(window, cx);
+    }
+
     /// Re-rank (`:`) or forward (`/`) every change to the command line's
     /// text — the `InputEvent::Change` subscription wired up in `new`.
     /// `/` forwards the raw text to the occupant's own `find` on every
@@ -1172,12 +1211,7 @@ impl ShellView {
         let tile = self.command_line.as_ref().map(|c| c.tile).unwrap();
         let key = event.keystroke.key.as_str();
         if key == "escape" {
-            if prompt == Prompt::Find
-                && let Some(o) = self.occupants.get(&tile)
-            {
-                o.content.find(FindEvent::Cancelled, window, cx);
-            }
-            self.close_command_line(window, cx);
+            self.cancel_command_line(window, cx);
             return true;
         }
         if key == "enter" {
@@ -1942,6 +1976,23 @@ impl ShellView {
                 .focus_handle(cx)
                 .is_focused(window)
         {
+            // The one deliberate exception (fix round 1, finding 1): the
+            // palette toggle is a shipped, always-reachable binding — "a
+            // binding that has shipped is a promise" — so it must still
+            // work from inside the command line, unlike every other
+            // keystroke here. Checked first, via the same `is_palette_
+            // toggle` the top-level check below uses, so it resolves the
+            // identical winning binding (desk/user layers included).
+            // `toggle_palette` itself now cancels an open command line
+            // unconditionally (its own doc comment), so this one call
+            // both opens the palette and cleans up the line.
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && self.is_palette_toggle(&ks, cx)
+            {
+                self.toggle_palette(window, cx);
+                cx.notify();
+                return;
+            }
             if self.handle_command_line_key(event, window, cx) {
                 cx.stop_propagation();
             }
@@ -2817,7 +2868,20 @@ impl Render for ShellView {
                         // focus: see `try_arm_tile_drag` / `TileDrag`.
                         .on_mouse_down(
                             MouseButton::Left,
-                            cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                // Any tile mouse-down cancels an open
+                                // command line first, unconditionally
+                                // (fix round 1, finding 2 —
+                                // `cancel_command_line`'s own doc
+                                // comment): a mouse click is the only way
+                                // the workspace's focused tile can change
+                                // while the line is open (every keystroke
+                                // is intercepted ahead of the matcher),
+                                // so this is what keeps "the focused tile
+                                // IS the line's tile, whenever it's open"
+                                // an invariant — see the comment where the
+                                // strip is painted, below.
+                                view.cancel_command_line(window, cx);
                                 if view.try_arm_tile_drag(id, event, cx) {
                                     return;
                                 }
@@ -2862,7 +2926,11 @@ impl Render for ShellView {
                     let view = self.occupants.get(&id).map(|o| o.view.clone());
                     surface = surface.child(tile_cell(id, tr, is_focused, view, cx).on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |view, event: &MouseDownEvent, _window, cx| {
+                        cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                            // Same command-line cancel as the tree-tile
+                            // listener above, and for the identical
+                            // reason (fix round 1, finding 2).
+                            view.cancel_command_line(window, cx);
                             if view.try_arm_tile_drag(id, event, cx) {
                                 return;
                             }
@@ -3331,11 +3399,26 @@ impl Render for ShellView {
             })
             // The per-tile command line (§3.4): a one-line strip along
             // the focused tile's bottom edge, plus a completions popup
-            // above it. Painted only while both a line is open AND that
-            // tile still has a rect this frame (a tile can close out from
-            // under an open line — `ensure_occupants` above already drops
-            // the occupant; `handle_command_line_key`'s own `None` arms
-            // handle the same race for dispatch, this is render's twin).
+            // above it. Painted at `focused_rect` — the WORKSPACE's own
+            // notion of the focused tile, computed in the loops above —
+            // rather than by looking up `self.command_line.tile`'s own
+            // rect. That is only correct because "the focused tile IS
+            // `command_line.tile`, for as long as the line is open" is an
+            // invariant (fix round 1, finding 2), not a coincidence:
+            // keyboard input can never change which tile is focused while
+            // the line is open (the command-line branch in
+            // `handle_key_down` intercepts every key ahead of the matcher
+            // and every workspace action), so a tile mouse-down is the
+            // only other way focus moves — and both tile mouse-down
+            // handlers (tree and dock, above) cancel an open command line
+            // before acting on the click, so the invariant holds instead
+            // of the strip silently repainting under whichever tile the
+            // click just focused. Painted only while both a line is open
+            // AND that tile still has a rect this frame (a tile can close
+            // out from under an open line — `ensure_occupants` above
+            // already drops the occupant; `handle_command_line_key`'s own
+            // `None` arms handle the same race for dispatch, this is
+            // render's twin).
             .when_some(
                 self.command_line.as_ref().zip(focused_rect),
                 |el, (line, rect)| {
@@ -3740,6 +3823,190 @@ mod tests {
         assert!(
             log.borrow()
                 .contains(&Recorded::Find(tile, FindEvent::Committed("x".into())))
+        );
+    }
+
+    /// Fix round 1, finding 1: `ctrl+k` is a shipped, always-reachable
+    /// binding, so it must still open the palette (and clean up after
+    /// itself) even from inside an open `:` line, rather than the line
+    /// swallowing it silently and staying stuck open.
+    #[gpui::test]
+    fn ctrl_k_cancels_an_open_command_line_and_opens_the_palette(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "line open before ctrl-k"
+        );
+        cx.simulate_keystrokes("ctrl-k");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "ctrl-k should have cancelled the open command line"
+        );
+        let shell = shell_of(&window, &mut cx);
+        assert!(
+            shell.read_with(&cx, |s, _| s.palette.is_some()),
+            "ctrl-k should still open the palette"
+        );
+        // A `Command` prompt cancel is silent: nothing was submitted, and
+        // (unlike `/`) nothing is cancelled on the occupant either.
+        assert!(
+            log.borrow().iter().all(|r| !matches!(
+                r,
+                crate::module::recording::Recorded::Command(..)
+                    | crate::module::recording::Recorded::Find(..)
+            )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// Fix round 1, finding 1: opening a shell dialog over an open `/`
+    /// line must cancel it (mirroring the existing `close_palette` call
+    /// in `dialog::open_shell_dialog_with_key`) — otherwise the line
+    /// stays `Some`, still painted, but the modal branch in
+    /// `handle_key_down` is checked first and would swallow every key
+    /// meant for it from then on. Dispatches `settings::open` directly,
+    /// the same real path `settings_open_opens_the_modal` above uses,
+    /// rather than a raw `ctrl-,` keystroke: this is testing what opening
+    /// a dialog does to an open command line, not how the dialog itself
+    /// gets reached.
+    #[gpui::test]
+    fn opening_a_shell_dialog_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("sp");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "line open before the dialog"
+        );
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(&ActionId("settings::open".to_string()), None, window, cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "opening the dialog should have cancelled the open command line"
+        );
+        assert!(
+            shell.read_with(&cx, |s, _| s.modal.is_some()),
+            "the dialog should still have opened"
+        );
+        use crate::module::{FindEvent, recording::Recorded};
+        assert_eq!(
+            log.borrow().last(),
+            Some(&Recorded::Find(tile, FindEvent::Cancelled)),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    /// Fix round 1, finding 2: a mouse-down on a different tile is the one
+    /// way the workspace's focused tile can change while a command line
+    /// is open (every keystroke is claimed ahead of the matcher), so it
+    /// must cancel the line rather than leaving it painted under the
+    /// wrong tile — this is what keeps "focused tile == command_line.tile
+    /// while open" an invariant (see the comment where the strip is
+    /// painted). Same click-point layout math as `mouse_down_on_a_tile_
+    /// focuses_it` below.
+    #[gpui::test]
+    fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        // Two tiles, so there is a second, non-focused one to click.
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("ctrl-v");
+        let shell = shell_of(&window, &mut cx);
+        let opened_on = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        cx.simulate_keystrokes(":");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "line open before the click"
+        );
+
+        let (target_id, click_point) = cx.update(|window, cx| {
+            let viewport = window.viewport_size();
+            let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+            let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+            let content_height =
+                (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            let rects = shell
+                .read(cx)
+                .services
+                .workspaces
+                .active()
+                .tree()
+                .layout(Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: tile_width,
+                    h: content_height,
+                });
+            let (id, r) = rects
+                .into_iter()
+                .find(|(id, _)| Some(*id) != Some(opened_on))
+                .expect("a second, non-focused tile exists");
+            let point = gpui::point(
+                px(sidebar::WIDTH + r.x + r.w / 2.0),
+                px(toolbar_height + r.y + r.h / 2.0),
+            );
+            (id, point)
+        });
+
+        cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
+        cx.simulate_mouse_up(click_point, MouseButton::Left, gpui::Modifiers::none());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "the click should have cancelled the open command line"
+        );
+        let focused = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert_eq!(focused, target_id, "the click still moved focus");
+        let shell_focus = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| shell_focus.is_focused(window)),
+            "focus should have returned to the shell root, then re-armed \
+             by the click's own restore"
+        );
+        assert!(
+            log.borrow().iter().all(|r| !matches!(
+                r,
+                crate::module::recording::Recorded::Command(..)
+                    | crate::module::recording::Recorded::Find(..)
+            )),
+            "a Command prompt's cancel is silent: {:?}",
+            log.borrow()
         );
     }
 

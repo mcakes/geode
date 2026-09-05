@@ -304,6 +304,13 @@ pub fn open_shell_dialog_with_key<F>(
     // it, and its exclusive key handling would otherwise still think it
     // owns every keystroke underneath the modal.
     view.close_palette(window, cx);
+    // Cancel an open command line for the identical reason (fix round 1,
+    // finding 1 — `cancel_command_line`'s own doc comment): the modal
+    // branch in `handle_key_down` is checked ahead of the command line's,
+    // so once a modal is open every key goes to it instead, and the line
+    // would otherwise sit there `Some`, still painted, but permanently
+    // deaf to escape/enter/tab.
+    view.cancel_command_line(window, cx);
 
     view.modal = Some(ShellModal {
         title: title.into(),
