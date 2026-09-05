@@ -47,7 +47,34 @@ use geode_core::config::Config;
 ///
 /// Close-tile is `ctrl+w` (user direction — the browser/vim close idiom;
 /// free since the vim window prefix retired, and unclaimed by macOS).
+///
+/// Frame slots (Phase 3 §4.2) are declared in their own table, FIRST —
+/// deliberately ahead of the `workspace` table's `mod+1..9` below, not
+/// alongside the other context-less bindings further down. The matcher
+/// keeps the *last* declaration-order match among exact keystroke ties
+/// (`Matcher::press`, "Bindings are in layer-then-definition order; keep
+/// the last"), and under a user's `keymap.mod = "ctrl"` (a supported
+/// alias — `defaults::mod_alias_from_config`), `mod+1` parses to the exact
+/// same keystroke as `ctrl+1`. Declaring the frame table first means the
+/// shipped `workspace::switch_N` bindings are declared *later* and so win
+/// that tie — a `mod = "ctrl"` user keeps their workspace switcher intact.
+/// The slots are not stranded by this: they stay reachable through the
+/// palette regardless of `mod`, and a user who wants the ctrl+N keys for
+/// slots instead can rebind either side in their own keymap layer.
 pub const BUILTIN_KEYMAP: &str = r#"
+[[bindings]]
+[bindings.keys]
+"ctrl+1" = "frame::slot_1"
+"ctrl+2" = "frame::slot_2"
+"ctrl+3" = "frame::slot_3"
+"ctrl+4" = "frame::slot_4"
+"ctrl+5" = "frame::slot_5"
+"ctrl+6" = "frame::slot_6"
+"ctrl+7" = "frame::slot_7"
+"ctrl+8" = "frame::slot_8"
+"ctrl+9" = "frame::slot_9"
+"ctrl+0" = "frame::slot_clear"
+
 [[bindings]]
 context = "workspace"
 [bindings.keys]
@@ -94,16 +121,6 @@ context = "workspace"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
 "mod+shift+d" = "data::toggle_probe"
-"ctrl+1" = "frame::slot_1"
-"ctrl+2" = "frame::slot_2"
-"ctrl+3" = "frame::slot_3"
-"ctrl+4" = "frame::slot_4"
-"ctrl+5" = "frame::slot_5"
-"ctrl+6" = "frame::slot_6"
-"ctrl+7" = "frame::slot_7"
-"ctrl+8" = "frame::slot_8"
-"ctrl+9" = "frame::slot_9"
-"ctrl+0" = "frame::slot_clear"
 
 [[bindings]]
 context = "tile"
@@ -328,8 +345,22 @@ pub fn mod_alias_from_config(config: &Config) -> Modifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::build_keymap;
+    use crate::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
     use geode_core::config::{ConfigSources, LayerDoc};
+
+    /// Resolve a single keystroke spec (e.g. `"ctrl+1"`) against
+    /// `BUILTIN_KEYMAP` built with `mod_alias`, in the always-active
+    /// `workspace` context — a pure, no-window rerun of exactly what
+    /// `Matcher::press` does on a real keypress.
+    fn resolve(mod_alias: Modifiers, spec: &str) -> MatchResult {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], mod_alias, &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let keystroke = parse_keystroke(spec, mod_alias).unwrap();
+        Matcher::default().press(&keymap, keystroke, &[KeyContext::new("workspace")])
+    }
 
     #[test]
     fn builtin_keymap_builds_clean_against_builtin_actions() {
@@ -385,5 +416,35 @@ mod tests {
             user: None,
         });
         assert_eq!(mod_alias_from_config(&bogus), default_mod());
+    }
+
+    /// Fix round 1 (review Finding 1): under a `keymap.mod = "ctrl"` user
+    /// (`mod_alias_from_config`'s supported "ctrl" alias), `mod+1` parses
+    /// to the exact same keystroke as `ctrl+1` — so BUILTIN_KEYMAP's
+    /// shipped `workspace::switch_1` must still win that tie. It does
+    /// because the frame-slot table is declared *before* the `workspace`
+    /// table (see `BUILTIN_KEYMAP`'s own doc comment) and the matcher
+    /// keeps the last declaration-order match.
+    #[test]
+    fn ctrl_1_resolves_to_the_shipped_workspace_switch_under_a_ctrl_mod_alias() {
+        match resolve(Modifiers::CTRL, "ctrl+1") {
+            MatchResult::Matched { action, .. } => {
+                assert_eq!(action.0, "workspace::switch_1");
+            }
+            other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
+    /// The other half of Finding 1's fix: under the default mod alias
+    /// (Alt), `mod+1` parses to `alt+1` — no collision with `ctrl+1` — so
+    /// the frame slot binding resolves normally.
+    #[test]
+    fn ctrl_1_resolves_to_the_frame_slot_under_the_default_mod_alias() {
+        match resolve(default_mod(), "ctrl+1") {
+            MatchResult::Matched { action, .. } => {
+                assert_eq!(action.0, "frame::slot_1");
+            }
+            other => panic!("expected a match, got {other:?}"),
+        }
     }
 }

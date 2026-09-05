@@ -260,7 +260,11 @@ pub enum ShellEvent {
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
-    /// Sources or datasets changed; nothing was applied.
+    /// Sources or datasets changed. The data engine needs a restart to
+    /// pick up new source paths or column definitions — but a `datasets`
+    /// change is also a `groupings_changed` input, so the frame's own
+    /// slot labels (pure presentation) are still replaced immediately;
+    /// this event is only about what the data engine cannot pick up live.
     RestartRequired(String),
 }
 
@@ -891,9 +895,14 @@ impl ShellView {
     /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
     /// tells the frame a config reload happened and emits `ShellEvent::
     /// ConfigReloaded` for the app bridge to forward to the data thread,
-    /// and a changed `sources`/`datasets` doc — which the frame cannot
-    /// pick up live — sets `restart_required` and emits `ShellEvent::
-    /// RestartRequired` instead of applying anything.
+    /// and a changed `sources`/`datasets` doc sets `restart_required` and
+    /// emits `ShellEvent::RestartRequired`. That restart is about the data
+    /// engine, not the frame: a `datasets` change also counts toward
+    /// `groupings_changed` above, so slot labels — pure presentation,
+    /// recomputed from whatever schema is on hand — are replaced
+    /// immediately either way. What actually needs the restart is the
+    /// data engine itself picking up new source paths or column
+    /// definitions, which this reload never touches.
     ///
     /// Any error-severity diagnostic — from `Config::load` itself, or from
     /// building the keymap against the new config's docs — keeps the
