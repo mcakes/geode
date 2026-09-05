@@ -1127,8 +1127,8 @@ run_mutation "commandline: an exact word runs as typed" \
 
 run_mutation "commandline: escape on a find is a cancel" \
   crates/geode-shell/src/shell/mod.rs \
-  '                o.content.find(FindEvent::Cancelled, window, cx);' \
-  '                let _ = o;' \
+  '            o.content.find(FindEvent::Cancelled, window, cx);' \
+  '            let _ = o;' \
   geode-shell \
   slash_streams_find_events_and_escape_cancels
 
