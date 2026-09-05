@@ -603,3 +603,52 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
         "the status bar says so"
     );
 }
+
+/// M8 (3b final review): `restart_required` compares each reload's
+/// `sources` doc against the baseline the running `DataService` was
+/// actually built from, not against the previous reload — so reverting
+/// the offending edit back to that baseline clears the stale message
+/// rather than leaving it up for the rest of the session.
+#[gpui::test]
+fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let mut with_sources = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "sources",
+                "[s]\ndataset = \"risk\"\npaths = [\"/x/*.csv\"]\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_sources), cx)
+    });
+    assert!(
+        shell.read_with(&cx, |s, _| s.restart_required.is_some()),
+        "a sources doc appearing where the baseline (from `test_services`, \
+         which loads `ConfigSources::default()`) had none asks for a restart"
+    );
+
+    // Revert: reload with a config whose `sources` doc is absent again,
+    // matching the empty baseline the shell (and the data engine) started
+    // with.
+    let mut reverted = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut reverted), cx)
+    });
+    assert!(
+        shell.read_with(&cx, |s, _| s.restart_required.is_none()),
+        "reverting sources.toml back to the baseline clears the message"
+    );
+}

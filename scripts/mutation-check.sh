@@ -1186,8 +1186,10 @@ run_mutation "commandline: losing keyboard focus to another surface cancels an o
 
 run_mutation "frame: a sources change is a restart, not a silent apply" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            let restart = ["sources", "datasets"]' \
-  '            let restart = ["nonesuch"]' \
+  '                ("sources", &self.sources_baseline),
+                ("datasets", &self.datasets_baseline),' \
+  '                ("nonesuch", &self.sources_baseline),
+                ("nonesuch", &self.datasets_baseline),' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
@@ -1204,6 +1206,45 @@ run_mutation "frame: a views/dimensions change reaches the frame and emits Confi
   '            if false {' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+# ---- Phase 3c Task 0 (deferred 3b cleanups: M4, M8, M9, slot-rebuild DRY)
+
+run_mutation "hot_reload: rebuild_slots is the one place both ShellView::new and apply_reload build GroupingSlots (DRY)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '    let (slots, diags) = config
+        .doc("groupings")
+        .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+        .unwrap_or_default();' \
+  '    let (slots, diags) = config
+        .doc("nonesuch")
+        .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+        .unwrap_or_default();' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+run_mutation "commandline: word_at clamps a non-char-boundary cursor down before slicing (M4)" \
+  crates/geode-shell/src/commandline.rs \
+  '    while !line.is_char_boundary(cursor) {' \
+  '    while false {' \
+  geode-shell \
+  a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking
+
+run_mutation "frame: restart_required clears once sources/datasets match the baseline again (M8)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.restart_required = None;' \
+  '                let _ = &self.restart_required;' \
+  geode-shell \
+  reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
+
+run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
+  crates/geode-shell/src/theme.rs \
+  '    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("geode-write");' \
+  '    let file_name = "app.toml";' \
+  geode-shell \
+  the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

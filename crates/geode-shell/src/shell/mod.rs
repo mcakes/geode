@@ -50,9 +50,6 @@ use crate::theme::ThemeService;
 use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
-use geode_core::dimensions::DerivedDimensions;
-use geode_core::groupings::GroupingSlots;
-use geode_core::schema::SchemaSpec;
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
@@ -392,12 +389,30 @@ pub struct ShellView {
     /// Same purpose as `scratch_all_tiles`, for the active-tiles half of
     /// the diff.
     scratch_active_tiles: HashSet<TileId>,
-    /// Set by `apply_reload` when a reload changed `sources` or `datasets`
-    /// (§4.5) — those need a restart to take effect, unlike `groupings`/
-    /// `views`/`dimensions`, which the frame picks up live. Drives the
-    /// status bar's own "restart required" message, alongside the
-    /// `ShellEvent::RestartRequired` the app bridge hears.
+    /// Set by `apply_reload` when a reload's `sources`/`datasets` docs
+    /// (§4.5) no longer match [`sources_baseline`](Self::sources_baseline)/
+    /// [`datasets_baseline`](Self::datasets_baseline) — those need a
+    /// restart to take effect, unlike `groupings`/`views`/`dimensions`,
+    /// which the frame picks up live. Cleared when a later reload's docs
+    /// match the baseline again (M8, 3b final review: reverting the
+    /// offending edit clears the message rather than leaving it up for
+    /// the rest of the session). Drives the status bar's own "restart
+    /// required" message, alongside the `ShellEvent::RestartRequired` the
+    /// app bridge hears.
     restart_required: Option<String>,
+    /// The `sources` layered doc the running `DataService` was actually
+    /// built from — captured once here at construction, since a reload
+    /// never rebuilds the data engine (see `apply_reload`'s doc comment).
+    /// `apply_reload` compares each freshly loaded config's `sources` doc
+    /// against this baseline, not against the previous reload's config,
+    /// so reverting an edit back to the value the service was built from
+    /// clears `restart_required`: the message means "what's on disk no
+    /// longer matches what's running", and a revert makes that false
+    /// again.
+    sources_baseline: Vec<LayerDoc>,
+    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
+    /// the `datasets` doc.
+    datasets_baseline: Vec<LayerDoc>,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -636,30 +651,10 @@ impl ShellView {
 
         // The shared frame (§4): built from whatever `[groupings]` (plus
         // the `datasets`/`dimensions` docs it validates slots against)
-        // config resolved to. A missing doc just means an empty schema/
-        // dimension set — `(SchemaSpec, Vec<Diagnostic>)` and its
-        // `DerivedDimensions` twin are both `Default`, so `unwrap_or_
-        // default` is a real, valid "nothing configured yet" state, not a
-        // workaround.
+        // config resolved to — see `hot_reload::rebuild_slots`, shared
+        // with `apply_reload`'s own slot rebuild.
         let frame = {
-            let (schema, _) = services
-                .config
-                .doc("datasets")
-                .map(SchemaSpec::from_doc)
-                .unwrap_or_default();
-            let (dims, _) = services
-                .config
-                .doc("dimensions")
-                .map(DerivedDimensions::from_doc)
-                .unwrap_or_default();
-            let (slots, diags) = services
-                .config
-                .doc("groupings")
-                .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
-                .unwrap_or_default();
-            for d in &diags {
-                eprintln!("[groupings] {d}");
-            }
+            let slots = hot_reload::rebuild_slots(&services.config);
             cx.new(|_| Frame::new(slots, user_dir.clone()))
         };
         // A slot saved by a module (`:group save N`) is drained and
@@ -668,6 +663,11 @@ impl ShellView {
         // one place that can do the write).
         cx.observe(&frame, |view, frame, cx| view.on_frame_changed(frame, cx))
             .detach();
+
+        // M8: the docs the data engine actually starts with — see
+        // `sources_baseline`'s field doc.
+        let sources_baseline = services.config.layered_docs("sources").to_vec();
+        let datasets_baseline = services.config.layered_docs("datasets").to_vec();
 
         Self {
             services,
@@ -707,6 +707,8 @@ impl ShellView {
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             restart_required: None,
+            sources_baseline,
+            datasets_baseline,
         }
     }
 

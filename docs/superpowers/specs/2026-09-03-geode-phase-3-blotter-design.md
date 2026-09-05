@@ -226,10 +226,12 @@ The roster is the only place the app knows which modules exist (§9.1).
 `context_stack` pushes the focused occupant's `key_context()` after
 `workspace`. Bindings in the builtin keymap use `blotter && mode ==
 normal` and `blotter && mode == visual`; the engine already resolves
-`Eq` innermost-wins. `dispatch` tries the shell's own arms first, then
-`apply_workspace_action`, then hands an unknown id to the focused
-occupant. Module actions are namespaced `blotter::…` and appear in the
-palette like any other, with their binding shown.
+`Eq` innermost-wins. `dispatch` tries `apply_workspace_action` first,
+then the shell's own arms, then hands an unknown id to the focused
+occupant (correction, 3b final review M16: an earlier draft of this
+section had the order reversed). Module actions are namespaced
+`blotter::…` and appear in the palette like any other, with their
+binding shown.
 
 The builtin keymap gains its first sequences (`gg`, `zc`, `zo`, `za`);
 the status bar already shows pending keystrokes and the which-key
@@ -385,6 +387,16 @@ returning every following tile to its view's own grouping. Unlike
 `mod+N`, which switches workspaces, these are frame-level and flip every
 following tile in every workspace.
 
+Correction (3b final review): under the default `keymap.mod = "ctrl"`,
+the shipped `workspace::switch_1..9` bindings already claim `ctrl+1..9`
+and win — the keymap engine has no notion of "frame" taking priority
+over "workspace" at the same chord, so setting a slot by key is not
+reachable there. In practice a slot is set from the palette (every
+action, including `frame::slot_1..9`, is always reachable there
+regardless of what owns its default chord) or by rebinding the keymap.
+`ctrl+0` → `frame::slot_clear` is unaffected: no `mod+0` binding exists
+to collide with it, so it works as written above.
+
 ### 4.3 The `:` vocabulary
 
 Every command below is a `blotter::` action reachable from the palette
@@ -425,11 +437,16 @@ strip (§6.5), as §4.2 and §4.4 require.
 ### 4.5 Config reload
 
 The shell's reload loop already diffs docs. Views, dimensions and
-groupings are safe changes (§8): the shell replaces the frame's slots,
-emits a `ShellEvent::ConfigReloaded` the app bridge forwards to the data
-thread as `ReplaceViews`, and bumps `config`. A change to `sources` or
-`datasets` sets a status-bar diagnostic "sources changed — restart to
-apply" and does nothing else.
+groupings are safe changes (§8), but they are not all handled the same
+way: a `groupings`/`datasets`/`dimensions` change replaces the frame's
+slots directly — pure presentation, recomputed shell-side from whatever
+schema is on hand, nothing the data thread needs to hear about. Only a
+`views`/`dimensions` change emits `ShellEvent::ConfigReloaded`, which
+the app bridge forwards to the data thread as `ReplaceViews` (correction,
+3b final review: an earlier draft of this section had groupings firing
+the event too). Both kinds of change bump `config`. A change to
+`sources` or `datasets` sets a status-bar diagnostic "sources changed —
+restart to apply" and does nothing else.
 
 ## 5. The data path
 

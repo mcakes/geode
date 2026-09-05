@@ -29,6 +29,35 @@ use super::{ShellEvent, ShellView, docs_equal};
 /// stall the render thread").
 pub(super) const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
+/// Rebuild `GroupingSlots` from whatever `[groupings]` (plus the
+/// `datasets`/`dimensions` docs it validates slots against) a `Config`
+/// resolves to, printing any diagnostics the same way both call sites
+/// did before this was factored out. A missing doc just means an empty
+/// schema/dimension set — `(SchemaSpec, Vec<Diagnostic>)` and its
+/// `DerivedDimensions` twin are both `Default`, so `unwrap_or_default` is
+/// a real, valid "nothing configured yet" state, not a workaround.
+/// Shared (Phase 3c Task 0, deferred 3b cleanup) between `ShellView::new`,
+/// which seeds the frame's initial slots, and `apply_reload`, which
+/// replaces them when `groupings`/`datasets`/`dimensions` changes.
+pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    let (slots, diags) = config
+        .doc("groupings")
+        .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+        .unwrap_or_default();
+    for d in &diags {
+        eprintln!("[groupings] {d}");
+    }
+    slots
+}
+
 impl ShellView {
     /// Apply (or reject) a freshly loaded `Config` (Task 1c-1): rebuild the
     /// keymap and mod alias from it, re-apply the theme only if `[theme]`
@@ -44,14 +73,18 @@ impl ShellView {
     /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
     /// tells the frame a config reload happened and emits `ShellEvent::
     /// ConfigReloaded` for the app bridge to forward to the data thread,
-    /// and a changed `sources`/`datasets` doc sets `restart_required` and
-    /// emits `ShellEvent::RestartRequired`. That restart is about the data
-    /// engine, not the frame: a `datasets` change also counts toward
-    /// `groupings_changed` above, so slot labels — pure presentation,
-    /// recomputed from whatever schema is on hand — are replaced
-    /// immediately either way. What actually needs the restart is the
-    /// data engine itself picking up new source paths or column
-    /// definitions, which this reload never touches.
+    /// and a `sources`/`datasets` doc that disagrees with
+    /// `sources_baseline`/`datasets_baseline` — the docs the data engine
+    /// was actually built from, not merely the previous reload's config —
+    /// sets `restart_required` and emits `ShellEvent::RestartRequired`;
+    /// once the docs agree with that baseline again (M8, 3b final review:
+    /// e.g. the offending edit is reverted) the message is cleared. That
+    /// restart is about the data engine, not the frame: a `datasets`
+    /// change also counts toward `groupings_changed` above, so slot
+    /// labels — pure presentation, recomputed from whatever schema is on
+    /// hand — are replaced immediately either way. What actually needs
+    /// the restart is the data engine itself picking up new source paths
+    /// or column definitions, which this reload never touches.
     ///
     /// Any error-severity diagnostic — from `Config::load` itself, or from
     /// building the keymap against the new config's docs — keeps the
@@ -118,10 +151,23 @@ impl ShellView {
             let groupings_changed =
                 changed("groupings") || changed("datasets") || changed("dimensions");
             let views_changed = changed("views") || changed("dimensions");
-            let restart = ["sources", "datasets"]
-                .into_iter()
-                .filter(|d| changed(d))
-                .collect::<Vec<_>>();
+            // M8 (3b final review): compared against the docs the running
+            // data engine was actually built from
+            // (`sources_baseline`/`datasets_baseline`), not against the
+            // previous reload's config — so reverting a `sources.toml`
+            // edit back to that baseline clears `restart_required` below
+            // instead of leaving a stale message up for the rest of the
+            // session (comparing against the previous reload instead would
+            // report "changed" on the revert too, since the value differs
+            // from what was there a moment ago).
+            let restart = [
+                ("sources", &self.sources_baseline),
+                ("datasets", &self.datasets_baseline),
+            ]
+            .into_iter()
+            .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
 
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
@@ -162,27 +208,7 @@ impl ShellView {
             }
 
             if groupings_changed {
-                let (schema, _) = self
-                    .services
-                    .config
-                    .doc("datasets")
-                    .map(SchemaSpec::from_doc)
-                    .unwrap_or_default();
-                let (dims, _) = self
-                    .services
-                    .config
-                    .doc("dimensions")
-                    .map(DerivedDimensions::from_doc)
-                    .unwrap_or_default();
-                let (slots, diags) = self
-                    .services
-                    .config
-                    .doc("groupings")
-                    .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
-                    .unwrap_or_default();
-                for d in &diags {
-                    eprintln!("[groupings] {d}");
-                }
+                let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
                         cx.notify();
@@ -200,6 +226,11 @@ impl ShellView {
                 let message = format!("{} changed — restart to apply", restart.join(" and "));
                 self.restart_required = Some(message.clone());
                 cx.emit(ShellEvent::RestartRequired(message));
+            } else {
+                // M8: both docs are back at the baseline the running data
+                // engine was built from — the on-disk config no longer
+                // disagrees with what's running, so the message is stale.
+                self.restart_required = None;
             }
         }
 

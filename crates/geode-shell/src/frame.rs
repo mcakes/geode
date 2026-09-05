@@ -103,9 +103,6 @@ impl Frame {
         let Some(previous) = self.previous_scope.take() else {
             return false;
         };
-        if previous == self.scope {
-            return false;
-        }
         self.scope = previous;
         self.versions.scope += 1;
         true

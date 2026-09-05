@@ -782,6 +782,16 @@ impl Render for ShellView {
         // must not appear then. Display-only: this reads `self.matcher`
         // without touching it, so it can never affect what `handle_key_down`
         // does with the next keystroke.
+        //
+        // M10 (3b final review): this same gate also hides `whichkey::
+        // render`'s count row for a *bare* count (e.g. `4` with no chord
+        // typed yet), since a bare count leaves `pending` empty. Spec §3.3
+        // describes the overlay appearing "after a held prefix"; the
+        // reading chosen here is that a bare count alone is not yet a held
+        // prefix — nothing is "held" until a key extends it into an actual
+        // sequence — so the overlay stays hidden and the status bar (a
+        // separate reading: it always has a count to show, held-prefix or
+        // not) is where a bare count surfaces instead.
         let pending = self.matcher.pending();
         let which_key_continuations = (!pending.is_empty()).then(|| {
             whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
