@@ -32,6 +32,21 @@ adds **no timer**: values are as-of the last invalidation — anything that
 redraws the window refreshes it, and an idle shell honestly shows the
 stats from its last painted frame rather than waking up to animate them.
 
+The overlay also shows three requery-latency rows (added in Phase 3b):
+
+- **q p50**: p50 of submit→snapshot latency (query submitted to snapshot
+  delivered to the UI). Measures the median query path across the
+  boundary to DuckDB.
+- **paint p50**: p50 of snapshot→paint latency (snapshot delivered to
+  first painted frame). Measures the median latency from the query pool
+  back to the render thread, through any module's frame-building and
+  into gpui's paint.
+- **requery**: the last completed pair, shown as `q_ms + p_ms` (query
+  latency plus paint latency for the most recent requery to finish).
+
+These rows read `—` until a module records its first requery (Plan 3c).
+`perf::reset` zeroes them along with the frame-time counters.
+
 ## Benchmarks
 
 - `cargo bench -p geode-shell` — criterion over the pure shell cores

@@ -12,6 +12,8 @@ Geode is the everything-tool for an index exotic equity derivatives desk: risk, 
 
 **Phase 3a is done:** `[sources]` is read (`sources.toml`, `SourceSpec::from_doc`), `DataService` owns a discovery scheduler and one ingest runner, and modules reach it through `DataHandle` (`geode_data::handle`). The probe now rides the handle; it is deleted in Phase 3c.
 
+**Phase 3b is done:** the shell now hosts module occupants through the hosting contract (`geode_shell::module`), with one shared `Frame` entity every tile observes, count prefixes in the keymap engine (`KeyContext::counts`), session `tiles` restored from layout, a per-tile command line (`/` and `:` in the `tile` context), slot numbering via `ctrl+0..9` (`ctrl+0` clears a slot; under `keymap.mod = "ctrl"` the shipped `workspace::switch_N` bindings win `ctrl+1..9`, so setting a slot is reached via the palette instead — `ctrl+0` still works, since no `mod+0` binding exists to collide with it), and `RequeryStats` displayed in the perf overlay. Plan 3c (the blotter, `--demo`, probe deletion) follows.
+
 **Sequencing constraint, satisfied by Phase 3a:** `[sources]` landed before the probe's deletion. The probe (`geode-app/src/probe.rs`) now builds its `SourceSpec`s from `sources.toml` when present and from `GEODE_PROBE_DIR` otherwise; Phase 3c deletes it.
 
 **Cold start is on hold pending measurement — read `docs/ingest-cold-start-handoff.md` before touching it.** The 1.87× parallel-staging figure in `docs/perf.md` measures `read_csv` alone, not the real staging path (`read_csv` + `split_by_grain`), so it describes a narrower operation than the change would affect. That handoff also records what implementation hits — chiefly that `staging_raw` and `staging_{grain}` are fixed global names created with `create or replace table`, so concurrent staging would overwrite itself.
@@ -32,7 +34,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warn
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
 cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (112 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (137 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 ```
@@ -69,6 +71,7 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 - Dialogs open through `shell::dialog::open_shell_dialog`, never `window.open_dialog` directly — it's the one standard door that cancels pending keymap sequences and closes an open palette before setting `ShellView`'s own `modal` state. Modals are Geode's own instant, self-owned overlay (backdrop + panel painted directly in `ShellView::render`, palette-style — no animation), not gpui-component's `Dialog`: that component hardwires a 250ms entrance animation with no opt-out at the pinned rev, which read as slow next to the instant palette, so this crate stopped routing through it for its own modals.
 - `geode_demo_data::write_csv` does no quoting/escaping — it relies on all string columns drawing from fixed comma-free vocabularies. Revisit if a vocabulary ever grows free-form values.
 - Release and bench profiles keep debug symbols on purpose (profiling support, spec §7.4).
+- **A tile occupant that tracks its own focus handle takes focus on click; the tile's mouse-down handler re-arms `pending_focus_restore` so the shell's chords survive. Keep it.**
 
 ## gpui skills
 

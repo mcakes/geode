@@ -11,6 +11,7 @@ use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
 use geode_shell::fonts;
 use geode_shell::keymap::build_keymap;
+use geode_shell::module::ModuleRoster;
 use geode_shell::session;
 use geode_shell::shell::{ShellServices, ShellView};
 use geode_shell::theme;
@@ -54,11 +55,12 @@ fn main() {
             // there is no session-side theme re-application step to run
             // here any more.
             if let Some(path) = &services.session_path {
-                let (workspaces, warnings) = session::load(path);
-                for warning in &warnings {
+                let restored = session::load(path);
+                for warning in &restored.warnings {
                     eprintln!("[session] warning: {warning}");
                 }
-                services.workspaces = workspaces;
+                services.workspaces = restored.workspaces;
+                services.restored_tiles = restored.tiles;
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
@@ -76,7 +78,7 @@ fn main() {
                     if let Some(handle) = window.downcast::<Root>() {
                         let _ = handle.update(cx, |root, _window, cx| {
                             if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                                shell.read(cx).save_session();
+                                shell.read(cx).save_session(cx);
                             }
                         });
                     }
@@ -146,6 +148,17 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
 
+    // Modules register their actions before the keymap builds (§3.2);
+    // Plan 3c fills the roster with the blotter. The default kind is
+    // read from `[app] modules.default`, "blotter" when unset.
+    let default_kind = config
+        .get("app", "modules.default")
+        .and_then(|v| v.as_str())
+        .unwrap_or("blotter")
+        .to_string();
+    let roster = ModuleRoster::new(default_kind);
+    roster.register_actions(&mut registry);
+
     let mod_alias = mod_alias_from_config(&config);
     let (keymap, keymap_diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
     for diag in &keymap_diags {
@@ -170,6 +183,8 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
         workspaces: Workspaces::new(),
         theme,
         session_path,
+        roster,
+        restored_tiles: std::collections::BTreeMap::new(),
     };
     (services, desk, user)
 }

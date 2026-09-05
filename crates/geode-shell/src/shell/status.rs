@@ -32,16 +32,22 @@ use crate::keymap::Keystroke;
 /// Fixed height of the status bar, in pixels (spec target: ~26px).
 pub const HEIGHT: f32 = 26.0;
 
-/// Build the status bar: left — pending keystrokes as space-separated text,
-/// then the reload indicator when `reload_message` is `Some` (Task 1c-1: a
-/// danger-toned `config: N error(s) — keeping last good` marker, `None`
-/// when config is healthy); right — the active theme name in
-/// `muted_foreground`. All colors come from `cx.theme()`; no other input is
-/// read, so the same call always renders the same tree for the same
-/// arguments.
+/// Build the status bar: left — the count prefix (§3.3, in the mono face)
+/// when one is in flight, then the pending keystrokes as space-separated
+/// text, then the reload indicator when `reload_message` is `Some` (Task
+/// 1c-1: a danger-toned `config: N error(s) — keeping last good` marker,
+/// `None` when config is healthy), then the restart indicator when
+/// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
+/// reload the frame cannot pick up live, so this asks for a restart in the
+/// same `warning` token the readout's AS OF badge uses); right — the
+/// active theme name in `muted_foreground`. All colors come from
+/// `cx.theme()`; no other input is read, so the same call always renders
+/// the same tree for the same arguments.
 pub fn status_bar(
     pending: &[Keystroke],
+    count: Option<u32>,
     reload_message: Option<&str>,
+    restart_message: Option<&str>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
@@ -53,7 +59,16 @@ pub fn status_bar(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let mut bar = StatusBar::new().flex_none().w_full().h(px(HEIGHT)).left(
+    let mut bar = StatusBar::new().flex_none().w_full().h(px(HEIGHT));
+    if let Some(count) = count {
+        bar = bar.left(
+            div()
+                .font_family(fonts::MONO)
+                .text_color(theme.muted_foreground)
+                .child(format!("{count}")),
+        );
+    }
+    bar = bar.left(
         div()
             .font_family(fonts::MONO)
             .text_color(theme.muted_foreground)
@@ -61,6 +76,14 @@ pub fn status_bar(
     );
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
+    }
+    if let Some(message) = restart_message {
+        bar = bar.left(
+            div()
+                .text_color(theme.warning)
+                .debug_selector(|| "restart-required".to_string())
+                .child(message.to_string()),
+        );
     }
 
     bar.right(

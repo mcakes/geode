@@ -208,6 +208,19 @@ pub struct ShellModal {
 ///    — so calling `cx.propagate()` from our own action would simply hand
 ///    the keystroke on to `Search` right after.)
 ///
+/// 3. **`tab`**, scoped to `"GeodeCommandLine"` (Phase 3 §3.4). The
+///    per-tile command line's own input reuses gpui-component's `Input`
+///    single-line, same as every other field here, so it hits the exact
+///    same `Root`-swallows-`tab` problem bullet 1 fixes for modals — but
+///    the command line is a shell-owned overlay, not a
+///    [`render_modal`] surface, so `"GeodeModal"` never wraps it.
+///    `commandline_view::render` gives the strip its own
+///    `"GeodeCommandLine"` key context for exactly this reclaim, the same
+///    narrow-scope shape as bullet 1 rather than the app-wide shape
+///    bullet 2 falls back to: unlike `ctrl-f`'s dead-weight `Search`
+///    action, `Root`'s Tab cycling is a real affordance the palette's and
+///    dialogs' own inputs still leave alone, so this must not reach them.
+///
 /// Called once from `geode-app`'s `main` (after `gpui_component::init`,
 /// same ordering requirement — later registrations outrank earlier ones)
 /// AND from every test that opens a real modal window
@@ -223,6 +236,7 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModal")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModal")),
         gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
     ]);
 }
 
@@ -290,6 +304,13 @@ pub fn open_shell_dialog_with_key<F>(
     // it, and its exclusive key handling would otherwise still think it
     // owns every keystroke underneath the modal.
     view.close_palette(window, cx);
+    // Cancel an open command line for the identical reason (fix round 1,
+    // finding 1 — `cancel_command_line`'s own doc comment): the modal
+    // branch in `handle_key_down` is checked ahead of the command line's,
+    // so once a modal is open every key goes to it instead, and the line
+    // would otherwise sit there `Some`, still painted, but permanently
+    // deaf to escape/enter/tab.
+    view.cancel_command_line(window, cx);
 
     view.modal = Some(ShellModal {
         title: title.into(),

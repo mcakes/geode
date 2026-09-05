@@ -25,7 +25,7 @@ fn keystrokes_drive_the_tiling_tree() {
     let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
         let ks = parse_keystroke(key, mod_alias).unwrap();
         match matcher.press(&keymap, ks, &stack) {
-            MatchResult::Matched(action) => {
+            MatchResult::Matched { action, .. } => {
                 assert!(
                     apply_workspace_action(ws, &action),
                     "unhandled action {action}"
@@ -109,7 +109,7 @@ fn keystrokes_drive_the_docks() {
     let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
         let ks = parse_keystroke(key, mod_alias).unwrap();
         match matcher.press(&keymap, ks, &stack) {
-            MatchResult::Matched(action) => {
+            MatchResult::Matched { action, .. } => {
                 assert!(
                     apply_workspace_action(ws, &action),
                     "unhandled action {action}"

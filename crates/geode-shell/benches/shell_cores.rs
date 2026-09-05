@@ -279,16 +279,16 @@ fn bench_session(c: &mut Criterion) {
     group.warm_up_time(Duration::from_millis(200));
 
     let ws = realistic_workspaces();
+    let no_tiles = session::TileRecords::new();
     group.bench_function("to_toml_9_workspaces", |b| {
-        b.iter(|| black_box(session::to_toml(black_box(&ws))))
+        b.iter(|| black_box(session::to_toml(black_box(&ws), black_box(&no_tiles))))
     });
 
-    let table = session::to_toml(&ws);
+    let table = session::to_toml(&ws, &no_tiles);
     group.bench_function("from_toml_9_workspaces", |b| {
         b.iter(|| {
-            let (restored, warnings) =
-                session::from_toml(black_box(&table)).expect("round-trip parses");
-            assert!(warnings.is_empty(), "{warnings:?}");
+            let restored = session::from_toml(black_box(&table)).expect("round-trip parses");
+            assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
             black_box(restored)
         })
     });

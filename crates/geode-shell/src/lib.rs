@@ -5,13 +5,16 @@
 //! Dependency rule: this crate never depends on geode-data or on modules.
 
 pub mod actions;
+pub mod commandline;
 pub mod dataprobe;
 pub mod defaults;
 pub mod fonts;
 pub mod fontsize;
+pub mod frame;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod listfilter;
+pub mod module;
 pub mod palette;
 pub mod perf;
 pub mod reload;

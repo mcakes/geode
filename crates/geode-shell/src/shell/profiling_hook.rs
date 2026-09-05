@@ -31,20 +31,22 @@ use crate::actions::ActionId;
 use crate::perf::format_ms;
 
 /// Handle the profiler-feature actions. Called from `ShellView::dispatch`'s
-/// tail for any action id no always-compiled branch claimed; unknown ids
-/// remain a silent no-op, matching `dispatch`'s own contract.
+/// tail for any action id no always-compiled branch claimed. Returns
+/// whether the id was recognised — `dispatch` falls through to the
+/// focused occupant otherwise, exactly as it would with this feature off.
 pub fn dispatch(
     view: &mut ShellView,
     action: &ActionId,
     window: &mut Window,
     cx: &mut Context<ShellView>,
-) {
+) -> bool {
     match action.0.as_str() {
         // Advance gpui's own painted frame overlay through its
         // Hidden → Minimal → Full cycle (it schedules its own redraw).
         "perf::gpui_overlay" => {
             window.cycle_debug_frame_overlay_mode();
             cx.notify();
+            true
         }
         // Dump both measurement layers to stderr: Geode's always-compiled
         // render-interval histogram and gpui's draw/present histograms.
@@ -84,7 +86,8 @@ pub fn dispatch(
                     format_ms(hist.max() / 1_000),
                 );
             }
+            true
         }
-        _ => {}
+        _ => false,
     }
 }

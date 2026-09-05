@@ -982,6 +982,229 @@ run_mutation "view: a format override applies over the kind default" \
   geode-core \
   presentation_is_parsed_per_column_and_defaults_are_per_kind
 
+# ---- keymap counts (Phase 3 §3.3)
+
+run_mutation "matcher: digits count only under a counting context" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '            && stack.last().is_some_and(|c| c.has_flag(COUNTS))' \
+  '            && true' \
+  geode-shell \
+  digits_are_ordinary_keys_outside_a_counting_context
+
+run_mutation "matcher: a leading zero is a key" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '            && (digit != 0 || self.count.is_some())' \
+  '            && true' \
+  geode-shell \
+  a_leading_zero_is_a_key_and_a_later_zero_is_a_digit
+
+run_mutation "matcher: a dead end clears the count" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '        self.pending.clear();
+        self.count = None;
+        MatchResult::NoMatch' \
+  '        self.pending.clear();
+        MatchResult::NoMatch' \
+  geode-shell \
+  a_count_survives_a_pending_sequence_and_dies_with_a_dead_end
+
+run_mutation "matcher: the count is capped" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '                    .min(MAX_COUNT),' \
+  '                    ,' \
+  geode-shell \
+  the_count_is_capped
+
+# ---- grouping slots and the frame (Phase 3 §4)
+
+run_mutation "groupings: an unknown column drops the slot" \
+  crates/geode-core/src/groupings.rs \
+  '            if let Some(unknown) = grouping.iter().find(|c| !known(c)) {' \
+  '            if let Some(unknown) = grouping.iter().find(|c| !known(c) && false) {' \
+  geode-core \
+  an_unknown_column_is_an_error_for_that_slot_only
+
+run_mutation "frame: an empty slot cannot be activated" \
+  crates/geode-shell/src/frame.rs \
+  '            && self.slots.get(n).is_none()' \
+  '            && false' \
+  geode-shell \
+  an_empty_slot_cannot_be_activated
+
+run_mutation "frame: set_scope bumps only the scope counter" \
+  crates/geode-shell/src/frame.rs \
+  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+        self.versions.scope += 1;' \
+  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+        self.versions.scope += 1;
+        self.versions.grouping += 1;' \
+  geode-shell \
+  each_mutation_bumps_exactly_its_own_counter
+
+run_mutation "frame: a vanished active slot is cleared on reload" \
+  crates/geode-shell/src/frame.rs \
+  '        if self
+            .active_slot
+            .is_some_and(|n| self.slots.get(n).is_none())
+        {' \
+  '        if false {' \
+  geode-shell \
+  replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
+
+# ---- module hosting (Phase 3 §3)
+
+run_mutation "hosting: an unknown action reaches the focused occupant with its count" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                o.content.dispatch(action, count, window, cx);' \
+  '                o.content.dispatch(action, None, window, cx);' \
+  geode-shell \
+  a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count
+
+run_mutation "hosting: a closed tile drops its occupant" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        self.occupants.retain(|id, _| all.contains(id));' \
+  '        let _ = &all;' \
+  geode-shell \
+  closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
+
+run_mutation "hosting: leaving the screen is announced" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                o.content.set_visible(false, cx);' \
+  '                let _ = o;' \
+  geode-shell \
+  closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
+
+run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
+  '            let state = restored.as_ref().map(|r| &r.state);' \
+  geode-shell \
+  a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
+
+run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            occupant.content.set_visible(active.contains(id), cx);' \
+  '            occupant.content.set_visible(true, cx);' \
+  geode-shell \
+  an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden
+
+# ---- session tiles (Phase 3 §3.5)
+
+run_mutation "session: a record for a tile not in the layout is dropped" \
+  crates/geode-shell/src/session.rs \
+  '                    if !here.contains(&id) {' \
+  '                    if false {' \
+  geode-shell \
+  a_tile_record_for_an_id_not_in_that_workspace_is_dropped_with_a_warning
+
+run_mutation "session: tile state round-trips" \
+  crates/geode-shell/src/session.rs \
+  '            if !record.state.is_empty() {
+                t.insert(
+                    "state".to_string(),
+                    toml::Value::Table(record.state.clone()),
+                );
+            }' \
+  '' \
+  geode-shell \
+  tiles_round_trip_with_their_kind_and_opaque_state
+
+run_mutation "session: a state-only change alone still flushes" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if !self.session_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty {' \
+  geode-shell \
+  a_module_state_change_alone_flushes_once_with_the_new_state
+
+# ---- command line (Phase 3 §3.4)
+
+run_mutation "commandline: an ambiguous word is refused, never guessed" \
+  crates/geode-shell/src/commandline.rs \
+  '    if candidates.len() == 1 {' \
+  '    if !candidates.is_empty() {' \
+  geode-shell \
+  submit_runs_accepts_or_refuses
+
+run_mutation "commandline: an exact word runs as typed" \
+  crates/geode-shell/src/commandline.rs \
+  '    if typed.is_empty() || candidates.is_empty() || words.iter().any(|w| w == typed) {' \
+  '    if typed.is_empty() || candidates.is_empty() {' \
+  geode-shell \
+  submit_runs_accepts_or_refuses
+
+run_mutation "commandline: escape on a find is a cancel" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            o.content.find(FindEvent::Cancelled, window, cx);' \
+  '            let _ = o;' \
+  geode-shell \
+  slash_streams_find_events_and_escape_cancels
+
+# "commandline: a tile mouse-down cancels an open line (fix round 1)"
+# retired (I1, final review): removing this call is no longer an
+# independently observable behaviour. A tile mouse-down always changes
+# the active workspace's own focused tile away from `command_line.tile`,
+# which the render-time backstop added for I1 (see the two entries just
+# below) now also catches — and, checked directly, `run_until_parked`
+# after `simulate_mouse_down`/`up` already runs that render before
+# control returns to the test, so no assertion (before or after an
+# explicit `window.draw`) can tell "the explicit call ran" apart from
+# "the backstop compensated in the same pass" any more. Confirmed by
+# hand: mutating away *both* this call and the backstop together is what
+# it now takes to fail `a_mouse_down_on_another_tile_cancels_an_open_
+# command_line` — that pairing is exactly what the two entries below
+# already defend. Keeping this one would only ever show `SURVIVED`,
+# which would misstate the situation as an untested gap rather than the
+# deliberate, now-redundant fast path `render`'s own doc comment
+# describes.
+
+run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        c.word = c.word.start..cursor;' \
+  '                        let _ = cursor;' \
+  geode-shell \
+  a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
+
+run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
+  '            false' \
+  geode-shell \
+  switching_workspaces_cancels_an_open_command_line
+
+run_mutation "commandline: losing keyboard focus to another surface cancels an open line (I1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                || !self
+                    .command_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)' \
+  '                || false' \
+  geode-shell \
+  clicking_the_filter_input_cancels_an_open_command_line
+
+# ---- frame keys, the readout, and config reload (Phase 3 §4.2, §4.5)
+
+run_mutation "frame: a sources change is a restart, not a silent apply" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let restart = ["sources", "datasets"]' \
+  '            let restart = ["nonesuch"]' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+run_mutation "frame: a groupings/datasets/dimensions change replaces the frame's slots (fix round 1)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if groupings_changed {' \
+  '            if false {' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+run_mutation "frame: a views/dimensions change reaches the frame and emits ConfigReloaded (fix round 1)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if views_changed {' \
+  '            if false {' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
