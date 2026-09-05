@@ -60,7 +60,12 @@ use geode_core::config::Config;
 /// that tie — a `mod = "ctrl"` user keeps their workspace switcher intact.
 /// The slots are not stranded by this: they stay reachable through the
 /// palette regardless of `mod`, and a user who wants the ctrl+N keys for
-/// slots instead can rebind either side in their own keymap layer.
+/// slots instead can rebind either side in their own keymap layer. Note
+/// the asymmetry this creates under `mod = "ctrl"`: `ctrl+0`
+/// (`frame::slot_clear`) keeps working by key, because no shipped
+/// `mod+0`/`workspace::switch_0` binding exists to collide with it and
+/// win the tie the way `ctrl+1..9` do — so a slot can be cleared by key
+/// but not set, without the palette.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 [bindings.keys]
