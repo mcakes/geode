@@ -55,11 +55,12 @@ fn main() {
             // there is no session-side theme re-application step to run
             // here any more.
             if let Some(path) = &services.session_path {
-                let (workspaces, warnings) = session::load(path);
-                for warning in &warnings {
+                let restored = session::load(path);
+                for warning in &restored.warnings {
                     eprintln!("[session] warning: {warning}");
                 }
-                services.workspaces = workspaces;
+                services.workspaces = restored.workspaces;
+                services.restored_tiles = restored.tiles;
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
@@ -77,7 +78,7 @@ fn main() {
                     if let Some(handle) = window.downcast::<Root>() {
                         let _ = handle.update(cx, |root, _window, cx| {
                             if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                                shell.read(cx).save_session();
+                                shell.read(cx).save_session(cx);
                             }
                         });
                     }

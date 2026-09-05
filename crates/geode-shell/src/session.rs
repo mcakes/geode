@@ -110,17 +110,38 @@ pub const SESSION_CONFIG_VERSION: i64 = 1;
 
 /// A tile's restored occupant kind and opaque module state (Phase 3 §3.5).
 /// Formalised here in Task 3 with `restored_tiles` always empty; Task 4
-/// fills it in from the session file's `[occupants]` table and
+/// fills it in from each workspace's `tiles` table and
 /// `ShellView::ensure_occupants` consumes it as tiles get their occupants.
+/// `state` is whatever the module's `serialize` returned; the shell never
+/// reads inside it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,
     pub state: toml::Table,
 }
 
-/// Serialize `workspaces` into a session TOML table (pure, no I/O — see
-/// [`save`] for the file-writing wrapper).
-pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
+/// Every tile's record, keyed by the raw `TileId` (`u64`) it belongs to —
+/// `BTreeMap` for deterministic iteration (matters for `to_toml`'s written
+/// key order, and for tests comparing round-tripped maps).
+pub type TileRecords = BTreeMap<u64, TileRecord>;
+
+/// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
+/// module record, and any non-fatal warnings accumulated healing either.
+#[derive(Debug)]
+pub struct Restored {
+    pub workspaces: Workspaces,
+    pub tiles: TileRecords,
+    pub warnings: Vec<String>,
+}
+
+/// Serialize `workspaces` and each tile's `tiles` record into a session
+/// TOML table (pure, no I/O — see [`save`] for the file-writing wrapper).
+/// `tiles` may hold a record for an id belonging to any workspace; only
+/// records whose id actually lives in the workspace being written land
+/// under that workspace's `tiles` table — a stale entry (a tile since
+/// closed) is silently dropped, never written to a workspace it doesn't
+/// belong to.
+pub fn to_toml(workspaces: &Workspaces, tiles: &TileRecords) -> toml::Table {
     let mut root = toml::Table::new();
     root.insert(
         "config_version".to_string(),
@@ -193,6 +214,40 @@ pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
         if !docks_table.is_empty() {
             ws_table.insert("docks".to_string(), toml::Value::Table(docks_table));
         }
+
+        // Task 4 (Phase 3 §3.5): a `tiles` table per workspace, keyed by
+        // tile id, module kind plus opaque state. Only ids that actually
+        // belong to this workspace (main tree or any dock) are considered
+        // — a record for an id that isn't here (a closed tile whose
+        // `current_tiles` snapshot hasn't been refreshed yet, or a hand-
+        // edited file) is simply not written; `from_toml` applies the same
+        // membership check symmetrically on the way back in.
+        let mut tiles_table = toml::Table::new();
+        let mut here: Vec<TileId> = tree.tiles();
+        for (_, dock) in workspace.docks().iter() {
+            here.extend(dock.tree().tiles());
+        }
+        for id in here {
+            let Some(record) = tiles.get(&id.0) else {
+                continue;
+            };
+            let mut t = toml::Table::new();
+            t.insert(
+                "module".to_string(),
+                toml::Value::String(record.kind.clone()),
+            );
+            if !record.state.is_empty() {
+                t.insert(
+                    "state".to_string(),
+                    toml::Value::Table(record.state.clone()),
+                );
+            }
+            tiles_table.insert(id.0.to_string(), toml::Value::Table(t));
+        }
+        if !tiles_table.is_empty() {
+            ws_table.insert("tiles".to_string(), toml::Value::Table(tiles_table));
+        }
+
         spaces_table.insert(ix.to_string(), toml::Value::Table(ws_table));
     }
     root.insert("workspaces".to_string(), toml::Value::Table(spaces_table));
@@ -200,21 +255,28 @@ pub fn to_toml(workspaces: &Workspaces) -> toml::Table {
     root
 }
 
-/// Deserialize a session TOML table back into `Workspaces` plus any
-/// non-fatal warnings (pure, no I/O). Tolerant of unknown keys
-/// (only the fields documented at the top of this file are ever read —
-/// notably including a legacy `[extra]` table, e.g. a `theme_mode` key
-/// written by a build before theme changes moved to the user config layer:
-/// it is simply never looked at, so the layout underneath it still loads).
-/// Any structural corruption — a mismatched `config_version` (see
-/// [`SESSION_CONFIG_VERSION`]), a `Split` with a bad arity/ratio-length
-/// mismatch or a non-finite/non-positive ratio (see [`Tree::from_parts`]),
-/// an unparseable node, an out-of-range `active` — collects into the `Err`
-/// variant rather than partially applying; [`load`] treats that as "fresh
-/// start, warn". A dangling `focused`/`fullscreen` reference is healed
-/// silently by `Tree::from_parts`, not an error; a missing `config_version`
-/// is a warning that still lets the rest of the file parse.
-pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<String>> {
+/// Deserialize a session TOML table back into a [`Restored`] (pure, no
+/// I/O). Tolerant of unknown keys (only the fields documented at the top of
+/// this file are ever read — notably including a legacy `[extra]` table,
+/// e.g. a `theme_mode` key written by a build before theme changes moved to
+/// the user config layer: it is simply never looked at, so the layout
+/// underneath it still loads). Any structural corruption — a mismatched
+/// `config_version` (see [`SESSION_CONFIG_VERSION`]), a `Split` with a bad
+/// arity/ratio-length mismatch or a non-finite/non-positive ratio (see
+/// [`Tree::from_parts`]), an unparseable node, an out-of-range `active` —
+/// collects into the `Err` variant rather than partially applying;
+/// [`load`] treats that as "fresh start, warn". A dangling
+/// `focused`/`fullscreen` reference is healed silently by
+/// `Tree::from_parts`, not an error; a missing `config_version` is a
+/// warning that still lets the rest of the file parse.
+///
+/// A `tiles` entry (Phase 3 §3.5, Task 4) is dropped, with a warning, when
+/// its key isn't a valid id, its id isn't a tile in that workspace's
+/// layout (main tree or any dock — a dangling record, e.g. from a tile
+/// closed since the file was written), it isn't a table, it has no
+/// `module`, or its `state` is present but not a table — never itself a
+/// reason to fail the whole session.
+pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
     let mut warnings = Vec::new();
     match table.get("config_version") {
         Some(toml::Value::Integer(v)) if *v == SESSION_CONFIG_VERSION => {}
@@ -248,11 +310,12 @@ pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<S
     };
 
     let mut spaces = BTreeMap::new();
+    let mut tiles = TileRecords::new();
     if let Some(workspaces_value) = table.get("workspaces") {
         match workspaces_value.as_table() {
             Some(workspaces_table) => {
                 for (key, value) in workspaces_table {
-                    match parse_workspace(key, value, &mut warnings) {
+                    match parse_workspace(key, value, &mut warnings, &mut tiles) {
                         Ok((ix, workspace)) => {
                             spaces.insert(ix, workspace);
                         }
@@ -272,13 +335,18 @@ pub fn from_toml(table: &toml::Table) -> Result<(Workspaces, Vec<String>), Vec<S
         Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
     warnings.extend(heal_warnings);
 
-    Ok((workspaces, warnings))
+    Ok(Restored {
+        workspaces,
+        tiles,
+        warnings,
+    })
 }
 
 fn parse_workspace(
     key: &str,
     value: &toml::Value,
     warnings: &mut Vec<String>,
+    out_tiles: &mut TileRecords,
 ) -> Result<(u8, Workspace), String> {
     let ix: u8 = key
         .parse()
@@ -325,6 +393,65 @@ fn parse_workspace(
             .into_iter()
             .map(|w| format!("workspace {ix}: {w}")),
     );
+
+    // Task 4 (Phase 3 §3.5): each tile's module record. Membership is
+    // checked against the *healed* workspace (main tree plus every dock),
+    // not the raw ids this function started from — a duplicate/dangling
+    // claim `Workspace::from_parts` already dropped above must not still
+    // accept a tile record keyed to it.
+    if let Some(tiles_value) = ws_table.get("tiles") {
+        match tiles_value.as_table() {
+            None => warnings.push(format!("workspace {ix}: tiles is not a table; ignored")),
+            Some(tiles_table) => {
+                let mut here: Vec<u64> = workspace.tree().tiles().iter().map(|t| t.0).collect();
+                for (_, dock) in workspace.docks().iter() {
+                    here.extend(dock.tree().tiles().iter().map(|t| t.0));
+                }
+                for (key, value) in tiles_table {
+                    let Ok(id) = key.parse::<u64>() else {
+                        warnings.push(format!(
+                            "workspace {ix}: tile key '{key}' is not an id; ignored"
+                        ));
+                        continue;
+                    };
+                    if !here.contains(&id) {
+                        warnings.push(format!(
+                            "workspace {ix}: tile {id} has a record but is not in the layout; ignored"
+                        ));
+                        continue;
+                    }
+                    let Some(t) = value.as_table() else {
+                        warnings.push(format!("workspace {ix}: tile {id} is not a table; ignored"));
+                        continue;
+                    };
+                    let Some(kind) = t.get("module").and_then(|v| v.as_str()) else {
+                        warnings.push(format!("workspace {ix}: tile {id} has no module; ignored"));
+                        continue;
+                    };
+                    let state = match t.get("state") {
+                        None => toml::Table::new(),
+                        Some(s) => match s.as_table() {
+                            Some(s) => s.clone(),
+                            None => {
+                                warnings.push(format!(
+                                    "workspace {ix}: tile {id} state is not a table; ignored"
+                                ));
+                                continue;
+                            }
+                        },
+                    };
+                    out_tiles.insert(
+                        id,
+                        TileRecord {
+                            kind: kind.to_string(),
+                            state,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     Ok((ix, workspace))
 }
 
@@ -588,8 +715,8 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
 /// `shell::mod`'s `take_dirty_session_write`), which serializes here on the
 /// UI thread and hands the resulting `String` to a background executor for
 /// [`write_atomic`].
-pub fn to_string_pretty(workspaces: &Workspaces) -> Result<String, String> {
-    let table = to_toml(workspaces);
+pub fn to_string_pretty(workspaces: &Workspaces, tiles: &TileRecords) -> Result<String, String> {
+    let table = to_toml(workspaces, tiles);
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
@@ -675,8 +802,8 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 /// UI/background boundary (direct test use; `ShellView`'s best-effort
 /// `on_app_quit` flush, which is a one-shot at shutdown, not a per-keystroke
 /// hot path).
-pub fn save(path: &Path, workspaces: &Workspaces) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces)
+pub fn save(path: &Path, workspaces: &Workspaces, tiles: &TileRecords) -> std::io::Result<()> {
+    let text = to_string_pretty(workspaces, tiles)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -688,8 +815,12 @@ pub fn save(path: &Path, workspaces: &Workspaces) -> std::io::Result<()> {
 /// prints one `[session] warning:` line each, same convention as config/
 /// keymap/theme diagnostics) — a bad session file must never panic or
 /// block startup.
-pub fn load(path: &Path) -> (Workspaces, Vec<String>) {
-    let fresh = |warnings: Vec<String>| (Workspaces::new(), warnings);
+pub fn load(path: &Path) -> Restored {
+    let fresh = |warnings: Vec<String>| Restored {
+        workspaces: Workspaces::new(),
+        tiles: TileRecords::new(),
+        warnings,
+    };
 
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
@@ -703,7 +834,7 @@ pub fn load(path: &Path) -> (Workspaces, Vec<String>) {
     };
 
     match from_toml(&table) {
-        Ok((workspaces, warnings)) => (workspaces, warnings),
+        Ok(restored) => restored,
         Err(errors) => fresh(errors),
     }
 }
@@ -717,13 +848,130 @@ mod tests {
         crate::actions::ActionId(s.to_string())
     }
 
+    /// Two tiles side by side in workspace 1 — the simplest fixture with
+    /// more than one tile to hang a `TileRecord` on. The first
+    /// `split_right` on an empty tree only creates the first tile (nothing
+    /// to split yet); the second actually splits it in two.
+    fn two_tile_workspaces() -> Workspaces {
+        let mut ws = Workspaces::new();
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws
+    }
+
+    // --- tiles (Phase 3 §3.5, Task 4) ------------------------------------
+
+    #[test]
+    fn tiles_round_trip_with_their_kind_and_opaque_state() {
+        let ws = two_tile_workspaces();
+        let ids = ws.active().tree().tiles();
+        let mut tiles = TileRecords::new();
+        let mut state = toml::Table::new();
+        state.insert("view".into(), toml::Value::String("tree".into()));
+        state.insert(
+            "pinned".into(),
+            toml::Value::Array(vec![toml::Value::String("lhu".into())]),
+        );
+        tiles.insert(
+            ids[0].0,
+            TileRecord {
+                kind: "blotter".into(),
+                state,
+            },
+        );
+        tiles.insert(
+            ids[1].0,
+            TileRecord {
+                kind: "blotter".into(),
+                state: toml::Table::new(),
+            },
+        );
+
+        let text = to_string_pretty(&ws, &tiles).unwrap();
+        assert!(
+            text.contains(&format!("[workspaces.1.tiles.{}]", ids[0].0)),
+            "{text}"
+        );
+        assert!(text.contains("module = \"blotter\""), "{text}");
+        assert!(text.contains("view = \"tree\""), "{text}");
+
+        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.tiles, tiles);
+        assert_eq!(restored.workspaces.active().tree().tiles(), ids);
+    }
+
+    #[test]
+    fn a_tile_record_for_an_id_not_in_that_workspace_is_dropped_with_a_warning() {
+        let ws = two_tile_workspaces();
+        let mut tiles = TileRecords::new();
+        tiles.insert(
+            999,
+            TileRecord {
+                kind: "blotter".into(),
+                state: toml::Table::new(),
+            },
+        );
+        let mut table = to_toml(&ws, &tiles);
+        // Force the stray record in under workspace 1 regardless of what
+        // `to_toml` filtered.
+        let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
+        let mut stray = toml::Table::new();
+        stray.insert("module".into(), toml::Value::String("blotter".into()));
+        let mut tiles_table = ws_table
+            .get("tiles")
+            .and_then(|t| t.as_table())
+            .cloned()
+            .unwrap_or_default();
+        tiles_table.insert("999".into(), toml::Value::Table(stray));
+        ws_table.insert("tiles".into(), toml::Value::Table(tiles_table));
+
+        let restored = from_toml(&table).unwrap();
+        assert!(!restored.tiles.contains_key(&999));
+        assert!(
+            restored.warnings.iter().any(|w| w.contains("999")),
+            "{:?}",
+            restored.warnings
+        );
+    }
+
+    #[test]
+    fn a_tile_record_without_a_module_or_with_a_bad_state_is_dropped_with_a_warning() {
+        let ws = two_tile_workspaces();
+        let id = ws.active().tree().tiles()[0].0;
+        let mut table = to_toml(&ws, &TileRecords::new());
+        let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
+        let mut tiles_table = toml::Table::new();
+        let mut no_module = toml::Table::new();
+        no_module.insert("state".into(), toml::Value::Table(toml::Table::new()));
+        tiles_table.insert(id.to_string(), toml::Value::Table(no_module));
+        ws_table.insert("tiles".into(), toml::Value::Table(tiles_table));
+        let restored = from_toml(&table).unwrap();
+        assert!(restored.tiles.is_empty());
+        assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
+    }
+
+    #[test]
+    fn a_session_without_tiles_still_loads_and_writes_no_tiles_table() {
+        // Every pre-Phase-3 session file.
+        let ws = two_tile_workspaces();
+        let text = to_string_pretty(&ws, &TileRecords::new()).unwrap();
+        assert!(!text.contains("tiles"), "{text}");
+        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        assert!(restored.tiles.is_empty());
+    }
+
     // --- to_toml / from_toml round-trip ---------------------------------
 
     #[test]
     fn round_trips_a_fresh_workspaces() {
         let ws = Workspaces::new();
-        let table = to_toml(&ws);
-        let (restored, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws, &TileRecords::new());
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored.active_index(), ws.active_index());
         assert!(restored.active().is_empty());
@@ -740,8 +988,12 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
-        let table = to_toml(&ws);
-        let (restored, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws, &TileRecords::new());
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         assert_eq!(restored.active_index(), 1);
@@ -780,7 +1032,7 @@ mod tests {
         // `from_toml` no longer reads `extra` at all — the layout must
         // still load intact, with the legacy key simply ignored like any
         // other unknown key.
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let mut extra_table = toml::Table::new();
         extra_table.insert(
             "theme_mode".to_string(),
@@ -788,7 +1040,11 @@ mod tests {
         );
         table.insert("extra".to_string(), toml::Value::Table(extra_table));
 
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
@@ -796,7 +1052,7 @@ mod tests {
 
     #[test]
     fn from_toml_tolerates_unknown_keys() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         table.insert(
             "some_future_field".to_string(),
             toml::Value::String("ignored".to_string()),
@@ -813,7 +1069,11 @@ mod tests {
 
     #[test]
     fn from_toml_on_an_empty_table_is_a_fresh_workspace_one_with_a_missing_version_warning() {
-        let (ws, warnings) = from_toml(&toml::Table::new()).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&toml::Table::new()).unwrap();
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
         assert_eq!(warnings.len(), 1);
@@ -914,8 +1174,11 @@ mod tests {
         ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
 
-        let (ws, warnings) =
-            from_toml(&table).expect("dangling focused must be healed, not rejected");
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).expect("dangling focused must be healed, not rejected");
         assert_eq!(
             warnings,
             vec!["missing config_version (assuming 1)".to_string()],
@@ -951,7 +1214,11 @@ mod tests {
             "config_version".to_string(),
             toml::Value::Integer(SESSION_CONFIG_VERSION),
         );
-        let (_, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: _,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
@@ -962,7 +1229,11 @@ mod tests {
         // `from_toml_heals_a_dangling_focused_reference`); this test pins
         // the exact warning wording as its own regression.
         let table = toml::Table::new();
-        let (_, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: _,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert_eq!(
             warnings,
             vec!["missing config_version (assuming 1)".to_string()]
@@ -999,7 +1270,11 @@ mod tests {
     #[test]
     fn load_of_a_missing_file_is_a_fresh_start_with_no_warnings() {
         let dir = tempfile::tempdir().unwrap();
-        let (ws, warnings) = load(&dir.path().join("session.toml"));
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&dir.path().join("session.toml"));
         assert!(warnings.is_empty());
         assert_eq!(ws.active_index(), 1);
         assert!(ws.active().is_empty());
@@ -1010,7 +1285,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "this is [not valid toml").unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert!(!warnings.is_empty());
         assert!(ws.active().is_empty());
     }
@@ -1020,7 +1299,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "active = 99\n").unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert!(!warnings.is_empty());
         assert_eq!(ws.active_index(), 1);
     }
@@ -1030,7 +1313,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "config_version = 99\nactive = 3\n").unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert_eq!(
             ws.active_index(),
             1,
@@ -1048,7 +1335,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         std::fs::write(&path, "active = 2\n").unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert_eq!(
             ws.active_index(),
             2,
@@ -1067,7 +1358,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
 
-        save(&path, &ws).unwrap();
+        save(&path, &ws, &TileRecords::new()).unwrap();
         assert!(path.exists());
         // The atomic-write temp file must not be left behind, whatever its
         // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
@@ -1081,7 +1372,11 @@ mod tests {
             "no *.tmp files should remain in the session directory, found {leftover_tmp_files:?}"
         );
 
-        let (restored, warnings) = load(&path);
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = load(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             restored.active().tree().layout(crate::tiling::Rect::UNIT),
@@ -1093,7 +1388,7 @@ mod tests {
     fn save_does_not_write_a_theme_mode_or_extra_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
-        save(&path, &Workspaces::new()).unwrap();
+        save(&path, &Workspaces::new(), &TileRecords::new()).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("theme_mode"), "{text}");
         assert!(!text.contains("[extra]"), "{text}");
@@ -1103,7 +1398,7 @@ mod tests {
     fn save_creates_the_parent_directory_if_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("session.toml");
-        save(&path, &Workspaces::new()).unwrap();
+        save(&path, &Workspaces::new(), &TileRecords::new()).unwrap();
         assert!(path.exists());
     }
 
@@ -1113,8 +1408,12 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let table = to_toml(&ws);
-        let (mut restored, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws, &TileRecords::new());
+        let Restored {
+            workspaces: mut restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let before_ids: std::collections::HashSet<_> =
@@ -1155,8 +1454,12 @@ mod tests {
     #[test]
     fn round_trips_docks_and_region() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws);
-        let (restored, warnings) = from_toml(&table).unwrap();
+        let table = to_toml(&ws, &TileRecords::new());
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let before = ws.active();
@@ -1193,7 +1496,7 @@ mod tests {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
         let mut ws = Workspaces::new();
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let text = to_string_pretty(&ws).unwrap();
+        let text = to_string_pretty(&ws, &TileRecords::new()).unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
     }
@@ -1201,8 +1504,12 @@ mod tests {
     #[test]
     fn restored_docked_tile_ids_do_not_collide_with_new_allocations() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws);
-        let (mut restored, _) = from_toml(&table).unwrap();
+        let table = to_toml(&ws, &TileRecords::new());
+        let Restored {
+            workspaces: mut restored,
+            warnings: _,
+            ..
+        } = from_toml(&table).unwrap();
         let known: Vec<_> = restored
             .active()
             .tree()
@@ -1230,7 +1537,7 @@ mod tests {
 
     #[test]
     fn from_toml_drops_a_dock_tile_also_present_in_the_tree() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1_text = r#"
             focused = 1
             region = "left"
@@ -1246,7 +1553,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).expect("a duplicate dock claim heals, not fails");
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).expect("a duplicate dock claim heals, not fails");
         assert!(
             warnings.iter().any(|w| w.contains("removing")),
             "{warnings:?}"
@@ -1262,7 +1573,7 @@ mod tests {
 
     #[test]
     fn from_toml_heals_a_region_pointing_at_a_hidden_or_absent_dock() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             focused = 1
             region = "bottom"
@@ -1275,7 +1586,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(!warnings.is_empty(), "{warnings:?}");
         assert_eq!(ws.active().region(), FocusRegion::Main);
     }
@@ -1283,7 +1598,7 @@ mod tests {
     #[test]
     fn from_toml_heals_an_out_of_range_or_nan_dock_size_to_default() {
         for bad in ["size = 0.9", "size = -3.0", "size = nan"] {
-            let mut table = to_toml(&Workspaces::new());
+            let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
             let ws1: toml::Table = format!(
                 r#"
                     [docks.right]
@@ -1296,7 +1611,11 @@ mod tests {
             if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
                 ws_table.insert("1".to_string(), toml::Value::Table(ws1));
             }
-            let (ws, warnings) = from_toml(&table).expect(bad);
+            let Restored {
+                workspaces: ws,
+                warnings,
+                ..
+            } = from_toml(&table).expect(bad);
             assert!(
                 warnings.iter().any(|w| w.contains("size")),
                 "{bad}: {warnings:?}"
@@ -1318,7 +1637,7 @@ mod tests {
         // live: fullscreen blocks focus from entering docks, and mod+f is
         // a no-op while dock-focused). Heals by clearing fullscreen and
         // keeping the dock focus, with a warning.
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             focused = 1
             fullscreen = 1
@@ -1336,7 +1655,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).expect("the contradictory combo heals, never fails");
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).expect("the contradictory combo heals, never fails");
         assert!(
             warnings.iter().any(|w| w.contains("fullscreen")),
             "{warnings:?}"
@@ -1351,12 +1674,16 @@ mod tests {
 
     #[test]
     fn from_toml_heals_an_unknown_region_string_to_main() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("region")),
             "{warnings:?}"
@@ -1368,7 +1695,7 @@ mod tests {
     fn from_toml_tolerates_hostile_dock_shapes_without_failing() {
         // docks not a table; a side not a table; tile negative/non-integer;
         // visible non-bool — every one heals with a warning, none fails.
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             [node]
             kind = "leaf"
@@ -1385,7 +1712,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(warnings.len() >= 2, "{warnings:?}");
         let left = ws.active().docks().get(DockSide::Left);
         assert!(left.tree().is_empty(), "negative tile id dropped");
@@ -1406,7 +1737,11 @@ mod tests {
              [workspaces.1.node]\nkind = \"leaf\"\nid = 1\n",
         )
         .unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
         assert_eq!(ws.active().region(), FocusRegion::Main);
@@ -1434,7 +1769,11 @@ mod tests {
              [workspaces.1.docks.left]\ntile = 2\nvisible = true\nsize = 0.3\n",
         )
         .unwrap();
-        let (ws, warnings) = load(&path);
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = load(&path);
         assert!(
             warnings.is_empty(),
             "legacy tile must load silently: {warnings:?}"
@@ -1453,7 +1792,7 @@ mod tests {
 
     #[test]
     fn a_dock_with_both_node_and_legacy_tile_picks_the_node_with_a_warning() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             [docks.left]
             tile = 9
@@ -1467,7 +1806,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("legacy tile")),
             "{warnings:?}"
@@ -1484,7 +1827,7 @@ mod tests {
         // Dock trees never have fullscreen — a hand-edited `fullscreen`
         // key inside a dock table is ignored (warned), and the dock's
         // tree loads without it.
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             [docks.bottom]
             visible = true
@@ -1499,7 +1842,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("fullscreen")),
             "{warnings:?}"
@@ -1514,7 +1861,7 @@ mod tests {
         // A structurally invalid dock subtree (single-child split) heals
         // to an empty dock with a warning — the workspace's main tree is
         // never discarded over a dock (docks are an adornment).
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -1535,7 +1882,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).expect("a bad dock tree heals, never fails");
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).expect("a bad dock tree heals, never fails");
         assert!(warnings.iter().any(|w| w.contains("dock")), "{warnings:?}");
         assert!(ws.active().docks().get(DockSide::Right).tree().is_empty());
         assert_eq!(
@@ -1551,7 +1902,7 @@ mod tests {
         // AND its right dock tree; tile 2 only in the right dock. The
         // main tree wins, then first dock claim wins; the right dock
         // keeps its unique tile.
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -1580,7 +1931,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert_eq!(
             warnings.iter().filter(|w| w.contains("removing")).count(),
             2,
@@ -1602,7 +1957,7 @@ mod tests {
         // exactly one warning is emitted for the one healed duplicate
         // (the pre-fix all-copies prune deleted both leaves and, walking
         // a pre-removal snapshot, warned twice).
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -1623,7 +1978,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, warnings) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
         assert_eq!(
             warnings.iter().filter(|w| w.contains("removing")).count(),
             1,
@@ -1641,7 +2000,7 @@ mod tests {
 
     #[test]
     fn a_dangling_dock_focused_reference_heals_to_the_first_tile() {
-        let mut table = to_toml(&Workspaces::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -1655,7 +2014,11 @@ mod tests {
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
         }
-        let (ws, _) = from_toml(&table).unwrap();
+        let Restored {
+            workspaces: ws,
+            warnings: _,
+            ..
+        } = from_toml(&table).unwrap();
         assert_eq!(
             ws.active().docks().get(DockSide::Left).tree().focused(),
             Some(TileId(4)),

@@ -20,7 +20,7 @@ pub mod whichkey;
 
 pub use keys::convert_keystroke;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -96,7 +96,7 @@ pub struct ShellServices {
     pub roster: ModuleRoster,
     /// Per-tile module kind and state restored from `session.toml`
     /// (Task 4); consumed as occupants are created.
-    pub restored_tiles: BTreeMap<u64, crate::session::TileRecord>,
+    pub restored_tiles: crate::session::TileRecords,
 }
 
 /// What an in-flight divider drag is resizing (drag-splitters task): a
@@ -440,6 +440,11 @@ pub struct ShellView {
     /// onto the existing poll tick means at most one write per ~500ms
     /// regardless of how many workspace actions fired in that window.
     session_dirty: bool,
+    /// The tile records written by the last flush (or, before the first
+    /// flush, empty), so a module state change — which never sets
+    /// `session_dirty`, that flag tracks the layout only — is still
+    /// noticed by the watcher's tick (Task 4).
+    last_tiles_written: crate::session::TileRecords,
     /// Set by a background path that closed the palette without a `Window`
     /// to restore focus with (today: only `apply_reload`'s palette-
     /// snapshot-changed branch) — see that call site's own comment for the
@@ -669,7 +674,7 @@ impl ShellView {
                 // of the `continue`s below, so it's never skipped by the
                 // reload watcher's own early-outs.
                 let Ok(pending_write) =
-                    this.update(cx, |view, _cx| view.take_dirty_session_write())
+                    this.update(cx, |view, cx| view.take_dirty_session_write(cx))
                 else {
                     return; // window/entity gone; stop polling
                 };
@@ -793,6 +798,7 @@ impl ShellView {
             last_snapshot: reload::Snapshot::default(),
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
+            last_tiles_written: crate::session::TileRecords::new(),
             pending_focus_restore: false,
             divider_drag: None,
             tile_drag: None,
@@ -1265,14 +1271,37 @@ impl ShellView {
             .detach();
     }
 
-    /// If a workspace mutation happened since the last flush, serialize the
-    /// current session state (cheap: `session::to_string_pretty` over a
-    /// handful of small TOML tables — safe to run synchronously here, on
-    /// the UI thread, unlike the actual file write) and clear the dirty
-    /// flag, handing the caller `(path, text)` to write off the UI thread.
-    /// Returns `None` when there's nothing to flush (not dirty, no session
-    /// path configured, or serialization somehow failed — logged as a
-    /// warning either way, never a panic).
+    /// Every non-placeholder occupant's tile record, gathered fresh from
+    /// `serialize` (Task 4, Phase 3 §3.5). A placeholder tile carries no
+    /// module of its own — it exists only until something opens on it —
+    /// so it is never written.
+    fn current_tiles(&self, cx: &App) -> session::TileRecords {
+        self.occupants
+            .iter()
+            .filter(|(_, o)| o.kind != "placeholder")
+            .map(|(id, o)| {
+                (
+                    id.0,
+                    session::TileRecord {
+                        kind: o.kind.to_string(),
+                        state: o.content.serialize(cx),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// If a workspace mutation happened since the last flush, or a live
+    /// occupant's serialized state differs from what was last written
+    /// (Task 4 — a state-only change never sets `session_dirty`, since
+    /// that flag tracks the layout only), serialize the current session
+    /// state (cheap: `session::to_string_pretty` over a handful of small
+    /// TOML tables — safe to run synchronously here, on the UI thread,
+    /// unlike the actual file write) and clear the dirty flag, handing the
+    /// caller `(path, text)` to write off the UI thread. Returns `None`
+    /// when there's nothing to flush (neither dirty, no session path
+    /// configured, or serialization somehow failed — logged as a warning
+    /// either way, never a panic).
     ///
     /// Called from the background watcher's ~500ms tick (`new`) in
     /// production. Tests call it directly instead of driving that timer:
@@ -1281,14 +1310,23 @@ impl ShellView {
     /// so there's no practical way to wait out a real ~500ms poll in a
     /// `#[gpui::test]` — this is the real flush logic either way; the
     /// watcher loop is just what schedules calling it.
-    fn take_dirty_session_write(&mut self) -> Option<(PathBuf, String)> {
-        if !self.session_dirty {
+    fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
+        let tiles = self.current_tiles(cx);
+        // A module state change never sets `session_dirty` (that flag
+        // tracks the layout only), so this compares the freshly-gathered
+        // tiles against what was last written — a state-only change is
+        // still noticed here, on the same tick, without dirtying the
+        // layout flag on every keystroke inside a module.
+        if !self.session_dirty && tiles == self.last_tiles_written {
             return None;
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
-        match session::to_string_pretty(&self.services.workspaces) {
-            Ok(text) => Some((path, text)),
+        match session::to_string_pretty(&self.services.workspaces, &tiles) {
+            Ok(text) => {
+                self.last_tiles_written = tiles;
+                Some((path, text))
+            }
             Err(e) => {
                 eprintln!("[session] warning: failed to serialize session: {e}");
                 None
@@ -1296,23 +1334,24 @@ impl ShellView {
         }
     }
 
-    /// Write the current workspace layout to the session file, if one is
-    /// configured (`ShellServices::session_path`), synchronously and
-    /// unconditionally (ignores `session_dirty` — this is the "flush no
-    /// matter what" path, not the coalesced per-dispatch one). The only
-    /// caller is `main.rs`'s best-effort `on_app_quit` hook: a one-shot at
-    /// shutdown, not a per-keystroke hot path, so a synchronous atomic write
+    /// Write the current workspace layout and every occupant's tile record
+    /// (Task 4) to the session file, if one is configured
+    /// (`ShellServices::session_path`), synchronously and unconditionally
+    /// (ignores `session_dirty` — this is the "flush no matter what" path,
+    /// not the coalesced per-dispatch one). The only caller is `main.rs`'s
+    /// best-effort `on_app_quit` hook: a one-shot at shutdown, not a
+    /// per-keystroke hot path, so a synchronous atomic write
     /// (`session::save`) here is fine — it does not reintroduce the
     /// render-thread stall Task 3 fix round 1 removed from `dispatch`. A
     /// write failure (e.g. an unwritable directory) is a warning line,
     /// never a panic — session persistence is a convenience, not a
     /// correctness requirement (mirrors config's own "bad input is a
     /// warning" philosophy).
-    pub fn save_session(&self) {
+    pub fn save_session(&self, cx: &App) {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
-        if let Err(e) = session::save(path, &self.services.workspaces) {
+        if let Err(e) = session::save(path, &self.services.workspaces, &self.current_tiles(cx)) {
             eprintln!("[session] warning: failed to save session: {e}");
         }
     }
@@ -3190,7 +3229,7 @@ mod tests {
             theme,
             session_path: None,
             roster: crate::module::ModuleRoster::default(),
-            restored_tiles: BTreeMap::new(),
+            restored_tiles: crate::session::TileRecords::new(),
         }
     }
 
@@ -5918,7 +5957,7 @@ mod tests {
             theme,
             session_path: None,
             roster: crate::module::ModuleRoster::default(),
-            restored_tiles: BTreeMap::new(),
+            restored_tiles: crate::session::TileRecords::new(),
         }
     }
 
@@ -6994,7 +7033,7 @@ mod tests {
             theme,
             session_path: None,
             roster: crate::module::ModuleRoster::default(),
-            restored_tiles: BTreeMap::new(),
+            restored_tiles: crate::session::TileRecords::new(),
         }
     }
 
@@ -7768,7 +7807,7 @@ mod tests {
 
         // Invoke the flush path directly — the same two steps the
         // background watcher's ~500ms tick performs in production.
-        let pending = shell.update(&mut cx, |shell, _cx| shell.take_dirty_session_write());
+        let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
         let (path, text) = pending.expect("a dirty session with a configured path must flush");
         session::write_atomic(&path, &text).unwrap();
 
@@ -7802,7 +7841,11 @@ mod tests {
                     .collect()
             });
 
-        let (mut restored, warnings) = session::load(&session_path);
+        let session::Restored {
+            workspaces: mut restored,
+            warnings,
+            ..
+        } = session::load(&session_path);
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let restored_layout: Vec<(u8, Vec<(crate::tiling::TileId, Rect)>)> = restored
@@ -7867,13 +7910,13 @@ mod tests {
 
         assert!(
             shell
-                .update(&mut cx, |shell, _cx| shell.take_dirty_session_write())
+                .update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx))
                 .is_none(),
             "nothing dirty yet — no pending write"
         );
 
         cx.simulate_keystrokes("ctrl-v");
-        let first = shell.update(&mut cx, |shell, _cx| shell.take_dirty_session_write());
+        let first = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
         assert!(
             first.is_some(),
             "the dispatch above must have marked it dirty"
@@ -7881,9 +7924,80 @@ mod tests {
 
         assert!(
             shell
-                .update(&mut cx, |shell, _cx| shell.take_dirty_session_write())
+                .update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx))
                 .is_none(),
             "the dirty flag must be consumed by the first take, not left set"
+        );
+    }
+
+    /// Task 4 (Phase 3 §3.5), two halves of the same contract:
+    /// `current_tiles` reports a live occupant's own kind and whatever its
+    /// `serialize` returns, and a `restored_tiles` record for a tile that
+    /// really is in the restored `Workspaces` reaches that tile's factory
+    /// as `Some(state)` when `ensure_occupants` creates it.
+    #[gpui::test]
+    fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Half 1: a freshly created occupant shows up in `current_tiles`
+        // under its own kind.
+        let (services, _log) = services_with_recorder();
+        let (window, mut vcx) = open_shell(cx, services);
+        vcx.simulate_keystrokes("ctrl-v");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut vcx);
+        let tile = shell.read_with(&vcx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        let tiles = shell.read_with(&vcx, |s, cx| s.current_tiles(cx));
+        assert_eq!(
+            tiles.get(&tile.0).map(|r| r.kind.as_str()),
+            Some("rec"),
+            "{tiles:?}"
+        );
+
+        // Half 2: a hand-built session table restoring one tile (id 1)
+        // with a `tiles` record naming the recorder's own kind — built
+        // through `session::from_toml`, exactly as `main.rs` restores a
+        // real session file — must have its `state` handed to the
+        // recorder's `create` as `Some(...)`.
+        let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new());
+        let ws1: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "rec"
+            [tiles.1.state]
+            last_command = "hello"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+        }
+        let restored = session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        let expected_state = restored.tiles.get(&1).unwrap().state.clone();
+
+        let (mut services2, log2) = services_with_recorder();
+        services2.workspaces = restored.workspaces;
+        services2.restored_tiles = restored.tiles;
+        let (_window2, mut vcx2) = open_shell(cx, services2);
+        vcx2.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            log2.borrow().iter().any(|r| matches!(
+                r,
+                crate::module::recording::Recorded::Created(TileId(1), Some(state))
+                    if *state == expected_state
+            )),
+            "{:?}",
+            log2.borrow()
         );
     }
 
