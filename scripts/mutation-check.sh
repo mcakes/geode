@@ -1081,6 +1081,27 @@ run_mutation "hosting: a fallback factory never sees a mismatched record's state
   geode-shell \
   a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
 
+# ---- session tiles (Phase 3 §3.5)
+
+run_mutation "session: a record for a tile not in the layout is dropped" \
+  crates/geode-shell/src/session.rs \
+  '                    if !here.contains(&id) {' \
+  '                    if false {' \
+  geode-shell \
+  a_tile_record_for_an_id_not_in_that_workspace_is_dropped_with_a_warning
+
+run_mutation "session: tile state round-trips" \
+  crates/geode-shell/src/session.rs \
+  '            if !record.state.is_empty() {
+                t.insert(
+                    "state".to_string(),
+                    toml::Value::Table(record.state.clone()),
+                );
+            }' \
+  '' \
+  geode-shell \
+  tiles_round_trip_with_their_kind_and_opaque_state
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
