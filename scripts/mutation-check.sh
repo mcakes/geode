@@ -41,11 +41,34 @@
 #     earlier abort did exactly that, and the mutation was found committed
 #     to a working tree days later.
 #
-# Usage: zsh scripts/mutation-check.sh [substring]   (from the repo root)
+# Usage: zsh scripts/mutation-check.sh [--changed[=REF]] [substring]
+#   (from the repo root)
 #
 # With a substring, only entries whose name contains it are run — for
 # iterating on the entries you just added. Always finish with an unfiltered
-# run; a filtered one proves nothing about the rest.
+# run; a filtered one proves nothing about the rest. The unfiltered run is
+# what CI and a merge gate should use; --changed is the everyday form
+# while a change is in flight.
+#
+# --changed (default REF: main) skips any entry whose `file` is not among
+# the files changed versus REF, changed in the working tree, or untracked.
+# The changed set is computed once, before the first mutation — this
+# script edits tracked files in place, so computing it later would see
+# its own mutations. A run prints "skipped N entries whose files are
+# unchanged since REF" at the end. --changed and a substring compose:
+# `--changed "pool:"` runs only entries matching both filters.
+#
+# Cost note (measured on this checkout, warm cache): a geode-data entry
+# with a covering test filter ("pool: the tag is echoed, not
+# regenerated", filtered to the one test) took ~3s; the same entry with
+# no filter, running the whole geode-data --lib suite, took ~36s — the
+# filter is why the Phase 3a entries above name one. `.cargo/config.toml`
+# pinning `profile.dev.split-debuginfo = "unpacked"` was also tried, to
+# skip dsymutil packing on macOS: measured with `time` across two warm
+# runs of a single entry, before (~3.1-3.4s) and after (~3.0-3.1s) adding
+# the file — no measurable difference on this toolchain (cargo's macOS
+# default is already "unpacked"), so the file was dropped rather than
+# kept for a change that does nothing here.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -81,7 +104,7 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 
-# run_mutation <name> <file> <from> <to> [package]
+# run_mutation <name> <file> <from> <to> [package] [test_filter]
 #
 # `package` is the crate whose lib tests should see the mutation, and
 # defaults to geode-data. It matters: a mutation in geode-core guarded only
@@ -89,11 +112,53 @@ trap 'cleanup; exit 143' TERM
 # report "caught" on the strength of unrelated tests, or "SURVIVED" while a
 # perfectly good test sits one crate away. Name the crate that holds the
 # test, not the crate that holds the code.
+#
+# `test_filter`, if given, is a `cargo test` name filter for the test(s)
+# expected to catch this mutation, tried before the full crate suite:
+#   - the filtered run fails            -> "caught    $name"
+#   - the filtered run passes and the
+#     full suite then fails             -> "caught*   $name  <-- caught by
+#                                           a test other than '$test_filter'"
+#     (the "caught for the wrong reason" case the header above warns
+#     about, now visible — fix it by naming the right test)
+#   - the filtered run passes and the
+#     full suite also passes            -> "SURVIVED  $name  <-- no test
+#                                           sees this"
+#   - the filter matches zero tests
+#     (cargo prints "running 0 tests")  -> "FILTER    $name  <-- '$test_filter'
+#                                           matches no test", then falls
+#                                           back to the full suite for a
+#                                           plain caught/SURVIVED verdict
+# Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+changed_ref=""
+if [[ "${1:-}" == --changed ]]; then
+  changed_ref="main"
+  shift
+elif [[ "${1:-}" == --changed=* ]]; then
+  changed_ref="${1#--changed=}"
+  shift
+fi
 only="${1:-}"
+skipped=0
+changed_files=""
+if [[ -n "$changed_ref" ]]; then
+  # Computed once, now, before any entry mutates a file — the harness
+  # edits tracked files in place, so computing this later would see its
+  # own mutations rather than the branch's real changes.
+  changed_files=$(
+    git diff --name-only "$changed_ref" --
+    git diff --name-only
+    git ls-files --others --exclude-standard
+  )
+fi
 
 run_mutation() {
-  local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}"
+  local name="$1" file="$2" from="$3" to="$4" pkg="${5:-geode-data}" filter="${6:-}"
   if [[ -n "$only" && "$name" != *"$only"* ]]; then
+    return 0
+  fi
+  if [[ -n "$changed_ref" ]] && ! printf '%s\n' "$changed_files" | grep -qxF "$file"; then
+    skipped=$((skipped + 1))
     return 0
   fi
   cp "$file" "$bak"
@@ -114,10 +179,32 @@ PY
     restore
     return 0
   fi
-  if cargo test -p "$pkg" --lib >"$log" 2>&1; then
-    echo "SURVIVED  $name  <-- no test sees this"
+  if [[ -n "$filter" ]]; then
+    if cargo test -p "$pkg" --lib -- "$filter" >"$log" 2>&1; then
+      if grep -q "running 0 tests" "$log"; then
+        echo "FILTER    $name  <-- '$filter' matches no test"
+        filter=""
+      fi
+    else
+      echo "caught    $name"
+      restore
+      return 0
+    fi
+  fi
+  if [[ -n "$filter" ]]; then
+    # The named test passed despite the mutation; the full suite is the
+    # real verdict, and a failure here means some other test caught it.
+    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+      echo "SURVIVED  $name  <-- no test sees this"
+    else
+      echo "caught*   $name  <-- caught by a test other than '$filter'"
+    fi
   else
-    echo "caught    $name"
+    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+      echo "SURVIVED  $name  <-- no test sees this"
+    else
+      echo "caught    $name"
+    fi
   fi
   restore
 }
@@ -676,19 +763,25 @@ run_mutation "snapshot: text reads a dimension under either era encoding" \
 run_mutation "pool: coalescing is keyed on the tile, not the view" \
   crates/geode-data/src/query/pool.rs \
   '        q.pending.insert(req.key, (id, req));' \
-  '        let key = QueryKey(0); q.pending.insert(key, (id, req));'
+  '        let key = QueryKey(0); q.pending.insert(key, (id, req));' \
+  geode-data \
+  two_keys_on_one_view_do_not_coalesce
 
 run_mutation "pool: the tag is echoed, not regenerated" \
   crates/geode-data/src/query/pool.rs \
   '            tag: req.tag,' \
-  '            tag: 0,'
+  '            tag: 0,' \
+  geode-data \
+  the_tag_and_submission_time_are_echoed
 
 # ---- service (spec §5.1)
 
 run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
   '                    key: r.key,' \
-  '                    key: QueryKey(0),'
+  '                    key: QueryKey(0),' \
+  geode-data \
+  an_outcome_is_addressed_to_the_key_that_asked
 
 run_mutation "service: a grouping override is applied" \
   crates/geode-data/src/service.rs \
@@ -696,12 +789,16 @@ run_mutation "service: a grouping override is applied" \
                     grouping: grouping.clone(),
                     ..spec.clone()
                 };' \
-  '                regrouped = spec.clone();'
+  '                regrouped = spec.clone();' \
+  geode-data \
+  a_grouping_override_regroups_the_named_view
 
 run_mutation "service: replace_views actually replaces" \
   crates/geode-data/src/service.rs \
   '        self.config.views = views;' \
-  '        let _ = views;'
+  '        let _ = views;' \
+  geode-data \
+  replacing_views_makes_a_new_view_queryable_and_reports_a_bad_one
 
 # ---- ingest runner (Phase 3 §2.5)
 
@@ -715,43 +812,57 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
                 return;
             }
             continue;' \
-  '            continue;'
+  '            continue;' \
+  geode-data \
+  an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues
 
 # ---- sources config (Phase 3 §5.2)
 
 run_mutation "sources: an undeclared dataset skips the source" \
   crates/geode-data/src/source/config.rs \
   '                Some(d) if schema.dataset(d).is_some() => d.to_string(),' \
-  '                Some(d) => d.to_string(),'
+  '                Some(d) => d.to_string(),' \
+  geode-data \
+  a_missing_or_unknown_dataset_is_an_error_and_the_source_is_skipped
 
 run_mutation "sources: a pattern without a batch capture is dropped" \
   crates/geode-data/src/source/config.rs \
   '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
-  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),'
+  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),' \
+  geode-data \
+  a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
 # ---- discovery scheduler (Phase 3 §5.3)
 
 run_mutation "scheduler: every source is polled immediately at start" \
   crates/geode-data/src/ingest/scheduler.rs \
   '.map(|i| (Instant::now(), i))' \
-  '.map(|i| (Instant::now() + std::time::Duration::from_secs(15), i))'
+  '.map(|i| (Instant::now() + std::time::Duration::from_secs(15), i))' \
+  geode-data \
+  a_file_that_appears_after_start_is_discovered_and_published
 
 run_mutation "scheduler: the poll re-arms" \
   crates/geode-data/src/ingest/scheduler.rs \
   '        due[0] = (Instant::now() + spec.poll_interval, i);' \
-  '        due[0] = (Instant::now() + std::time::Duration::from_secs(70), i);'
+  '        due[0] = (Instant::now() + std::time::Duration::from_secs(70), i);' \
+  geode-data \
+  an_unchanged_directory_submits_nothing_on_later_polls
 
 run_mutation "scheduler: ready files reach the runner" \
   crates/geode-data/src/ingest/scheduler.rs \
   '                if ready > 0 {
                     ingest.submit(plan);
                 }' \
-  '                let _ = plan;'
+  '                let _ = plan;' \
+  geode-data \
+  a_file_that_appears_after_start_is_discovered_and_published
 
 run_mutation "scheduler: pending-too-long surfaces as health" \
   crates/geode-data/src/ingest/scheduler.rs \
   '            CandidateState::PendingTooLong => Health::PendingTooLong,' \
-  '            CandidateState::PendingTooLong => continue,'
+  '            CandidateState::PendingTooLong => continue,' \
+  geode-data \
+  a_csv_pending_past_its_timeout_is_a_health_event
 
 run_mutation "service: a publish becomes a Published event" \
   crates/geode-data/src/service.rs \
@@ -764,19 +875,25 @@ run_mutation "service: a publish becomes a Published event" \
   '                } => {
                     let _ = (dataset, batch, gen_id, books);
                     true
-                }'
+                }' \
+  geode-data \
+  a_configured_source_is_discovered_loaded_and_announced
 
 # ---- data handle (Phase 3 §5.1)
 
 run_mutation "handle: a refused request is counted" \
   crates/geode-data/src/handle.rs \
   '                    self.dropped.fetch_add(1, Ordering::Relaxed);' \
-  '                    let _ = Ordering::Relaxed;'
+  '                    let _ = Ordering::Relaxed;' \
+  geode-data \
+  a_full_channel_refuses_and_counts_rather_than_blocking
 
 run_mutation "handle: a compile failure is delivered as the key's outcome" \
   crates/geode-data/src/handle.rs \
   '                if let Err(e) = service.query(&params) {' \
-  '                if let Err(e) = service.query(&params) && false {'
+  '                if let Err(e) = service.query(&params) && false {' \
+  geode-data \
+  the_real_service_answers_through_the_sink_and_reports_open_failures
 
 # ---- snapshot index accessors (Phase 3 §5.5)
 
@@ -784,19 +901,22 @@ run_mutation "snapshot: column_index resolves the column it names" \
   crates/geode-core/src/snapshot.rs \
   '        self.meta.iter().position(|m| m.name == name)' \
   '        self.meta.iter().position(|m| m.name == name).map(|i| i.saturating_sub(1))' \
-  geode-core
+  geode-core \
+  index_accessors_agree_with_their_by_name_twins_under_every_type
 
 run_mutation "snapshot: column_at bounds-checks the index" \
   crates/geode-core/src/snapshot.rs \
   '        (idx < batch.num_columns()).then(|| batch.column(idx).as_ref())' \
   '        Some(batch.column(idx.min(batch.num_columns() - 1)).as_ref())' \
-  geode-core
+  geode-core \
+  index_accessors_agree_with_their_by_name_twins_under_every_type
 
 run_mutation "snapshot: misaligned meta is refused" \
   crates/geode-core/src/snapshot.rs \
   '            if names != described {' \
   '            if false && names != described {' \
-  geode-core
+  geode-core \
+  a_meta_list_that_disagrees_with_the_batch_is_refused
 
 # ---- tree index (Phase 3 §5.5)
 #
@@ -829,25 +949,29 @@ run_mutation "tree: a child attaches to the row its prefix names, not to a neigh
   crates/geode-core/src/tree.rs \
   '                        Some(p) => parent[row] = p,' \
   '                        Some(_) => parent[row] = *by_depth[d - 1].last().unwrap(),' \
-  geode-core
+  geode-core \
+  children_are_found_by_prefix_not_by_contiguity
 
 run_mutation "tree: an unplaced row is counted" \
   crates/geode-core/src/tree.rs \
   '                            unplaced += 1;' \
   '                            unplaced += 0;' \
-  geode-core
+  geode-core \
+  a_row_whose_parent_is_missing_attaches_to_the_root_and_is_counted
 
 run_mutation "tree: an unplaced row still appears under the root" \
   crates/geode-core/src/tree.rs \
   '                            parent[row] = roots.first().copied().unwrap_or(NO_PARENT);' \
   '                            parent[row] = NO_PARENT;' \
-  geode-core
+  geode-core \
+  a_row_whose_parent_is_missing_attaches_to_the_root_and_is_counted
 
 run_mutation "tree: children keep row order" \
   crates/geode-core/src/tree.rs \
   '        for (r, &p) in parent.iter().enumerate() {' \
   '        for (r, &p) in parent.iter().enumerate().rev() {' \
-  geode-core
+  geode-core \
+  children_keep_row_order_so_a_declared_sort_is_the_default_sibling_order
 
 # ---- column presentation (Phase 3 §6.2)
 
@@ -855,4 +979,9 @@ run_mutation "view: a format override applies over the kind default" \
   crates/geode-core/src/view.rs \
   '            precision: p.precision.unwrap_or(self.precision),' \
   '            precision: self.precision,' \
-  geode-core
+  geode-core \
+  presentation_is_parsed_per_column_and_defaults_are_per_kind
+
+if [[ -n "$changed_ref" ]]; then
+  echo "skipped $skipped entries whose files are unchanged since $changed_ref"
+fi
