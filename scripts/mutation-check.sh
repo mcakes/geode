@@ -1283,6 +1283,20 @@ run_mutation "expansion: closing one node under open_all leaves its siblings ope
   geode-blotter \
   close_under_open_all_closes_only_that_node
 
+run_mutation "find: fzf narrows and vim does not" \
+  crates/geode-blotter/src/core/find.rs \
+  '            FindStyle::Vim => find_match(texts, self.origin, FindDirection::Forward, query),' \
+  '            FindStyle::Vim => { self.narrowed = Some(filter_matches(texts, query)); find_match(texts, self.origin, FindDirection::Forward, query) }' \
+  geode-blotter \
+  vim_style_jumps_as_typed_commits_and_repeats
+
+run_mutation "cursor: a counted G is a row number" \
+  crates/geode-blotter/src/core/cursor.rs \
+  '                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));' \
+  '                self.row = len.saturating_sub(1); let _ = c;' \
+  geode-blotter \
+  row_motion_is_counted_and_clamped
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
