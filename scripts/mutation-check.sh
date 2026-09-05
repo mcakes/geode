@@ -1102,6 +1102,13 @@ run_mutation "session: tile state round-trips" \
   geode-shell \
   tiles_round_trip_with_their_kind_and_opaque_state
 
+run_mutation "session: a state-only change alone still flushes" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if !self.session_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty {' \
+  geode-shell \
+  a_module_state_change_alone_flushes_once_with_the_new_state
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -7930,6 +7930,75 @@ mod tests {
         );
     }
 
+    /// Fix round 1 (Task 4 review): the headline write trigger —
+    /// `take_dirty_session_write`'s `tiles == self.last_tiles_written`
+    /// half of its guard, not just `session_dirty` — was untested. A
+    /// module state change alone (through the recording module's own
+    /// `command`, the same path its `serialize` reads back) never touches
+    /// `session_dirty`, so only that tiles comparison can notice it; this
+    /// pins that a flush happens exactly once per state change, carrying
+    /// the new state, and that a further call with nothing new returns
+    /// `None` again.
+    #[gpui::test]
+    fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.toml");
+
+        let (mut services, _log) = services_with_recorder();
+        services.session_path = Some(session_path);
+        let (window, mut vcx) = open_shell(cx, services);
+        vcx.simulate_keystrokes("ctrl-v");
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut vcx);
+        let tile = shell.read_with(&vcx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+
+        // Drain the layout-dirty write the split above queued, so what
+        // follows isolates the state-only trigger from the
+        // already-covered layout one.
+        let layout_flush = shell.update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx));
+        assert!(
+            layout_flush.is_some(),
+            "the split must have marked the layout dirty"
+        );
+        assert!(
+            shell
+                .update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx))
+                .is_none(),
+            "nothing changed since that flush — session_dirty is clear and \
+             the occupant's state hasn't moved"
+        );
+
+        // Mutate the occupant's own state through `command` — never
+        // `session_dirty` — exactly the path `serialize` reads back.
+        shell.update_in(&mut vcx, |view, window, cx| {
+            let o = view.occupants.get(&tile).expect("the split created a tile");
+            o.content
+                .command("state changed", window, cx)
+                .expect("the recorder's command always succeeds");
+        });
+
+        let state_flush = shell.update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx));
+        let (_, text) = state_flush.expect(
+            "a state-only change must still flush — `session_dirty` alone \
+             would miss it, which is exactly what this test guards",
+        );
+        assert!(
+            text.contains("last_command = \"state changed\""),
+            "the flushed text must carry the new state: {text}"
+        );
+
+        assert!(
+            shell
+                .update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx))
+                .is_none(),
+            "the state hasn't changed again since the flush above"
+        );
+    }
+
     /// Task 4 (Phase 3 §3.5), two halves of the same contract:
     /// `current_tiles` reports a live occupant's own kind and whatever its
     /// `serialize` returns, and a `restored_tiles` record for a tile that
