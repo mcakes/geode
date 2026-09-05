@@ -1051,6 +1051,29 @@ run_mutation "frame: a vanished active slot is cleared on reload" \
   geode-shell \
   replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
 
+# ---- module hosting (Phase 3 §3)
+
+run_mutation "hosting: an unknown action reaches the focused occupant with its count" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                o.content.dispatch(action, count, window, cx);' \
+  '                o.content.dispatch(action, None, window, cx);' \
+  geode-shell \
+  a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count
+
+run_mutation "hosting: a closed tile drops its occupant" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        self.occupants.retain(|id, _| all.contains(id));' \
+  '        let _ = &all;' \
+  geode-shell \
+  closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
+
+run_mutation "hosting: leaving the screen is announced" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                o.content.set_visible(false, cx);' \
+  '                let _ = o;' \
+  geode-shell \
+  closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
