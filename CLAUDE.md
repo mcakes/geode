@@ -10,7 +10,9 @@ Geode is the everything-tool for an index exotic equity derivatives desk: risk, 
 
 **Phase 3 (blotter) is next, and its prerequisites are done** — `docs/phase-3-prerequisites.md` records what was fixed and the three items deliberately not implemented as written. Phase 3 deletes the throwaway data probe (`geode-shell::dataprobe` + `geode-app/src/probe.rs`, `mod+shift+d`, opt-in via `GEODE_PROBE_DIR`), which exists only because the §7.1 budget is specified through a painted frame and the benchmarks stop at the snapshot. The probe can be run against a working sample config: see `examples/probe-config/datasets.toml`.
 
-**Sequencing constraint: `[sources]` has to land before the probe is deleted.** `sources` is a recognised config doc name in `config/merge.rs`, but nothing reads it — the only place outside `geode-data`'s internals that builds a `SourceSpec` from user configuration is `probe.rs`, from `GEODE_PROBE_DIR`. Delete the probe first and nothing can ingest.
+**Phase 3a is done:** `[sources]` is read (`sources.toml`, `SourceSpec::from_doc`), `DataService` owns a discovery scheduler and one ingest runner, and modules reach it through `DataHandle` (`geode_data::handle`). The probe now rides the handle; it is deleted in Phase 3c.
+
+**Sequencing constraint, satisfied by Phase 3a:** `[sources]` landed before the probe's deletion. The probe (`geode-app/src/probe.rs`) now builds its `SourceSpec`s from `sources.toml` when present and from `GEODE_PROBE_DIR` otherwise; Phase 3c deletes it.
 
 **Cold start is on hold pending measurement — read `docs/ingest-cold-start-handoff.md` before touching it.** The 1.87× parallel-staging figure in `docs/perf.md` measures `read_csv` alone, not the real staging path (`read_csv` + `split_by_grain`), so it describes a narrower operation than the change would affect. That handoff also records what implementation hits — chiefly that `staging_raw` and `staging_{grain}` are fixed global names created with `create or replace table`, so concurrent staging would overwrite itself.
 
@@ -30,7 +32,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warn
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
 cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (89 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (111 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 ```
 
