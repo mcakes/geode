@@ -1255,6 +1255,27 @@ run_mutation "plan: attribution is per depth" \
   geode-blotter \
   attribution_is_per_column_per_depth_and_semi_joined_dimensions_are_named
 
+run_mutation "flatten: only open nodes are descended into" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    if expansion.is_open(path) {' \
+  '    if true {' \
+  geode-blotter \
+  opening_a_node_shows_its_children_in_row_order_and_descends_only_into_open_nodes
+
+run_mutation "flatten: NULL sorts last in both directions" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                if is_null(snapshot, idx, numeric, a) || is_null(snapshot, idx, numeric, b) =>' \
+  '                if false =>' \
+  geode-blotter \
+  a_sort_orders_siblings_within_their_parent_with_null_last
+
+run_mutation "expansion: the depth bound is one past the deepest open node" \
+  crates/geode-blotter/src/core/expansion.rs \
+  '        .saturating_add(1)' \
+  '        .saturating_add(2)' \
+  geode-blotter \
+  the_depth_bound_is_one_past_the_deepest_open_node_capped_at_the_grouping
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

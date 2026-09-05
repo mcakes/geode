@@ -34,7 +34,7 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warn
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
 cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (142 entries) — see below
+zsh scripts/mutation-check.sh                          # mutation harness (145 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 ```
