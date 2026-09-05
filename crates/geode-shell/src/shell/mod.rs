@@ -1229,7 +1229,24 @@ impl ShellView {
     /// root — the command-line twin of [`close_palette`](Self::close_palette).
     fn close_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.command_line = None;
-        self.focus_handle.focus(window, cx);
+        // Only reclaim keyboard focus for the shell root if `command_
+        // input` still holds it (I1, final review). Every established
+        // close path — Enter, Escape, `ctrl+k`, a dialog opening — runs
+        // while that is true, so this was always a no-op guard for them.
+        // It matters for the render-time backstop above (`render`'s own
+        // doc comment, beside `ensure_occupants`'s drag-cancel
+        // neighbours): that path also closes the line when some OTHER
+        // surface — the toolbar's `filter_input` — has already taken
+        // focus for itself, and reclaiming it here would steal it right
+        // back the instant the user clicked it.
+        if self
+            .command_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            self.focus_handle.focus(window, cx);
+        }
         cx.notify();
     }
 
@@ -1248,7 +1265,11 @@ impl ShellView {
     /// stayed `Some` and painted but stopped receiving any of its own
     /// keys the moment a newer surface's branch in `handle_key_down`
     /// started winning ahead of it, or repainted at whatever tile the
-    /// workspace's focus had silently moved to underneath it.
+    /// workspace's focus had silently moved to underneath it. `render`'s
+    /// own generic check (I1, final review — same doc comment location
+    /// as the `pending_focus_restore`/drag-cancel block above it) also
+    /// calls this, as the backstop for any surface that steals the line
+    /// away by some means other than a tile mouse-down.
     fn cancel_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(line) = self.command_line.as_ref() else {
             return;
@@ -1379,20 +1400,29 @@ impl ShellView {
                 commandline::CompletionKey::Accept => {
                     if let Some(word) = c.highlighted_word().map(str::to_string) {
                         let text = self.command_input.read(cx).value().to_string();
-                        let (line, _) = commandline::accept(&text, c.word.clone(), &word);
+                        let (line, cursor) = commandline::accept(&text, c.word.clone(), &word);
+                        // C1 (final review): `c.word` is the range the
+                        // NEXT accept splices into — it must move to
+                        // cover exactly the candidate just written
+                        // (`word.start..cursor`), or a second `tab` uses
+                        // the stale pre-accept range against the
+                        // already-accepted line and corrupts it. Nothing
+                        // else can refresh `word` here: `set_value`
+                        // below emits no `InputEvent::Change` at the
+                        // pinned gpui-component rev (`on_command_line_
+                        // changed`, this struct's only other writer of
+                        // `word`, never runs), which is also why the
+                        // `candidates`/`words`/`highlighted` save-and-
+                        // restore this replaced was provably inert: the
+                        // `refresh` those three fields were being
+                        // defended against never fires from `set_value`
+                        // either.
+                        c.word = c.word.start..cursor;
                         // Cycle on repeat: the next tab highlights the next
                         // candidate over the same typed word.
                         c.step(1);
-                        let keep = std::mem::take(&mut c.candidates);
-                        let keep_words = std::mem::take(&mut c.words);
-                        let highlighted = c.highlighted;
                         self.command_input
                             .update(cx, |input, cx| input.set_value(line, window, cx));
-                        if let Some(c) = self.command_line.as_mut() {
-                            c.candidates = keep;
-                            c.words = keep_words;
-                            c.highlighted = highlighted;
-                        }
                     }
                 }
             }
@@ -1847,6 +1877,18 @@ impl ShellView {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
         self.occupants.retain(|id, _| all.contains(id));
+
+        // Computed here, ahead of the creation loop (I2, final review),
+        // so a newly created occupant can be told its own starting
+        // visibility below — see `TileContent::set_visible`'s doc
+        // comment for the contract this satisfies. The diff loop further
+        // down is unchanged: a tile created active is told `true` twice
+        // (once here, once there, since it is also new to
+        // `self.visible_tiles`) — harmless, and simpler than teaching
+        // that loop to skip ids this loop already announced.
+        let mut active = std::mem::take(&mut self.scratch_active_tiles);
+        self.fill_active_tiles(&mut active);
+
         for id in &all {
             if self.occupants.contains_key(id) {
                 continue;
@@ -1873,12 +1915,17 @@ impl ShellView {
                     cx,
                 ),
             };
+            // I2 (final review): an occupant created outside the active
+            // set (a different workspace, a collapsed dock) was never
+            // told anything — it is never in `self.visible_tiles`, so
+            // the diff loop below never sees it either, and it would
+            // hold whatever it defaults to (visible, per `TileContent::
+            // set_visible`'s doc comment) for the rest of the process.
+            occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
         }
         self.scratch_all_tiles = all;
 
-        let mut active = std::mem::take(&mut self.scratch_active_tiles);
-        self.fill_active_tiles(&mut active);
         for id in self.visible_tiles.difference(&active) {
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
@@ -2714,6 +2761,38 @@ impl Render for ShellView {
             self.cancel_tile_drag();
         }
 
+        // The per-tile command line's own invariant (I1, final review):
+        // "the focused tile IS `command_line.tile`, for as long as the
+        // line is open" holds only while BOTH (a) the active workspace's
+        // own focused tile is still that tile, and (b) `command_input`
+        // still holds keyboard focus. Both tile mouse-down handlers
+        // (`render`, below) already call `cancel_command_line` before
+        // acting, and that remains the fast, explicit path for the two
+        // surfaces that need it — this is the generic backstop for
+        // everything else that can change (a) or (b) without going
+        // through one of those call sites: the sidebar's workspace-switch
+        // mouse-down (`sidebar::sidebar`) changes (a) — a plain, non-
+        // focusable `div`, so keyboard focus never moves — and a click
+        // into the toolbar's `filter_input` changes (b) — a real `Input`
+        // that takes focus on click, with no workspace-state change at
+        // all. One check here, at the top of render (same "reliably
+        // funnels through with fresh state" precedent as `pending_focus_
+        // restore` above), covers both without a third and fourth
+        // `cancel_command_line` call site — and is a no-op on the tile-
+        // mouse-down paths, since they already set `command_line` to
+        // `None` before this runs, so there is no double cancel (no
+        // second `FindEvent::Cancelled`).
+        if self.command_line.as_ref().is_some_and(|line| {
+            self.services.workspaces.active().focused_tile() != Some(line.tile)
+                || !self
+                    .command_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+        }) {
+            self.cancel_command_line(window, cx);
+        }
+
         // Apply the UI font size (see the `fontsize` module doc): the rem
         // size scales every rem-based text size in the shell. Guarded so
         // the setter only runs on an actual change, not every frame.
@@ -3052,14 +3131,23 @@ impl Render for ShellView {
                                 // command line first, unconditionally
                                 // (fix round 1, finding 2 —
                                 // `cancel_command_line`'s own doc
-                                // comment): a mouse click is the only way
-                                // the workspace's focused tile can change
-                                // while the line is open (every keystroke
-                                // is intercepted ahead of the matcher),
-                                // so this is what keeps "the focused tile
-                                // IS the line's tile, whenever it's open"
-                                // an invariant — see the comment where the
-                                // strip is painted, below.
+                                // comment): this is the fast, explicit
+                                // path for the one focus-stealing surface
+                                // that is itself a tile click. The
+                                // render-time check (I1, final review —
+                                // see the comment just above
+                                // `ensure_occupants`'s drag-cancel
+                                // neighbours) is the generic backstop
+                                // that also covers surfaces that are NOT
+                                // a tile mouse-down (the sidebar's
+                                // workspace switch, the toolbar's filter
+                                // field) — this call just means a tile
+                                // click doesn't wait a frame for that
+                                // backstop to notice. Together they keep
+                                // "the focused tile IS the line's tile,
+                                // whenever it's open" an invariant — see
+                                // the comment where the strip is painted,
+                                // below.
                                 view.cancel_command_line(window, cx);
                                 if view.try_arm_tile_drag(id, event, cx) {
                                     return;
@@ -3588,17 +3676,23 @@ impl Render for ShellView {
             // rather than by looking up `self.command_line.tile`'s own
             // rect. That is only correct because "the focused tile IS
             // `command_line.tile`, for as long as the line is open" is an
-            // invariant (fix round 1, finding 2), not a coincidence:
-            // keyboard input can never change which tile is focused while
-            // the line is open (the command-line branch in
+            // invariant, not a coincidence — but (I1, final review) a
+            // tile mouse-down is NOT the only other way it could move:
+            // keyboard input can't (the command-line branch in
             // `handle_key_down` intercepts every key ahead of the matcher
-            // and every workspace action), so a tile mouse-down is the
-            // only other way focus moves — and both tile mouse-down
+            // and every workspace action), and both tile mouse-down
             // handlers (tree and dock, above) cancel an open command line
-            // before acting on the click, so the invariant holds instead
-            // of the strip silently repainting under whichever tile the
-            // click just focused. Painted only while both a line is open
-            // AND that tile still has a rect this frame (a tile can close
+            // before acting on their click — but the sidebar's
+            // workspace-switch mouse-down changes the active workspace's
+            // own focused tile without touching either of those, and a
+            // click into the toolbar's `filter_input` steals keyboard
+            // focus without touching the workspace at all. The generic
+            // check at the top of render (see its own doc comment, just
+            // above `ensure_occupants`'s drag-cancel neighbours) closes
+            // both, so by the time this runs `command_line` is `None`
+            // whenever the tile it named is no longer the workspace's
+            // focused one. Painted only while both a line is open AND
+            // that tile still has a rect this frame (a tile can close
             // out from under an open line — `ensure_occupants` above
             // already drops the occupant; `handle_command_line_key`'s own
             // `None` arms handle the same race for dispatch, this is
@@ -3925,6 +4019,49 @@ mod tests {
         );
     }
 
+    /// C1, final review: a second `tab` used to corrupt the line, because
+    /// `CommandLine::word` was only ever refreshed by
+    /// `on_command_line_changed` (which `InputEvent::Change` drives), and
+    /// the Accept branch's `set_value` emits no `Change` at the pinned
+    /// gpui-component rev — so the *second* accept spliced the new
+    /// candidate into the byte range the *first* accept had already made
+    /// stale. Both `delta01` and `gamma01` match "a01" (the branch's own
+    /// fixture — see `RecordingFactory::new`), so this exercises the
+    /// two-candidate cycle the single-tab tests never reach a second time.
+    #[gpui::test]
+    fn a_second_tab_cycles_the_completion_instead_of_corrupting_the_line(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, _log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.simulate_input("sort a01");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let line = shell.read_with(&cx, |s, cx| s.command_input.read(cx).value().to_string());
+        assert_eq!(line, "sort delta01", "first tab accepts the top candidate");
+
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let line = shell.read_with(&cx, |s, cx| s.command_input.read(cx).value().to_string());
+        assert_eq!(
+            line, "sort gamma01",
+            "second tab cycles cleanly to the next candidate — a stale \
+             `c.word` would instead splice into the wrong range and \
+             produce \"sort gamma01ta01\""
+        );
+    }
+
     #[gpui::test]
     fn an_ambiguous_enter_and_a_failing_command_show_inline_and_stay_open(
         cx: &mut gpui::TestAppContext,
@@ -4199,6 +4336,126 @@ mod tests {
         );
     }
 
+    /// I1, final review: the sidebar's workspace-switch mouse-down
+    /// (`sidebar::sidebar`) dispatches `workspace::switch_N` directly —
+    /// there is no sidebar-click precedent to imitate instead, so this
+    /// dispatches the same action the real mouse-down does, the way
+    /// `switching_away_and_back_within_one_frame_voids_the_drop` already
+    /// does for the identical reason. Switching workspaces changes which
+    /// tile the active workspace considers focused without ever touching
+    /// the command line or moving keyboard focus, so nothing in the
+    /// pre-fix code cancelled the line: the strip kept painting over the
+    /// OLD workspace's tile while `enter` would have run the line against
+    /// a tile the switch just left. The render-time backstop (see the
+    /// comment beside `ensure_occupants`'s drag-cancel neighbours in
+    /// `render`) is what closes this.
+    #[gpui::test]
+    fn switching_workspaces_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "line open before the switch"
+        );
+
+        let shell = shell_of(&window, &mut cx);
+        cx.update(|window, cx| {
+            shell.update(cx, |shell, cx| {
+                shell.dispatch(
+                    &ActionId("workspace::switch_2".to_string()),
+                    None,
+                    window,
+                    cx,
+                );
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        // The direct state check, not just the painted strip: workspace 2
+        // has no tile of its own, so `focused_rect` would be `None` there
+        // regardless of whether the line was actually cancelled — the
+        // strip's absence alone cannot isolate this mutation from "there
+        // is nowhere to paint it this frame".
+        assert!(
+            shell.read_with(&cx, |s, _| s.command_line.is_none()),
+            "switching workspaces should have cancelled the open command line"
+        );
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "and the strip should not be painted either"
+        );
+        assert_eq!(
+            shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+            2,
+            "the switch itself still happened"
+        );
+        assert!(
+            log.borrow().iter().all(|r| !matches!(
+                r,
+                crate::module::recording::Recorded::Command(..)
+                    | crate::module::recording::Recorded::Find(..)
+            )),
+            "a Command prompt's cancel is silent: {:?}",
+            log.borrow()
+        );
+    }
+
+    /// I1, final review, the other half: a click into the toolbar's
+    /// `filter_input` steals keyboard focus from `command_input` without
+    /// touching the workspace at all — the opposite failure shape from
+    /// `switching_workspaces_cancels_an_open_command_line`'s above, and
+    /// the other arm of the same render-time backstop's `||`. Focuses
+    /// `filter_input`'s handle directly, the same real path
+    /// `escape_in_the_filter_input_returns_focus_to_the_shell_root`
+    /// already uses instead of a pixel-coordinate click.
+    #[gpui::test]
+    fn clicking_the_filter_input_cancels_an_open_command_line(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "line open before the filter is focused"
+        );
+
+        let shell = shell_of(&window, &mut cx);
+        let filter_input = shell.read_with(&cx, |s, _| s.filter_input.clone());
+        let filter_focus = filter_input.read_with(&cx, |state, cx| state.focus_handle(cx));
+        cx.update(|window, cx| filter_focus.focus(window, cx));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "focusing the filter input should have cancelled the open command line"
+        );
+        assert!(
+            cx.update(|window, _| filter_focus.is_focused(window)),
+            "the filter still took focus"
+        );
+        assert!(
+            log.borrow().iter().all(|r| !matches!(
+                r,
+                crate::module::recording::Recorded::Command(..)
+                    | crate::module::recording::Recorded::Find(..)
+            )),
+            "a Command prompt's cancel is silent: {:?}",
+            log.borrow()
+        );
+    }
+
     #[gpui::test]
     fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(
         cx: &mut gpui::TestAppContext,
@@ -4240,6 +4497,73 @@ mod tests {
                 |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
             ),
             "the fallback factory got no state: {:?}",
+            log.borrow()
+        );
+    }
+
+    /// I2, final review: `fill_all_tiles` walks every workspace, so the
+    /// FIRST render creates an occupant for a tile in an inactive
+    /// workspace too — restored here via `session::from_toml`, the same
+    /// real path `current_tiles_reflects_live_occupants_and_restored_
+    /// state_reaches_the_factory` above builds. Before the fix, only
+    /// tiles in the *active* set ever got a `set_visible` call at all;
+    /// an occupant created outside it heard nothing, ever. `RecordingFactory`
+    /// does not default a fresh occupant to anything — the assertion
+    /// below is only meaningful because `set_visible` is required to be
+    /// called at creation time, per its own doc comment's contract.
+    #[gpui::test]
+    fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new());
+        // Workspace 1 (the default active one) stays empty. Workspace 2
+        // gets one tile, restored with the recorder's own kind — this is
+        // the occupant that is created on the very first render while
+        // workspace 1, not 2, is active.
+        let ws2: toml::Table = r#"
+            focused = 1
+            [node]
+            kind = "leaf"
+            id = 1
+            [tiles.1]
+            module = "rec"
+        "#
+        .parse()
+        .unwrap();
+        if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+            ws_table.insert("2".to_string(), toml::Value::Table(ws2));
+        }
+        let restored = session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(
+            restored.workspaces.active_index(),
+            1,
+            "sanity: workspace 1, not 2, is active"
+        );
+
+        let (mut services, log) = services_with_recorder();
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        let (_window, mut cx) = open_shell(cx, services);
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        assert!(
+            log.borrow().iter().any(|r| matches!(
+                r,
+                crate::module::recording::Recorded::Visible(TileId(1), false)
+            )),
+            "an occupant created outside the active workspace must be told \
+             it is hidden on its first render: {:?}",
+            log.borrow()
+        );
+        assert!(
+            log.borrow().iter().all(|r| !matches!(
+                r,
+                crate::module::recording::Recorded::Visible(TileId(1), true)
+            )),
+            "it must never have been told the opposite: {:?}",
             log.borrow()
         );
     }

@@ -1081,6 +1081,13 @@ run_mutation "hosting: a fallback factory never sees a mismatched record's state
   geode-shell \
   a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
 
+run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            occupant.content.set_visible(active.contains(id), cx);' \
+  '            occupant.content.set_visible(true, cx);' \
+  geode-shell \
+  an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden
+
 # ---- session tiles (Phase 3 §3.5)
 
 run_mutation "session: a record for a tile not in the layout is dropped" \
@@ -1138,6 +1145,31 @@ run_mutation "commandline: a tile mouse-down cancels an open line (fix round 1)"
   '                                let _ = window;' \
   geode-shell \
   a_mouse_down_on_another_tile_cancels_an_open_command_line
+
+run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        c.word = c.word.start..cursor;' \
+  '                        let _ = cursor;' \
+  geode-shell \
+  a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
+
+run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
+  '            false' \
+  geode-shell \
+  switching_workspaces_cancels_an_open_command_line
+
+run_mutation "commandline: losing keyboard focus to another surface cancels an open line (I1, final review)" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                || !self
+                    .command_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)' \
+  '                || false' \
+  geode-shell \
+  clicking_the_filter_input_cancels_an_open_command_line
 
 # ---- frame keys, the readout, and config reload (Phase 3 §4.2, §4.5)
 

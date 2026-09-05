@@ -45,6 +45,17 @@ pub trait TileContent {
     /// A query result addressed to this tile (§5.1).
     fn deliver(&self, outcome: QueryOutcome, window: &mut Window, cx: &mut App);
     /// Hidden tiles may drop subscriptions; shown tiles requery if stale.
+    ///
+    /// **Contract (I2, final review):** an occupant is told its
+    /// visibility on the first render after `ModuleFactory::create`
+    /// returns it, whatever that visibility is — `ShellView::
+    /// ensure_occupants` calls this once, immediately, with the tile's
+    /// membership in the active workspace's visible set. Until that call
+    /// arrives, a fresh occupant must treat itself as hidden: it is
+    /// created for every tile in every workspace and dock on first
+    /// render (`fill_all_tiles`), most of them off-screen, and holding
+    /// live subscriptions for all of them until the shell speaks would be
+    /// exactly the resource leak this method exists to prevent.
     fn set_visible(&self, visible: bool, cx: &mut App);
     /// State for `session.toml` (§3.5); stored opaquely by the shell.
     fn serialize(&self, cx: &App) -> toml::Table;
@@ -62,6 +73,13 @@ pub trait ModuleFactory {
     /// Runs once, before the keymap builds — `build_keymap` drops any
     /// binding whose action is unregistered.
     fn register_actions(&self, registry: &mut ActionRegistry);
+    /// Build a fresh occupant for `tile`. **Contract (I2, final
+    /// review):** the occupant does not yet know whether it is on
+    /// screen — `TileContent::set_visible`'s own doc comment states the
+    /// other half: the shell announces that on the first render after
+    /// this call returns. A factory whose occupant does anything
+    /// screen-dependent (subscribing, requerying) before that first
+    /// `set_visible` call should assume it is hidden.
     fn create(
         &self,
         tile: TileId,
