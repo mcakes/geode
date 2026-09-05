@@ -1346,6 +1346,47 @@ run_mutation "commands: a completions cursor mid-character is clamped to a bound
   geode-blotter \
   completions_clamp_a_cursor_inside_a_multibyte_char
 
+run_mutation "delegate: the cursor follows its node across a new snapshot" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
+  '            let _ = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
+  geode-blotter \
+  applying_a_snapshot_builds_the_plan_flattens_and_keeps_the_cursor_node
+
+run_mutation "delegate: a regroup with a different grouping rebuilds the plan" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(p) => p.grouping != grouping || !p.same_columns(&snapshot),' \
+  '            Some(_p) => false,' \
+  geode-blotter \
+  a_regroup_prunes_expansion_and_rebuilds_the_plan
+
+run_mutation "delegate: narrowed rows filter what is shown" \
+  crates/geode-blotter/src/delegate.rs \
+  '                    .filter(|r| rows.contains(&(*r as usize))),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  '                    .filter(|_r| true),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  geode-blotter \
+  narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
+run_mutation "delegate: narrowing invalidates the cache" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cursor.clamp(self.shown.len(), cols);
+        self.cache.invalidate();
+    }' \
+  '        self.cursor.clamp(self.shown.len(), cols);
+    }' \
+  geode-blotter \
+  narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
