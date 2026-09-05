@@ -1360,22 +1360,48 @@ run_mutation "delegate: a regroup with a different grouping rebuilds the plan" \
   geode-blotter \
   a_regroup_prunes_expansion_and_rebuilds_the_plan
 
-run_mutation "delegate: narrowed rows filter what is shown" \
+run_mutation "delegate: narrowed positions actually filter what is shown" \
   crates/geode-blotter/src/delegate.rs \
-  '                    .filter(|r| rows.contains(&(*r as usize))),
+  '            Some(positions) => self.shown.extend(
+                positions
+                    .iter()
+                    .filter_map(|&i| self.visible.get(i).copied()),
             ),
         }
     }
 
     pub fn set_narrowed' \
-  '                    .filter(|_r| true),
-            ),
+  '            Some(_positions) => self.shown.extend_from_slice(&self.visible),
         }
     }
 
     pub fn set_narrowed' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
+run_mutation "delegate: narrowed values are positions into visible, not row ids" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(positions) => self.shown.extend(
+                positions
+                    .iter()
+                    .filter_map(|&i| self.visible.get(i).copied()),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  '            Some(positions) => self.shown.extend(
+                self.visible
+                    .iter()
+                    .copied()
+                    .filter(|r| positions.contains(&(*r as usize))),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  geode-blotter \
+  narrowing_uses_positions_into_visible_not_row_ids_even_when_they_differ
 
 run_mutation "delegate: narrowing invalidates the cache" \
   crates/geode-blotter/src/delegate.rs \
@@ -1386,6 +1412,58 @@ run_mutation "delegate: narrowing invalidates the cache" \
     }' \
   geode-blotter \
   narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
+run_mutation "delegate: apply_snapshot prunes expansion to the new grouping" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.expansion.prune_to(grouping.len());' \
+  '        let _ = grouping.len();' \
+  geode-blotter \
+  a_regroup_to_a_shallower_grouping_prunes_a_path_deeper_than_it_can_reach
+
+run_mutation "delegate: apply_snapshot invalidates the cache even without narrowing" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.cache.invalidate();
+    }' \
+  '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+    }' \
+  geode-blotter \
+  apply_snapshot_invalidates_the_cache_even_without_narrowing
+
+run_mutation "delegate: any_determined reflects the whole cached window" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cache
+            .set_window(window.clone(), cols, |shown_row, col| {
+                let row = *shown.get(shown_row)? as usize;
+                cell(snapshot, plan, row, col)
+            });
+        // Scanned over the *whole* current window, not just the rows
+        // this call'"'"'s `fill` closure actually ran for: `set_window`
+        // keeps overlapping rows without re-invoking `fill`, so a row
+        // that entered on an earlier call and stayed cached must still
+        // be able to hold the flag up after a scroll that brings in
+        // nothing but non-determined rows.
+        let determined_window = self.cache.window();
+        self.any_determined = determined_window.into_iter().any(|row: usize| {
+            (0..cols).any(|col| {
+                self.cache
+                    .get(row, col)
+                    .is_some_and(|c| c.attribution == Attribution::DeterminedNonAdditive)
+            })
+        });' \
+  '        let mut any_determined = false;
+        self.cache
+            .set_window(window.clone(), cols, |shown_row, col| {
+                let row = *shown.get(shown_row)? as usize;
+                let c = cell(snapshot, plan, row, col)?;
+                if c.attribution == Attribution::DeterminedNonAdditive {
+                    any_determined = true;
+                }
+                Some(c)
+            });
+        self.any_determined = any_determined;' \
+  geode-blotter \
+  any_determined_reflects_the_whole_window_not_just_newly_entered_rows
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
