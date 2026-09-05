@@ -14,30 +14,39 @@ pub type Path = Vec<Option<String>>;
 #[derive(Debug, Default, Clone)]
 pub struct Expansion {
     open: HashSet<Path>,
-    /// `zR`: every materialised node is open until `close_all`.
+    /// Consulted only while `all` is set: nodes `zc`'d shut after `zR`.
+    /// Vim closes just the named fold and leaves the rest of `zR` open
+    /// (spec §6.1), so "all open" needs its own carve-out set rather
+    /// than degrading to "all closed" the moment one node is closed.
+    closed: HashSet<Path>,
+    /// `zR`: every materialised node is open until `close_all`, except
+    /// what `closed` names.
     all: bool,
 }
 
 impl Expansion {
     pub fn is_open(&self, path: &[Option<String>]) -> bool {
-        self.all || self.open.contains(path)
+        if self.all {
+            !self.closed.contains(path)
+        } else {
+            self.open.contains(path)
+        }
     }
 
     pub fn open(&mut self, path: Path) -> bool {
-        !self.all && self.open.insert(path)
+        if self.all {
+            self.closed.remove(&path)
+        } else {
+            self.open.insert(path)
+        }
     }
 
     pub fn close(&mut self, path: &[Option<String>]) -> bool {
         if self.all {
-            // Closing one node under "all open" means: everything else
-            // stays open, this one closes. Materialising that exactly
-            // needs the tree, which this set does not have — in
-            // practice `zM` then `zo` is what users do. Keep it simple:
-            self.all = false;
-            self.open.clear();
-            return true;
+            self.closed.insert(path.to_vec())
+        } else {
+            self.open.remove(path)
         }
-        self.open.remove(path)
     }
 
     /// `true` when the node is open afterwards.
@@ -53,11 +62,14 @@ impl Expansion {
 
     pub fn open_all(&mut self) {
         self.all = true;
+        self.open.clear();
+        self.closed.clear();
     }
 
     pub fn close_all(&mut self) {
         self.all = false;
         self.open.clear();
+        self.closed.clear();
     }
 
     /// The deepest open node's depth; `usize::MAX` under `open_all`.
@@ -71,6 +83,7 @@ impl Expansion {
     /// After a regroup, paths deeper than the new grouping cannot exist.
     pub fn prune_to(&mut self, grouping_len: usize) {
         self.open.retain(|p| p.len() <= grouping_len);
+        self.closed.retain(|p| p.len() <= grouping_len);
     }
 }
 
@@ -138,6 +151,23 @@ mod tests {
         e.close_all();
         assert!(!e.is_open(&p(&[Some("anything")])));
         assert_eq!(e.deepest_open_depth(), 0);
+    }
+
+    #[test]
+    fn close_under_open_all_closes_only_that_node() {
+        // vim's own behaviour: `zR` then `zc` on one fold closes just
+        // that fold, not every fold `zR` opened (spec §6.1).
+        let mut e = Expansion::default();
+        e.open_all();
+        assert!(e.close(&p(&[Some("L1")])));
+        assert!(!e.is_open(&p(&[Some("L1")])));
+        assert!(e.is_open(&p(&[Some("L2")])), "a sibling stays open");
+        assert!(!e.close(&p(&[Some("L1")])), "already closed");
+        assert!(e.open(p(&[Some("L1")])), "reopens under all");
+        assert!(e.is_open(&p(&[Some("L1")])));
+        e.close_all();
+        assert!(!e.is_open(&p(&[Some("L1")])));
+        assert!(!e.is_open(&p(&[Some("L2")])));
     }
 
     #[test]

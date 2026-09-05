@@ -1276,6 +1276,13 @@ run_mutation "expansion: the depth bound is one past the deepest open node" \
   geode-blotter \
   the_depth_bound_is_one_past_the_deepest_open_node_capped_at_the_grouping
 
+run_mutation "expansion: closing one node under open_all leaves its siblings open" \
+  crates/geode-blotter/src/core/expansion.rs \
+  '            !self.closed.contains(path)' \
+  '            true' \
+  geode-blotter \
+  close_under_open_all_closes_only_that_node
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
