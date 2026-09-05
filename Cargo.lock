@@ -2572,6 +2572,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-blotter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "gpui",
+ "gpui-component",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "geode-core"
 version = "0.1.0"
 dependencies = [
