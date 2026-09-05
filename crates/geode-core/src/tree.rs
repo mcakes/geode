@@ -16,8 +16,19 @@
 //! with NULL as its own token, so a blanked ENUM value (P2 §3.6) is a
 //! distinct key rather than a collision — and nothing depends on how
 //! DuckDB collates an ENUM.
+//!
+//! Spec §5.5 asks for dictionary codes where present, strings under
+//! as-of: each grouping column is resolved once, in [`TreeIndex::build`],
+//! into an enum tagging it dictionary-encoded, plain text, or absent, and
+//! the hash/equality below key a dictionary column on its per-row code
+//! rather than resolving the string per cell. One snapshot carries one
+//! encoding per column, so code equality implies value equality within
+//! it — that identity is exactly what `snapshot.rs`'s
+//! `concat_preserving_dictionaries` shared-dictionary fast path
+//! guarantees (its own doc records the fallback path that would break
+//! it).
 
-use crate::snapshot::Snapshot;
+use crate::snapshot::{DictCodes, Snapshot};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 
@@ -34,11 +45,28 @@ pub struct TreeIndex {
     unplaced: u32,
 }
 
+/// A grouping column, resolved once so the hot loop below never downcasts
+/// or resolves a name per cell.
+enum Col<'a> {
+    Absent,
+    Dict(DictCodes<'a>),
+    Text(usize),
+}
+
 impl TreeIndex {
     pub fn build(snapshot: &Snapshot) -> TreeIndex {
         let n = snapshot.rows();
         let grouping = snapshot.grouping();
-        let cols: Vec<Option<usize>> = grouping.iter().map(|g| snapshot.column_index(g)).collect();
+        let cols: Vec<Col> = grouping
+            .iter()
+            .map(|g| match snapshot.column_index(g) {
+                Some(idx) => match snapshot.dict_codes_at(idx) {
+                    Some((codes, _)) => Col::Dict(codes),
+                    None => Col::Text(idx),
+                },
+                None => Col::Absent,
+            })
+            .collect();
         let max_depth = grouping.len();
 
         let mut depth = vec![0u8; n];
@@ -184,8 +212,11 @@ impl TreeIndex {
 }
 
 /// FNV-1a over the first `k` grouping cells of `row`. A NULL cell hashes
-/// a token no string can produce; an absent column is NULL everywhere.
-fn prefix_hash(snapshot: &Snapshot, cols: &[Option<usize>], row: usize, k: usize) -> u64 {
+/// a token no string or code can produce; an absent column is NULL
+/// everywhere. A dictionary column feeds its per-row code, tagged
+/// distinctly from a string's bytes so a code and a string can never
+/// collide across a row that mixes encodings (spec §5.5).
+fn prefix_hash(snapshot: &Snapshot, cols: &[Col], row: usize, k: usize) -> u64 {
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h = OFFSET;
@@ -194,24 +225,37 @@ fn prefix_hash(snapshot: &Snapshot, cols: &[Option<usize>], row: usize, k: usize
         h = h.wrapping_mul(PRIME);
     };
     for col in cols.iter().take(k) {
-        match col.and_then(|c| snapshot.text_at(c, row)) {
-            Some(s) => {
-                feed(0x01);
-                for b in s.bytes() {
-                    feed(b);
+        match col {
+            Col::Absent => feed(0x00),
+            Col::Dict(codes) => match codes.code(row) {
+                Some(code) => {
+                    feed(0x02);
+                    for b in (code as u64).to_le_bytes() {
+                        feed(b);
+                    }
                 }
-            }
-            None => feed(0x00),
+                None => feed(0x00),
+            },
+            Col::Text(idx) => match snapshot.text_at(*idx, row) {
+                Some(s) => {
+                    feed(0x01);
+                    for b in s.bytes() {
+                        feed(b);
+                    }
+                }
+                None => feed(0x00),
+            },
         }
         feed(0xff);
     }
     h
 }
 
-fn prefix_eq(snapshot: &Snapshot, cols: &[Option<usize>], a: usize, b: usize, k: usize) -> bool {
+fn prefix_eq(snapshot: &Snapshot, cols: &[Col], a: usize, b: usize, k: usize) -> bool {
     cols.iter().take(k).all(|col| match col {
-        Some(c) => snapshot.text_at(*c, a) == snapshot.text_at(*c, b),
-        None => true,
+        Col::Absent => true,
+        Col::Dict(codes) => codes.code(a) == codes.code(b),
+        Col::Text(idx) => snapshot.text_at(*idx, a) == snapshot.text_at(*idx, b),
     })
 }
 

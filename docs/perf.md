@@ -290,18 +290,24 @@ produces them):
 
 | shape | rows | median |
 | --- | ---: | ---: |
-| bounded to depth 2 | 133 | **7.94 µs** |
-| scoped to three books, all depths | 135,733 | **11.15 ms** |
-| unscoped, all depths | 720,881 | **61.86 ms** |
+| bounded to depth 2 | 133 | **11.09 µs** |
+| scoped to three books, all depths | 135,733 | **12.63 ms** |
+| unscoped, all depths | 720,881 | **65.85 ms** |
+
+The earlier figures in this table (7.94 µs / 11.15 ms / 61.86 ms) were
+the string-hashing path, resolving each grouping cell's text per row;
+these are the code-hashing path (spec §5.5's "dictionary codes where
+present, strings under as-of"), which keys a dictionary-encoded column
+on its per-row code instead.
 
 The build runs on the query worker inside `Snapshot::from_batches`, not
 on the render thread, so none of this is frame time — it is added to the
 requery latency the §7.1 <50ms contract governs. **The 729k build does
-not fit that budget on its own** (61.86 ms), but the 729k shape is the
+not fit that budget on its own** (65.85 ms), but the 729k shape is the
 unscoped query that already misses §7.1 by a wide margin for its own
 reasons, recorded above. The shapes the blotter actually submits do fit
-comfortably: the bounded tree pays 7.94 µs against a 4–8 ms query, and
-the scoped 136k tree pays 11.15 ms on top of ~31 ms — inside 50 ms, with
+comfortably: the bounded tree pays 11.09 µs against a 4–8 ms query, and
+the scoped 136k tree pays 12.63 ms on top of ~31 ms — inside 50 ms, with
 no room wasted. The cost is linear in rows × depth (one FNV-1a hash of
 the grouping prefix per row per level, then a CSR fill), so it scales
 with the result the compiler was told to materialize, which is what the

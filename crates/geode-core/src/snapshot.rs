@@ -718,21 +718,23 @@ fn dictionary_fixture(
 ) -> (arrow::datatypes::DataType, arrow::array::ArrayRef) {
     use arrow::array::{ArrayRef, DictionaryArray, UInt8Array, UInt16Array, UInt32Array};
     use arrow::datatypes::{DataType, UInt8Type, UInt16Type, UInt32Type};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
+    // A `Vec::contains`/`position` scan made this O(cells × distinct
+    // values); a benchmark fixture with a large vocabulary made building
+    // the fixture itself the bottleneck rather than the code under test.
+    // The map interns each distinct value once, in first-seen order.
     let mut distinct: Vec<&str> = Vec::new();
+    let mut seen: HashMap<&str, usize> = HashMap::new();
     for c in cells.iter().flatten() {
-        if !distinct.contains(&c.as_str()) {
+        seen.entry(c.as_str()).or_insert_with(|| {
             distinct.push(c.as_str());
-        }
+            distinct.len() - 1
+        });
     }
     let values = Arc::new(StringArray::from(distinct.clone()));
-    let code_of = |s: &str| {
-        distinct
-            .iter()
-            .position(|d| *d == s)
-            .expect("every non-null cell is interned above")
-    };
+    let code_of = |s: &str| *seen.get(s).expect("every non-null cell is interned above");
 
     if distinct.len() > u16::MAX as usize {
         let keys: UInt32Array = cells
