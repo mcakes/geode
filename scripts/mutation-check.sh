@@ -982,6 +982,39 @@ run_mutation "view: a format override applies over the kind default" \
   geode-core \
   presentation_is_parsed_per_column_and_defaults_are_per_kind
 
+# ---- keymap counts (Phase 3 §3.3)
+
+run_mutation "matcher: digits count only under a counting context" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '            && stack.last().is_some_and(|c| c.has_flag(COUNTS))' \
+  '            && true' \
+  geode-shell \
+  digits_are_ordinary_keys_outside_a_counting_context
+
+run_mutation "matcher: a leading zero is a key" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '            && (digit != 0 || self.count.is_some())' \
+  '            && true' \
+  geode-shell \
+  a_leading_zero_is_a_key_and_a_later_zero_is_a_digit
+
+run_mutation "matcher: a dead end clears the count" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '        self.pending.clear();
+        self.count = None;
+        MatchResult::NoMatch' \
+  '        self.pending.clear();
+        MatchResult::NoMatch' \
+  geode-shell \
+  a_count_survives_a_pending_sequence_and_dies_with_a_dead_end
+
+run_mutation "matcher: the count is capped" \
+  crates/geode-shell/src/keymap/matcher.rs \
+  '                    .min(MAX_COUNT),' \
+  '                    ,' \
+  geode-shell \
+  the_count_is_capped
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
