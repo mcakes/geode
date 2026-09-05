@@ -52,7 +52,7 @@ prerequisites and are consumed as-is.
 - Commit trailers:
   ```
   Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-  Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1
+  Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL
   ```
 
 ## What already exists (do not rebuild)
@@ -101,6 +101,122 @@ config}`; `ShellEvent::{ConfigReloaded, RestartRequired}`;
 | `examples/demo-config/*.toml` | The demo layer (replaces `examples/probe-config`). |
 | `crates/geode-shell/src/defaults.rs` | Blotter bindings (the actions are the blotter's). |
 | deleted | `crates/geode-shell/src/dataprobe.rs`, `crates/geode-app/src/probe.rs`, `examples/probe-config/`. |
+
+---
+
+### Task 0: Split `shell/mod.rs` before any blotter work
+
+Added 2026-09-05 from `docs/phase-3c-handoff.md`. `crates/geode-shell/src/shell/mod.rs`
+is ~11,700 lines, ~7,880 of them one `mod tests`, and one `render` function of
+~1,190 lines. The 3b final review found that its one Critical defect survived
+four reviews partly because the command line's accept branch sat 1,400 lines
+from the pure core it depended on. Tasks 7 and 8 add to this file (occupant
+routing, `deliver`, `set_data_status`), so the split goes first.
+
+**This task is a pure move.** No behaviour change, no renames, no signature
+edits beyond `fn` → `pub(super) fn` where a moved method is called from
+another file under `shell/`, and `use` lines that the compiler demands. Every
+doc comment travels with its item. The second commit (Step 5) is the only
+place code changes shape.
+
+**Files: `mod.rs` keeps** the `pub mod` lines, the consts it still uses,
+`ShellServices`, `ShellEvent`, the `ShellView` struct with its field docs,
+`docs_equal`, `ShellView::new`, `close_modal`, `on_frame_changed`,
+`save_slot`, `config`, `frame`, `set_probe`, `data_probe_visible`. Target
+size ≈ 1,100 lines.
+
+| New file | Moves out of `mod.rs` (non-test) |
+|---|---|
+| `shell/input.rs` | `context_stack`, `is_palette_toggle`, `handle_key_down`, `dispatch`, `persist_theme`, `persist_font_size`, `persist_find_style`, `mod_alias_held` if only these use it |
+| `shell/palette_ctl.rs` | `toggle_palette`, `close_palette`, `sync_palette_scroll`, `handle_palette_key`, `dispatch_palette_item` |
+| `shell/commandline_ctl.rs` | `open_command_line`, `close_command_line`, `cancel_command_line`, `on_command_line_changed`, `handle_command_line_key` (the Accept branch lives here) |
+| `shell/occupants.rs` | `occupant_kind`, `deliver`, `fill_all_tiles`, `fill_active_tiles`, `ensure_occupants`, `current_tiles` |
+| `shell/session_io.rs` | `take_dirty_session_write`, `save_session` |
+| `shell/reload.rs` | `apply_reload`, `RELOAD_POLL_INTERVAL` if `new`'s poll loop can reach it without a `pub` |
+| `shell/drag.rs` | `DividerDragTarget`, `DividerDrag`, `StripSpec`, `TILE_DRAG_*` consts, `TileDrag`, and every `*_divider_drag` / `*_tile_drag` / `heal_drags_on_root_release` method |
+| `shell/render.rs` | the whole `impl Render for ShellView` block and `DIVIDER_GROUP` |
+
+`shell/keys.rs` already exists (the pure keystroke converter) and is not
+touched; that is why the key path is `input.rs`.
+
+**Tests** move to a directory module: `#[cfg(test)] mod tests;` in `mod.rs`,
+`shell/tests/mod.rs` holding the shared helpers (`test_services`,
+`services_with_recorder`, `open_shell`, `shell_of`) as `pub(super)`, and one
+submodule per seam, in the order the tests already sit in the file:
+
+| Test file | Tests (by the first and last name in the run) |
+|---|---|
+| `tests/commandline.rs` | `colon_opens_the_command_line…` … `clicking_the_filter_input_cancels_an_open_command_line` |
+| `tests/occupants.rs` | `a_restored_tile_of_an_unknown_kind…` … `a_click_on_a_docked_tile_leaves_the_shell_focused…` |
+| `tests/tiling_keys.rs` | `empty_workspace_paints_the_hint` … `ctrl_w_keystroke_closes_the_focused_tile`, plus `close_tile_focuses_adjacent_sibling` |
+| `tests/drag.rs` | `dock_test_shell` helper … `switching_away_and_back_within_one_frame_voids_the_drop` (divider and tile drags, with their local helpers `alt_held`, `main_tile_point`, `dock_point`, `two_tile_drag_shell`) |
+| `tests/dock.rs` | `a_pending_key_sequence_gates_the_divider_strips` … `a_visible_left_dock_carves_its_column_out_of_the_tree_area` |
+| `tests/palette.rs` | `mod_shift_t_keystroke_toggles_the_theme_mode` … `enter_on_the_palette_toggle_row_closes_the_palette_without_reopening` (sequences, palette, rebinding; helpers `test_services_with_gg_binding`, `test_services_with_ctrl_k_rebound_to_split`) |
+| `tests/reload.rs` | `config_with_mod` helper … `a_reloaded_groupings_doc_replaces_the_slots…` (includes `ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it`) |
+| `tests/session.rs` | `test_services_with_session` helper … `mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file` |
+| `tests/chrome_and_dialogs.rs` | `chrome_paints_quads_even_with_no_tiles_open` … `open_shell_dialog_closes_an_open_palette` (filter input, settings dialog, font size, find style) |
+| `tests/keybindings_dialog.rs` | `keybindings_open_paints_the_modal_with_rows` … `click_selects_a_row_and_clicking_it_again_starts_listening` (helpers `dialog_test_shell`, `filter_is_focused`) |
+| `tests/perf.rs` | `perf_overlay_toggles_via_the_bound_action`, `the_data_probe_paints_a_pushed_snapshot`, `render_records_frame_samples_and_reset_clears_them` |
+
+A helper used by more than one test file goes to `tests/mod.rs`. If a test
+is on the wrong side of a boundary by its content rather than its name,
+move it to the file its subject lives in and say so in the report.
+
+**Steps**
+
+- [ ] Step 1: Record the baseline. `cargo test --workspace 2>&1 | grep 'test result'`
+  and `cargo test -p geode-shell --lib 2>&1 | grep 'test result'`. Expected:
+  1070 workspace, 715 `geode-shell` lib. Write both numbers in the report.
+- [ ] Step 2: Move the non-test code, one file at a time, compiling after each
+  (`cargo check -p geode-shell --all-targets`). Each new file opens with a
+  `//!` doc saying what it owns and why it is separate. Order: `render.rs`,
+  `drag.rs`, `input.rs`, `palette_ctl.rs`, `commandline_ctl.rs`,
+  `occupants.rs`, `session_io.rs`, `reload.rs`. Visibility: `pub(super)` for
+  anything only `shell` needs; keep `pub` only on what was `pub` before.
+- [ ] Step 3: Move the tests into `shell/tests/`. Run
+  `cargo test -p geode-shell --lib 2>&1 | grep 'test result'` — the count is
+  the Step 1 number exactly. Run `cargo test --workspace` — 1070.
+- [ ] Step 4: Retarget the harness. `scripts/mutation-check.sh` has 13
+  entries anchored on `crates/geode-shell/src/shell/mod.rs`; each anchor's
+  path becomes the file its `grep` line moved to. Run
+  `zsh scripts/mutation-check.sh --changed` and paste the result lines in
+  the report: every entry `caught`, none `caught*`, `FILTER` or `SURVIVED`.
+  (Moving code detaches anchors silently — this happened in Phase 3a Task 9.)
+  Run `cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`.
+  Commit: `refactor(shell): split shell/mod.rs by seam (pure move)`.
+- [ ] Step 5: Second commit, the shape changes the handoff assigns to this
+  task. Each is small and self-contained:
+  - the slot-rebuild block duplicated between `ShellView::new` and
+    `apply_reload` becomes one `fn` (in `reload.rs`, called from both);
+    the three `reload:` harness entries anchored on `apply_reload` must still
+    be `caught`;
+  - M3: drop the unreachable `previous == self.scope` guard in
+    `Frame::undo_scope` (`frame.rs`), or replace it with a comment saying
+    why it cannot fire — read the code first, the review may be wrong;
+  - M4: `commandline::word_at` clamps a non-char-boundary cursor to a
+    boundary, with a test using a multi-byte character;
+  - M6: `chrono` moves to `[dev-dependencies]` in `geode-shell` if no
+    non-test code uses it (`grep -rn chrono crates/geode-shell/src`);
+  - M8: `restart_required` — decide whether it should clear when a later
+    reload restores the original `sources`/`datasets`; if yes implement
+    with a test, if no add a doc comment saying it is sticky by design;
+  - M9: `theme::write_atomic`'s temp-file name derives from the target
+    file's name instead of the hardcoded `.app.toml.*`;
+  - M10: a comment above the which-key count row naming the reading of
+    spec §3.3 that was chosen;
+  - M15: a doc comment in `session.rs` on the restored-unknown-kind
+    rewrite;
+  - spec corrections in `docs/superpowers/specs/2026-08-28-geode-foundation-design.md`:
+    §3.3 dispatch order (workspace arms run before the shell's own);
+    §4.2 records that under `keymap.mod = "ctrl"` the shipped
+    `workspace::switch_N` bindings win `ctrl+1..9` and slots are set via
+    the palette; §4.5 says `ShellEvent::ConfigReloaded` fires for views
+    and dimensions only.
+  Run the same four checks plus `zsh scripts/mutation-check.sh --changed`.
+  Commit: `refactor(shell): deferred 3b cleanups (M3 M4 M6 M8 M9 M10 M15, slot rebuild DRY)`.
+- [ ] Step 6: Report: the two test counts before and after, the harness
+  output, the line count of every file under `shell/` after the split, and
+  any test that moved to a file other than the one the table names.
 
 ---
 
@@ -522,7 +638,7 @@ width and per-depth attribution; grouping dimensions fold into a leading
 tree column (Phase 3 §6.1).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 6: Harness entry** (package `geode-blotter`)
@@ -1017,7 +1133,7 @@ last; the depth bound is one past the deepest open node (Phase 3 §6.1,
 §6.3).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 5: Harness entries** (package `geode-blotter`)
@@ -1366,7 +1482,7 @@ cursor returns to the same node after a requery; / jumps under vim and
 narrows under fzf with n/N counted (Phase 3 §6.1, §2.2).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 5: Harness entries** (package `geode-blotter`)
@@ -1822,7 +1938,7 @@ a NonAttributable cell cannot become 0.00 because the accessor says
 NULL (Phase 3 §6.2, §6.4, §6.5).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 5: Harness entries** (package `geode-blotter`)
@@ -2139,7 +2255,7 @@ the vocabulary follows the argument position so the shell can rank it
 (Phase 3 §4.3, §3.4).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 5: Harness entry** (package `geode-blotter`)
@@ -2671,7 +2787,7 @@ column's indent and glyph, sign colours, the dagger, and a blank for a
 NonAttributable cell (Phase 3 §6.6).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 5: Harness entries** (package `geode-blotter`)
@@ -3958,7 +4074,7 @@ timing, paints header, table and footer, and implements every :
 command (Phase 3 §6.5–§6.8, §4.3, §3).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 - [ ] **Step 7: Harness entries** (package `geode-blotter`)
@@ -4515,7 +4631,7 @@ platform data dir unless configured; --demo emits generated data and
 layers a compiled-in config (Phase 3 §5.1, §5.4, §7.1).
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 ---
@@ -4670,7 +4786,7 @@ is the painted end of §7.1, --demo is its test story, and nothing reads
 GEODE_PROBE_DIR. Blotter core benches recorded in docs/perf.md.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01H67rCSzZZZdiknfaMNBhx1"
+Claude-Session: https://claude.ai/code/session_013f4ftJp6GLNLTj3EBs7XFL"
 ```
 
 ---
@@ -4726,4 +4842,6 @@ deferred.
 ## Execution Handoff
 
 Plan complete. Execution order across the three plans: 3a → 3b → 3c,
-each merged green before the next begins.
+each merged green before the next begins. Task 0 (the `shell/mod.rs`
+split) was added on 2026-09-05 and is reviewed as its own gate before
+Task 1 starts.
