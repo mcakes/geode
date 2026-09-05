@@ -1332,6 +1332,13 @@ run_mutation "yank: numbers are raw and unscaled" \
   geode-blotter \
   tsv_has_a_header_indented_tree_text_raw_numbers_and_blanks
 
+run_mutation "commands: sort desc is parsed" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                    descending: true,' \
+  '                    descending: false,' \
+  geode-blotter \
+  every_command_parses
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
