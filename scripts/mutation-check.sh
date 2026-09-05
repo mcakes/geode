@@ -1015,6 +1015,42 @@ run_mutation "matcher: the count is capped" \
   geode-shell \
   the_count_is_capped
 
+# ---- grouping slots and the frame (Phase 3 §4)
+
+run_mutation "groupings: an unknown column drops the slot" \
+  crates/geode-core/src/groupings.rs \
+  '            if let Some(unknown) = grouping.iter().find(|c| !known(c)) {' \
+  '            if let Some(unknown) = grouping.iter().find(|c| !known(c) && false) {' \
+  geode-core \
+  an_unknown_column_is_an_error_for_that_slot_only
+
+run_mutation "frame: an empty slot cannot be activated" \
+  crates/geode-shell/src/frame.rs \
+  '            && self.slots.get(n).is_none()' \
+  '            && false' \
+  geode-shell \
+  an_empty_slot_cannot_be_activated
+
+run_mutation "frame: set_scope bumps only the scope counter" \
+  crates/geode-shell/src/frame.rs \
+  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+        self.versions.scope += 1;' \
+  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+        self.versions.scope += 1;
+        self.versions.grouping += 1;' \
+  geode-shell \
+  each_mutation_bumps_exactly_its_own_counter
+
+run_mutation "frame: a vanished active slot is cleared on reload" \
+  crates/geode-shell/src/frame.rs \
+  '        if self
+            .active_slot
+            .is_some_and(|n| self.slots.get(n).is_none())
+        {' \
+  '        if false {' \
+  geode-shell \
+  replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
