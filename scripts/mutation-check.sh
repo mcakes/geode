@@ -1339,6 +1339,13 @@ run_mutation "commands: sort desc is parsed" \
   geode-blotter \
   every_command_parses
 
+run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
+  crates/geode-blotter/src/core/commands.rs \
+  '    while !line.is_char_boundary(cursor) {' \
+  '    while false {' \
+  geode-blotter \
+  completions_clamp_a_cursor_inside_a_multibyte_char
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
