@@ -132,7 +132,7 @@ size ≈ 1,100 lines.
 | `shell/commandline_ctl.rs` | `open_command_line`, `close_command_line`, `cancel_command_line`, `on_command_line_changed`, `handle_command_line_key` (the Accept branch lives here) |
 | `shell/occupants.rs` | `occupant_kind`, `deliver`, `fill_all_tiles`, `fill_active_tiles`, `ensure_occupants`, `current_tiles` |
 | `shell/session_io.rs` | `take_dirty_session_write`, `save_session` |
-| `shell/reload.rs` | `apply_reload`, `RELOAD_POLL_INTERVAL` if `new`'s poll loop can reach it without a `pub` |
+| `shell/hot_reload.rs` | `apply_reload`, `RELOAD_POLL_INTERVAL` if `new`'s poll loop can reach it without a `pub` |
 | `shell/drag.rs` | `DividerDragTarget`, `DividerDrag`, `StripSpec`, `TILE_DRAG_*` consts, `TileDrag`, and every `*_divider_drag` / `*_tile_drag` / `heal_drags_on_root_release` method |
 | `shell/render.rs` | the whole `impl Render for ShellView` block and `DIVIDER_GROUP` |
 
@@ -171,7 +171,7 @@ move it to the file its subject lives in and say so in the report.
   (`cargo check -p geode-shell --all-targets`). Each new file opens with a
   `//!` doc saying what it owns and why it is separate. Order: `render.rs`,
   `drag.rs`, `input.rs`, `palette_ctl.rs`, `commandline_ctl.rs`,
-  `occupants.rs`, `session_io.rs`, `reload.rs`. Visibility: `pub(super)` for
+  `occupants.rs`, `session_io.rs`, `hot_reload.rs`. Visibility: `pub(super)` for
   anything only `shell` needs; keep `pub` only on what was `pub` before.
 - [ ] Step 3: Move the tests into `shell/tests/`. Run
   `cargo test -p geode-shell --lib 2>&1 | grep 'test result'` — the count is
@@ -187,7 +187,7 @@ move it to the file its subject lives in and say so in the report.
 - [ ] Step 5: Second commit, the shape changes the handoff assigns to this
   task. Each is small and self-contained:
   - the slot-rebuild block duplicated between `ShellView::new` and
-    `apply_reload` becomes one `fn` (in `reload.rs`, called from both);
+    `apply_reload` becomes one `fn` (in `hot_reload.rs`, called from both);
     the three `reload:` harness entries anchored on `apply_reload` must still
     be `caught`;
   - M3: drop the unreachable `previous == self.scope` guard in
