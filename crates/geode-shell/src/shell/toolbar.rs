@@ -9,25 +9,33 @@
 //! (`examples/window_title/src/main.rs`) is the reference for putting
 //! content inside it via `TitleBar::new().child(...)`.
 //!
-//! Content: the app title left, a reserved (empty, for now) middle region
-//! for grouping/scope state (spec, a later phase), and a right-aligned
-//! filter [`Input`] to prove the row hosts real content (user direction).
-//! The filter is deliberately **inert**: nothing reads its value yet — it
-//! becomes the global text filter (spec §4.1) once the data phase wires a
-//! consumer to the `InputState` `ShellView` owns. Its focus interplay
-//! (click-to-focus, Esc-back-to-shell-root, shell chords suppressed while
-//! it has focus) lives in `ShellView::handle_key_down` — this function only
-//! renders it.
+//! Content: the app title left, the frame readout centered in the
+//! previously-reserved middle region (Task 6, spec §4.4 — slot, scope
+//! summary, and an unmissable AS OF badge when scoped to a snapshot), and
+//! a right-aligned filter [`Input`] to prove the row hosts real content
+//! (user direction). The filter is deliberately **inert**: nothing reads
+//! its value yet — it becomes the global text filter (spec §4.1) once the
+//! data phase wires a consumer to the `InputState` `ShellView` owns. Its
+//! focus interplay (click-to-focus, Esc-back-to-shell-root, shell chords
+//! suppressed while it has focus) lives in `ShellView::handle_key_down` —
+//! this function only renders it.
 
 use gpui::prelude::*;
 use gpui::{App, Entity, IntoElement, div, px};
 use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
+use crate::fonts;
+use crate::frame::FrameReadout;
+
 /// Compact width of the filter field (brief: "~200px").
 const FILTER_WIDTH: f32 = 200.0;
 
-pub fn toolbar(filter_input: &Entity<InputState>, cx: &App) -> impl IntoElement {
+pub fn toolbar(
+    filter_input: &Entity<InputState>,
+    readout: &FrameReadout,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
 
     TitleBar::new().child(
@@ -35,10 +43,46 @@ pub fn toolbar(filter_input: &Entity<InputState>, cx: &App) -> impl IntoElement 
             .w_full()
             .items_center()
             .child(div().text_color(theme.foreground).child("geode"))
-            // Reserved for grouping/scope state (spec §post-data-phase);
-            // an empty flexing spacer keeps the filter pinned to the right
-            // edge without hardcoding a gap.
-            .child(div().flex_1())
+            // The frame readout (§4.4): slot + label, the scope summary,
+            // and — when scoped to a snapshot rather than the live data —
+            // an unmissable AS OF badge, deliberately the one warning-
+            // toned element on this row (a stray as-of scope is exactly
+            // the kind of thing that must never go unnoticed). Mono face,
+            // matching every other data-adjacent readout in the shell.
+            .child(
+                h_flex()
+                    .flex_1()
+                    .justify_center()
+                    .gap_3()
+                    .font_family(fonts::MONO)
+                    .text_sm()
+                    .debug_selector(|| "frame-readout".to_string())
+                    .when_some(readout.as_of.as_ref(), |el, t| {
+                        el.bg(theme.warning.opacity(0.25))
+                            .px_2()
+                            .rounded(px(4.))
+                            .child(
+                                div()
+                                    .text_color(theme.warning_foreground)
+                                    .child(format!("AS OF {t}")),
+                            )
+                    })
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(match &readout.slot {
+                                Some((n, label)) => format!("{n} · {label}"),
+                                None => "view default".to_string(),
+                            }),
+                    )
+                    .when(!readout.scope.is_empty(), |el| {
+                        el.child(
+                            div()
+                                .text_color(theme.foreground)
+                                .child(readout.scope.clone()),
+                        )
+                    }),
+            )
             // A muted search icon in the `prefix` slot rather than a
             // "filter" placeholder (user direction), matching the palette
             // and the dialogs' shared `dialog::filter_row` — every text

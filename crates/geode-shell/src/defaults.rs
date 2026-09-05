@@ -94,6 +94,16 @@ context = "workspace"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
 "mod+shift+d" = "data::toggle_probe"
+"ctrl+1" = "frame::slot_1"
+"ctrl+2" = "frame::slot_2"
+"ctrl+3" = "frame::slot_3"
+"ctrl+4" = "frame::slot_4"
+"ctrl+5" = "frame::slot_5"
+"ctrl+6" = "frame::slot_6"
+"ctrl+7" = "frame::slot_7"
+"ctrl+8" = "frame::slot_8"
+"ctrl+9" = "frame::slot_9"
+"ctrl+0" = "frame::slot_clear"
 
 [[bindings]]
 context = "tile"
@@ -253,6 +263,24 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Tile",
     );
     action(reg, "tile::find", "Find in tile", "Tile");
+    // The nine grouping slots (Phase 3 §4.2): ctrl+1..9 activate a
+    // configured slot (an empty one is ignored — see `Frame::
+    // set_active_slot`), ctrl+0 returns every following tile to its
+    // view's own grouping.
+    for i in 1..=9 {
+        action(
+            reg,
+            &format!("frame::slot_{i}"),
+            &format!("Grouping slot {i}"),
+            "Frame",
+        );
+    }
+    action(
+        reg,
+        "frame::slot_clear",
+        "Clear grouping slot (views' own grouping)",
+        "Frame",
+    );
     // The throwaway data probe (spec §7's vertical slice) — the only way
     // to see the §7.1 end-to-end budget through a painted frame. Deleted
     // when the blotter lands; see `crate::dataprobe`.

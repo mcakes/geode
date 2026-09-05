@@ -45,6 +45,12 @@ pub struct Frame {
     /// the frame is the one shell-side handle every module holds.
     pub requery: RequeryStats,
     user_dir: Option<PathBuf>,
+    /// A slot saved by `save_slot`, waiting to be written to the user
+    /// layer's `groupings.toml`. The frame is pure (no file access), so
+    /// `ShellView` drains this via [`take_pending_persist`](Self::take_pending_persist)
+    /// — observed off an entity-change notification — and does the actual
+    /// background write with [`persist_slot_to_user_config`] (§4.2).
+    pending_persist: Option<(u8, Vec<String>)>,
 }
 
 impl Frame {
@@ -58,6 +64,7 @@ impl Frame {
             versions: FrameVersions::default(),
             requery: RequeryStats::new(),
             user_dir,
+            pending_persist: None,
         }
     }
 
@@ -153,8 +160,10 @@ impl Frame {
     }
 
     /// `:group save N`: set the slot in memory. The caller persists with
-    /// [`persist_slot_to_user_config`] off the UI thread.
+    /// [`persist_slot_to_user_config`] off the UI thread — see
+    /// `take_pending_persist`.
     pub fn save_slot(&mut self, slot: u8, grouping: Vec<String>) -> Result<(), String> {
+        let persisted = grouping.clone();
         if !self.slots.set(slot, grouping) {
             return Err(format!(
                 "slot must be 1–9 and the grouping non-empty (got {slot})"
@@ -163,7 +172,16 @@ impl Frame {
         if self.active_slot == Some(slot) {
             self.versions.grouping += 1;
         }
+        self.pending_persist = Some((slot, persisted));
         Ok(())
+    }
+
+    /// Take the slot a `save_slot` call is waiting to have written to the
+    /// user layer's `groupings.toml`, if any (§4.2). `ShellView` calls this
+    /// from its frame-change observer and does the actual write on the
+    /// background executor.
+    pub fn take_pending_persist(&mut self) -> Option<(u8, Vec<String>)> {
+        self.pending_persist.take()
     }
 
     pub fn as_of(&self) -> &AsOf {
@@ -392,6 +410,7 @@ mod tests {
         f.set_active_slot(Some(3));
         let v = f.versions();
         assert!(f.save_slot(3, vec!["book".into()]).is_ok());
+        assert_eq!(f.take_pending_persist(), Some((3, vec!["book".into()])));
         assert_eq!(
             f.versions().grouping,
             v.grouping + 1,

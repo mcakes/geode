@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyView, App, Context, Entity, FocusHandle, Focusable as _, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, Window, div, px,
+    AnyView, App, Context, Entity, EventEmitter, FocusHandle, Focusable as _, KeyDownEvent,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, Window, div, px,
 };
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
@@ -250,6 +250,21 @@ struct TileDrag {
 fn mod_alias_held(alias: Modifiers, mods: &gpui::Modifiers) -> bool {
     (alias.ctrl && mods.control) || (alias.alt && mods.alt) || (alias.cmd && mods.platform)
 }
+
+/// What `ShellView` tells the rest of the app about a config reload (§4.5).
+/// The app bridge (`geode-app`, which alone may touch `geode-data`)
+/// subscribes to these to know when the views it feeds the data thread
+/// need re-sending, and when to tell the user a restart is needed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShellEvent {
+    /// Views, dimensions or groupings changed and were applied; the app
+    /// bridge forwards the new views to the data thread.
+    ConfigReloaded,
+    /// Sources or datasets changed; nothing was applied.
+    RestartRequired(String),
+}
+
+impl EventEmitter<ShellEvent> for ShellView {}
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution
@@ -546,18 +561,26 @@ pub struct ShellView {
     /// Same purpose as `scratch_all_tiles`, for the active-tiles half of
     /// the diff.
     scratch_active_tiles: HashSet<TileId>,
+    /// Set by `apply_reload` when a reload changed `sources` or `datasets`
+    /// (§4.5) — those need a restart to take effect, unlike `groupings`/
+    /// `views`/`dimensions`, which the frame picks up live. Drives the
+    /// status bar's own "restart required" message, alongside the
+    /// `ShellEvent::RestartRequired` the app bridge hears.
+    restart_required: Option<String>,
 }
 
-/// Whether two layered keymap-doc slices (`Config::layered_docs("keymap")`,
-/// Builtin → Desk → User order) are identical — content, not just count.
-/// Used by [`ShellView::apply_reload`] (Review fix round 1, Finding 2) to
-/// decide whether a reload's palette-relevant inputs actually changed.
-/// A free function comparing fields directly rather than a `PartialEq`
-/// derive on `LayerDoc` itself (`geode_core::config`): every field here
-/// already implements `PartialEq` (`Layer`, `String`, `PathBuf`,
+/// Whether two layered doc slices for the same config file
+/// (`Config::layered_docs(name)`, Builtin → Desk → User order) are
+/// identical — content, not just count. Used by [`ShellView::apply_reload`]
+/// both for the keymap (Review fix round 1, Finding 2 — deciding whether a
+/// reload's palette-relevant inputs actually changed) and, per-doc, for
+/// deciding whether `groupings`/`views`/`dimensions`/`sources`/`datasets`
+/// changed (§4.5). A free function comparing fields directly rather than a
+/// `PartialEq` derive on `LayerDoc` itself (`geode_core::config`): every
+/// field here already implements `PartialEq` (`Layer`, `String`, `PathBuf`,
 /// `toml::Table`), so this needs no change to that shared type just for
-/// one call site.
-fn keymap_docs_equal(a: &[LayerDoc], b: &[LayerDoc]) -> bool {
+/// these call sites.
+fn docs_equal(a: &[LayerDoc], b: &[LayerDoc]) -> bool {
     a.len() == b.len()
         && a.iter().zip(b).all(|(x, y)| {
             x.layer == y.layer && x.name == y.name && x.file == y.file && x.table == y.table
@@ -806,6 +829,12 @@ impl ShellView {
             }
             cx.new(|_| Frame::new(slots, user_dir.clone()))
         };
+        // A slot saved by a module (`:group save N`) is drained and
+        // persisted here — see `on_frame_changed`'s own doc comment (§4.2:
+        // the frame is pure and has no file access, so `ShellView` is the
+        // one place that can do the write).
+        cx.observe(&frame, |view, frame, cx| view.on_frame_changed(frame, cx))
+            .detach();
 
         Self {
             services,
@@ -844,6 +873,7 @@ impl ShellView {
             visible_tiles: HashSet::new(),
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
+            restart_required: None,
         }
     }
 
@@ -855,8 +885,15 @@ impl ShellView {
     /// (Review fix round 1, Finding 2 — refines the original brief's "must
     /// close on a successful reload": a theme-only reload no longer closes
     /// it, since the palette's items don't depend on `[theme]` at all; see
-    /// `keymap_docs_equal` and the `palette_snapshot_changed` check below),
-    /// and record the outcome for the status bar.
+    /// `docs_equal` and the `palette_snapshot_changed` check below),
+    /// and record the outcome for the status bar. Also reaches into the
+    /// shared frame (§4.5): a changed `groupings`/`datasets`/`dimensions`
+    /// doc replaces the frame's slots, a changed `views`/`dimensions` doc
+    /// tells the frame a config reload happened and emits `ShellEvent::
+    /// ConfigReloaded` for the app bridge to forward to the data thread,
+    /// and a changed `sources`/`datasets` doc — which the frame cannot
+    /// pick up live — sets `restart_required` and emits `ShellEvent::
+    /// RestartRequired` instead of applying anything.
     ///
     /// Any error-severity diagnostic — from `Config::load` itself, or from
     /// building the keymap against the new config's docs — keeps the
@@ -905,10 +942,28 @@ impl ShellView {
             // write triggers, see that function's doc comment) must not
             // silently close an open palette out from under the user.
             let palette_snapshot_changed = self.services.mod_alias != mod_alias
-                || !keymap_docs_equal(
+                || !docs_equal(
                     self.services.config.layered_docs("keymap"),
                     new_config.layered_docs("keymap"),
                 );
+
+            // §4.5: which of the frame's inputs changed. Computed against
+            // the still-current `self.services.config` before it's
+            // overwritten below — `changed`'s last use is right here, so
+            // the borrow ends before the move.
+            let changed = |name: &str| {
+                !docs_equal(
+                    self.services.config.layered_docs(name),
+                    new_config.layered_docs(name),
+                )
+            };
+            let groupings_changed =
+                changed("groupings") || changed("datasets") || changed("dimensions");
+            let views_changed = changed("views") || changed("dimensions");
+            let restart = ["sources", "datasets"]
+                .into_iter()
+                .filter(|d| changed(d))
+                .collect::<Vec<_>>();
 
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
@@ -946,6 +1001,47 @@ impl ShellView {
                 // is what closes that gap without needing a `Window` here.
                 self.palette = None;
                 self.pending_focus_restore = true;
+            }
+
+            if groupings_changed {
+                let (schema, _) = self
+                    .services
+                    .config
+                    .doc("datasets")
+                    .map(SchemaSpec::from_doc)
+                    .unwrap_or_default();
+                let (dims, _) = self
+                    .services
+                    .config
+                    .doc("dimensions")
+                    .map(DerivedDimensions::from_doc)
+                    .unwrap_or_default();
+                let (slots, diags) = self
+                    .services
+                    .config
+                    .doc("groupings")
+                    .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+                    .unwrap_or_default();
+                for d in &diags {
+                    eprintln!("[groupings] {d}");
+                }
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if views_changed {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+                cx.emit(ShellEvent::ConfigReloaded);
+            }
+            if !restart.is_empty() {
+                let message = format!("{} changed — restart to apply", restart.join(" and "));
+                self.restart_required = Some(message.clone());
+                cx.emit(ShellEvent::RestartRequired(message));
             }
         }
 
@@ -1399,6 +1495,27 @@ impl ShellView {
             // zeroed numbers immediately.
             self.perf.reset();
             cx.notify();
+        } else if let Some(n) = action
+            .0
+            .strip_prefix("frame::slot_")
+            .and_then(|s| s.parse::<u8>().ok())
+        {
+            // ctrl+1..9 (§4.2): activate a configured slot. An empty slot
+            // is ignored — `set_active_slot` returns `false` and nothing
+            // notifies, so the readout and every following tile stay put.
+            self.frame.update(cx, |f, cx| {
+                if f.set_active_slot(Some(n)) {
+                    cx.notify();
+                }
+            });
+        } else if action.0 == "frame::slot_clear" {
+            // ctrl+0: return every following tile to its view's own
+            // grouping.
+            self.frame.update(cx, |f, cx| {
+                if f.set_active_slot(None) {
+                    cx.notify();
+                }
+            });
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`
@@ -1517,6 +1634,58 @@ impl ShellView {
                 }
             })
             .detach();
+    }
+
+    /// Fired by the `cx.observe(&frame, ..)` set up in `new` whenever the
+    /// frame notifies — which covers both the keyboard's `frame::slot_*`
+    /// dispatches and a module's own `:group save N`. A slot saved by a
+    /// module is persisted here, off the UI thread, because the frame is
+    /// pure and the module has no file access (§4.2): the frame only
+    /// remembers the save in `pending_persist`, and this is where it gets
+    /// drained and actually written.
+    fn on_frame_changed(&mut self, frame: Entity<Frame>, cx: &mut Context<Self>) {
+        if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
+            && let Some(dir) = self.user_dir.clone()
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping)
+                    {
+                        eprintln!("[groupings] warning: {e}");
+                    }
+                })
+                .detach();
+        }
+        cx.notify();
+    }
+
+    /// Set a grouping slot in memory (`:group save N`, a module command —
+    /// modules hold no config/file access, so this is the seam they call
+    /// through). The write to the user layer's `groupings.toml` happens
+    /// off the UI thread, via `on_frame_changed` observing the frame's own
+    /// notify.
+    pub fn save_slot(
+        &mut self,
+        slot: u8,
+        grouping: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.frame.update(cx, |f, cx| {
+            let result = f.save_slot(slot, grouping);
+            if result.is_ok() {
+                cx.notify();
+            }
+            result
+        })
+    }
+
+    /// The current config, for the app bridge to read the new `views` doc
+    /// out of after a `ShellEvent::ConfigReloaded` (§4.5) — `geode-app` is
+    /// the only crate allowed to touch `geode-data`, so it needs to reach
+    /// the reloaded config through the shell rather than reloading it a
+    /// second time itself.
+    pub fn config(&self) -> &Config {
+        &self.services.config
     }
 
     /// Every non-placeholder occupant's tile record, gathered fresh from
@@ -3095,11 +3264,16 @@ impl Render for ShellView {
             self.matcher.pending(),
             self.matcher.count(),
             reload_message.as_deref(),
+            self.restart_required.as_deref(),
             self.services.theme.active_name(),
             cx,
         );
         let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
-        let toolbar = toolbar::toolbar(&self.filter_input, cx);
+        // Computed once per frame (§4.4) rather than read field-by-field
+        // from inside `toolbar::toolbar` — the frame is an entity, and this
+        // is the one place `render` already has `cx` in hand to read it.
+        let readout = self.frame.read(cx).readout();
+        let toolbar = toolbar::toolbar(&self.filter_input, &readout, cx);
 
         let body = h_flex()
             .w_full()
@@ -8377,6 +8551,130 @@ mod tests {
             "a background reload closing a focused palette must still return \
              focus to the shell root — otherwise handle_key_down's on_key_down \
              listener never fires again until a mouse click claims focus"
+        );
+    }
+
+    // --- Task 6: frame keys, the readout, and config reload -------------
+
+    #[gpui::test]
+    fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestAppContext) {
+        let mut services = test_services();
+        // Two slots through config, the way `new` reads them.
+        let groupings = LayerDoc::builtin("groupings", "1 = [\"book\"]\n2 = [\"lhu\"]\n").unwrap();
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+        )
+        .unwrap();
+        services.config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                groupings,
+                datasets,
+            ],
+            ..ConfigSources::default()
+        });
+        let (window, mut cx) = open_shell(cx, services);
+        let shell = shell_of(&window, &mut cx);
+        cx.simulate_keystrokes("ctrl-2");
+        assert_eq!(
+            shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+            Some(2)
+        );
+        let v = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+        cx.simulate_keystrokes("ctrl-5");
+        assert_eq!(
+            shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+            Some(2),
+            "an empty slot is ignored"
+        );
+        assert_eq!(shell.read_with(&cx, |s, cx| s.frame.read(cx).versions()), v);
+        cx.simulate_keystrokes("ctrl-0");
+        assert_eq!(
+            shell.read_with(&cx, |s, cx| s.frame.read(cx).active_slot()),
+            None
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("frame-readout").is_some(),
+            "the readout painted"
+        );
+    }
+
+    #[gpui::test]
+    fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, _log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        let shell = shell_of(&window, &mut cx);
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = events.clone();
+        cx.update(|_, cx| {
+            cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+                sink.borrow_mut().push(event.clone())
+            })
+            .detach();
+        });
+
+        let mut new_config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                LayerDoc::builtin("groupings", "3 = [\"book\"]\n").unwrap(),
+                LayerDoc::builtin("datasets", "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n").unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n").unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+        shell.update(&mut cx, |s, cx| {
+            s.apply_reload(std::mem::take(&mut new_config), cx)
+        });
+        let (slots, versions) = shell.read_with(&cx, |s, cx| {
+            (
+                s.frame.read(cx).slots().clone(),
+                s.frame.read(cx).versions(),
+            )
+        });
+        assert_eq!(slots.label(3).as_deref(), Some("book"));
+        assert!(versions.config > v0.config);
+        assert!(
+            events.borrow().contains(&ShellEvent::ConfigReloaded),
+            "{:?}",
+            events.borrow()
+        );
+
+        // Now a sources change.
+        let mut with_sources = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+                LayerDoc::builtin(
+                    "sources",
+                    "[s]\ndataset = \"risk\"\npaths = [\"/x/*.csv\"]\n",
+                )
+                .unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        shell.update(&mut cx, |s, cx| {
+            s.apply_reload(std::mem::take(&mut with_sources), cx)
+        });
+        assert!(
+            events
+                .borrow()
+                .iter()
+                .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("sources"))),
+            "{:?}",
+            events.borrow()
+        );
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("restart-required").is_some(),
+            "the status bar says so"
         );
     }
 
