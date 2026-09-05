@@ -1297,6 +1297,41 @@ run_mutation "cursor: a counted G is a row number" \
   geode-blotter \
   row_motion_is_counted_and_clamped
 
+run_mutation "cache: a NULL measure is None, never a number" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            let value = snapshot.f64_at(idx, row)?;' \
+  '            let value = snapshot.f64_at(idx, row).unwrap_or(0.0);' \
+  geode-blotter \
+  cells_honour_the_read_paths_opinions
+
+run_mutation "cache: a window move keeps overlapping rows" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            if old.contains(&r) {' \
+  '            if false {' \
+  geode-blotter \
+  a_window_move_refills_only_the_rows_that_entered
+
+run_mutation "format: the sign is of the rounded value" \
+  crates/geode-blotter/src/core/format.rs \
+  '    let sign = if rounded == 0.0 {' \
+  '    let sign = if scaled == 0.0 {' \
+  geode-blotter \
+  precision_thousands_and_sign
+
+run_mutation "format: scale divides before precision" \
+  crates/geode-blotter/src/core/format.rs \
+  '        s => value / s.divisor(),' \
+  '        s => { let _ = s; value }' \
+  geode-blotter \
+  parentheses_and_scale
+
+run_mutation "yank: numbers are raw and unscaled" \
+  crates/geode-blotter/src/core/yank.rs \
+  '                        let _ = write!(s, "{v}");' \
+  '                        let _ = write!(s, "{:.2}", v);' \
+  geode-blotter \
+  tsv_has_a_header_indented_tree_text_raw_numbers_and_blanks
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
