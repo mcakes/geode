@@ -1139,12 +1139,23 @@ run_mutation "commandline: escape on a find is a cancel" \
   geode-shell \
   slash_streams_find_events_and_escape_cancels
 
-run_mutation "commandline: a tile mouse-down cancels an open line (fix round 1)" \
-  crates/geode-shell/src/shell/mod.rs \
-  '                                view.cancel_command_line(window, cx);' \
-  '                                let _ = window;' \
-  geode-shell \
-  a_mouse_down_on_another_tile_cancels_an_open_command_line
+# "commandline: a tile mouse-down cancels an open line (fix round 1)"
+# retired (I1, final review): removing this call is no longer an
+# independently observable behaviour. A tile mouse-down always changes
+# the active workspace's own focused tile away from `command_line.tile`,
+# which the render-time backstop added for I1 (see the two entries just
+# below) now also catches — and, checked directly, `run_until_parked`
+# after `simulate_mouse_down`/`up` already runs that render before
+# control returns to the test, so no assertion (before or after an
+# explicit `window.draw`) can tell "the explicit call ran" apart from
+# "the backstop compensated in the same pass" any more. Confirmed by
+# hand: mutating away *both* this call and the backstop together is what
+# it now takes to fail `a_mouse_down_on_another_tile_cancels_an_open_
+# command_line` — that pairing is exactly what the two entries below
+# already defend. Keeping this one would only ever show `SURVIVED`,
+# which would misstate the situation as an untested gap rather than the
+# deliberate, now-redundant fast path `render`'s own doc comment
+# describes.
 
 run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
   crates/geode-shell/src/shell/mod.rs \
