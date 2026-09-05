@@ -6,6 +6,7 @@
 //! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
+pub mod commandline_view;
 pub mod dialog;
 pub mod keybindings_view;
 pub mod keys;
@@ -33,13 +34,14 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, WindowExt as _, h_flex, v_flex};
 
 use crate::actions::{ActionId, ActionRegistry};
+use crate::commandline::{self, CommandLine, Prompt};
 use crate::defaults::mod_alias_from_config;
 use crate::fonts;
 use crate::fontsize::{self, FontSize};
 use crate::frame::Frame;
 use crate::keymap::{KeyContext, Keymap, MatchResult, Matcher, Modifiers, build_keymap};
 use crate::listfilter;
-use crate::module::{ModuleFactory as _, ModuleRoster, TileOccupant};
+use crate::module::{FindEvent, ModuleFactory as _, ModuleRoster, TileOccupant};
 use crate::palette::{self, PaletteItem, PaletteState};
 use crate::perf::{self, FrameHistogram};
 use crate::reload;
@@ -486,6 +488,16 @@ pub struct ShellView {
     /// applied yet, so unlike `divider_drag` there is no `moved`
     /// bookkeeping to preserve.
     tile_drag: Option<TileDrag>,
+    /// The per-tile command line's input (§3.4), built once like
+    /// `palette_input` — a stable `Entity<InputState>` across frames, its
+    /// value reset (not rebuilt) on every open.
+    command_input: Entity<InputState>,
+    /// The open command line's own pure state (§3.4), or `None` when
+    /// closed. Set fresh by `open_command_line` each time (mirrors
+    /// `palette`'s "nothing survives a close/reopen" contract) and read/
+    /// mutated by `handle_command_line_key`/`on_command_line_changed` and
+    /// painted by `commandline_view::render`.
+    command_line: Option<CommandLine>,
     /// The toolbar's right-aligned filter field (Task 4). Deliberately
     /// inert — nothing reads its value; it becomes the global text filter
     /// (spec §4.1) in the data phase. Owned here (rather than built fresh
@@ -598,6 +610,23 @@ impl ShellView {
             palette.set_query(input.read(cx).value().to_string());
             view.sync_palette_scroll();
             cx.notify();
+        })
+        .detach();
+
+        // The per-tile command line's own input (§3.4) — same lifecycle
+        // as `palette_input` above (built once, value reset on every
+        // open, one `InputEvent::Change` subscription for the life of the
+        // window). Unlike the palette's own subscription, this only ever
+        // needs to re-rank completions — the actual key routing
+        // (escape/enter/tab/ctrl+n/ctrl+p) happens in `handle_key_down`,
+        // ahead of the window's own `Input` action bindings, exactly like
+        // the modal branch above it.
+        let command_input = cx.new(|cx| InputState::new(window, cx));
+        cx.subscribe_in(&command_input, window, |view, _input, event, window, cx| {
+            if !matches!(event, InputEvent::Change) {
+                return;
+            }
+            view.on_command_line_changed(window, cx);
         })
         .detach();
 
@@ -792,6 +821,8 @@ impl ShellView {
             settings_scroll: ScrollHandle::new(),
             palette_scroll: ScrollHandle::new(),
             palette_input,
+            command_input,
+            command_line: None,
             dialog_input,
             desk_dir,
             user_dir,
@@ -1053,6 +1084,185 @@ impl ShellView {
         cx.notify();
     }
 
+    /// Open the per-tile command line (§3.4) with the given prompt: builds
+    /// a fresh [`CommandLine`] over the focused tile, cancels any pending
+    /// keymap sequence (mirrors `toggle_palette`'s own cancel — same
+    /// reasoning: the line has its own key handling that never touches
+    /// `self.matcher`), resets the shared input's value, and focuses it.
+    /// A no-op when there is no focused tile, or the focused tile has no
+    /// occupant — nothing to run a command against.
+    fn open_command_line(&mut self, prompt: Prompt, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tile) = self.services.workspaces.active().focused_tile() else {
+            return;
+        };
+        if !self.occupants.contains_key(&tile) {
+            return;
+        }
+        self.matcher.cancel();
+        self.command_line = Some(CommandLine::new(prompt, tile));
+        self.command_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
+        self.command_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+    }
+
+    /// Close the command line (if open) and hand focus back to the shell
+    /// root — the command-line twin of [`close_palette`](Self::close_palette).
+    fn close_command_line(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.command_line = None;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Re-rank (`:`) or forward (`/`) every change to the command line's
+    /// text — the `InputEvent::Change` subscription wired up in `new`.
+    /// `/` forwards the raw text to the occupant's own `find` on every
+    /// keystroke (§3.4: `FindEvent::Changed`); `:` asks the occupant for
+    /// completions over the word under the cursor and re-ranks them
+    /// through the pure core (`CommandLine::refresh`).
+    fn on_command_line_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(line) = self.command_line.as_ref() else {
+            return;
+        };
+        let (prompt, tile) = (line.prompt, line.tile);
+        let text = self.command_input.read(cx).value().to_string();
+        let cursor = self.command_input.read(cx).cursor();
+        let Some(o) = self.occupants.get(&tile) else {
+            return;
+        };
+        match prompt {
+            Prompt::Find => o.content.find(FindEvent::Changed(text), window, cx),
+            Prompt::Command => {
+                let words = o.content.completions(&text, cursor, cx);
+                if let Some(line) = self.command_line.as_mut() {
+                    line.refresh(&text, cursor, words);
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Keys while the command line's input has focus (routed from
+    /// `handle_key_down`'s own command-line branch, ahead of the modal/
+    /// filter-input guards). `true` if the key was consumed here and must
+    /// not also reach the window's text-input phase; everything not
+    /// claimed here (printable characters, caret movement, ...) falls
+    /// through to the focused `Input`, exactly as the filter field and the
+    /// dialogs' shared filter input already do.
+    ///
+    /// `escape` cancels (a `/` cancel is forwarded to the occupant first);
+    /// `enter` commits — `/` forwards the committed text, `:` resolves the
+    /// line through the pure core (`commandline::resolve_submit`) and
+    /// either runs it on the occupant, accepts a unique match and runs
+    /// that, or shows an ambiguous-match error inline without closing.
+    /// `tab`/`ctrl+n`/`ctrl+p` (command-line only) step or accept the
+    /// completion popup.
+    fn handle_command_line_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(prompt) = self.command_line.as_ref().map(|c| c.prompt) else {
+            return false;
+        };
+        let tile = self.command_line.as_ref().map(|c| c.tile).unwrap();
+        let key = event.keystroke.key.as_str();
+        if key == "escape" {
+            if prompt == Prompt::Find
+                && let Some(o) = self.occupants.get(&tile)
+            {
+                o.content.find(FindEvent::Cancelled, window, cx);
+            }
+            self.close_command_line(window, cx);
+            return true;
+        }
+        if key == "enter" {
+            let text = self.command_input.read(cx).value().to_string();
+            let cursor = self.command_input.read(cx).cursor();
+            match prompt {
+                Prompt::Find => {
+                    if let Some(o) = self.occupants.get(&tile) {
+                        o.content.find(FindEvent::Committed(text), window, cx);
+                    }
+                    self.close_command_line(window, cx);
+                }
+                Prompt::Command => {
+                    let (candidates, words) = {
+                        let c = self.command_line.as_ref().unwrap();
+                        (c.candidates.clone(), c.words.clone())
+                    };
+                    let to_run =
+                        match commandline::resolve_submit(&text, cursor, &candidates, &words) {
+                            commandline::Submit::Run(line) => line,
+                            commandline::Submit::Accepted(line, _) => {
+                                self.command_input.update(cx, |input, cx| {
+                                    input.set_value(line.clone(), window, cx)
+                                });
+                                line
+                            }
+                            commandline::Submit::Ambiguous(names) => {
+                                if let Some(c) = self.command_line.as_mut() {
+                                    c.error = Some(format!("ambiguous: {}", names.join(", ")));
+                                }
+                                cx.notify();
+                                return true;
+                            }
+                        };
+                    let result = match self.occupants.get(&tile) {
+                        Some(o) => o.content.command(&to_run, window, cx),
+                        None => Err("the tile is gone".into()),
+                    };
+                    match result {
+                        Ok(()) => self.close_command_line(window, cx),
+                        Err(e) => {
+                            if let Some(c) = self.command_line.as_mut() {
+                                c.error = Some(e);
+                            }
+                            cx.notify();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        if prompt == Prompt::Command
+            && let Some(ks) = convert_keystroke(&event.keystroke)
+            && let Some(ck) = commandline::completion_key(&ks)
+        {
+            let c = self.command_line.as_mut().unwrap();
+            match ck {
+                commandline::CompletionKey::Next => c.step(1),
+                commandline::CompletionKey::Prev => c.step(-1),
+                commandline::CompletionKey::Accept => {
+                    if let Some(word) = c.highlighted_word().map(str::to_string) {
+                        let text = self.command_input.read(cx).value().to_string();
+                        let (line, _) = commandline::accept(&text, c.word.clone(), &word);
+                        // Cycle on repeat: the next tab highlights the next
+                        // candidate over the same typed word.
+                        c.step(1);
+                        let keep = std::mem::take(&mut c.candidates);
+                        let keep_words = std::mem::take(&mut c.words);
+                        let highlighted = c.highlighted;
+                        self.command_input
+                            .update(cx, |input, cx| input.set_value(line, window, cx));
+                        if let Some(c) = self.command_line.as_mut() {
+                            c.candidates = keep;
+                            c.words = keep_words;
+                            c.highlighted = highlighted;
+                        }
+                    }
+                }
+            }
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     /// Scroll the palette's results viewport so the currently selected row
     /// is visible (`gpui::ScrollHandle::scroll_to_item`, a real per-frame
     /// layout measurement — see `palette::render`'s doc comment). Called
@@ -1144,6 +1354,10 @@ impl ShellView {
             // pushing readings whether or not anyone is looking.
             self.data_probe = !self.data_probe;
             cx.notify();
+        } else if action.0 == "tile::command_line" {
+            self.open_command_line(Prompt::Command, window, cx);
+        } else if action.0 == "tile::find" {
+            self.open_command_line(Prompt::Find, window, cx);
         } else if action.0 == "perf::reset" {
             // Zero the frame-time counters so a measurement can start
             // from a known point (e.g. right before an interaction worth
@@ -1711,6 +1925,25 @@ impl ShellView {
                 if event.keystroke.key == "escape" {
                     self.close_modal(window, cx);
                 }
+            }
+            return;
+        }
+
+        // The per-tile command line (§3.4) owns its own key handling
+        // while its input has focus — escape/enter/tab/ctrl+n/ctrl+p are
+        // claimed by `handle_command_line_key`, everything else falls
+        // through to the focused `Input` exactly like the filter field
+        // below. Checked ahead of it (never both focused at once, but
+        // this is the more specific guard).
+        if self.command_line.is_some()
+            && self
+                .command_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        {
+            if self.handle_command_line_key(event, window, cx) {
+                cx.stop_propagation();
             }
             return;
         }
@@ -2498,6 +2731,15 @@ impl Render for ShellView {
             .w(px(tile_width))
             .h(px(content_height))
             .flex_none();
+
+        // The focused tile's rect, in window space (`to_window_space`),
+        // for the command line strip (§3.4): it paints along that tile's
+        // bottom edge, not the surface's, so it must follow focus into a
+        // dock exactly like the focused ring does. Captured from the same
+        // per-tile `is_focused` computed in the loops below rather than a
+        // second lookup — `region`/`focused`/`dock_cells` already say
+        // which tile, if any, is the one ring shows.
+        let mut focused_rect: Option<Rect> = None;
         if rects.is_empty() {
             // The empty hint fills the *tree's* remaining area (not the
             // whole surface — visible docks keep their columns), so it is
@@ -2557,6 +2799,9 @@ impl Render for ShellView {
         } else {
             for (id, r) in rects {
                 let is_focused = region == crate::tiling::FocusRegion::Main && focused == Some(id);
+                if is_focused {
+                    focused_rect = Some(to_window_space(r));
+                }
                 let view = self.occupants.get(&id).map(|o| o.view.clone());
                 surface = surface.child(
                     tile_cell(id, r, is_focused, view, cx)
@@ -2608,6 +2853,9 @@ impl Render for ShellView {
                 for (id, tr) in dock_tiles {
                     let is_focused = region == crate::tiling::FocusRegion::Dock(side)
                         && dock_focused == Some(id);
+                    if is_focused {
+                        focused_rect = Some(to_window_space(tr));
+                    }
                     // Same mod+down drag-arming branch as the tree tiles
                     // above — a docked tile is the same kind of tile, and
                     // drags work from any source region.
@@ -3081,6 +3329,24 @@ impl Render for ShellView {
             .when(self.data_probe, |el| {
                 el.child(crate::dataprobe::render(&self.probe, toolbar_height, cx))
             })
+            // The per-tile command line (§3.4): a one-line strip along
+            // the focused tile's bottom edge, plus a completions popup
+            // above it. Painted only while both a line is open AND that
+            // tile still has a rect this frame (a tile can close out from
+            // under an open line — `ensure_occupants` above already drops
+            // the occupant; `handle_command_line_key`'s own `None` arms
+            // handle the same race for dispatch, this is render's twin).
+            .when_some(
+                self.command_line.as_ref().zip(focused_rect),
+                |el, (line, rect)| {
+                    el.child(commandline_view::render(
+                        line,
+                        &self.command_input,
+                        rect,
+                        cx,
+                    ))
+                },
+            )
             // The palette overlay paints above the tiles/status bar (later
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
@@ -3288,6 +3554,193 @@ mod tests {
         window.root(cx).unwrap().read_with(cx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         })
+    }
+
+    #[gpui::test]
+    fn colon_opens_the_command_line_and_enter_runs_the_line_on_the_occupant(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_some(),
+            "the strip painted"
+        );
+        cx.simulate_input("unpin");
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("command-line").is_none(),
+            "closed after a successful command"
+        );
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert!(
+            log.borrow()
+                .contains(&crate::module::recording::Recorded::Command(
+                    tile,
+                    "unpin".into()
+                )),
+            "{:?}",
+            log.borrow()
+        );
+        let focused = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+        assert!(
+            cx.update(|window, _| focused.is_focused(window)),
+            "focus back on the shell"
+        );
+    }
+
+    #[gpui::test]
+    fn completions_rank_accept_on_tab_and_submit_on_a_unique_enter(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.simulate_input("sort g");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("completion-row-0").is_some(),
+            "gamma01 is offered"
+        );
+        assert!(
+            cx.debug_bounds("completion-row-1").is_none(),
+            "delta01 has no g"
+        );
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let line = shell.read_with(&cx, |s, cx| s.command_input.read(cx).value().to_string());
+        assert_eq!(line, "sort gamma01");
+
+        cx.simulate_keystrokes("enter");
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        assert!(
+            log.borrow()
+                .contains(&crate::module::recording::Recorded::Command(
+                    tile,
+                    "sort gamma01".into()
+                ))
+        );
+
+        // A unique match submits without tab.
+        cx.simulate_keystrokes(":");
+        cx.simulate_input("sort del");
+        cx.simulate_keystrokes("enter");
+        assert!(
+            log.borrow()
+                .contains(&crate::module::recording::Recorded::Command(
+                    tile,
+                    "sort delta01".into()
+                )),
+            "{:?}",
+            log.borrow()
+        );
+    }
+
+    #[gpui::test]
+    fn an_ambiguous_enter_and_a_failing_command_show_inline_and_stay_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut services, log) = services_with_recorder();
+        // Make the recorder's `command` fail.
+        let mut roster = crate::module::ModuleRoster::new("rec");
+        let mut rec = crate::module::recording::RecordingFactory::new("rec");
+        rec.command_result = Err("no such column".into());
+        let log2 = rec.log.clone();
+        roster.add(Box::new(rec));
+        services.roster = roster;
+        let _ = log;
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes(":");
+        cx.simulate_input("sort a01");
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shell = shell_of(&window, &mut cx);
+        let error = shell.read_with(&cx, |s, _| {
+            s.command_line.as_ref().and_then(|c| c.error.clone())
+        });
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("delta01") && e.contains("gamma01")),
+            "{error:?}"
+        );
+        assert!(
+            log2.borrow()
+                .iter()
+                .all(|r| !matches!(r, crate::module::recording::Recorded::Command(..))),
+            "nothing ran"
+        );
+
+        cx.simulate_keystrokes("tab");
+        cx.simulate_keystrokes("enter");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let error = shell.read_with(&cx, |s, _| {
+            s.command_line.as_ref().and_then(|c| c.error.clone())
+        });
+        assert_eq!(
+            error.as_deref(),
+            Some("no such column"),
+            "the occupant's error, inline, line still open"
+        );
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(cx.debug_bounds("command-line").is_none());
+    }
+
+    #[gpui::test]
+    fn slash_streams_find_events_and_escape_cancels(cx: &mut gpui::TestAppContext) {
+        let (services, log) = services_with_recorder();
+        let (window, mut cx) = open_shell(cx, services);
+        cx.simulate_keystrokes("ctrl-v");
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("sp");
+        let shell = shell_of(&window, &mut cx);
+        let tile = shell.read_with(&cx, |s, _| {
+            s.services.workspaces.active().focused_tile().unwrap()
+        });
+        use crate::module::{FindEvent, recording::Recorded};
+        assert!(
+            log.borrow()
+                .contains(&Recorded::Find(tile, FindEvent::Changed("sp".into()))),
+            "{:?}",
+            log.borrow()
+        );
+        cx.simulate_keystrokes("escape");
+        assert!(
+            log.borrow()
+                .contains(&Recorded::Find(tile, FindEvent::Cancelled))
+        );
+        cx.simulate_keystrokes("/");
+        cx.simulate_input("x");
+        cx.simulate_keystrokes("enter");
+        assert!(
+            log.borrow()
+                .contains(&Recorded::Find(tile, FindEvent::Committed("x".into())))
+        );
     }
 
     #[gpui::test]

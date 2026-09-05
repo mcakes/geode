@@ -5,6 +5,7 @@
 //! Dependency rule: this crate never depends on geode-data or on modules.
 
 pub mod actions;
+pub mod commandline;
 pub mod dataprobe;
 pub mod defaults;
 pub mod fonts;

@@ -94,6 +94,12 @@ context = "workspace"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
 "mod+shift+d" = "data::toggle_probe"
+
+[[bindings]]
+context = "tile"
+[bindings.keys]
+":" = "tile::command_line"
+"/" = "tile::find"
 "#;
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -236,6 +242,17 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Reset performance counters",
         "Diagnostics",
     );
+    // The per-tile command line (Phase 3 §3.4): the shell's own actions,
+    // bound `:`/`/` in the `tile` context (any focused tile with an
+    // occupant) so every module gets them for free, without registering
+    // anything of its own.
+    action(
+        reg,
+        "tile::command_line",
+        "Open the tile command line",
+        "Tile",
+    );
+    action(reg, "tile::find", "Find in tile", "Tile");
     // The throwaway data probe (spec §7's vertical slice) — the only way
     // to see the §7.1 end-to-end budget through a painted frame. Deleted
     // when the blotter lands; see `crate::dataprobe`.

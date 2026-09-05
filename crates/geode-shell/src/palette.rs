@@ -532,7 +532,7 @@ const ROW_HEIGHT: f32 = 28.0;
 /// and fight `h_flex`'s gaps to keep them visually glued together).
 /// `highlight_runs` (pure core, above) does the char-index -> merged
 /// byte-range conversion this needs.
-fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
+pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::Hsla) -> StyledText {
     let runs = highlight_runs(title, indices);
     if runs.is_empty() {
         return StyledText::new(title.to_string());
