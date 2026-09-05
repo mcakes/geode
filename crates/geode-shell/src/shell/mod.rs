@@ -1503,6 +1503,7 @@ impl ShellView {
             // profiling). Notify so a visible overlay repaints its
             // zeroed numbers immediately.
             self.perf.reset();
+            self.frame.update(cx, |f, _| f.requery.reset());
             cx.notify();
         } else if let Some(n) = action
             .0
@@ -3722,7 +3723,12 @@ impl Render for ShellView {
             // showing values as-of the last invalidation (see
             // `perf_overlay`'s module doc for why that's deliberate).
             .when(self.perf_overlay, |el| {
-                el.child(perf_overlay::render(&self.perf, toolbar_height, cx))
+                el.child(perf_overlay::render(
+                    &self.perf,
+                    &self.frame.read(cx).requery,
+                    toolbar_height,
+                    cx,
+                ))
             })
             // ShellView is the first-level view Root wraps; Root's own
             // Render impl does not paint these overlay layers itself, so

@@ -21,7 +21,7 @@ use gpui::{App, IntoElement, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::fonts;
-use crate::perf::{FrameHistogram, format_ms};
+use crate::perf::{FrameHistogram, RequeryStats, format_ms};
 
 /// Panel width and margin from the window edges, in px.
 const WIDTH: f32 = 168.0;
@@ -38,11 +38,16 @@ fn row(label: &'static str, value: String, cx: &App) -> impl IntoElement {
         .child(div().font_family(fonts::MONO).child(value))
 }
 
-/// Build the overlay panel. Pure function of the histogram + theme — no
+/// Build the overlay panel. Pure function of the histogram + requery + theme — no
 /// stored state, no side effects — mirroring `whichkey::render`'s shape
 /// (absolute-positioned instant panel, theme tokens, test-only
 /// `debug_selector` hook).
-pub fn render(hist: &FrameHistogram, toolbar_height: f32, cx: &App) -> impl IntoElement {
+pub fn render(
+    hist: &FrameHistogram,
+    requery: &RequeryStats,
+    toolbar_height: f32,
+    cx: &App,
+) -> impl IntoElement {
     let theme = cx.theme();
 
     let dash = || "—".to_string();
@@ -79,6 +84,30 @@ pub fn render(hist: &FrameHistogram, toolbar_height: f32, cx: &App) -> impl Into
                 .child(row("frames", hist.count().to_string(), cx))
                 .child(row("p50", p50, cx))
                 .child(row("p95", p95, cx))
-                .child(row("max", max, cx)),
+                .child(row("max", max, cx))
+                .child(row(
+                    "requery",
+                    match requery.last() {
+                        Some((q, p)) => format!("{} + {}", format_ms(q), format_ms(p)),
+                        None => dash(),
+                    },
+                    cx,
+                ))
+                .child(row(
+                    "q p50",
+                    requery
+                        .submit_to_snapshot()
+                        .percentile_micros(50.0)
+                        .map_or_else(dash, format_ms),
+                    cx,
+                ))
+                .child(row(
+                    "paint p50",
+                    requery
+                        .snapshot_to_paint()
+                        .percentile_micros(50.0)
+                        .map_or_else(dash, format_ms),
+                    cx,
+                )),
         )
 }

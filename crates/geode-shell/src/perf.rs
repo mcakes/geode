@@ -168,13 +168,64 @@ impl FrameHistogram {
     }
 }
 
-/// Requery timing (Phase 3 §6.8). Filled in by Task 7; the frame carries
-/// it from the start so its shape does not change.
-#[derive(Debug, Default)]
-pub struct RequeryStats {}
+/// Requery timing (Phase 3 §6.8): the two halves of §7.1's "query +
+/// snapshot handoff + first painted frame" that the headless benchmarks
+/// cannot see. The blotter records submit→snapshot on `deliver` and
+/// snapshot→paint on the first render after it. Fixed-size, allocation-
+/// free, never notifies — the same discipline as `FrameHistogram`.
+#[derive(Debug)]
+pub struct RequeryStats {
+    submit_to_snapshot: FrameHistogram,
+    snapshot_to_paint: FrameHistogram,
+    pending_snapshot: Option<u64>,
+    last: Option<(u64, u64)>,
+}
+
+impl Default for RequeryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequeryStats {
     pub const fn new() -> Self {
-        RequeryStats {}
+        RequeryStats {
+            submit_to_snapshot: FrameHistogram::new(),
+            snapshot_to_paint: FrameHistogram::new(),
+            pending_snapshot: None,
+            last: None,
+        }
+    }
+
+    pub fn record_submit_to_snapshot(&mut self, micros: u64) {
+        self.submit_to_snapshot.record_micros(micros);
+        self.pending_snapshot = Some(micros);
+    }
+
+    pub fn record_snapshot_to_paint(&mut self, micros: u64) {
+        self.snapshot_to_paint.record_micros(micros);
+        if let Some(first) = self.pending_snapshot.take() {
+            self.last = Some((first, micros));
+        }
+    }
+
+    pub fn last(&self) -> Option<(u64, u64)> {
+        self.last
+    }
+
+    pub fn submit_to_snapshot(&self) -> &FrameHistogram {
+        &self.submit_to_snapshot
+    }
+
+    pub fn snapshot_to_paint(&self) -> &FrameHistogram {
+        &self.snapshot_to_paint
+    }
+
+    pub fn reset(&mut self) {
+        self.submit_to_snapshot.reset();
+        self.snapshot_to_paint.reset();
+        self.pending_snapshot = None;
+        self.last = None;
     }
 }
 
@@ -322,5 +373,24 @@ mod tests {
         assert_eq!(format_ms(4_642), "4.6ms");
         assert_eq!(format_ms(83_000), "83ms");
         assert_eq!(format_ms(0), "0.00ms");
+    }
+
+    #[test]
+    fn requery_stats_pair_the_two_halves_and_summarise_each() {
+        let mut s = RequeryStats::new();
+        assert_eq!(s.last(), None);
+        s.record_submit_to_snapshot(12_000);
+        assert_eq!(s.last(), None, "half a pair is not a pair");
+        s.record_snapshot_to_paint(3_000);
+        assert_eq!(s.last(), Some((12_000, 3_000)));
+        s.record_submit_to_snapshot(20_000);
+        s.record_snapshot_to_paint(4_000);
+        assert_eq!(s.last(), Some((20_000, 4_000)));
+        assert_eq!(s.submit_to_snapshot().count(), 2);
+        assert_eq!(s.snapshot_to_paint().count(), 2);
+        assert!(s.submit_to_snapshot().percentile_micros(50.0).unwrap() >= 12_000);
+        s.reset();
+        assert_eq!(s.last(), None);
+        assert_eq!(s.submit_to_snapshot().count(), 0);
     }
 }
