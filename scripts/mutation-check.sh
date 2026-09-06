@@ -2011,6 +2011,24 @@ run_mutation "palette: selecting a saved scope loads it" \
   '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
 
+run_mutation "bar: a keystroke sets the frame text" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                        if f.set_scope_in_session(s) {' \
+  '                        if false && f.set_scope_in_session(s) {' \
+  geode-shell typing_in_the_field_sets_the_frame_text_per_keystroke_and_enter_blurs
+
+run_mutation "bar: escape restores the pre-focus text" \
+  crates/geode-shell/src/shell/input.rs \
+  '                if let Some(base) = self.filter_session_base.take() {' \
+  '                if let Some(base) = self.filter_session_base.take().filter(|_| false) {' \
+  geode-shell escape_restores_the_text_the_field_had_when_focused
+
+run_mutation "bar: a chip close drops the dimension" \
+  crates/geode-shell/src/shell/render.rs \
+  '                    if f.drop_dimension(column) {' \
+  '                    if false {' \
+  geode-shell a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

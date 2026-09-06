@@ -207,6 +207,10 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if action.0 == "frame::focus_text" {
+            // mod+/ (spec §3.11): focus the scope bar's live text field
+            // from anywhere in the shell.
+            self.focus_text_field(window, cx);
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`
@@ -325,6 +329,16 @@ impl ShellView {
                 }
             })
             .detach();
+    }
+
+    /// `mod+/` (spec §3.11): move focus into the scope bar's live text
+    /// field from anywhere in the shell. The field's own `InputEvent::
+    /// Focus` subscription (`ShellView::new`) is what actually opens the
+    /// scope-editing session — this just moves the focus handle.
+    pub(super) fn focus_text_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.filter_input.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+        cx.notify();
     }
 
     pub(super) fn handle_key_down(
@@ -469,6 +483,27 @@ impl ShellView {
             .is_focused(window)
         {
             if event.keystroke.key == "escape" {
+                // Restore the text the field had when it took focus (spec
+                // §3.11) — `filter_session_base` is only `Some` while a
+                // session is open (set on `InputEvent::Focus`, taken here
+                // or on blur/enter). `set_value` emits no `Change` (the
+                // checked note in `dialog.rs`), so this cannot re-trigger
+                // the per-keystroke subscription. `set_text` after
+                // `end_scope_session` pushes one undo entry for the
+                // revert — acceptable: undo then goes to the session's
+                // start, which is the same scope, and a second undo goes
+                // before it. Simpler than special-casing.
+                if let Some(base) = self.filter_session_base.take() {
+                    self.filter_input.update(cx, |i, cx| {
+                        i.set_value(base.clone(), window, cx);
+                    });
+                    self.frame.update(cx, |f, cx| {
+                        f.end_scope_session();
+                        if f.set_text((!base.trim().is_empty()).then_some(base)) {
+                            cx.notify();
+                        }
+                    });
+                }
                 self.focus_handle.focus(window, cx);
                 cx.notify();
             }

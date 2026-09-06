@@ -9,10 +9,13 @@ use crate::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
 use crate::keymap::build_keymap;
 use crate::tiling::{DockSide, Rect};
 use geode_core::config::{ConfigSources, Layer, LayerDoc};
-use gpui::{Focusable as _, MouseButton, MouseDownEvent, MouseUpEvent, div, px};
+use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, div, px};
 use gpui_component::{Root, TITLE_BAR_HEIGHT};
-// `WindowExt` is already brought in by `use super::*` (top-of-file
-// import, needed by `handle_key_down`'s dialog guard below).
+// `WindowExt` and (since Task 4) `Focusable` are already brought in by
+// `use super::*` (top-of-file imports in `shell/mod.rs`) — needed by
+// `handle_key_down`'s dialog guard and `filter_is_focused`/
+// `dialog_filter_is_focused`'s `.focus_handle(cx)` calls below,
+// respectively.
 
 pub(super) fn test_services() -> ShellServices {
     let config = Config::load(&ConfigSources::default());
@@ -169,7 +172,7 @@ pub(super) fn dialog_test_shell(
     (shell, vcx)
 }
 /// Does the shared dialog filter currently hold focus?
-pub(super) fn filter_is_focused(
+pub(super) fn dialog_filter_is_focused(
     shell: &Entity<ShellView>,
     cx: &mut gpui::VisualTestContext,
 ) -> bool {
@@ -177,6 +180,21 @@ pub(super) fn filter_is_focused(
         shell
             .read(cx)
             .dialog_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    })
+}
+/// Does the scope bar's live text field (Task 4, spec §3.11) currently
+/// hold focus?
+pub(super) fn filter_is_focused(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) -> bool {
+    cx.update(|window, cx| {
+        shell
+            .read(cx)
+            .filter_input
             .read(cx)
             .focus_handle(cx)
             .is_focused(window)

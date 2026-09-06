@@ -499,7 +499,7 @@ fn opening_the_settings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext)
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     assert!(shell.read_with(&cx, |shell, _| shell.settings.is_some()));
     assert!(
-        filter_is_focused(&shell, &mut cx),
+        dialog_filter_is_focused(&shell, &mut cx),
         "the filter must own focus the moment the dialog opens"
     );
 }

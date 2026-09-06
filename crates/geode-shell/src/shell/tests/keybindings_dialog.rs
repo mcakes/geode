@@ -75,7 +75,7 @@ fn opening_the_keybindings_dialog_focuses_the_filter(cx: &mut gpui::TestAppConte
         "sanity: keybindings::open should have opened the dialog"
     );
     assert!(
-        filter_is_focused(&shell, &mut cx),
+        dialog_filter_is_focused(&shell, &mut cx),
         "the filter must own focus the moment the dialog opens"
     );
 }
@@ -121,7 +121,7 @@ fn arrows_and_ctrl_motions_move_the_selection(cx: &mut gpui::TestAppContext) {
         "navigation must not put anything in the filter"
     );
     assert!(
-        filter_is_focused(&shell, &mut cx),
+        dialog_filter_is_focused(&shell, &mut cx),
         "navigation must not steal focus from the filter"
     );
 }
@@ -174,7 +174,7 @@ fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::Test
         "enter should start listening on the selected row"
     );
     assert!(
-        !filter_is_focused(&shell, &mut cx),
+        !dialog_filter_is_focused(&shell, &mut cx),
         "listening must blur the filter, or the capture can never see a letter"
     );
 
@@ -216,7 +216,7 @@ fn escape_cancels_a_capture_without_closing_the_dialog(cx: &mut gpui::TestAppCon
     assert!(open, "and must not also close the dialog behind it");
     assert_eq!(query, "f", "the filter text survives a cancelled capture");
     assert!(
-        filter_is_focused(&shell, &mut cx),
+        dialog_filter_is_focused(&shell, &mut cx),
         "cancelling hands focus back to the filter"
     );
 }
@@ -236,7 +236,7 @@ fn escape_closes_the_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppConte
         );
     });
     assert!(
-        !filter_is_focused(&shell, &mut cx),
+        !dialog_filter_is_focused(&shell, &mut cx),
         "focus must leave the filter on close"
     );
     assert!(

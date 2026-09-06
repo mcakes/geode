@@ -33,7 +33,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, FocusHandle, ScrollHandle, Window};
+use gpui::{Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle, Window};
 use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::ActionRegistry;
@@ -352,14 +352,23 @@ pub struct ShellView {
     /// mutated by `handle_command_line_key`/`on_command_line_changed` and
     /// painted by `commandline_view::render`.
     command_line: Option<CommandLine>,
-    /// The toolbar's right-aligned filter field (Task 4). Deliberately
-    /// inert — nothing reads its value; it becomes the global text filter
-    /// (spec §4.1) in the data phase. Owned here (rather than built fresh
+    /// The toolbar's right-aligned filter field (Task 4), now the scope
+    /// bar's live text field (Task 4, spec §3.1/§3.11): every keystroke
+    /// while it's focused feeds `Frame::set_scope_in_session` through the
+    /// `InputEvent::Change` subscription in `new`, coalesced into one
+    /// undo entry per focus session. Owned here (rather than built fresh
     /// per render, like `status_bar`/`sidebar`'s stateless element fns) is
     /// required: `Input` is a stateful gpui-component that needs a stable
     /// `Entity<InputState>` across frames to keep its own cursor/selection/
     /// focus state, not something rebuildable from scratch each render.
     filter_input: Entity<InputState>,
+    /// The field's value at the moment it took focus (spec §3.11),
+    /// captured by the `InputEvent::Focus` arm of `filter_input`'s
+    /// subscription and taken by whichever of Enter/Escape/Blur ends the
+    /// session first. `Some` only while a text-editing session is open —
+    /// `handle_key_down`'s escape branch uses it to restore the pre-focus
+    /// text; `Enter`/`Blur` just clear it without restoring anything.
+    filter_session_base: Option<String>,
     /// Frame-time histogram (spec §7.4 — always compiled, cheap): fed at
     /// the top of `render` with the interval since the previous render.
     /// See `crate::perf`'s module doc for exactly what that signal does
@@ -461,6 +470,49 @@ impl ShellView {
         // field with a search icon in the `Input`'s prefix slot instead,
         // the same way the palette and the dialogs' filter row do.
         let filter_input = cx.new(|cx| InputState::new(window, cx));
+
+        // The scope bar's live text field (Task 4, spec §3.1/§3.8/§3.11):
+        // one subscription for the life of the window, same lifecycle
+        // shape as `palette_input`'s below. `Focus` opens a text-editing
+        // session (`begin_scope_session`) and remembers the pre-focus
+        // value for Escape to restore; `Change` feeds every keystroke
+        // into the session, coalescing into one undo entry; `PressEnter`
+        // and `Blur` both close the session (`end_scope_session`) — Enter
+        // additionally hands focus back to the shell root, `Blur` doesn't
+        // need to (something else already has it). Escape's own restore
+        // is handled in `handle_key_down`'s filter-focused branch, ahead
+        // of this subscription ever seeing the resulting `Blur`.
+        cx.subscribe_in(
+            &filter_input,
+            window,
+            |view, input, event, window, cx| match event {
+                InputEvent::Focus => {
+                    view.filter_session_base = Some(input.read(cx).value().to_string());
+                    view.frame.update(cx, |f, _| f.begin_scope_session());
+                }
+                InputEvent::Change => {
+                    let text = input.read(cx).value().to_string();
+                    view.frame.update(cx, |f, cx| {
+                        let mut s = f.scope().clone();
+                        s.text = (!text.trim().is_empty()).then_some(text);
+                        if f.set_scope_in_session(s) {
+                            cx.notify();
+                        }
+                    });
+                }
+                InputEvent::PressEnter { .. } => {
+                    view.filter_session_base = None;
+                    view.frame.update(cx, |f, _| f.end_scope_session());
+                    view.focus_handle.focus(window, cx);
+                    cx.notify();
+                }
+                InputEvent::Blur => {
+                    view.filter_session_base = None;
+                    view.frame.update(cx, |f, _| f.end_scope_session());
+                }
+            },
+        )
+        .detach();
 
         // The palette's own query field (palette-input-polish task) — see
         // the `palette_input` field's own doc comment for the full
@@ -674,9 +726,13 @@ impl ShellView {
         // save NAME`) is drained and persisted here — see
         // `on_frame_changed`'s own doc comment (§4.2/§3.9: the frame is
         // pure and has no file access, so `ShellView` is the one place
-        // that can do the write).
-        cx.observe(&frame, |view, frame, cx| view.on_frame_changed(frame, cx))
-            .detach();
+        // that can do the write). `observe_in` (not `observe`) because
+        // Task 4's text-field reflection needs `&mut Window` to call
+        // `InputState::set_value`.
+        cx.observe_in(&frame, window, |view, frame, window, cx| {
+            view.on_frame_changed(frame, window, cx)
+        })
+        .detach();
 
         // Restore a saved session's scope/slot/as-of (Task 3, spec §3.6
         // "state-as-config"), applied directly to the just-built frame
@@ -727,6 +783,7 @@ impl ShellView {
             divider_drag: None,
             tile_drag: None,
             filter_input,
+            filter_session_base: None,
             perf: FrameHistogram::new(),
             last_render_started: None,
             perf_overlay: false,
@@ -763,14 +820,19 @@ impl ShellView {
         cx.notify();
     }
 
-    /// Fired by the `cx.observe(&frame, ..)` set up in `new` whenever the
-    /// frame notifies — which covers both the keyboard's `frame::slot_*`
-    /// dispatches and a module's own `:group save N`. A slot saved by a
-    /// module is persisted here, off the UI thread, because the frame is
-    /// pure and the module has no file access (§4.2): the frame only
-    /// remembers the save in `pending_persist`, and this is where it gets
-    /// drained and actually written.
-    fn on_frame_changed(&mut self, frame: Entity<Frame>, cx: &mut Context<Self>) {
+    /// Fired by the `cx.observe_in(&frame, ..)` set up in `new` whenever
+    /// the frame notifies — which covers both the keyboard's
+    /// `frame::slot_*` dispatches and a module's own `:group save N`. A
+    /// slot saved by a module is persisted here, off the UI thread,
+    /// because the frame is pure and the module has no file access
+    /// (§4.2): the frame only remembers the save in `pending_persist`,
+    /// and this is where it gets drained and actually written.
+    fn on_frame_changed(
+        &mut self,
+        frame: Entity<Frame>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
         {
@@ -797,6 +859,28 @@ impl ShellView {
                     }
                 })
                 .detach();
+        }
+        // Reflect the frame's text back into the field (Task 4, spec
+        // §3.11): an unfocused field always shows the frame's truth — a
+        // scope set elsewhere (a saved-scope load, a module's own
+        // `:scope` command) must show up here even though this field
+        // never had focus. Skipped while the field IS focused: the user's
+        // own typing is the truth then, and `set_value` would stomp the
+        // caret/selection mid-edit. Reading the value is a `SharedString`
+        // clone per frame notify, not per render — fine.
+        if !self
+            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            let frame_text = frame.read(cx).scope().text.clone().unwrap_or_default();
+            let field_text = self.filter_input.read(cx).value().to_string();
+            if field_text != frame_text {
+                self.filter_input.update(cx, |i, cx| {
+                    i.set_value(frame_text, window, cx);
+                });
+            }
         }
         cx.notify();
     }

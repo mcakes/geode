@@ -75,3 +75,117 @@ fn ctrl_z_and_ctrl_shift_z_undo_and_redo_the_scope(cx: &mut gpui::TestAppContext
         "ctrl-shift-z must return to the scope ctrl-z just undid"
     );
 }
+
+#[gpui::test]
+fn typing_in_the_field_sets_the_frame_text_per_keystroke_and_enter_blurs(
+    cx: &mut gpui::TestAppContext,
+) {
+    // `test_services()` builds its keymap with `default_mod()` (spec
+    // §3.1: Alt) — `test_services_with_ctrl_mod` above exists precisely
+    // because that default is Alt, not Ctrl, so `mod+/` resolves to
+    // `alt+/` here.
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    // `InputState`'s own `Focus`/`Blur` events fire from the focus-path
+    // diff `Window::draw` computes (unlike `Change`/`PressEnter`, emitted
+    // straight from the key handler), and that diff is only meaningful
+    // for an active window (`drag.rs`'s `window_deactivation_mid_drag_
+    // ends_both_drag_kinds` doc comment has the same activation-plumbing
+    // note) — without this, `begin_scope_session` never runs.
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/"); // mod+/ under the default mod
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("sp");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("sp")
+    );
+    let v_after_two = frame.read_with(&vcx, |f, _| f.versions().scope);
+    vcx.simulate_input("x");
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.versions().scope),
+        v_after_two + 1
+    );
+    vcx.simulate_keystrokes("enter");
+    assert!(!filter_is_focused(&shell, &mut vcx));
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("spx")
+    );
+    // One undo entry for the whole session.
+    frame.update(&mut vcx, |f, _| assert!(f.undo_scope()));
+    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+}
+
+#[gpui::test]
+fn escape_restores_the_text_the_field_had_when_focused(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    // `cx.notify()` is required here (not `|f, _|`, discarding `cx`): a
+    // `Frame` method never notifies on its own (same reasoning `frame.rs`
+    // documents throughout) — without it `on_frame_changed`'s reflection
+    // into `filter_input` never runs, so the field would still be empty
+    // when Escape captures its base value, as the third test below does.
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_text(Some("old".into())) {
+            cx.notify();
+        }
+    });
+    // See the sibling test's comment: `Focus` only fires from an active
+    // window's `Window::draw` focus-path diff.
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("new");
+    vcx.simulate_keystrokes("escape");
+    assert!(!filter_is_focused(&shell, &mut vcx));
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("old")
+    );
+    let value = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string());
+    assert_eq!(value, "old");
+}
+
+#[gpui::test]
+fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        let mut s = f.scope().clone();
+        s.text = Some("from-tile".into());
+        s.dimensions.push(geode_core::scope::DimensionSelection {
+            column: "book".into(),
+            values: vec!["BK001".into()],
+        });
+        f.set_scope(s);
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let value = shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string());
+    assert_eq!(value, "from-tile");
+    let close = vcx
+        .debug_bounds("scope-chip-close-book")
+        .expect("chip painted");
+    vcx.simulate_click(close.center(), gpui::Modifiers::default());
+    assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
+    assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
+}

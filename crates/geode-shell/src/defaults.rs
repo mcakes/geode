@@ -127,6 +127,7 @@ context = "workspace"
 "mod+shift+p" = "perf::toggle_overlay"
 "mod+z" = "frame::scope_undo"
 "mod+shift+z" = "frame::scope_redo"
+"mod+/" = "frame::focus_text"
 
 [[bindings]]
 context = "tile"
@@ -415,6 +416,16 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
+    // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
+    // focus into it from anywhere in the shell, the one keyboard route
+    // in (typing itself, once focused, needs no action — the field's own
+    // `Input` handles that; see `shell/input.rs`'s filter-focused guard).
+    action(
+        reg,
+        "frame::focus_text",
+        "Focus the scope text field",
+        "Frame",
+    );
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.

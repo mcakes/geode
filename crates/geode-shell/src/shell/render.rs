@@ -764,7 +764,22 @@ impl Render for ShellView {
         // from inside `toolbar::toolbar` — the frame is an entity, and this
         // is the one place `render` already has `cx` in hand to read it.
         let bar_model = self.frame.read(cx).bar_model();
-        let toolbar = toolbar::toolbar(&self.filter_input, &bar_model, cx);
+        // A chip's close glyph drops that dimension from the scope
+        // (spec §3.1) — an undoable edit, same door as every other scope
+        // mutation. Built here, not `cx.listener` (whose signature takes
+        // `&Evt`, not `&str`): capture `cx.entity()` and update through
+        // it, matching `on_chip_close`'s plain-`Fn(&str, ..)` shape.
+        let chip_close_entity = cx.entity();
+        let on_chip_close = move |column: &str, _window: &mut Window, cx: &mut App| {
+            chip_close_entity.update(cx, |view, cx| {
+                view.frame.update(cx, |f, cx| {
+                    if f.drop_dimension(column) {
+                        cx.notify();
+                    }
+                });
+            });
+        };
+        let toolbar = toolbar::toolbar(&self.filter_input, &bar_model, on_chip_close, cx);
 
         let body = h_flex()
             .w_full()
