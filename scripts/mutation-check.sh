@@ -1852,6 +1852,12 @@ run_mutation "schema: textual on an unroutable column is cleared" \
   '        if false {' \
   geode-core textual_on_a_column_no_grain_can_route_is_an_error_and_textual_is_cleared
 
+run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
+  crates/geode-core/src/schema/mod.rs \
+  '        .retain(|c| !uncarriable.iter().any(|(name, _)| name == &c.name));' \
+  '        .retain(|_| true);' \
+  geode-core a_dimension_carried_by_the_pair_grain_is_uncarriable_and_is_dropped
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -77,7 +77,10 @@ pub enum ColumnRole {
     /// key (`Grain::key_columns`); `Some(g)` is a *carried* dimension —
     /// one value per row of `g`'s key, carried by `g` and every finer
     /// grain, stored as a payload column, never added to a key
-    /// (spec §3.3).
+    /// (spec §3.3). `g` must be a grain whose *dimension* key contains
+    /// `g`'s own key (`validate_dataset` rejects it otherwise): the pair
+    /// grain fails this — its dimension key collapses to the instrument
+    /// key — so `grain = "underlying_pair"` is never carriable by anything.
     Dimension { grain: Option<Grain> },
     /// A number, aggregated at its declared grain.
     Measure { grain: Grain, aggregate: Aggregate },

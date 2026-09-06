@@ -21,6 +21,18 @@ test-support = []
 # read that order — a picker or interned-ENUM list in TOML order is what
 # a trader expects, not an alphabetical shuffle). `indexmap` is already
 # in the dependency graph (via `arrow-json`), so this adds no new crate.
+#
+# This feature is workspace-wide, not geode-core-local: Cargo unifies
+# features across every crate that resolves to the same `toml` version
+# (confirmed with `cargo tree -e features -i toml@1.1.4`, geode-core's
+# fix report), so `geode-shell` and `geode-app`'s own `toml::Table`s are
+# also IndexMaps in file order now, not BTreeMaps in sorted order. Kept
+# on anyway (the schema behaviour above is worth it) — every consumer of
+# a `toml::Table`/`toml::Value::Table` in `geode-shell`/`geode-app`/
+# `geode-core::config` was audited for order-dependence; the one real
+# case (`keymap::build`'s ambiguous-alias tie-break) now sorts by
+# spelling explicitly instead of relying on the table's own iteration
+# order. See the fix report for the full audit.
 toml = { version = "1.1.4", features = ["preserve_order"] }
 # Must match the version duckdb-rs re-exports, or `RecordBatch` here and
 # `RecordBatch` there are different types. Check with

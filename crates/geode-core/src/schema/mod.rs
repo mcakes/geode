@@ -208,6 +208,48 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     }
     ds.columns.retain(|c| !bare_outside_key.contains(&c.name));
 
+    // A carried dimension must actually be carriable: its declaring
+    // grain's key must be contained in *some* grain's dimension key
+    // (`DatasetSpec::carries`'s own test), or no grain ever carries it —
+    // `carried_dimensions_at` never returns it, so `ddl.rs` creates no
+    // column for it and `payload_columns` never selects it: declared in
+    // the schema, silently absent from every table. The pair grain is
+    // the one built-in grain this can happen for: its *dimension* key
+    // collapses to the instrument key (`Grain::dimension_key_columns`'s
+    // doc comment), so `grain = "underlying_pair"` names a key no
+    // grain's dimension key — not even the pair grain's own — ever
+    // contains.
+    let uncarriable: Vec<(String, Grain)> = ds
+        .columns
+        .iter()
+        .filter_map(|c| match c.role {
+            ColumnRole::Dimension { grain: Some(g) } => Some((c.name.clone(), g)),
+            _ => None,
+        })
+        .filter(|(_, g)| {
+            !Grain::ALL.iter().any(|grain| {
+                g.key_columns()
+                    .iter()
+                    .all(|k| grain.dimension_key_columns().contains(k))
+            })
+        })
+        .collect();
+    for (name, g) in &uncarriable {
+        diags.push(Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!(
+                "dataset '{}' column '{name}': declares grain = {g:?}, but no grain's \
+                 dimension key contains {g:?}'s key, so nothing can ever carry it as a \
+                 dimension; dropped",
+                ds.name
+            ),
+        });
+    }
+    ds.columns
+        .retain(|c| !uncarriable.iter().any(|(name, _)| name == &c.name));
+
     // `textual` needs a grain that can evaluate the column: a dimension
     // some grain carries, or a measure/attribute declared at a grain.
     // Found by measurement (spec §7): one unroutable textual column
@@ -658,6 +700,33 @@ grain = "underlying"
             d.message
         );
         assert!(schema.dataset("risk").unwrap().column("desk").is_none());
+    }
+
+    #[test]
+    fn a_dimension_carried_by_the_pair_grain_is_uncarriable_and_is_dropped() {
+        // The pair grain's own *dimension* key collapses to the
+        // instrument key (`dimension_key_columns`'s doc comment), so
+        // `grain = "underlying_pair"` names a key no grain's dimension
+        // key ever contains — not even the pair grain's own. Nothing
+        // could ever carry this column: `carried_dimensions_at` would
+        // never return it, so no table would ever have the column.
+        let text = format!(
+            "{CARRIED}\n[risk.columns.spread_type]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"underlying_pair\"\n"
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("spread_type"))
+            .unwrap_or_else(|| panic!("{diags:?}"));
+        assert_eq!(d.severity, Severity::Error);
+        let ds = schema.dataset("risk").unwrap();
+        assert!(
+            ds.column("spread_type").is_none(),
+            "dropped, not merely warned about"
+        );
+        for grain in Grain::ALL {
+            assert!(!ds.carries(grain, "spread_type"));
+        }
     }
 
     #[test]

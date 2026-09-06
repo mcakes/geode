@@ -39,7 +39,7 @@ impl Keymap {
 /// Compile keymap docs (unmerged, in Builtin → Desk → User order) into a
 /// flat binding list. Bad entries are skipped with a diagnostic — a typo in
 /// a user keymap must never take down the keymap (spec §10.1).
-/// Within one [bindings.keys] table, TOML key uniqueness is by spelling, so two spellings that normalize to the same sequence (e.g. "alt+h" and "mod+h" when mod=alt) can coexist; they are iterated alphabetically, so which wins is determined by spelling, not declaration order.
+/// Within one [bindings.keys] table, TOML key uniqueness is by spelling, so two spellings that normalize to the same sequence (e.g. "alt+h" and "mod+h" when mod=alt) can coexist; they are iterated alphabetically, so which wins is determined by spelling, not declaration order. This is sorted explicitly below rather than relied on from `toml::Table`'s own iteration order: `geode-core`'s `preserve_order` feature (Phase 4 §3.3, for schema column declaration order) is workspace-wide by Cargo feature unification, so every crate's `toml::Table` — this one included — iterates in file order, not sorted order, unless a consumer sorts for itself.
 pub fn build_keymap(
     layered: &[LayerDoc],
     mod_alias: Modifiers,
@@ -100,7 +100,15 @@ pub fn build_keymap(
                 ));
                 continue;
             };
-            for (spec, action_value) in keys {
+            // Sorted explicitly by spelling (see the doc comment above):
+            // `toml::Table` iterates in file order under `preserve_order`,
+            // and the ambiguous-alias tie-break this loop's push order
+            // decides (`matcher.rs` keeps the *last* pushed binding) must
+            // stay keyed on spec spelling, not on where a spec happens to
+            // sit in the source file.
+            let mut sorted_keys: Vec<(&String, &toml::Value)> = keys.iter().collect();
+            sorted_keys.sort_by_key(|(a, _)| *a);
+            for (spec, action_value) in sorted_keys {
                 let Some(action_str) = action_value.as_str() else {
                     diags.push(Diagnostic::error(
                         doc.layer,
@@ -193,6 +201,30 @@ mod tests {
         assert_eq!(bindings[1].layer, Layer::User);
         assert!(bindings[1].predicate.is_none());
         assert!(bindings[0].index < bindings[1].index);
+    }
+
+    #[test]
+    fn ambiguous_aliases_in_one_keys_table_resolve_by_spelling_not_file_position() {
+        // "mod+h" (with mod=alt) and "alt+h" normalize to the same
+        // keystroke, so both are legal keys of one [bindings.keys] table
+        // (spec: TOML key uniqueness is by spelling). Declared in file
+        // order mod+h, then alt+h — the *opposite* of alphabetical order —
+        // so a regression back to raw `toml::Table` iteration order
+        // (file order, under `preserve_order`) would push alt+h last and
+        // flip which action wins.
+        let d = doc(
+            Layer::User,
+            "[[bindings]]\n[bindings.keys]\n\"mod+h\" = \"workspace::focus_right\"\n\"alt+h\" = \"workspace::focus_left\"\n",
+        );
+        let (keymap, diags) = build_keymap(&[d], Modifiers::ALT, &registry());
+        assert!(diags.is_empty(), "{diags:?}");
+        let bindings = keymap.bindings();
+        assert_eq!(bindings.len(), 2);
+        // Sorted by spelling: "alt+h" pushed first, "mod+h" pushed last —
+        // the matcher keeps the last pushed on an exact tie, so "mod+h"'s
+        // action must win regardless of which key the file names first.
+        assert_eq!(bindings[0].action.0, "workspace::focus_left");
+        assert_eq!(bindings[1].action.0, "workspace::focus_right");
     }
 
     #[test]
