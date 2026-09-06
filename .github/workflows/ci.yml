@@ -34,3 +34,5 @@ jobs:
         run: cargo test --workspace
       - name: Benches compile
         run: cargo bench --workspace --no-run
+      - name: geode-shell test-support feature builds
+        run: cargo check -p geode-shell --features test-support --all-targets
