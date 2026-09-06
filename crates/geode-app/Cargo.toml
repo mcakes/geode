@@ -40,3 +40,10 @@ toml = "1.1.4"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# `#[gpui::test]` / `TestAppContext` / `VisualTestContext` for the bridge's
+# window-close drain-task test (`src/bridge.rs`), and `DataHandle::
+# for_tests()` for a service-thread-free handle — same pattern as
+# `geode-blotter`'s dev-dependencies re-declaring the same crates with
+# `test-support` turned on.
+gpui = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }

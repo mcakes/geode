@@ -219,62 +219,62 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
-            if now_dropped != last_dropped {
-                last_dropped = now_dropped;
-                cx.update(|cx| {
+            // Every branch below reaches the shell through `window.update`
+            // rather than a standalone `Entity<ShellView>` clone updated
+            // via plain `cx.update`: an entity update succeeds forever,
+            // window or no, so a bare `cx.update` never notices the
+            // window is gone and this task (with its `DataHandle` clone,
+            // `Rc<BlotterFactory>` and `Arc<AtomicU64>`) would outlive the
+            // window until a `Query` outcome happened to arrive. Routing
+            // every branch through the window handle makes the very next
+            // event — of any kind — the one that ends the task.
+            let handled = window.update(cx, |root, window, cx| {
+                let Ok(shell) = root.view().clone().downcast::<ShellView>() else {
+                    return;
+                };
+                if now_dropped != last_dropped {
                     shell.update(cx, |s, cx| {
                         s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
                     });
-                });
-            }
-            let outcome = match event {
-                DataEvent::Query(outcome) => Some(outcome),
-                DataEvent::Published {
-                    dataset,
-                    batch,
-                    gen_id,
-                    ..
-                } => {
-                    eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
-                    cx.update(|cx| {
+                }
+                match event {
+                    DataEvent::Query(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    }
+                    DataEvent::Published {
+                        dataset,
+                        batch,
+                        gen_id,
+                        ..
+                    } => {
+                        eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
                         let frame = shell.read(cx).frame().clone();
                         frame.update(cx, |f, cx| {
                             f.note_published();
                             cx.notify();
                         });
-                    });
-                    None
-                }
-                DataEvent::Health {
-                    source,
-                    worst,
-                    detail,
-                } => {
-                    eprintln!("[data] health {source}: {} — {detail}", worst.label());
-                    cx.update(|cx| {
+                    }
+                    DataEvent::Health {
+                        source,
+                        worst,
+                        detail,
+                    } => {
+                        eprintln!("[data] health {source}: {} — {detail}", worst.label());
                         shell.update(cx, |s, cx| {
                             s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
                         });
-                    });
-                    None
-                }
-                DataEvent::Diagnostics(diags) => {
-                    for d in diags {
-                        eprintln!("[data] {d}");
                     }
-                    None
-                }
-            };
-            if let Some(outcome) = outcome {
-                let delivered = window.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    DataEvent::Diagnostics(diags) => {
+                        for d in diags {
+                            eprintln!("[data] {d}");
+                        }
                     }
-                });
-                if delivered.is_err() {
-                    return; // the window is gone
                 }
+            });
+            if handled.is_err() {
+                return; // the window is gone
             }
+            last_dropped = now_dropped;
         }
     })
     .detach();
@@ -284,6 +284,131 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
 mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
+    use geode_shell::actions::ActionRegistry;
+    use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
+    use geode_shell::keymap::build_keymap;
+    use geode_shell::module::ModuleRoster;
+    use geode_shell::session::TileRecords;
+    use geode_shell::shell::ShellServices;
+    use geode_shell::tiling::Workspaces;
+    use geode_shell::{theme, vimfind::FindStyle};
+    use gpui::AppContext as _;
+
+    /// The minimal real `ShellServices` a window needs to open — same
+    /// shape as `geode-shell`'s own `test_services()` (not reachable
+    /// from here: it is `pub(super)` inside that crate's test module),
+    /// built from public items only.
+    fn test_shell_services() -> ShellServices {
+        let config = Config::load(&ConfigSources::default());
+        let mut registry = ActionRegistry::default();
+        register_builtin_actions(&mut registry);
+        let mod_alias = default_mod();
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+        assert!(diags.is_empty(), "{diags:?}");
+        let (theme, warnings) = theme::load_bundled();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        ShellServices {
+            config,
+            registry,
+            keymap,
+            mod_alias,
+            workspaces: Workspaces::new(),
+            theme,
+            session_path: None,
+            roster: ModuleRoster::default(),
+            restored_tiles: TileRecords::new(),
+        }
+    }
+
+    fn open_test_window(cx: &mut gpui::TestAppContext) -> WindowHandle<Root> {
+        cx.update(gpui_component::init);
+        cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view =
+                    cx.new(|cx| ShellView::new(test_shell_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap()
+    }
+
+    /// Finding 1 (fix round 1): every branch of the drain loop must
+    /// detect the closed window and end the task, not just `Query`.
+    /// Before the fix, `Published`/`Health`/the dropped-events branch
+    /// reached the shell through a standalone `Entity<ShellView>` clone
+    /// via plain `cx.update`, which succeeds forever regardless of the
+    /// window — so the task (and its `dropped` counter, `DataHandle` and
+    /// factory clones) outlived the window until a `Query` outcome
+    /// happened to arrive.
+    ///
+    /// `dropped: Arc<AtomicU64>` is the cleanest observable proxy for
+    /// "the task has ended": it is captured directly by the drain task's
+    /// `async move` block (every branch reads it) and by nothing else in
+    /// `attach` — unlike `factory`/`handle`, which the `ConfigReloaded`
+    /// subscription also clones for its own, unrelated, longer lifetime.
+    /// A `Health` event — one of the branches that used to bypass the
+    /// window check — is sent after the window closes; if the task is
+    /// still alive it will have observed the event and still hold its
+    /// clone, so the strong count would not move. No completion flag
+    /// needed in production code.
+    #[gpui::test]
+    fn the_drain_task_ends_on_the_first_event_after_the_window_closes(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = open_test_window(cx);
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: dropped.clone(),
+        };
+
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        // This test's own `dropped`, `bridge.dropped`, and the drain
+        // task's own clone (captured at `attach` time) — three, while
+        // the task is alive.
+        let alive = Arc::strong_count(&dropped);
+        assert_eq!(
+            alive, 3,
+            "the drain task holds its own clone of `dropped` while it runs"
+        );
+
+        cx.update(|cx| {
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
+
+        // A `Health` event — one of the branches that used to bypass the
+        // window check entirely — must be what ends the task now that
+        // the window is gone.
+        tx.try_send(DataEvent::Health {
+            source: "s".into(),
+            worst: geode_data::health::Health::Ok,
+            detail: String::new(),
+        })
+        .unwrap();
+        cx.run_until_parked();
+
+        assert_eq!(
+            Arc::strong_count(&dropped),
+            alive - 1,
+            "the drain task released its clone of `dropped` once the window was gone"
+        );
+    }
 
     #[test]
     fn the_database_path_prefers_config_then_demo_then_the_platform_dir() {

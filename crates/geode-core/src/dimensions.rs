@@ -49,6 +49,9 @@ impl DerivedDimensions {
         let mut diags = Vec::new();
 
         for (name, value) in &doc.value {
+            if name == "config_version" {
+                continue;
+            }
             let bad = |m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
@@ -172,5 +175,16 @@ IDX_EXO_US = ["BK003"]
         let (dims, diags) = DerivedDimensions::from_doc(&doc(""));
         assert!(dims.all().next().is_none());
         assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn a_dimension_config_version_header_is_not_a_spurious_diagnostic() {
+        // Every config doc carries this header by convention
+        // (`groupings.toml`'s own `GroupingSlots::from_doc` already
+        // skips it) — it must not be treated as a malformed dimension.
+        let (dims, diags) =
+            DerivedDimensions::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(dims.get("desk").is_some());
     }
 }

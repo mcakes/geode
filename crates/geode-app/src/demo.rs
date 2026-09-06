@@ -126,19 +126,15 @@ mod demo_config_integration {
     /// fed to `data_setup`, they produce a servable `DataServiceConfig`
     /// with the same views the blotter is meant to run.
     ///
-    /// **Pre-existing finding, out of this task's scope (`geode-core`, not
-    /// `geode-app`):** `ViewSpec::from_doc` and `DerivedDimensions::
-    /// from_doc` iterate every top-level key of the doc and do not skip
-    /// `config_version`, unlike `GroupingSlots::from_doc`, which
-    /// explicitly does. Since `views.toml`/`dimensions.toml` carry a
-    /// `config_version = 1` header (the same convention every other
-    /// config doc uses), both calls below produce one warning-severity
-    /// "not a table" diagnostic apiece — cosmetic (no bogus view/
-    /// dimension is added; `names` below is exactly `tree`/`wide`) but
-    /// noisy on every real startup, demo or not. Asserted here rather
-    /// than fixed, since fixing it means editing `geode-core::view`/
-    /// `geode-core::dimensions`, outside this task's file list — flagged
-    /// in the task report for a follow-up.
+    /// **Fix round 1, Finding 2:** `ViewSpec::from_doc` and
+    /// `DerivedDimensions::from_doc` used to iterate every top-level key
+    /// of the doc without skipping `config_version` (unlike
+    /// `GroupingSlots::from_doc`, which already did), so `views.toml`/
+    /// `dimensions.toml`'s `config_version = 1` header — the same
+    /// convention every other config doc uses — produced one spurious
+    /// "not a table" diagnostic apiece. Both `from_doc`s now skip it
+    /// (`crates/geode-core/src/{view,dimensions}.rs`), so this asserts
+    /// zero diagnostics rather than the two it used to tolerate.
     #[test]
     fn the_demo_layer_produces_a_servable_data_setup() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
@@ -150,19 +146,7 @@ mod demo_config_integration {
         let setup =
             crate::bridge::data_setup(&config, "/tmp/geode-demo/100000-42/geode.duckdb".into())
                 .expect("datasets + views are both present in the demo layer");
-        let messages: Vec<String> = setup
-            .diagnostics
-            .iter()
-            .map(|d| d.message.clone())
-            .collect();
-        assert_eq!(
-            messages,
-            vec![
-                "view 'config_version': not a table".to_string(),
-                "dimension 'config_version': not a table".to_string(),
-            ],
-            "only the known geode-core config_version gap — see this test's doc comment",
-        );
+        assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
         let names: Vec<&str> = setup.views.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();

@@ -439,6 +439,28 @@ run_mutation "validation: a derived dimension shadowing a column is reported" \
   '                if false {' \
   geode-core
 
+run_mutation "views: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/view.rs \
+  '            if name == "config_version" {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-core \
+  a_view_config_version_header_is_not_a_spurious_diagnostic
+
+run_mutation "dimensions: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/dimensions.rs \
+  '            if name == "config_version" {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-core \
+  a_dimension_config_version_header_is_not_a_spurious_diagnostic
+
 # ---- findings from the phase-2b/prerequisites review round
 
 run_mutation "derived: the value is blanked, not just the marker" \
@@ -1561,6 +1583,122 @@ run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted d
   '        "/nonexistent/*.csv".to_string()' \
   geode-app \
   the_demo_layer_is_complete_and_points_sources_at_the_directory
+
+# Fix round 1, Finding 1: every branch of the drain loop, not just
+# `Query`, must reach the shell through `window.update` and end the task
+# the first time the window is gone. This entry restores the pre-fix
+# shape — only `Query` routes through `window.update`; the dropped-events
+# status update, `Published`, and `Health` go back to a bare `cx.update`
+# on a standalone `Entity<ShellView>` clone the task keeps alive forever
+# — so a `Health` event sent after the window closes no longer ends the
+# task, which is exactly what the covering test sends and checks for.
+run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
+  crates/geode-app/src/bridge.rs \
+  '            let handled = window.update(cx, |root, window, cx| {
+                let Ok(shell) = root.view().clone().downcast::<ShellView>() else {
+                    return;
+                };
+                if now_dropped != last_dropped {
+                    shell.update(cx, |s, cx| {
+                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
+                    });
+                }
+                match event {
+                    DataEvent::Query(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    }
+                    DataEvent::Published {
+                        dataset,
+                        batch,
+                        gen_id,
+                        ..
+                    } => {
+                        eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
+                        let frame = shell.read(cx).frame().clone();
+                        frame.update(cx, |f, cx| {
+                            f.note_published();
+                            cx.notify();
+                        });
+                    }
+                    DataEvent::Health {
+                        source,
+                        worst,
+                        detail,
+                    } => {
+                        eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                        shell.update(cx, |s, cx| {
+                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                        });
+                    }
+                    DataEvent::Diagnostics(diags) => {
+                        for d in diags {
+                            eprintln!("[data] {d}");
+                        }
+                    }
+                }
+            });
+            if handled.is_err() {
+                return; // the window is gone
+            }
+            last_dropped = now_dropped;' \
+  '            if now_dropped != last_dropped {
+                last_dropped = now_dropped;
+                cx.update(|cx| {
+                    shell.update(cx, |s, cx| {
+                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
+                    });
+                });
+            }
+            let outcome = match event {
+                DataEvent::Query(outcome) => Some(outcome),
+                DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    ..
+                } => {
+                    eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
+                    cx.update(|cx| {
+                        let frame = shell.read(cx).frame().clone();
+                        frame.update(cx, |f, cx| {
+                            f.note_published();
+                            cx.notify();
+                        });
+                    });
+                    None
+                }
+                DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => {
+                    eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                    cx.update(|cx| {
+                        shell.update(cx, |s, cx| {
+                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                        });
+                    });
+                    None
+                }
+                DataEvent::Diagnostics(diags) => {
+                    for d in diags {
+                        eprintln!("[data] {d}");
+                    }
+                    None
+                }
+            };
+            if let Some(outcome) = outcome {
+                let delivered = window.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
+                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    }
+                });
+                if delivered.is_err() {
+                    return; // the window is gone
+                }
+            }' \
+  geode-app \
+  the_drain_task_ends_on_the_first_event_after_the_window_closes
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
