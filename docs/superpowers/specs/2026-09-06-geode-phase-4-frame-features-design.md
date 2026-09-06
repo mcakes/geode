@@ -31,9 +31,13 @@ Phase 4 is one spec and three implementation plans, sequenced 4a → 4b →
 - The scope bar in the toolbar's middle: slot readout, one chip per
   dimension selection, text and expression chips, a live text field, and
   the as-of marker. Rebuilt only when `Frame::versions()` changes.
-- Dimension pickers: `frame::pick` (choose a dimension, then its values)
-  and one `frame::pick_<column>` action per dimension column known at
-  startup, fed by a new `Request::Distinct` on `DataHandle`.
+- A `categorical` flag on schema columns — the one rule that decides
+  which columns are ENUM-interned at ingest, which get a picker, and
+  which the text rewrite applies to.
+- Dimension pickers: `frame::pick` (choose a categorical column, then
+  its values) and one `frame::pick_<column>` action per categorical
+  column known at startup, fed by a new `Request::Distinct` on
+  `DataHandle`.
 - A text filter that requeries on every keystroke, made affordable by
   compiling the pattern over ENUM dictionaries rather than rows, with
   the bench as the gate.
@@ -126,8 +130,9 @@ and every behaviour above has a mutation entry.
   the pick actions follow the same rule.
 - Any change to how tiles are created or split. `docs/modules.md` is a
   draft roster for later phases and does not bear on this one.
-- A config surface for pickers. Every dimension column is pickable;
-  there is nothing to configure.
+- A picker doc. Every categorical column is pickable; the only
+  configuration is the per-column `categorical` flag in the dataset
+  schema (§3.3), which the column's storage encoding already needs.
 
 ## 2. Amendments to earlier designs
 
@@ -136,8 +141,9 @@ older document does not have to be re-read with a correction in mind.
 
 1. **§4.1 and §8, "dimension-picker definitions" as config.** Struck.
    Pickers derive from the schema: every column any dataset declares
-   with `ColumnRole::Dimension`, plus every derived dimension, gets a
-   picker. A per-dimension key binding is the keymap's job (`mod+b =
+   `categorical` (§3.3) — a column whose vocabulary is small enough to
+   be an ENUM, whatever its role — plus every derived dimension, gets a
+   picker. A per-column key binding is the keymap's job (`mod+b =
    "frame::pick_book"`), not a picker doc's.
 2. **§4.3, the text field.** The foundation spec is silent on when the
    text filter fires. It fires on every keystroke (§3.2). The pool's
@@ -164,6 +170,15 @@ older document does not have to be re-read with a correction in mind.
    measurement (§7): a text filter over a textual column no grain
    carries as a dimension fails the whole statement. `textual = true` on
    such a column is a load-time error for that column (§3.5).
+10. **P2 §3.6, "dimension columns are stored as DuckDB ENUM types".**
+    Becomes "categorical columns are". Every `Dimension` is categorical
+    by default, so nothing already ingested changes encoding; the
+    difference is that an `Attribute` such as `currency` or
+    `model_code` can opt in, and a high-cardinality `Dimension` can opt
+    out. Selections (§4.1's chips) may then name any categorical
+    column, not only `Dimension`-role ones; the compiler routes a
+    categorical attribute the way it already routes a textual attribute
+    (a membership term at the carrying grain).
 
 ## 3. Phase 4a — the frame's face
 
@@ -211,14 +226,52 @@ model, and `escape` is the way out, same as the command line.
 
 An empty field clears the text filter. Whitespace-only is empty.
 
-### 3.3 Dimension pickers
+### 3.3 Categorical columns and the pickers
 
-`frame::pick` opens a two-stage modal through `open_shell_dialog`:
+**The flag.** `ColumnSpec` gains `categorical: bool`, read from the
+dataset doc:
 
-1. **Dimension.** A fuzzy list (`PaletteState` over `PaletteItem`s) of
-   every pickable dimension: the union over `config.datasets` of
-   columns with `ColumnRole::Dimension`, plus every derived dimension,
-   sorted by name, each labelled with the datasets that carry it.
+```toml
+[risk_snapshot.columns.currency]
+type = "utf8"
+role = "attribute"
+grain = "position"
+categorical = true          # small vocabulary: ENUM-stored, pickable
+```
+
+Defaults: `true` for `Dimension`, `false` for `Key`, `Measure` and
+`Attribute`. Only a `utf8` column may be categorical; declaring it on
+any other type is a load-time error for that column. The flag means
+"this column's vocabulary is small enough to be an ENUM", and one
+function, `DatasetSpec::categorical_columns()`, is read by the three
+things that care: the store's ENUM interning at ingest (replacing
+`ddl::dimension_columns`), the picker roster, and the text rewrite
+(§3.5). A picker and an ENUM are the same judgement about a column, so
+they come from the same flag; nothing can be pickable without being
+ENUM-stored or the other way round.
+
+A `Dimension` with a large vocabulary — a per-trade reference someone
+chose to group by — can declare `categorical = false`: it stays
+groupable and scopeable through the expression filter, loses its
+picker, and is stored as `VARCHAR`. The compiler's dictionary-code
+paths (`dict_value`, the ENUM `try_cast`) already tolerate a plain
+string column because as-of tables are plain strings in every era.
+
+**Selections on categorical attributes.** `DimensionSelection.column`
+may name any categorical column. `Scope::validate` accepts it, and
+`scope_sql.rs` routes it as it routes a textual attribute today: a
+direct predicate at a grain that carries the column, a membership term
+at grains that do not. The plan verifies this by execution against a
+selection on `currency`, which is an attribute at `position` grain in
+the demo schema, before any picker is built on it.
+
+**The pickers.** `frame::pick` opens a two-stage modal through
+`open_shell_dialog`:
+
+1. **Column.** A fuzzy list (`PaletteState` over `PaletteItem`s) of
+   every pickable column: the union over `config.datasets` of
+   categorical columns, plus every derived dimension, sorted by name,
+   each labelled with its role and the datasets that carry it.
    `enter` moves to stage two; `escape` closes.
 2. **Values.** The column's distinct values under the current era and
    the frame's scope *minus this dimension's own selection*, each with
@@ -232,7 +285,7 @@ The values list is a `VirtualList`: a real underlying dictionary runs to
 thousands of rows.
 
 `frame::pick_<column>` opens stage two directly for that column. One is
-registered per pickable dimension at startup, so the palette lists
+registered per pickable column at startup, so the palette lists
 `Pick: book`, `Pick: underlying_ref`, … and a keymap can bind any of
 them. `mod+p` is bound to `frame::pick` by default; the per-column
 actions ship unbound.
@@ -292,9 +345,10 @@ costs a flat ~50 ms of scan before any result is built, because each
 `ILIKE` decodes every row's ENUM back to text. The needle that matches
 nothing costs the same as the one that matches half the rows.
 
-The rewrite: for a textual column stored as an ENUM, the compiler
-evaluates the pattern over the dictionary and emits an `IN` over the
-matching values instead of an `ILIKE` over rows. A row's value is by
+The rewrite: for a textual column that is also categorical (§3.3), and
+therefore ENUM-stored in the live era, the compiler evaluates the
+pattern over the dictionary and emits an `IN` over the matching values
+instead of an `ILIKE` over rows. A row's value is by
 construction one of the dictionary entries, so the two predicates
 select the same rows; the pattern (`%needle%`, case-insensitive, with
 `like_pattern`'s escaping) is applied to hundreds of strings instead of
@@ -312,8 +366,9 @@ one prepared statement per view and parameter counts do not change.
 Under an as-of era the archived table carries plain `VARCHAR` (P2: as-of
 skips ENUM interning), so the term stays the row `ILIKE`; the rewrite is
 an era-aware branch in `scope_sql.rs`, chosen per column from the
-schema's encoding for that era. Key and attribute columns are plain
-strings in every era and keep the row scan.
+schema's `categorical` flag and the era. Non-categorical columns — keys,
+and any attribute or dimension that did not opt in — are plain strings
+in every era and keep the row scan.
 
 The gate: the bench in §7 re-run after the rewrite, with the zero-match
 case over ENUM columns only inside 50 ms at 1M rows, and the residual
@@ -932,7 +987,11 @@ excluded); `ScopeSpec` and `ViewPresentationSpec` readers with their
 per-object atomicity; the ring (capacity, wrap, `drain_since`, two
 writers); the key-path-to-span walk; the doc-and-layer picker's listing.
 
-**Data layer:** `Distinct` under scope-minus-own-dimension, under
+**Data layer:** the `categorical` default per role and the `utf8`-only
+rule; interning follows the flag (an opted-in attribute comes back as
+a dictionary, an opted-out dimension as plain strings); a selection on
+a categorical attribute selects the same rows as the equivalent
+expression filter; `Distinct` under scope-minus-own-dimension, under
 as-of, unioned across two datasets; the ENUM rewrite selecting the
 same rows as the row scan for a property-tested set of needles
 (including `%`, `_` and `\`); the `textual` validation; `Catalog`'s
@@ -968,9 +1027,11 @@ geode-app              + tracing init, Diagnostics feed, DataService restart, ro
   ├─ geode-config-editor   NEW: editor tile, validation, save through the write door
   ├─ geode-shell           + scope bar, picker, as-of modal, Diagnostics entity, flip barrier,
   │                          undo/redo, saved scopes, pick_* actions, config_write
-  ├─ geode-data            + Distinct and Catalog, ENUM text rewrite, swappable handle,
+  ├─ geode-data            + Distinct and Catalog, interning and text rewrite by `categorical`,
+  │                          selections on categorical attributes, swappable handle,
   │                          ingest boundary, textual validation
-  └─ geode-core            + log ring, Diagnostic.path, ScopeSpec, ViewPresentationSpec
+  └─ geode-core            + `categorical` column flag, log ring, Diagnostic.path, ScopeSpec,
+                             ViewPresentationSpec
 geode-demo-data          unchanged
 ```
 
@@ -990,8 +1051,10 @@ full harness at branch end.
 
 **4a**
 
-1. Data: `Request::Distinct`; the ENUM rewrite with the bench cases
-   added permanently and the gate met or the Rust-side fallback taken;
+1. Data: the `categorical` flag with interning switched to it;
+   selections on categorical attributes verified by execution;
+   `Request::Distinct`; the ENUM rewrite with the bench cases added
+   permanently and the gate met or the Rust-side fallback taken;
    `textual` validation. Mutation entries for each.
 2. Core and frame: `ScopeSpec`; undo and redo stacks; `previous_as_of`;
    `scopebar::layout` replacing `readout`; session `[frame]`.
@@ -1040,7 +1103,7 @@ None block the plans. Recorded so they are not rediscovered:
    the overlay's render path cannot cheaply read an entity, it keeps its
    own and the section reads the overlay's.
 3. **Per-column pick actions on a wide schema.** A dataset with fifty
-   dimension columns registers fifty palette entries. Acceptable at the
+   categorical columns registers fifty palette entries. Acceptable at the
    demo's scale; a real desk schema decides whether a category filter
    in the palette is needed.
 4. **The presentation merge and `ViewSpec` identity.** Merging over the
