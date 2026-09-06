@@ -488,18 +488,33 @@ impl ShellView {
                 // session is open (set on `InputEvent::Focus`, taken here
                 // or on blur/enter). `set_value` emits no `Change` (the
                 // checked note in `dialog.rs`), so this cannot re-trigger
-                // the per-keystroke subscription. `set_text` after
-                // `end_scope_session` pushes one undo entry for the
-                // revert — acceptable: undo then goes to the session's
-                // start, which is the same scope, and a second undo goes
-                // before it. Simpler than special-casing.
+                // the per-keystroke subscription.
+                //
+                // The revert goes through `set_scope_in_session` — still
+                // inside the session — and only *then* ends it (fix round
+                // 1, Finding 1). The first cut called `end_scope_session`
+                // first and reverted through the ordinary `set_text`: that
+                // runs outside the session, so it pushed a *second* undo
+                // entry — the just-typed, now-abandoned scope — leaving
+                // the session's own coalesced entry (the pre-focus scope)
+                // buried underneath it. One `undo_scope` then popped the
+                // abandoned scope straight back onto the screen — Escape
+                // resurrecting exactly the text it had just thrown away.
+                // Reverting inside the session instead coalesces the
+                // revert into the session's *one* entry (a no-op push,
+                // since the session already recorded that same pre-focus
+                // scope on the first keystroke), so the abandoned scope
+                // is never pushed anywhere and undo cannot reach it.
                 if let Some(base) = self.filter_session_base.take() {
                     self.filter_input.update(cx, |i, cx| {
                         i.set_value(base.clone(), window, cx);
                     });
                     self.frame.update(cx, |f, cx| {
+                        let mut reverted = f.scope().clone();
+                        reverted.text = (!base.trim().is_empty()).then_some(base);
+                        let changed = f.set_scope_in_session(reverted);
                         f.end_scope_session();
-                        if f.set_text((!base.trim().is_empty()).then_some(base)) {
+                        if changed {
                             cx.notify();
                         }
                     });

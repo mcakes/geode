@@ -20,6 +20,8 @@
 //! suppressed while it has focus) lives in `ShellView::handle_key_down` —
 //! see that method's filter-focused branch.
 
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{App, Div, Entity, Hsla, IntoElement, MouseButton, Window, div, px};
 use gpui_component::input::{Input, InputState};
@@ -33,8 +35,14 @@ const FILTER_WIDTH: f32 = 200.0;
 
 /// One painted chip: a rounded, colored label with a debug selector so
 /// e2e tests can find it (`debug_bounds`/`simulate_click`) without this
-/// module knowing anything about test infrastructure.
-fn chip(label: String, fg: Hsla, bg: Hsla, selector: String) -> Div {
+/// module knowing anything about test infrastructure. `selector` builds
+/// its `String` lazily (fix round 1, Finding 2): `debug_selector` is a
+/// release no-op that never calls its closure, so an already-`format!`ed
+/// `String` handed in here would pay full allocation cost every render
+/// for a value release builds never read — matching the `frame-readout`/
+/// `scope-asof` selectors two calls away, which build their (static)
+/// strings the same lazy way.
+fn chip(label: String, fg: Hsla, bg: Hsla, selector: impl Fn() -> String + 'static) -> Div {
     div()
         .px_2()
         .py_0p5()
@@ -42,7 +50,7 @@ fn chip(label: String, fg: Hsla, bg: Hsla, selector: String) -> Div {
         .bg(bg)
         .text_color(fg)
         .child(label)
-        .debug_selector(move || selector.clone())
+        .debug_selector(selector)
 }
 
 pub fn toolbar(
@@ -59,25 +67,30 @@ pub fn toolbar(
 
     let mut chips_row = h_flex().gap_1().items_center();
     for c in &model.chips {
-        let column = c.column.clone();
-        let close_selector = format!("scope-chip-close-{column}");
+        // `Rc<str>`, not `String`: the mouse-down handler, the chip-body
+        // selector and the close-glyph selector are three separate
+        // `'static` closures, each needing its own owned handle to the
+        // column name — an `Rc` clone is a refcount bump, so this is one
+        // real allocation (the `Rc::from` below) per chip per render,
+        // not three (fix round 1, Finding 2's "the one clone... is
+        // unavoidable and fine" — this is that one clone, shared).
+        let column: Rc<str> = Rc::from(c.column.as_str());
         let on_close = on_chip_close.clone();
+        let body_column = column.clone();
+        let close_column = column.clone();
         chips_row = chips_row.child(
             h_flex()
                 .items_center()
                 .gap_1()
-                .child(chip(
-                    c.summary.clone(),
-                    chip_fg,
-                    chip_bg,
-                    format!("scope-chip-{column}"),
-                ))
+                .child(chip(c.summary.clone(), chip_fg, chip_bg, move || {
+                    format!("scope-chip-{body_column}")
+                }))
                 .child(
                     // Chip body click is inert this task (Task 5 wires it
                     // to the picker); only this close glyph acts.
                     div()
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
-                        .debug_selector(move || close_selector.clone())
+                        .debug_selector(move || format!("scope-chip-close-{close_column}"))
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             on_close(&column, window, cx)
                         }),
@@ -85,20 +98,14 @@ pub fn toolbar(
         );
     }
     if let Some(t) = &model.text {
-        chips_row = chips_row.child(chip(
-            format!("text \"{t}\""),
-            chip_fg,
-            chip_bg,
-            "scope-text-chip".to_string(),
-        ));
+        chips_row = chips_row.child(chip(format!("text \"{t}\""), chip_fg, chip_bg, || {
+            "scope-text-chip".to_string()
+        }));
     }
     if let Some(expr) = &model.expr {
-        chips_row = chips_row.child(chip(
-            expr.clone(),
-            chip_fg,
-            chip_bg,
-            "scope-expr-chip".to_string(),
-        ));
+        chips_row = chips_row.child(chip(expr.clone(), chip_fg, chip_bg, || {
+            "scope-expr-chip".to_string()
+        }));
     }
     if let Some(named) = &model.impossible {
         // The contradiction chip: `theme.danger`/`danger_foreground`, not
@@ -108,7 +115,7 @@ pub fn toolbar(
             named.clone(),
             theme.danger_foreground,
             theme.danger.opacity(0.25),
-            "scope-impossible-chip".to_string(),
+            || "scope-impossible-chip".to_string(),
         ));
     }
     let has_chips = !model.chips.is_empty()

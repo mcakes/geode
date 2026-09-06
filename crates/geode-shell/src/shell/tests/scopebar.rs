@@ -163,6 +163,67 @@ fn escape_restores_the_text_the_field_had_when_focused(cx: &mut gpui::TestAppCon
 }
 
 #[gpui::test]
+fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    // Pre-focus state: text = "old", pushed onto undo by the ordinary
+    // (non-session) `set_text` path. A first cut of the escape fix (fix
+    // round 1, Finding 1) let a *second*, spurious entry bury this one:
+    // it called `end_scope_session` first and reverted through the
+    // ordinary `set_text`, which runs outside the session and so pushed
+    // the just-typed, now-abandoned "new" scope too — leaving the
+    // session's own coalesced entry (this "old" scope) buried
+    // underneath it. A single `undo_scope` then resurrected "new".
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_text(Some("old".into())) {
+            cx.notify();
+        }
+    });
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("new");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("old"),
+        "escape must restore the pre-focus text"
+    );
+
+    // The session coalesced its one entry (the pre-focus "old" scope,
+    // recorded on the session's first divergence, when typing started)
+    // rather than pushing a second one for the abandoned "new" — so the
+    // first undo pops that session entry, landing back on "old" (a
+    // value no-op: the scope was already "old" after Escape) rather
+    // than resurrecting "new".
+    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("old"),
+        "the first undo must land back on the pre-focus scope, never on the abandoned \"new\""
+    );
+
+    // A second undo walks past the session entirely, to the scope from
+    // before "old" was ever set.
+    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
+    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+
+    // Nothing further to undo — "new" never appears anywhere in the
+    // history walked above.
+    assert!(!frame.update(&mut vcx, |f, _| f.undo_scope()));
+}
+
+#[gpui::test]
 fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     cx: &mut gpui::TestAppContext,
 ) {
