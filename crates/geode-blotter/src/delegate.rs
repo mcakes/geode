@@ -423,7 +423,20 @@ impl TableDelegate for BlotterDelegate {
         if let Some(p) = self.plan.as_mut() {
             p.move_column(col_ix, to_ix);
         }
+        // `TableState::move_column` (gpui-component) calls this directly
+        // and never fires `visible_rows_changed`, so a bare
+        // `self.cache.invalidate()` here would leave the window's cells
+        // blank until the next scroll. Capture the window that was
+        // already on screen *before* invalidating (`invalidate` clears
+        // `rows` but keeps `start`, so `window()` after it is an empty
+        // range), then refill it immediately with the reordered plan.
+        // The glyphs are untouched by a column reorder — the tree
+        // column never moves (`ColumnPlan::move_column` refuses `from ==
+        // 0 || to == 0`) — so this goes through `self.cache.invalidate()`
+        // + `refill_window`, not `invalidate_cells`, deliberately.
+        let w = self.cache.window();
         self.cache.invalidate();
+        self.refill_window(w);
         cx.notify();
     }
 
@@ -891,5 +904,87 @@ mod tests {
             "A/B/C stayed cached and determined even though only L1 \
              (not determined) newly entered"
         );
+    }
+
+    /// Ruled-in fix (Task 6 review, applied here): gpui-component's
+    /// `TableState::move_column` calls `self.delegate.move_column(..)`
+    /// directly and never fires `visible_rows_changed`, so a bare
+    /// `self.cache.invalidate()` in `move_column` left the window blank
+    /// — no `refill_window` call was coming until the next scroll. The
+    /// glyphs stay valid across a column reorder (the tree column never
+    /// moves — `ColumnPlan::move_column` refuses `from == 0 || to ==
+    /// 0`), so only the cell cache needs to be repainted, immediately,
+    /// for the window that was already on screen.
+    #[gpui::test]
+    fn move_column_refills_the_window_immediately(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let view_text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+             [[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"gamma01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let snap = Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(vec![None, s("L1")])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1])),
+                (dim("delta01"), TestColumn::F64(vec![Some(9.0), Some(5.0)])),
+                (dim("gamma01"), TestColumn::F64(vec![Some(1.0), Some(2.0)])),
+            ],
+            1,
+        ));
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    cx.new(|cx| TableState::new(BlotterDelegate::new(), window, cx))
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let table = window.root(&mut vcx).unwrap();
+
+        table.update(&mut vcx, |t, _| {
+            let d = t.delegate_mut();
+            d.apply_snapshot(snap, &view, &["lhu".to_string()]);
+            d.refill_window(0..2);
+        });
+
+        // Assert inside the same `update_in` call that performs the move,
+        // immediately after it returns and before anything else runs —
+        // deliberately not a separate `read_with` afterwards, since the
+        // test window's own effect-flushing can trigger a real layout
+        // pass between two top-level calls, and a first-ever real draw
+        // would establish `TableState`'s own visible range and refill
+        // the cache on its own, independent of whether `move_column`
+        // itself refills — which would make the test pass regardless of
+        // the fix. Checking synchronously inside the same call isolates
+        // exactly what `move_column` itself did.
+        table.update_in(&mut vcx, |t, window, cx| {
+            let d = t.delegate_mut();
+            assert_eq!(
+                d.cache.get(0, 2).map(|c| c.text.to_string()),
+                Some("1.00".into()),
+                "gamma01 (col 2) is cached before the move"
+            );
+
+            // Swap delta01 (col 1) and gamma01 (col 2).
+            d.move_column(1, 2, window, cx);
+
+            assert_eq!(
+                d.cache.window(),
+                0..2,
+                "the window is refilled immediately, not left empty until \
+                 the next scroll"
+            );
+            assert_eq!(
+                d.cache.get(0, 1).map(|c| c.text.to_string()),
+                Some("1.00".into()),
+                "gamma01 moved into column 1 and repainted immediately"
+            );
+            assert_eq!(
+                d.cache.get(0, 2).map(|c| c.text.to_string()),
+                Some("9.00".into()),
+                "delta01 moved into column 2 and repainted immediately"
+            );
+        });
     }
 }

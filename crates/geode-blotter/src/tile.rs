@@ -1310,4 +1310,16 @@ mod tests {
             2
         );
     }
+
+    /// The shell cannot depend on `geode-blotter` (layering: shell never
+    /// depends on a module), so `geode_shell::defaults` carries its own
+    /// copy of these ids to reserve, ahead of `BlotterFactory::
+    /// register_actions`, so `BUILTIN_KEYMAP`'s `blotter::*` bindings
+    /// are never dropped as unregistered. This pins the two lists
+    /// identical.
+    #[test]
+    fn the_shells_reserved_blotter_actions_match_ours() {
+        let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ours, geode_shell::defaults::BLOTTER_ACTIONS.to_vec());
+    }
 }
