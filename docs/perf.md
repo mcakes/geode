@@ -428,6 +428,7 @@ build would make any reading meaningless as a check against them. The
 | reading | where read | value |
 | --- | --- | --- |
 | last requery, submit→snapshot + snapshot→paint | overlay's **requery** row | 17 ms + 21 ms = 38 ms |
+| isolated single-action requery (2026-09-06, action not labelled), submit→snapshot + snapshot→paint | overlay's **requery** row, read after the action settled | 14 ms + 2.5 ms = 16.5 ms |
 | requery submit→snapshot, session p50 | overlay's **q p50** row | 12 ms |
 | requery snapshot→paint, session p50 | overlay's **paint p50** row | 4.6 ms |
 | frame interval, session p50 | overlay's **p50** row | 18 ms |
@@ -435,11 +436,12 @@ build would make any reading meaningless as a check against them. The
 
 **Whether the §7.1 <50ms requery contract holds end to end:** yes on
 this evidence. The last requery's two halves sum to 38 ms, and the
-session medians (12 ms query, 4.6 ms paint) leave the same margin. The
-reading was not labelled by action; the `ctrl+2` regroup and the `zo`
-at the bound should each be read separately on the next run (press the
-key, wait for the header to settle, read the **requery** row before
-pressing anything else).
+session medians (12 ms query, 4.6 ms paint) leave the same margin. An
+isolated reading of a single action (2026-09-06, action not labelled)
+came in at 16.5 ms end to end (14 ms + 2.5 ms), well inside budget; the
+`ctrl+2` regroup and the `zo` at the bound still need to be read and
+labelled separately (press the key, wait for the header to settle,
+read the **requery** row before pressing anything else).
 
 **The frame-interval p95 of 500 ms is not a paint cost.** The histogram
 (`geode-shell::perf`) buckets intervals up to 100 ms; anything between
@@ -460,7 +462,13 @@ isolated reading: open the `wide` view in a tile, reset the overlay's
 counters (`perf::reset`, palette-only: `ctrl+k`, type `reset`), hold `j`
 until at least 40 rows of key-repeat have passed, and
 read **p95** before releasing anything else. The session-wide p95 above
-does not separate the hold from the pauses around it.
+does not separate the hold from the pauses around it. Before this fix,
+`perf::reset` left one stale sample in the zeroed histogram — the
+reaction-time gap back to the frame painted before the palette action —
+so a p95 read right after a reset showed a few hundred milliseconds
+before the `j` hold had contributed anything; from this commit the first
+post-reset render records nothing, so the counters really do start from
+zero.
 
 | reading | where read | value |
 | --- | --- | --- |

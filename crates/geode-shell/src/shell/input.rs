@@ -153,6 +153,15 @@ impl ShellView {
             // zeroed numbers immediately.
             self.perf.reset();
             self.frame.update(cx, |f, _| f.requery.reset());
+            // Also drop the previous render's timestamp: this notify's
+            // own render would otherwise measure the interval back to
+            // whatever frame was painted before the reset (e.g. the
+            // user's reaction time in the palette), landing one stale
+            // sample in the freshly zeroed histogram. `None` makes the
+            // next render record nothing and become the new baseline
+            // instead — the render after that records the first real
+            // interval.
+            self.last_render_started = None;
             cx.notify();
         } else if let Some(n) = action
             .0
