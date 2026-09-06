@@ -65,6 +65,22 @@ pub fn selection(mode: &Mode, cursor: &Cursor) -> Range<usize> {
 }
 
 /// The visible index whose node has `path`, or `fallback` clamped.
+///
+/// I3 (final review): this runs inside every `reflatten_keeping`, i.e.
+/// on every keypress that expands/collapses/sorts/regroups, so its cost
+/// is the render-thread's, not a background one. Two things kept the
+/// naive scan-from-zero-and-`path_of`-everything shape expensive at row
+/// counts in the hundreds of thousands: `path_of` allocates a `Vec<
+/// Option<String>>` plus one `String` per ancestor, and it ran for every
+/// row from index 0 up to the match regardless of that row's depth or
+/// how close the match actually was to where the cursor already was.
+/// Fixed by (1) `tree.depth(row) == path.len()` first — an O(1), non-
+/// allocating check that skips the overwhelming majority of rows (most
+/// depths in a tree aren't the cursor's) before ever calling `path_of`,
+/// and (2) searching outward from `fallback` (the cursor's previous row)
+/// rather than from row 0 — the common case is that the cursor's node
+/// moved by a handful of positions or not at all, so this finds it in
+/// O(1) `path_of` calls instead of O(fallback).
 pub fn restore_by_path(
     visible: &[u32],
     snapshot: &Snapshot,
@@ -72,10 +88,41 @@ pub fn restore_by_path(
     path: &[Option<String>],
     fallback: usize,
 ) -> usize {
-    visible
-        .iter()
-        .position(|&r| path_of(snapshot, plan, r as usize) == path)
-        .unwrap_or_else(|| fallback.min(visible.len().saturating_sub(1)))
+    let len = visible.len();
+    if len == 0 {
+        return 0;
+    }
+    let tree = snapshot.tree();
+    let depth = path.len();
+    let matches = |i: usize| -> bool {
+        let row = visible[i] as usize;
+        tree.depth(row) == depth && path_of(snapshot, plan, row) == path
+    };
+    let start = fallback.min(len - 1);
+    if matches(start) {
+        return start;
+    }
+    let (mut lo, mut hi) = (start, start);
+    loop {
+        let can_dec = lo > 0;
+        let can_inc = hi + 1 < len;
+        if !can_dec && !can_inc {
+            break;
+        }
+        if can_dec {
+            lo -= 1;
+            if matches(lo) {
+                return lo;
+            }
+        }
+        if can_inc {
+            hi += 1;
+            if matches(hi) {
+                return hi;
+            }
+        }
+    }
+    fallback.min(len - 1)
 }
 
 #[cfg(test)]
@@ -163,6 +210,82 @@ mod tests {
             restore_by_path(&visible, &snap, &plan, &[], 1),
             0,
             "the root's path is empty"
+        );
+    }
+
+    /// I3 (final review): 500 rows of mixed depth-1/depth-2 filler precede
+    /// the target, none of them at the target's own depth — a fixture
+    /// built exactly so the O(1) `tree.depth(row) == path.len()` check
+    /// must reject every one of them before `path_of` ever runs on a
+    /// row that couldn't possibly match, and the outward-from-`fallback`
+    /// search must still land on the right index when `fallback` is
+    /// nowhere near the target (row 0 here, target near the end).
+    #[test]
+    fn restore_by_path_finds_the_row_when_many_precede_it_at_other_depths() {
+        use crate::core::plan::ColumnPlan;
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        use geode_core::view::ViewSpec;
+
+        let dim = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let mut lhu: Vec<Option<String>> = vec![None]; // root
+        let mut und: Vec<Option<String>> = vec![None];
+        let mut pos: Vec<Option<String>> = vec![None];
+        let mut depth: Vec<i32> = vec![0];
+        const N: usize = 250;
+        for i in 0..N {
+            // depth-1 filler
+            lhu.push(Some(format!("L{i}")));
+            und.push(None);
+            pos.push(None);
+            depth.push(1);
+        }
+        for i in 0..N {
+            // depth-2 filler, a *different* depth than the target below
+            lhu.push(Some(format!("L{i}")));
+            und.push(Some(format!("U{i}")));
+            pos.push(None);
+            depth.push(2);
+        }
+        // The target: one more depth-1 row, at the very end — 2*N = 500
+        // rows of mixed-depth filler precede it.
+        lhu.push(Some("TARGET".into()));
+        und.push(None);
+        pos.push(None);
+        depth.push(1);
+
+        let snap = Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(lhu)),
+                (dim("underlying_ref"), TestColumn::Dict(und)),
+                (dim("position_ref"), TestColumn::Dict(pos)),
+                (dim("row_depth"), TestColumn::I32(depth)),
+            ],
+            3,
+        );
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\", \"position_ref\"]\n",
+            )
+            .unwrap()],
+        );
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let visible: Vec<u32> = (0..snap.rows() as u32).collect();
+        let target_row = snap.rows() - 1;
+
+        assert_eq!(
+            restore_by_path(&visible, &snap, &plan, &[Some("TARGET".to_string())], 0),
+            target_row,
+            "the depth-1 target is found correctly past 500 rows of \
+             mixed-depth filler, with `fallback` (0) nowhere near it"
         );
     }
 }
