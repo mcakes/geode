@@ -207,6 +207,36 @@ impl ShellView {
                 self.pending_focus_restore = true;
             }
 
+            // I2 (final review, residual fix): this `cx.emit` must be
+            // queued before ANY `self.frame.update(..)` call below —
+            // including the `groupings_changed` one right after it, not
+            // just the `views_changed` block further down — so it has to
+            // sit here, above both. gpui doesn't flush effects in
+            // subscriber-registration order; it flushes the queue it
+            // built while this function ran, and an `Effect::Notify` is
+            // deduped to the position of its *first* queueing per emitter
+            // (`pending_notifications` in gpui's `App::push_effect` —
+            // `~/.cargo/git/checkouts/zed-*/*/crates/gpui/src/app.rs`
+            // around line 1650). `groupings_changed` and `views_changed`
+            // both key off `dimensions` (line ~153), and
+            // `GroupingSlots::from_doc` really does depend on that doc, so
+            // a single reload can make `groupings_changed`'s own
+            // `frame.update(..) { .. cx.notify() }` fire below. If the
+            // emit ran after that block, the frame's Notify would already
+            // hold first position in the queue — `views_changed`'s later
+            // `cx.notify()` on the same entity would just no-op against
+            // that same slot — and the frame's tiles would requery
+            // (`on_frame_changed`) before the app bridge's `ConfigReloaded`
+            // handler replaces the factory's/handle's views
+            // (`ReplaceViews`), querying the *old* views while recording
+            // the *new* version and never triggering the requery they
+            // actually needed. Emitting here, before either
+            // `frame.update`, guarantees `ConfigReloaded` occupies the
+            // earlier queue slot regardless of which branch below touches
+            // the frame first.
+            if views_changed {
+                cx.emit(ShellEvent::ConfigReloaded);
+            }
             if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
@@ -216,20 +246,6 @@ impl ShellView {
                 });
             }
             if views_changed {
-                // I2 (final review): gpui flushes effects FIFO, so the
-                // order these two calls *queue* their effects in is the
-                // order they run in, regardless of subscriber
-                // registration order. `frame.update`'s `cx.notify()`
-                // queues the frame's own change notification — which is
-                // what wakes every tile's `on_frame_changed` observer
-                // and (if its followed versions moved) requeries — and
-                // must not run before `ConfigReloaded` does: the app
-                // bridge's handler for that event is what replaces a
-                // factory's/handle's views (`ReplaceViews`), so a tile
-                // that requeries first would query against the *old*
-                // views while recording the *new* version, leaving
-                // nothing to trigger the requery it actually needed.
-                cx.emit(ShellEvent::ConfigReloaded);
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();

@@ -1267,22 +1267,42 @@ run_mutation "frame: restart_required clears once sources/datasets match the bas
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
 
-run_mutation "reload: ConfigReloaded is emitted before the frame notifies its observers (I2)" \
+run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's (I2, residual fix)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                cx.emit(ShellEvent::ConfigReloaded);
+  '            if views_changed {
+                cx.emit(ShellEvent::ConfigReloaded);
+            }
+            if groupings_changed {
+                let slots = rebuild_slots(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if views_changed {
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();
                 });
             }' \
-  '                self.frame.update(cx, |f, cx| {
+  '            if groupings_changed {
+                let slots = rebuild_slots(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if views_changed {
+                cx.emit(ShellEvent::ConfigReloaded);
+                self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();
                 });
-                cx.emit(ShellEvent::ConfigReloaded);
             }' \
   geode-shell \
-  a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers
+  emits_config_reloaded_before_the_frame_notifies
 
 run_mutation "frame: readout is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \

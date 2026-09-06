@@ -717,3 +717,106 @@ fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
          frame's own change notification"
     );
 }
+
+/// I2 residual (re-review after 7814fdc): the test above only exercises
+/// the `views_changed` branch's own two statements — its
+/// `groupings_changed` block never actually notifies, since no
+/// `groupings`/`dimensions` doc is present there and `rebuild_slots`
+/// reproduces the same empty `GroupingSlots`, so `replace_slots` returns
+/// `false`. But `groupings_changed` and `views_changed` both key off a
+/// changed `dimensions` doc (`apply_reload`'s `changed(..)` closure), and
+/// `GroupingSlots::from_doc` genuinely depends on `dimensions` — a slot
+/// naming a derived-dimension column resolves once that dimension exists
+/// — so one reload can make BOTH branches touch the frame. This builds
+/// that case: slot 1 names dimension `desk`, unresolved (and so dropped,
+/// an "unknown column" diagnostic) at construction, and resolved once the
+/// reload's `dimensions.toml` defines it — `replace_slots` genuinely
+/// returns `true` here, which the previous fix (hoisting the emit only
+/// above `views_changed`'s own `frame.update`) left free to queue the
+/// frame's `Effect::Notify` first, since `groupings_changed`'s block runs
+/// earlier in source order.
+#[gpui::test]
+fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, _log) = services_with_recorder();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("groupings", "1 = [\"desk\"]\n").unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let frame = shell.read_with(&cx, |s, _| s.frame.clone());
+
+    // Slot 1 names a dimension that doesn't exist yet — dropped at
+    // construction by `GroupingSlots::from_doc`'s "unknown column" branch.
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).slots().label(1)),
+        None,
+        "slot 1 starts unresolved: no `dimensions` doc defines `desk` yet"
+    );
+
+    let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let o1 = order.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            if matches!(event, ShellEvent::ConfigReloaded) {
+                o1.borrow_mut().push("event");
+            }
+        })
+        .detach();
+    });
+    let o2 = order.clone();
+    cx.update(|_, cx| {
+        cx.observe(&frame, move |_frame, _cx| {
+            o2.borrow_mut().push("frame");
+        })
+        .detach();
+    });
+
+    let mut new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("groupings", "1 = [\"desk\"]\n").unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\nEU = [\"BK000\"]\n",
+            )
+            .unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut new_config), cx)
+    });
+
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame.read(cx).slots().label(1)),
+        Some("desk".to_string()),
+        "slot 1 must resolve once `dimensions.toml` defines `desk` — proves \
+         `replace_slots` actually returned `true` here (the \
+         groupings_changed branch queuing its own frame notify), not just \
+         views_changed's"
+    );
+    assert_eq!(
+        order.borrow().as_slice(),
+        &["event", "frame"],
+        "ConfigReloaded must still be queued (and therefore fire) before \
+         the frame's own change notification, even when it's the \
+         groupings_changed branch — which runs first in source order — \
+         that actually notifies"
+    );
+}
