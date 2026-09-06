@@ -1,0 +1,455 @@
+# The --demo layer's views. `tree` is the shape the blotter runs and
+# the requery benchmarks measure; `wide` is the 100-column view the
+# DataTable swap trigger is measured on (spec §6.6).
+config_version = 1
+
+[tree]
+dataset = "risk_snapshot"
+grouping = ["lhu", "underlying_ref", "position_ref"]
+[[tree.columns]]
+name = "delta01"
+label = "Δ01"
+[[tree.columns]]
+name = "gamma01"
+label = "Γ01"
+[[tree.columns]]
+name = "vega01"
+[[tree.columns]]
+name = "cross_gamma02"
+[[tree.columns]]
+name = "npv"
+format = { precision = 0, scale = "k" }
+[[tree.columns]]
+name = "daily_trading_pnl"
+format = { precision = 0, negative = "parens" }
+
+[wide]
+dataset = "risk_snapshot"
+grouping = ["book", "lhu", "position_ref"]
+# Every measure and its `_usd` twin (38 columns, expanded mechanically
+# from `datasets.toml`'s declared measures), then derived columns
+# `d01 = delta01 * 1` through `d62 = delta01 * 62`, for 100 columns —
+# the count the DataTable swap trigger is measured against (spec §6.6).
+[[wide.columns]]
+name = "delta01"
+
+[[wide.columns]]
+name = "delta01_usd"
+
+[[wide.columns]]
+name = "delta02"
+
+[[wide.columns]]
+name = "delta02_usd"
+
+[[wide.columns]]
+name = "delta05"
+
+[[wide.columns]]
+name = "delta05_usd"
+
+[[wide.columns]]
+name = "gamma01"
+
+[[wide.columns]]
+name = "gamma01_usd"
+
+[[wide.columns]]
+name = "gamma02"
+
+[[wide.columns]]
+name = "gamma02_usd"
+
+[[wide.columns]]
+name = "gamma05"
+
+[[wide.columns]]
+name = "gamma05_usd"
+
+[[wide.columns]]
+name = "vega01"
+
+[[wide.columns]]
+name = "vega01_usd"
+
+[[wide.columns]]
+name = "normalized_vega01"
+
+[[wide.columns]]
+name = "normalized_vega01_usd"
+
+[[wide.columns]]
+name = "skew01"
+
+[[wide.columns]]
+name = "skew01_usd"
+
+[[wide.columns]]
+name = "rho010"
+
+[[wide.columns]]
+name = "rho010_usd"
+
+[[wide.columns]]
+name = "rho_rfr010"
+
+[[wide.columns]]
+name = "rho_rfr010_usd"
+
+[[wide.columns]]
+name = "rho_ois010"
+
+[[wide.columns]]
+name = "rho_ois010_usd"
+
+[[wide.columns]]
+name = "cross_gamma02"
+
+[[wide.columns]]
+name = "cross_gamma02_usd"
+
+[[wide.columns]]
+name = "cross_gamma05"
+
+[[wide.columns]]
+name = "cross_gamma05_usd"
+
+[[wide.columns]]
+name = "npv"
+
+[[wide.columns]]
+name = "daily_pnl"
+
+[[wide.columns]]
+name = "daily_m2m_pnl"
+
+[[wide.columns]]
+name = "daily_fx_pnl"
+
+[[wide.columns]]
+name = "clean_theta_business_day"
+
+[[wide.columns]]
+name = "clean_theta_business_day_usd"
+
+[[wide.columns]]
+name = "realized_theta"
+
+[[wide.columns]]
+name = "realized_theta_usd"
+
+[[wide.columns]]
+name = "daily_trading_pnl"
+
+[[wide.columns]]
+name = "sc"
+
+[[wide.columns]]
+name = "d01"
+kind = "derived"
+sql = "delta01 * 1"
+
+[[wide.columns]]
+name = "d02"
+kind = "derived"
+sql = "delta01 * 2"
+
+[[wide.columns]]
+name = "d03"
+kind = "derived"
+sql = "delta01 * 3"
+
+[[wide.columns]]
+name = "d04"
+kind = "derived"
+sql = "delta01 * 4"
+
+[[wide.columns]]
+name = "d05"
+kind = "derived"
+sql = "delta01 * 5"
+
+[[wide.columns]]
+name = "d06"
+kind = "derived"
+sql = "delta01 * 6"
+
+[[wide.columns]]
+name = "d07"
+kind = "derived"
+sql = "delta01 * 7"
+
+[[wide.columns]]
+name = "d08"
+kind = "derived"
+sql = "delta01 * 8"
+
+[[wide.columns]]
+name = "d09"
+kind = "derived"
+sql = "delta01 * 9"
+
+[[wide.columns]]
+name = "d10"
+kind = "derived"
+sql = "delta01 * 10"
+
+[[wide.columns]]
+name = "d11"
+kind = "derived"
+sql = "delta01 * 11"
+
+[[wide.columns]]
+name = "d12"
+kind = "derived"
+sql = "delta01 * 12"
+
+[[wide.columns]]
+name = "d13"
+kind = "derived"
+sql = "delta01 * 13"
+
+[[wide.columns]]
+name = "d14"
+kind = "derived"
+sql = "delta01 * 14"
+
+[[wide.columns]]
+name = "d15"
+kind = "derived"
+sql = "delta01 * 15"
+
+[[wide.columns]]
+name = "d16"
+kind = "derived"
+sql = "delta01 * 16"
+
+[[wide.columns]]
+name = "d17"
+kind = "derived"
+sql = "delta01 * 17"
+
+[[wide.columns]]
+name = "d18"
+kind = "derived"
+sql = "delta01 * 18"
+
+[[wide.columns]]
+name = "d19"
+kind = "derived"
+sql = "delta01 * 19"
+
+[[wide.columns]]
+name = "d20"
+kind = "derived"
+sql = "delta01 * 20"
+
+[[wide.columns]]
+name = "d21"
+kind = "derived"
+sql = "delta01 * 21"
+
+[[wide.columns]]
+name = "d22"
+kind = "derived"
+sql = "delta01 * 22"
+
+[[wide.columns]]
+name = "d23"
+kind = "derived"
+sql = "delta01 * 23"
+
+[[wide.columns]]
+name = "d24"
+kind = "derived"
+sql = "delta01 * 24"
+
+[[wide.columns]]
+name = "d25"
+kind = "derived"
+sql = "delta01 * 25"
+
+[[wide.columns]]
+name = "d26"
+kind = "derived"
+sql = "delta01 * 26"
+
+[[wide.columns]]
+name = "d27"
+kind = "derived"
+sql = "delta01 * 27"
+
+[[wide.columns]]
+name = "d28"
+kind = "derived"
+sql = "delta01 * 28"
+
+[[wide.columns]]
+name = "d29"
+kind = "derived"
+sql = "delta01 * 29"
+
+[[wide.columns]]
+name = "d30"
+kind = "derived"
+sql = "delta01 * 30"
+
+[[wide.columns]]
+name = "d31"
+kind = "derived"
+sql = "delta01 * 31"
+
+[[wide.columns]]
+name = "d32"
+kind = "derived"
+sql = "delta01 * 32"
+
+[[wide.columns]]
+name = "d33"
+kind = "derived"
+sql = "delta01 * 33"
+
+[[wide.columns]]
+name = "d34"
+kind = "derived"
+sql = "delta01 * 34"
+
+[[wide.columns]]
+name = "d35"
+kind = "derived"
+sql = "delta01 * 35"
+
+[[wide.columns]]
+name = "d36"
+kind = "derived"
+sql = "delta01 * 36"
+
+[[wide.columns]]
+name = "d37"
+kind = "derived"
+sql = "delta01 * 37"
+
+[[wide.columns]]
+name = "d38"
+kind = "derived"
+sql = "delta01 * 38"
+
+[[wide.columns]]
+name = "d39"
+kind = "derived"
+sql = "delta01 * 39"
+
+[[wide.columns]]
+name = "d40"
+kind = "derived"
+sql = "delta01 * 40"
+
+[[wide.columns]]
+name = "d41"
+kind = "derived"
+sql = "delta01 * 41"
+
+[[wide.columns]]
+name = "d42"
+kind = "derived"
+sql = "delta01 * 42"
+
+[[wide.columns]]
+name = "d43"
+kind = "derived"
+sql = "delta01 * 43"
+
+[[wide.columns]]
+name = "d44"
+kind = "derived"
+sql = "delta01 * 44"
+
+[[wide.columns]]
+name = "d45"
+kind = "derived"
+sql = "delta01 * 45"
+
+[[wide.columns]]
+name = "d46"
+kind = "derived"
+sql = "delta01 * 46"
+
+[[wide.columns]]
+name = "d47"
+kind = "derived"
+sql = "delta01 * 47"
+
+[[wide.columns]]
+name = "d48"
+kind = "derived"
+sql = "delta01 * 48"
+
+[[wide.columns]]
+name = "d49"
+kind = "derived"
+sql = "delta01 * 49"
+
+[[wide.columns]]
+name = "d50"
+kind = "derived"
+sql = "delta01 * 50"
+
+[[wide.columns]]
+name = "d51"
+kind = "derived"
+sql = "delta01 * 51"
+
+[[wide.columns]]
+name = "d52"
+kind = "derived"
+sql = "delta01 * 52"
+
+[[wide.columns]]
+name = "d53"
+kind = "derived"
+sql = "delta01 * 53"
+
+[[wide.columns]]
+name = "d54"
+kind = "derived"
+sql = "delta01 * 54"
+
+[[wide.columns]]
+name = "d55"
+kind = "derived"
+sql = "delta01 * 55"
+
+[[wide.columns]]
+name = "d56"
+kind = "derived"
+sql = "delta01 * 56"
+
+[[wide.columns]]
+name = "d57"
+kind = "derived"
+sql = "delta01 * 57"
+
+[[wide.columns]]
+name = "d58"
+kind = "derived"
+sql = "delta01 * 58"
+
+[[wide.columns]]
+name = "d59"
+kind = "derived"
+sql = "delta01 * 59"
+
+[[wide.columns]]
+name = "d60"
+kind = "derived"
+sql = "delta01 * 60"
+
+[[wide.columns]]
+name = "d61"
+kind = "derived"
+sql = "delta01 * 61"
+
+[[wide.columns]]
+name = "d62"
+kind = "derived"
+sql = "delta01 * 62"

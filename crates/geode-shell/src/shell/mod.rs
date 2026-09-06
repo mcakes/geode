@@ -413,6 +413,14 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
+    /// The latest data-layer diagnostic the app bridge wants shown (Phase
+    /// 3 §5.1) — a source's health degrading, or events refused because
+    /// the bridge's bounded channel filled up. `None` means nothing to
+    /// report. The shell cannot query for itself (CLAUDE.md: it does not
+    /// depend on `geode-data`), so `geode-app` is the only writer, via
+    /// [`set_data_status`](Self::set_data_status); this field is plain
+    /// display state, same as `restart_required` two fields up.
+    data_status: Option<String>,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -709,6 +717,7 @@ impl ShellView {
             restart_required: None,
             sources_baseline,
             datasets_baseline,
+            data_status: None,
         }
     }
 

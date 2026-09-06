@@ -53,6 +53,19 @@ impl ShellView {
         }
     }
 
+    /// A data-layer diagnostic to show in the status bar (Phase 3 §5.1):
+    /// a source's worst health on its last poll, or events dropped
+    /// because the app bridge's bounded channel refused a `try_send`.
+    /// `None` clears it. The shell cannot query for itself — it does not
+    /// depend on `geode-data` (CLAUDE.md) — so `geode-app` is the only
+    /// caller, the same relationship [`ShellView::set_probe`] has to the
+    /// throwaway probe. Notifies unconditionally, like `set_probe`: a
+    /// status the user cannot see is not surfaced.
+    pub fn set_data_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
+        self.data_status = status;
+        cx.notify();
+    }
+
     /// Every tile id in every workspace, main trees and docks, written
     /// into `out` (cleared first). A method rather than a `HashSet`
     /// return so `ensure_occupants` can reuse a scratch allocation across

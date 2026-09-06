@@ -755,6 +755,7 @@ impl Render for ShellView {
             self.matcher.count(),
             reload_message.as_deref(),
             self.restart_required.as_deref(),
+            self.data_status.as_deref(),
             self.services.theme.active_name(),
             cx,
         );

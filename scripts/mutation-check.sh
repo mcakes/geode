@@ -161,6 +161,14 @@ run_mutation() {
     skipped=$((skipped + 1))
     return 0
   fi
+  # geode-app is bin-only (no [lib] target — see its Cargo.toml), so
+  # `--lib` fails outright with "no library targets found"; `--bins`
+  # is the equivalent for it. Every other package here is lib-only, so
+  # `--lib` stays the default.
+  local target_flag="--lib"
+  if [[ "$pkg" == "geode-app" ]]; then
+    target_flag="--bins"
+  fi
   cp "$file" "$bak"
   in_flight="$file"
   local rc=0
@@ -180,7 +188,7 @@ PY
     return 0
   fi
   if [[ -n "$filter" ]]; then
-    if cargo test -p "$pkg" --lib -- "$filter" >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
         echo "FILTER    $name  <-- '$filter' matches no test"
         filter=""
@@ -194,13 +202,13 @@ PY
   if [[ -n "$filter" ]]; then
     # The named test passed despite the mutation; the full suite is the
     # real verdict, and a failure here means some other test caught it.
-    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       echo "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
-    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       echo "caught    $name"
@@ -1529,6 +1537,30 @@ run_mutation "delegate: move_column refills the window it already had" \
   '        self.cache.invalidate();' \
   geode-blotter \
   move_column_refills_the_window_immediately
+
+# ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
+
+run_mutation "bridge: dropped_events counted on a refused try_send" \
+  crates/geode-app/src/bridge.rs \
+  '            dropped.fetch_add(1, Ordering::Relaxed);
+            false' \
+  '            false' \
+  geode-app \
+  a_refused_event_is_counted_as_dropped_rather_than_lost_silently
+
+run_mutation "bridge: db_path precedence — config wins over demo and the platform dir" \
+  crates/geode-app/src/bridge.rs \
+  '    if let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
+  '    if false && let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
+  geode-app \
+  the_database_path_prefers_config_then_demo_then_the_platform_dir
+
+run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted directory" \
+  crates/geode-app/src/demo.rs \
+  '        source_dir.join("*.csv").to_string_lossy()' \
+  '        "/nonexistent/*.csv".to_string()' \
+  geode-app \
+  the_demo_layer_is_complete_and_points_sources_at_the_directory
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

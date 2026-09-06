@@ -2562,13 +2562,18 @@ dependencies = [
 name = "geode-app"
 version = "0.1.0"
 dependencies = [
+ "async-channel",
+ "geode-blotter",
  "geode-core",
  "geode-data",
+ "geode-demo-data",
  "geode-shell",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "tempfile",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

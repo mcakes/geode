@@ -1,0 +1,5 @@
+config_version = 1
+1 = ["lhu", "underlying_ref", "position_ref"]
+2 = ["book", "lhu"]
+3 = ["underlying_ref", "book", "position_ref"]
+4 = ["desk", "book"]

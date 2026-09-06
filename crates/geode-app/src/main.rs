@@ -2,25 +2,53 @@
 //! registry, keymap, and starting workspace state, then opens the window on
 //! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
 
-mod probe;
+mod bridge;
+mod demo;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
+use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
 use geode_shell::fonts;
+use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
-use geode_shell::module::ModuleRoster;
+use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
 use geode_shell::session;
 use geode_shell::shell::{ShellServices, ShellView};
 use geode_shell::theme;
-use geode_shell::tiling::Workspaces;
+use geode_shell::tiling::{TileId, Workspaces};
+use geode_shell::vimfind::FindStyle;
 use gpui::App;
 use gpui::prelude::*;
+use gpui::{Entity, Window};
 use gpui_component::{Root, TitleBar};
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let demo_rows = match parse_args(&args) {
+        Ok(rows) => rows,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(2);
+        }
+    };
+
+    // `--demo` (spec §7.1): emit the generator's sample data once per row
+    // count, off the render thread's critical path — this runs before
+    // `gpui_platform::application()` even opens a window, so there is no
+    // frame yet to stall. `ensure_emitted` is idempotent: a warm demo
+    // directory from an earlier run is reused rather than regenerated.
+    let demo_root = demo_rows.map(demo::demo_dir);
+    if let (Some(rows), Some(root)) = (demo_rows, &demo_root)
+        && let Err(e) = demo::ensure_emitted(root, rows)
+    {
+        eprintln!("[demo] failed to emit sample data into {root:?}: {e}");
+        std::process::exit(1);
+    }
+
     gpui_platform::application()
         .with_assets(gpui_component_assets::Assets)
         .run(move |cx: &mut App| {
@@ -41,7 +69,12 @@ fn main() {
             // after init (installs the Theme global this edits), before the
             // window opens so the first frame already carries them.
 
-            let (mut services, desk, user) = build_shell_services();
+            // Reclaim `DataTable`'s own key bindings while a tile has
+            // gpui focus for one frame after a click (Phase 3 §3.3) — see
+            // `geode_blotter::init`'s own doc comment.
+            geode_blotter::init(cx);
+
+            let (mut services, desk, user, bridge) = build_shell_services(demo_root.as_deref(), cx);
             for warning in services.theme.apply_from_config(&services.config, cx) {
                 eprintln!("[theme] warning: {warning}");
             }
@@ -87,11 +120,21 @@ fn main() {
             })
             .detach();
 
-            // The throwaway data probe (spec §7) reads the same layered
-            // config as everything else, so its inputs are resolved here,
-            // before `services` moves into the spawn. `None` unless
-            // GEODE_PROBE_DIR is set — see `probe`.
-            let prepared_probe = probe::prepare(&services.config);
+            // The data service's shutdown joins its own thread, which may
+            // wait out an in-flight ingest or discovery scan (`DataHandle::
+            // shutdown`'s own doc comment) — so it must run off the UI
+            // thread, never as a side effect of a `DataHandle` simply
+            // dropping on `main`'s own thread at quit.
+            if let Some(bridge) = &bridge {
+                let handle = bridge.handle.clone();
+                cx.on_app_quit(move |cx| {
+                    let handle = handle.clone();
+                    cx.background_executor().spawn(async move {
+                        handle.shutdown();
+                    })
+                })
+                .detach();
+            }
 
             cx.spawn(async move |cx| {
                 // Task 4: the toolbar IS the native title bar
@@ -107,37 +150,102 @@ fn main() {
                     })
                     .expect("failed to open window");
 
-                // Start the probe against the shell that just opened.
-                if let Some(prepared) = prepared_probe {
-                    cx.update(|cx| {
-                        let shell = window
-                            .read(cx)
-                            .ok()
-                            .and_then(|root| root.view().clone().downcast::<ShellView>().ok());
-                        if let Some(shell) = shell {
-                            probe::start(prepared, shell, cx);
-                        }
-                    });
+                // Wire the data bridge to the shell that just opened
+                // (Phase 3 §5.1): route query outcomes and health/publish
+                // events in, forward config reloads back out.
+                if let Some(bridge) = &bridge {
+                    cx.update(|cx| bridge::attach(bridge, window, cx));
                 }
             })
             .detach();
         });
 }
 
-/// Load config, register the shell's builtin actions, compile the keymap,
-/// and build the starting (empty, workspace 1) workspace state. Config and
-/// keymap diagnostics print to stderr, one line each — a diagnostics UI is
-/// a later phase; invalid config must never stop the app from starting
-/// (spec §10.1). Returns the desk/user config directories alongside the
-/// services so the caller can pass the same two directories into
-/// `ShellView::new` for the config hot-reload watcher (Task 1c-1) — one
-/// `config_dirs()` call, one source of truth for what's watched.
-fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
+/// `--demo [rows]` (default 100,000), or no arguments at all (spec §7.1).
+/// Anything else is a usage error the caller should exit(2) on — argument
+/// parsing has no config to fall back to, unlike a bad `*.toml`, so this
+/// is the one place invalid input does not just degrade and continue.
+fn parse_args(args: &[String]) -> Result<Option<usize>, String> {
+    match args {
+        [] => Ok(None),
+        [flag] if flag == "--demo" => Ok(Some(100_000)),
+        [flag, rows] if flag == "--demo" => rows
+            .parse::<usize>()
+            .map(Some)
+            .map_err(|_| usage(&format!("'{rows}' is not a row count"))),
+        _ => Err(usage("unrecognised arguments")),
+    }
+}
+
+fn usage(reason: &str) -> String {
+    format!("{reason}\nusage: geode [--demo [rows]]")
+}
+
+/// Wraps the bridge's shared `Rc<BlotterFactory>` so it can go in the
+/// roster, which wants an owned `Box<dyn ModuleFactory>` (§9.1) — the
+/// factory itself has to stay an `Rc` because `bridge::attach`'s reload
+/// handler also holds a clone, for `set_views`/`set_find_style`/
+/// `set_stale_after` on every `ConfigReloaded` (spec §5.1). A thin
+/// forwarding wrapper here, rather than `impl ModuleFactory for
+/// Rc<BlotterFactory>` in `geode-blotter` itself, keeps that crate's
+/// public surface exactly the one `ModuleFactory for BlotterFactory` impl
+/// it already has.
+struct BlotterFactoryHandle(Rc<BlotterFactory>);
+
+impl ModuleFactory for BlotterFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0.create(tile, restored, frame, window, cx)
+    }
+}
+
+/// Load config, register the shell's and modules' builtin actions,
+/// compile the keymap, and build the starting (empty, workspace 1)
+/// workspace state. Config and keymap diagnostics print to stderr, one
+/// line each — a diagnostics UI is a later phase; invalid config must
+/// never stop the app from starting (spec §10.1). Returns the desk/user
+/// config directories alongside the services so the caller can pass the
+/// same two directories into `ShellView::new` for the config hot-reload
+/// watcher (Task 1c-1) — one `config_dirs()` call, one source of truth
+/// for what's watched — and the data bridge (`None` when the config has
+/// no datasets/views to serve), so the caller can attach it to the
+/// window once it opens.
+///
+/// `demo_root` is `Some` under `--demo` (spec §7.1): the directory
+/// `demo::ensure_emitted` has already populated with generated CSVs, one
+/// level above its `src` subdirectory. Its config layer goes in ahead of
+/// desk/user config, exactly where the builtin keymap already sits, so a
+/// desk or user layer can still override any of it.
+fn build_shell_services(
+    demo_root: Option<&Path>,
+    cx: &mut App,
+) -> (
+    ShellServices,
+    Option<PathBuf>,
+    Option<PathBuf>,
+    Option<bridge::Bridge>,
+) {
     let (desk, user) = config_dirs();
-    let builtin_keymap =
-        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed");
+    let mut builtin = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed"),
+    ];
+    if let Some(root) = demo_root {
+        builtin.extend(demo::layer(&root.join("src")));
+    }
     let config = Config::load(&ConfigSources {
-        builtin: vec![builtin_keymap],
+        builtin,
         desk: desk.clone(),
         user: user.clone(),
     });
@@ -148,15 +256,36 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
 
-    // Modules register their actions before the keymap builds (§3.2);
-    // Plan 3c fills the roster with the blotter. The default kind is
-    // read from `[app] modules.default`, "blotter" when unset.
+    // The default kind is read from `[app] modules.default`, "blotter"
+    // when unset.
     let default_kind = config
         .get("app", "modules.default")
         .and_then(|v| v.as_str())
         .unwrap_or("blotter")
         .to_string();
-    let roster = ModuleRoster::new(default_kind);
+    let mut roster = ModuleRoster::new(default_kind);
+
+    // The data bridge (spec §5.1, §5.4): `None` when the config declares
+    // no datasets/views, in which case the roster's only occupant is
+    // whatever `default_kind` names with nothing behind it — a blotter
+    // with no data handle would panic on its first requery, so a roster
+    // with no bridge simply gets no blotter factory at all, and every
+    // tile falls back to the placeholder.
+    let db = bridge::db_path(
+        &config,
+        demo_root,
+        std::env::var("LOCALAPPDATA").ok(),
+        std::env::var("HOME").ok(),
+    );
+    let bridge = bridge::data_setup(&config, db).map(|setup| {
+        let find_style = FindStyle::from_config(&config);
+        let stale_after = bridge::stale_after_from_config(&config);
+        let bridge = bridge::start(setup, find_style, stale_after, cx);
+        roster.add(Box::new(BlotterFactoryHandle(bridge.factory.clone())));
+        bridge
+    });
+
+    // Modules register their actions before the keymap builds (§3.2).
     roster.register_actions(&mut registry);
 
     let mod_alias = mod_alias_from_config(&config);
@@ -186,7 +315,7 @@ fn build_shell_services() -> (ShellServices, Option<PathBuf>, Option<PathBuf>) {
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
     };
-    (services, desk, user)
+    (services, desk, user, bridge)
 }
 
 fn print_diagnostic(source: &str, diag: &Diagnostic) {
@@ -244,5 +373,33 @@ mod tests {
     #[test]
     fn none_when_neither_env_var_set() {
         assert_eq!(user_config_dir(None, None), None);
+    }
+
+    #[test]
+    fn no_arguments_means_no_demo() {
+        assert_eq!(parse_args(&[]), Ok(None));
+    }
+
+    #[test]
+    fn bare_demo_flag_defaults_to_a_hundred_thousand_rows() {
+        assert_eq!(parse_args(&["--demo".to_string()]), Ok(Some(100_000)));
+    }
+
+    #[test]
+    fn demo_flag_with_a_row_count() {
+        assert_eq!(
+            parse_args(&["--demo".to_string(), "1000000".to_string()]),
+            Ok(Some(1_000_000))
+        );
+    }
+
+    #[test]
+    fn a_non_numeric_row_count_is_a_usage_error() {
+        assert!(parse_args(&["--demo".to_string(), "abc".to_string()]).is_err());
+    }
+
+    #[test]
+    fn an_unrecognised_flag_is_a_usage_error() {
+        assert!(parse_args(&["--nonesuch".to_string()]).is_err());
     }
 }
