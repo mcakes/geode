@@ -34,16 +34,16 @@ use crate::theme::ThemeService;
 /// `"Theme: {name}"` under category `"Appearance"`).
 const THEME_CATEGORY: &str = "Appearance";
 
+/// Palette-facing category for saved-scope rows (Phase 4a §3.9: `"Scope:
+/// {name}"`, listed after the theme rows).
+const SCOPE_CATEGORY: &str = "Scope";
+
 /// One row the palette can show. `Action` carries the id (for dispatch),
 /// its registry title/category, and its rendered binding text if the
 /// keymap has one bound. `Theme`'s `String` is a fully qualified bundled
 /// theme name (e.g. `"Gruvbox Dark"`) — exactly what
 /// `ThemeService::apply`/`resolve` expect, so dispatch needs no further
 /// lookup.
-/// Palette-facing category for saved-scope rows (Phase 4a §3.9: `"Scope:
-/// {name}"`, listed after the theme rows).
-const SCOPE_CATEGORY: &str = "Scope";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteItem {
     Action(ActionId, String, String, Option<String>),

@@ -1144,8 +1144,8 @@ run_mutation "session: tile state round-trips" \
 
 run_mutation "session: a state-only change alone still flushes" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty {' \
+  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty && !frame_dirty {' \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
@@ -1277,7 +1277,7 @@ run_mutation "frame: restart_required clears once sources/datasets match the bas
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
 
-run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's (I2, residual fix)" \
+run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's and scopes_changed's (I2, residual fix)" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '            if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
@@ -1286,6 +1286,14 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if scopes_changed {
+                let saved = rebuild_saved_scopes(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_saved_scopes(saved) {
                         cx.notify();
                     }
                 });
@@ -1300,6 +1308,14 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if scopes_changed {
+                let saved = rebuild_saved_scopes(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_saved_scopes(saved) {
                         cx.notify();
                     }
                 });
@@ -1690,12 +1706,21 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                         dataset,
                         batch,
                         gen_id,
-                        ..
+                        books,
                     } => {
                         eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
                         let frame = shell.read(cx).frame().clone();
+                        // The event carries no timestamp of its own; the
+                        // arrival instant is what a "recent publishes"
+                        // preset needs (Phase 4a §3.12).
+                        let publish = geode_shell::frame::Publish {
+                            dataset,
+                            batch,
+                            books: books.len(),
+                            at: chrono::Utc::now(),
+                        };
                         frame.update(cx, |f, cx| {
-                            f.note_published();
+                            f.note_published(publish);
                             cx.notify();
                         });
                     }
@@ -1737,13 +1762,19 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                     dataset,
                     batch,
                     gen_id,
-                    ..
+                    books,
                 } => {
                     eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
                     cx.update(|cx| {
                         let frame = shell.read(cx).frame().clone();
+                        let publish = geode_shell::frame::Publish {
+                            dataset,
+                            batch,
+                            books: books.len(),
+                            at: chrono::Utc::now(),
+                        };
                         frame.update(cx, |f, cx| {
-                            f.note_published();
+                            f.note_published(publish);
                             cx.notify();
                         });
                     });
