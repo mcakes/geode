@@ -15,7 +15,10 @@
 # first.** `apply_schema` is CREATE TABLE IF NOT EXISTS, so an existing
 # table is never migrated; a schema that has grown a column then fails
 # every publish with "table ... has N columns but N+1 values were
-# supplied".
+# supplied". `--demo`'s database lives at
+# `$TMPDIR/geode-demo/<rows>-<seed>/geode.duckdb` (`geode-app::demo::demo_dir`,
+# seed fixed at 42) — delete that whole `<rows>-<seed>` directory, since
+# the generated source CSVs under its `src/` are keyed to the same schema.
 
 [risk_snapshot.columns.business_date]
 type = "utf8"
@@ -26,26 +29,31 @@ source_name = "BusinessDate"
 [risk_snapshot.columns.book]
 type = "utf8"
 role = "dimension"
+textual = true
 source_name = "Book"
 
 [risk_snapshot.columns.lhu]
 type = "utf8"
 role = "dimension"
+textual = true
 source_name = "LHU"
 
 [risk_snapshot.columns.position_ref]
 type = "utf8"
 role = "key"
+textual = true
 source_name = "PositionRef"
 
 [risk_snapshot.columns.instrument_ref]
 type = "utf8"
 role = "key"
+textual = true
 source_name = "InstrumentRef"
 
 [risk_snapshot.columns.underlying_ref]
 type = "utf8"
 role = "dimension"
+textual = true
 source_name = "Underlying1Ref"
 
 [risk_snapshot.columns.underlying2_ref]
@@ -56,6 +64,7 @@ source_name = "Underlying2Ref"
 [risk_snapshot.columns.counterparty]
 type = "utf8"
 role = "dimension"
+textual = true
 source_name = "Counterparty"
 
 # Instrument reference attributes.
@@ -65,22 +74,28 @@ role = "attribute"
 grain = "instrument"
 source_name = "Strike"
 
+# Carried dimensions (spec §3.3): one value per instrument, carried by the
+# instrument grain and every finer one, groupable and scopeable like a key
+# dimension rather than a lookup-only attribute.
 [risk_snapshot.columns.expiry]
 type = "utf8"
-role = "attribute"
+role = "dimension"
 grain = "instrument"
+textual = true
 source_name = "Expiry"
 
 [risk_snapshot.columns.currency]
 type = "utf8"
-role = "attribute"
+role = "dimension"
 grain = "instrument"
+textual = true
 source_name = "Currency"
 
 [risk_snapshot.columns.model_code]
 type = "utf8"
-role = "attribute"
+role = "dimension"
 grain = "instrument"
+textual = true
 source_name = "ModelCode"
 
 # ---- Underlying grain: one row per (position, underlying). ----

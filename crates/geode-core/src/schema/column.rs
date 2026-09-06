@@ -73,11 +73,15 @@ impl Aggregate {
 pub enum ColumnRole {
     /// Part of a grain key.
     Key,
-    /// Scopeable and groupable.
-    Dimension,
+    /// Scopeable and groupable. `None` is a column of a built-in grain
+    /// key (`Grain::key_columns`); `Some(g)` is a *carried* dimension —
+    /// one value per row of `g`'s key, carried by `g` and every finer
+    /// grain, stored as a payload column, never added to a key
+    /// (spec §3.3).
+    Dimension { grain: Option<Grain> },
     /// A number, aggregated at its declared grain.
     Measure { grain: Grain, aggregate: Aggregate },
-    /// A non-numeric property carried at a grain (strike, expiry, currency).
+    /// A non-numeric property carried at a grain (strike, expiry).
     Attribute { grain: Grain },
 }
 
@@ -92,6 +96,10 @@ pub struct ColumnSpec {
     pub required: bool,
     /// Participates in the global text filter (spec §4.1).
     pub textual: bool,
+    /// Small enough vocabulary to be an ENUM: interned at ingest, given a
+    /// picker, and matched by dictionary in the text filter (spec §3.3).
+    /// Defaults to `true` for a dimension, `false` otherwise.
+    pub categorical: bool,
     pub role: ColumnRole,
 }
 
@@ -100,10 +108,23 @@ impl ColumnSpec {
         self.source_name.as_deref().unwrap_or(&self.name)
     }
 
+    /// The grain a measure or attribute is declared at. `None` for keys
+    /// and for every dimension, carried or not: a carried dimension is
+    /// reached through [`Self::carried_grain`] so the by-grain payload
+    /// paths (`grains()`, `measures_at`, `attributes_at`) keep meaning
+    /// "declared at exactly this grain".
     pub fn grain(&self) -> Option<Grain> {
         match self.role {
             ColumnRole::Measure { grain, .. } | ColumnRole::Attribute { grain } => Some(grain),
-            ColumnRole::Key | ColumnRole::Dimension => None,
+            ColumnRole::Key | ColumnRole::Dimension { .. } => None,
+        }
+    }
+
+    /// `Some` for a carried dimension: the grain whose key determines it.
+    pub fn carried_grain(&self) -> Option<Grain> {
+        match self.role {
+            ColumnRole::Dimension { grain } => grain,
+            _ => None,
         }
     }
 
@@ -115,7 +136,8 @@ impl ColumnSpec {
             ty: ColumnType::F64,
             required: true,
             textual: false,
-            role: ColumnRole::Dimension,
+            categorical: true,
+            role: ColumnRole::Dimension { grain: None },
         }
     }
 }

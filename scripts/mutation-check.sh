@@ -1777,6 +1777,81 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
   geode-app \
   the_drain_task_ends_on_the_first_event_after_the_window_closes
 
+# ---- carried dimensions (Phase 4 spec §3.3)
+
+run_mutation "carried: a carried dimension is a payload column of its grain and finer" \
+  crates/geode-data/src/ingest/split.rs \
+  '    out.extend(
+        ds.carried_dimensions_at(grain)
+            .into_iter()
+            .map(|c| c.name.as_str()),
+    );' \
+  '    let _ = ds.carried_dimensions_at(grain);' \
+  geode-data a_carried_dimension_lands_in_its_grain_and_every_finer_one_but_not_position
+
+run_mutation "carried: DDL carries a carried dimension" \
+  crates/geode-data/src/store/ddl.rs \
+  '    for c in ds.carried_dimensions_at(grain) {' \
+  '    for c in ds.carried_dimensions_at(grain).into_iter().filter(|_| false) {' \
+  geode-data create_table_carries_a_carried_dimension_at_its_grain_and_finer
+
+run_mutation "carried: routing evaluates a carried dimension where it is carried" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '    ds.carries(grain, base) || ds.column(base).and_then(|c| c.grain()) == Some(grain)' \
+  '    grain.dimension_key_columns().contains(&base) || ds.column(base).and_then(|c| c.grain()) == Some(grain)' \
+  geode-data a_selection_on_a_carried_dimension_is_direct_where_carried_and_probed_from_position
+
+run_mutation "carried: attribution counts a carried dimension as part of the key" \
+  crates/geode-core/src/attribution.rs \
+  '    let key = ds.dimensions_at(grain);' \
+  '    let key: Vec<&str> = grain.dimension_key_columns().to_vec();' \
+  geode-core grouping_by_a_carried_dimension_is_additive_where_carried_and_non_attributable_where_not
+
+run_mutation "carried: the grouping check accepts a carried dimension" \
+  crates/geode-data/src/query/compile.rs \
+  '    columns
+        .iter()
+        .all(|col| ds.carries(grain, dims.base_column(col)))' \
+  '    columns
+        .iter()
+        .all(|col| grain.dimension_key_columns().contains(&dims.base_column(col)))' \
+  geode-data grouping_by_a_carried_dimension_sums_like_the_key_it_depends_on_and_blanks_coarser_measures
+
+run_mutation "carried: a dependency violation degrades health" \
+  crates/geode-data/src/ingest/load.rs \
+  '        if req
+            .dataset
+            .column(&c.column)
+            .and_then(|col| col.carried_grain())
+            .is_some()
+        {' \
+  '        if false {' \
+  geode-data a_carried_dimension_dependency_violation_degrades_health
+
+run_mutation "categorical: defaults on for dimensions, off otherwise" \
+  crates/geode-core/src/schema/mod.rs \
+  '    let categorical_default = matches!(role, ColumnRole::Dimension { .. });' \
+  '    let categorical_default = true;' \
+  geode-core categorical_defaults_true_for_dimensions_and_false_otherwise_and_attributes_may_opt_in
+
+run_mutation "categorical: interning follows the flag" \
+  crates/geode-data/src/store/ddl.rs \
+  '    ds.categorical_columns()' \
+  '    ds.columns.iter().filter(|c| matches!(c.role, ColumnRole::Dimension { .. })).map(|c| c.name.as_str()).collect()' \
+  geode-data categorical_columns_follow_the_flag_not_the_role
+
+run_mutation "schema: a bare dimension outside every key is dropped" \
+  crates/geode-core/src/schema/mod.rs \
+  '    ds.columns.retain(|c| !bare_outside_key.contains(&c.name));' \
+  '    let _ = &bare_outside_key;' \
+  geode-core a_bare_dimension_outside_every_built_in_key_is_an_error_and_is_dropped
+
+run_mutation "schema: textual on an unroutable column is cleared" \
+  crates/geode-core/src/schema/mod.rs \
+  '        if unroutable.contains(&c.name) {' \
+  '        if false {' \
+  geode-core textual_on_a_column_no_grain_can_route_is_an_error_and_textual_is_cleared
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

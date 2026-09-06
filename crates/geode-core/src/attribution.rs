@@ -6,7 +6,7 @@
 //! compiler.
 
 use crate::dimensions::DerivedDimensions;
-use crate::schema::Grain;
+use crate::schema::{DatasetSpec, Grain};
 
 /// Whether a measure's value at one grouping level can be summed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,13 +89,18 @@ impl ScopeSemantics {
 ///
 /// `grouping` is the prefix of the view's grouping tuple for this level,
 /// so a three-level tree calls this three times with growing slices.
-pub fn attribution_of(grain: Grain, grouping: &[String], dims: &DerivedDimensions) -> Attribution {
-    // Dimension keys, not the raw key: the pair grain's `underlying_ref`
-    // is `least(u1, u2)`, so grouping by the underlying does not partition
-    // its rows — an SPX-RUT pair belongs to both. That is spec §6.3's
-    // "non-attributable at an underlying-level grouping" rule, and it
-    // falls out of the vocabulary rather than needing a special case.
-    let key = grain.dimension_key_columns();
+pub fn attribution_of(
+    ds: &DatasetSpec,
+    grain: Grain,
+    grouping: &[String],
+    dims: &DerivedDimensions,
+) -> Attribution {
+    // Dimension keys plus carried dimensions (spec §3.3): a carried
+    // dimension is functionally determined by this grain's key, so
+    // grouping by it partitions the rows exactly as a key does. The pair
+    // grain's canonicalised underlyings are still excluded, for the
+    // reason `dimension_key_columns` gives.
+    let key = ds.dimensions_at(grain);
 
     // Resolve derived dimensions to their source before testing: `desk`
     // counts as `book`, which is what makes a desk rollup additive.
@@ -197,9 +202,62 @@ IDX_EXO_EU = ["BK000", "BK001"]
         DerivedDimensions::from_doc(&doc).0
     }
 
+    /// No carried dimensions: `dimensions_at` reduces to
+    /// `grain.dimension_key_columns()`, so an empty dataset is a drop-in
+    /// stand-in for the tests below that only exercise the built-in
+    /// vocabulary.
+    fn dataset() -> DatasetSpec {
+        DatasetSpec::default()
+    }
+
     fn attribution(grain: Grain, grouping: &[&str]) -> Attribution {
         let g: Vec<String> = grouping.iter().map(|s| s.to_string()).collect();
-        attribution_of(grain, &g, &dims())
+        attribution_of(&dataset(), grain, &g, &dims())
+    }
+
+    /// The Phase 4 §3.3 carried-dimension fixture (`currency` carried by
+    /// the instrument grain), duplicated from `schema::mod::tests::CARRIED`
+    /// — attribution and schema parsing are tested separately even though
+    /// they share a fixture shape.
+    fn carried_dataset() -> DatasetSpec {
+        let text = r#"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        crate::schema::SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk")
+            .expect("dataset")
+            .clone()
     }
 
     #[test]
@@ -331,5 +389,38 @@ IDX_EXO_EU = ["BK000", "BK001"]
         };
         assert!(!semi.is_direct());
         assert_eq!(semi.dimensions(), &["underlying_ref".to_string()]);
+    }
+
+    #[test]
+    fn grouping_by_a_carried_dimension_is_additive_where_carried_and_non_attributable_where_not() {
+        let ds = carried_dataset(); // the CARRIED fixture from schema tests, duplicated here
+        let g = |cols: &[&str]| cols.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            attribution_of(&ds, Grain::Underlying, &g(&["currency"]), &dims()),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution_of(
+                &ds,
+                Grain::Instrument,
+                &g(&["currency", "instrument_ref"]),
+                &dims()
+            ),
+            Attribution::Additive
+        );
+        assert_eq!(
+            attribution_of(&ds, Grain::Position, &g(&["currency"]), &dims()),
+            Attribution::NonAttributable,
+            "a position spans currencies and nothing names the position"
+        );
+        assert_eq!(
+            attribution_of(
+                &ds,
+                Grain::Position,
+                &g(&["position_ref", "currency"]),
+                &dims()
+            ),
+            Attribution::DeterminedNonAdditive
+        );
     }
 }

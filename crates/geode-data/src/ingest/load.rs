@@ -241,13 +241,17 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
     // 5. Rebuild the dimension ENUM types from what is now live, so the
     // query path can cast to them and get dictionary-encoded columns
     // (spec §3.6). Storage stays VARCHAR — see `refresh_enum` for why.
-    for col in crate::store::ddl::dimension_columns(req.dataset) {
-        // Refresh from the coarsest table carrying the column, which is
-        // the smallest scan that sees every value.
-        let Some(grain) = geode_core::schema::Grain::ALL
-            .iter()
-            .find(|g| g.key_columns().contains(&col) && split.staged.iter().any(|(s, _)| s == *g))
-        else {
+    for col in crate::store::ddl::categorical_columns(req.dataset) {
+        // Refresh from the coarsest staged table carrying the column,
+        // which is the smallest scan that sees every value. The third
+        // disjunct is what lets an opted-in *attribute* like `expiry`
+        // refresh from its own grain's table.
+        let Some(grain) = geode_core::schema::Grain::ALL.iter().find(|g| {
+            (g.key_columns().contains(&col)
+                || req.dataset.carries(**g, col)
+                || req.dataset.column(col).and_then(|c| c.grain()) == Some(**g))
+                && split.staged.iter().any(|(s, _)| s == *g)
+        }) else {
             continue;
         };
         crate::store::ddl::refresh_enum(
@@ -278,6 +282,22 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             "books present in the data but absent from the sentinel: {}",
             undeclared.join(", ")
         ));
+    }
+    // A carried dimension that varied inside its key (spec §3.3): the
+    // file disagrees with the schema's dependency claim. The row was
+    // written with one of the values; say so rather than hide it.
+    for c in &split.conflicts {
+        if req
+            .dataset
+            .column(&c.column)
+            .and_then(|col| col.carried_grain())
+            .is_some()
+        {
+            degradations.push(format!(
+                "'{}' varies within its {:?} key in {} group(s)",
+                c.column, c.grain, c.groups
+            ));
+        }
     }
     let health = if degradations.is_empty() {
         Health::Ok
@@ -664,6 +684,113 @@ source_name = "ModelCode"
                 .any(|c| c.column == "model_code"
                     && c.grain == geode_core::schema::Grain::Instrument),
             "the detector must report the planted model_code disagreement: {found:?}"
+        );
+    }
+
+    /// A minimal schema with `currency` a dimension carried by the
+    /// instrument grain (spec §3.3) — deliberately not the shared
+    /// `schema()`/`fixture()` above, which the generator populates and
+    /// has no way to plant a carried-dimension disagreement in.
+    fn carried_schema() -> geode_core::schema::DatasetSpec {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+source_name = "Book"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+source_name = "LHU"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+source_name = "PositionRef"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+source_name = "Counterparty"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+source_name = "InstrumentRef"
+[risk_snapshot.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+source_name = "Currency"
+[risk_snapshot.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "NPV"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        geode_core::schema::SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk_snapshot")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_carried_dimension_dependency_violation_degrades_health() {
+        // Two rows sharing one instrument's key but disagreeing on the
+        // currency it declares itself to carry: the schema's dependency
+        // claim is wrong for this file, and §3.3 wants that surfaced as
+        // degraded health rather than silently picking one value.
+        let ds = carried_schema();
+        let db_dir = tempfile::tempdir().unwrap();
+        let store = Store::open(db_dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let csv_path = src_dir.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(
+            &csv_path,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P1,C,I1,EUR,100\n",
+        )
+        .unwrap();
+
+        let sentinel = crate::source::Sentinel {
+            as_of: Utc::now(),
+            columns: [
+                "Book",
+                "LHU",
+                "PositionRef",
+                "Counterparty",
+                "InstrumentRef",
+                "Currency",
+                "NPV",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            books: vec!["BK0".to_string()],
+            row_count: None,
+            dataset: None,
+            business_date: None,
+        };
+
+        let out = load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &csv_path,
+                sentinel: &sentinel,
+                batch: "BK0",
+            },
+        )
+        .unwrap();
+
+        assert!(
+            matches!(&out.health, Health::Degraded { reason } if reason.contains("currency")),
+            "{:?}",
+            out.health
         );
     }
 

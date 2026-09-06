@@ -83,11 +83,11 @@ impl Era<'_> {
 }
 
 /// Whether `column` can be evaluated on `grain`'s own rows: a dimension
-/// key it carries, or a measure or attribute declared at it.
+/// key it carries, a carried dimension it carries (spec §3.3), or a
+/// measure or attribute declared at it.
 fn evaluable_at(ds: &DatasetSpec, dims: &DerivedDimensions, grain: Grain, column: &str) -> bool {
     let base = dims.base_column(column);
-    grain.dimension_key_columns().contains(&base)
-        || ds.column(base).and_then(|c| c.grain()) == Some(grain)
+    ds.carries(grain, base) || ds.column(base).and_then(|c| c.grain()) == Some(grain)
 }
 
 /// Where a clause over `columns` is evaluated when compiling at `grain`.
@@ -113,9 +113,7 @@ fn route(
     };
     for c in columns {
         let base = dims.base_column(c);
-        let carried = Grain::ALL
-            .iter()
-            .any(|g| g.dimension_key_columns().contains(&base));
+        let carried = Grain::ALL.iter().any(|g| ds.carries(*g, base));
         match ds.column(base) {
             None if !carried => return Err(unknown(c, "is not a column")),
             Some(col) if col.grain().is_none() && !carried => {
@@ -595,6 +593,51 @@ grain = "position"
         DerivedDimensions::default()
     }
 
+    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
+    /// grain. Both position (`daily_trading_pnl`) and instrument (`npv`)
+    /// measures are declared so `ds.grains()` includes both, which is
+    /// what lets `route` probe from position to instrument.
+    fn carried_dataset() -> geode_core::schema::DatasetSpec {
+        let text = r#"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+[risk.columns.daily_trading_pnl]
+type = "f64"
+role = "measure"
+grain = "position"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk")
+            .unwrap()
+            .clone()
+    }
+
     fn store() -> (tempfile::TempDir, crate::store::Store) {
         let d = tempfile::tempdir().unwrap();
         let s = crate::store::Store::open(d.path().join("g.duckdb")).unwrap();
@@ -777,6 +820,7 @@ grain = "position"
             ty: geode_core::schema::ColumnType::F64,
             required: false,
             textual: false,
+            categorical: false,
             role: geode_core::schema::ColumnRole::Attribute {
                 grain: Grain::Instrument,
             },
@@ -990,5 +1034,56 @@ grain = "position"
             .unwrap();
         assert_eq!(total, 10.0, "only BK000's row survives");
         drop(dir);
+    }
+
+    #[test]
+    fn a_selection_on_a_carried_dimension_is_direct_where_carried_and_probed_from_position() {
+        let ds = carried_dataset();
+        let (_dir, store) = store();
+        let scope = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "currency".into(),
+                values: vec!["USD".into()],
+            }],
+            ..Scope::default()
+        };
+        let at_instrument = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(at_instrument.predicate.contains("\"currency\" in"));
+        assert!(
+            !at_instrument.predicate.contains("exists"),
+            "{}",
+            at_instrument.predicate
+        );
+        assert_eq!(at_instrument.semantics, ScopeSemantics::Direct);
+
+        let at_position = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Position,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(
+            at_position.predicate.contains("exists"),
+            "{}",
+            at_position.predicate
+        );
+        assert_eq!(
+            at_position.semantics,
+            ScopeSemantics::SemiJoined {
+                dimensions: vec!["currency".into()]
+            },
+            "positions that have USD risk, not the USD share of the position"
+        );
     }
 }

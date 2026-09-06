@@ -153,4 +153,35 @@ mod demo_config_integration {
         assert_eq!(wide.columns.len(), 100, "spec §6.6's 100-column view");
         assert_eq!(setup.config.sources.len(), 1);
     }
+
+    /// Task 1 (Phase 4 spec §3.3): `currency`, `model_code` and `expiry`
+    /// are carried dimensions in the demo schema now, not lookup-only
+    /// attributes — `categorical_columns` is what the picker and the
+    /// interning loop both read, and this is the compiled-in doc's own
+    /// promise that the flag reaches them.
+    #[test]
+    fn the_demo_schema_declares_currency_model_code_and_expiry_as_categorical() {
+        let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
+        let config = Config::load(&ConfigSources {
+            builtin: layer(src),
+            ..ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let setup =
+            crate::bridge::data_setup(&config, "/tmp/geode-demo/100000-42/geode.duckdb".into())
+                .expect("datasets + views are both present in the demo layer");
+        assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
+        let ds = setup
+            .config
+            .schema
+            .dataset("risk_snapshot")
+            .expect("risk_snapshot is declared");
+        let categorical = ds.categorical_columns();
+        for name in ["currency", "model_code", "expiry"] {
+            assert!(
+                categorical.contains(&name),
+                "'{name}' must be categorical: {categorical:?}"
+            );
+        }
+    }
 }

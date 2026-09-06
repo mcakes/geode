@@ -72,16 +72,27 @@ fn key_exprs(grain: Grain) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Measures and attributes declared at this grain.
+/// Measures and attributes declared at this grain, plus the carried
+/// dimensions it carries (spec §3.3). A carried dimension goes through
+/// `any_value` like an attribute and — because the dependency on the
+/// key is a claim the schema makes — through the conflict check below
+/// like one too.
 fn payload_columns(ds: &DatasetSpec, grain: Grain) -> Vec<&str> {
-    ds.columns
+    let mut out: Vec<&str> = ds
+        .columns
         .iter()
         .filter(|c| match c.role {
             ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
             _ => false,
         })
         .map(|c| c.name.as_str())
-        .collect()
+        .collect();
+    out.extend(
+        ds.carried_dimensions_at(grain)
+            .into_iter()
+            .map(|c| c.name.as_str()),
+    );
+    out
 }
 
 pub fn split_by_grain(conn: &Connection, req: &SplitRequest) -> Result<SplitResult, StoreError> {
@@ -183,14 +194,15 @@ mod tests {
                      counterparty varchar, instrument_ref varchar,
                      underlying_ref varchar, underlying2_ref varchar,
                      delta01 double, cross_gamma02 double,
-                     npv double, daily_trading_pnl double, model_code varchar);
+                     npv double, daily_trading_pnl double, model_code varchar,
+                     currency varchar);
                  insert into staging_raw values
-                   ('BK0','L0','P1','C','P1a','NDX','RUT', 10, 1, 100, 7, 'EURP'),
-                   ('BK0','L0','P1','C','P1a','NDX','SPX', 10, 2, 100, 7, 'EURP'),
-                   ('BK0','L0','P1','C','P1a','RUT','NDX', 20, 1, 100, 7, 'EURP'),
-                   ('BK0','L0','P1','C','P1a','RUT','SPX', 20, 3, 100, 7, 'EURP'),
-                   ('BK0','L0','P1','C','P1a','SPX','NDX', 30, 2, 100, 7, 'EURP'),
-                   ('BK0','L0','P1','C','P1a','SPX','RUT', 30, 3, 100, 7, 'EURP');",
+                   ('BK0','L0','P1','C','P1a','NDX','RUT', 10, 1, 100, 7, 'EURP', 'USD'),
+                   ('BK0','L0','P1','C','P1a','NDX','SPX', 10, 2, 100, 7, 'EURP', 'USD'),
+                   ('BK0','L0','P1','C','P1a','RUT','NDX', 20, 1, 100, 7, 'EURP', 'USD'),
+                   ('BK0','L0','P1','C','P1a','RUT','SPX', 20, 3, 100, 7, 'EURP', 'USD'),
+                   ('BK0','L0','P1','C','P1a','SPX','NDX', 30, 2, 100, 7, 'EURP', 'USD'),
+                   ('BK0','L0','P1','C','P1a','SPX','RUT', 30, 3, 100, 7, 'EURP', 'USD');",
             )
             .unwrap();
         (dir, store)
@@ -220,6 +232,10 @@ role = "dimension"
 [risk.columns.underlying2_ref]
 type = "utf8"
 role = "dimension"
+[risk.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
 [risk.columns.delta01]
 type = "f64"
 role = "measure"
@@ -412,5 +428,65 @@ grain = "instrument"
         let ds = dataset();
         let out = split_by_grain(store.writer(), &req(&ds)).unwrap();
         assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+    }
+
+    #[test]
+    fn a_carried_dimension_lands_in_its_grain_and_every_finer_one_but_not_position() {
+        let (_dir, store) = fixture();
+        let ds = dataset();
+        split_by_grain(store.writer(), &req(&ds)).unwrap();
+        let has = |table: &str| -> bool {
+            store
+                .writer()
+                .query_row(
+                    &format!(
+                        "select count(*) from (describe {table}) where column_name = 'currency'"
+                    ),
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+                == 1
+        };
+        assert!(!has(&staging_table(Grain::Position)));
+        assert!(has(&staging_table(Grain::Instrument)));
+        assert!(has(&staging_table(Grain::Underlying)));
+        // and the value is the one the instrument carries
+        let n: i64 = store
+            .writer()
+            .query_row(
+                &format!(
+                    "select count(*) from {} where currency is null",
+                    staging_table(Grain::Instrument)
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn a_carried_dimension_that_varies_within_its_key_is_a_conflict() {
+        let (_dir, store) = fixture();
+        let ds = dataset();
+        // Break the dependency for one row in the raw table: five of the
+        // six rows share instrument P1a and agree on currency, one does
+        // not, so the instrument-grain group disagrees with itself.
+        store
+            .writer()
+            .execute_batch(
+                "update staging_raw set currency = 'JPY'
+                 where rowid = (select min(rowid) from staging_raw)",
+            )
+            .unwrap();
+        let out = split_by_grain(store.writer(), &req(&ds)).unwrap();
+        assert!(
+            out.conflicts
+                .iter()
+                .any(|c| c.column == "currency" && c.grain == Grain::Instrument && c.groups == 1),
+            "{:?}",
+            out.conflicts
+        );
     }
 }

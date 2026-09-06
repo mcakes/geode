@@ -16,7 +16,12 @@ bench = false
 test-support = []
 
 [dependencies]
-toml = "1.1.4"
+# `preserve_order`: a dataset's declared columns keep the schema's
+# declaration order (spec §3.3's `categorical_columns`/`dimensions_at`
+# read that order — a picker or interned-ENUM list in TOML order is what
+# a trader expects, not an alphabetical shuffle). `indexmap` is already
+# in the dependency graph (via `arrow-json`), so this adds no new crate.
+toml = { version = "1.1.4", features = ["preserve_order"] }
 # Must match the version duckdb-rs re-exports, or `RecordBatch` here and
 # `RecordBatch` there are different types. Check with
 # `cargo tree -p geode-data -i arrow` before bumping.

@@ -52,13 +52,19 @@ fn quoted(cols: &[String]) -> Vec<String> {
 }
 
 /// Whether `grain` carries every one of `columns` as a dimension —
-/// derived dimensions resolved to their source first.
-fn carries_all(grain: Grain, columns: &[String], dims: &DerivedDimensions) -> bool {
-    columns.iter().all(|col| {
-        grain
-            .dimension_key_columns()
-            .contains(&dims.base_column(col))
-    })
+/// derived dimensions resolved to their source first. A carried
+/// dimension counts here exactly as a key dimension does (spec §3.3):
+/// `DatasetSpec::carries` is the one place that decides "carried by this
+/// grain and every finer one".
+fn carries_all(
+    ds: &DatasetSpec,
+    grain: Grain,
+    columns: &[String],
+    dims: &DerivedDimensions,
+) -> bool {
+    columns
+        .iter()
+        .all(|col| ds.carries(grain, dims.base_column(col)))
 }
 
 /// The finest declared grain carrying every one of `columns`.
@@ -77,7 +83,7 @@ fn finest_carrying(
     ds.grains()
         .into_iter()
         .rev()
-        .find(|g| carries_all(*g, columns, dims))
+        .find(|g| carries_all(ds, *g, columns, dims))
 }
 
 /// The already-compiled columns a derived expression names.
@@ -237,6 +243,7 @@ fn scan(relation: &str, derived: &[&geode_core::dimensions::DerivedDimension]) -
 /// `grain`. A dimension whose source is not on the table would compile to
 /// a `case` over a column that is not there.
 fn derived_for<'a>(
+    ds: &DatasetSpec,
     columns: &[String],
     dims: &'a DerivedDimensions,
     grain: Grain,
@@ -244,7 +251,7 @@ fn derived_for<'a>(
     columns
         .iter()
         .filter_map(|c| dims.get(c))
-        .filter(|d| grain.dimension_key_columns().contains(&d.from.as_str()))
+        .filter(|d| ds.carries(grain, &d.from))
         .collect()
 }
 
@@ -387,7 +394,7 @@ pub fn compile_view(
         // groups by would leave it outside every aggregate.
         let own: Vec<String> = materialized
             .iter()
-            .filter(|g| grain.dimension_key_columns().contains(&dims.base_column(g)))
+            .filter(|g| ds.carries(grain, dims.base_column(g)))
             .cloned()
             .collect();
         let own_q = quoted(&own);
@@ -467,7 +474,7 @@ pub fn compile_view(
             aggs = aggs.join(", "),
             relation = scan(
                 &era.relation(&view.dataset, grain),
-                &derived_for(&own, dims, grain),
+                &derived_for(ds, &own, dims, grain),
             ),
             pred = and_gen(&grain_scope.predicate),
         ));
@@ -529,7 +536,7 @@ pub fn compile_view(
         for m in measures {
             // Attribution per depth, from the schema alone.
             let by_depth: Vec<Attribution> = (0..=n)
-                .map(|d| attribution_of(grain, &view.grouping[..d], dims))
+                .map(|d| attribution_of(ds, grain, &view.grouping[..d], dims))
                 .collect();
             let blank: Vec<String> = (0..=n)
                 .filter(|d| by_depth[*d] == Attribution::NonAttributable)
@@ -567,7 +574,7 @@ pub fn compile_view(
                 view,
                 format!(
                     "no declared grain of '{}' carries every grouping column {:?}; \
-                     a grouping column must be a dimension key of some grain",
+                     a grouping column must be carried as a dimension by some grain",
                     view.dataset, materialized
                 ),
             )
@@ -588,7 +595,7 @@ pub fn compile_view(
             select = group_cols[..depth].join(", "),
             relation = scan(
                 &era.relation(&view.dataset, spine_grain),
-                &derived_for(materialized, dims, spine_grain),
+                &derived_for(ds, materialized, dims, spine_grain),
             ),
             pred = and_gen(&spine_scope.predicate),
             sets = sets.join(", "),
@@ -615,7 +622,7 @@ pub fn compile_view(
         Vec::new()
     } else {
         let existing = existing_enum_types(conn, &view.dataset)?;
-        crate::store::ddl::dimension_columns(ds)
+        crate::store::ddl::categorical_columns(ds)
             .into_iter()
             .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
             .collect()
@@ -691,7 +698,7 @@ pub fn compile_view(
         let Some(joined_grain) = joined_ds
             .grains()
             .into_iter()
-            .find(|g| carries_all(*g, &join.on, dims))
+            .find(|g| carries_all(joined_ds, *g, &join.on, dims))
         else {
             continue;
         };
@@ -783,7 +790,7 @@ pub fn compile_view(
                 grain: col_grain,
                 attribution_by_depth: (0..=n)
                     .map(|d| match col_grain {
-                        Some(g) => attribution_of(g, &view.grouping[..d], dims),
+                        Some(g) => attribution_of(joined_ds, g, &view.grouping[..d], dims),
                         None => Attribution::Additive,
                     })
                     .collect(),
@@ -1471,6 +1478,162 @@ kind = "dimension"
         rows.map(|r| r.unwrap()).collect()
     }
 
+    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
+    /// grain. `npv` (position) and `delta01` (underlying) are the two
+    /// measures that disagree on whether a currency grouping attributes
+    /// them.
+    fn carried_schema() -> SchemaSpec {
+        let text = r#"
+[risk_carried.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_carried.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_carried.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_carried.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_carried.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_carried.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk_carried.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[risk_carried.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk_carried.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc).0
+    }
+
+    /// Two positions, each with one instrument and one underlying, each
+    /// instrument carrying its own currency.
+    fn carried_fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .apply_schema(carried_schema().dataset("risk_carried").unwrap())
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_carried_position_live
+                   (book, lhu, position_ref, counterparty, npv,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C', 100, 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C', 50, 'b', 1, 1, now());
+                 insert into risk_carried_underlying_live
+                   (book, lhu, position_ref, counterparty, instrument_ref,
+                    underlying_ref, delta01, currency,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C','I1','U1', 10, 'USD', 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I2','U2', 20, 'EUR', 'b', 1, 1, now());",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    struct CarriedRow {
+        depth: i64,
+        npv: Option<f64>,
+        delta01: Option<f64>,
+    }
+
+    /// Compile and run a single-column-group view over `carried_fixture`.
+    fn run_carried(
+        store: &crate::store::Store,
+        schema: &SchemaSpec,
+        group: &str,
+    ) -> Vec<CarriedRow> {
+        let text = format!(
+            "[t]\ndataset = \"risk_carried\"\ngrouping = [\"{group}\"]\n\
+             [[t.columns]]\nname = \"npv\"\nkind = \"measure\"\n\
+             [[t.columns]]\nname = \"delta01\"\nkind = \"measure\"\n"
+        );
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", &text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        let q = compile_view(
+            store.writer(),
+            &view,
+            schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let rows = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                Ok(CarriedRow {
+                    depth: r.get("row_depth")?,
+                    npv: r.get("npv")?,
+                    delta01: r.get("delta01")?,
+                })
+            })
+            .unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    /// The grand total's value for `col` — the one place both groupings
+    /// below must agree, since the grand total is always additive.
+    fn total(rows: &[CarriedRow], col: &str) -> f64 {
+        let grand = rows.iter().find(|r| r.depth == 0).unwrap_or_else(|| {
+            panic!(
+                "no grand total row: {:?}",
+                rows.iter().map(|r| r.depth).collect::<Vec<_>>()
+            )
+        });
+        match col {
+            "npv" => grand.npv.expect("npv grand total must not be blank"),
+            "delta01" => grand
+                .delta01
+                .expect("delta01 grand total must not be blank"),
+            other => panic!("unknown column '{other}'"),
+        }
+    }
+
+    #[test]
+    fn grouping_by_a_carried_dimension_sums_like_the_key_it_depends_on_and_blanks_coarser_measures()
+    {
+        let (_d, store) = carried_fixture();
+        let schema = carried_schema();
+        let by_currency = run_carried(&store, &schema, "currency");
+        let by_instrument = run_carried(&store, &schema, "instrument_ref");
+
+        // delta01 (underlying grain) sums to the same total either way.
+        assert_eq!(
+            total(&by_currency, "delta01"),
+            total(&by_instrument, "delta01")
+        );
+
+        // npv (position grain) is NonAttributable at the currency level: NULL.
+        for row in by_currency.iter().filter(|r| r.depth == 1) {
+            assert!(
+                row.npv.is_none(),
+                "position-grain npv must be blank under a currency grouping"
+            );
+        }
+        // and the grand total still carries it.
+        assert!(by_currency.iter().any(|r| r.depth == 0 && r.npv.is_some()));
+    }
+
     #[test]
     fn a_real_null_in_a_grouping_column_does_not_fan_out_the_tree() {
         // A rolled-up level carries NULL in the columns below it, so
@@ -1759,9 +1922,10 @@ kind = "measure"
         // Build the ENUMs the way ingest does — from live only. Only for
         // columns this grain's table actually has; `underlying2_ref`
         // lives at the pair grain.
-        for col in crate::store::ddl::dimension_columns(schema().dataset("risk_snapshot").unwrap())
-            .into_iter()
-            .filter(|c| Grain::Underlying.key_columns().contains(c))
+        for col in
+            crate::store::ddl::categorical_columns(schema().dataset("risk_snapshot").unwrap())
+                .into_iter()
+                .filter(|c| Grain::Underlying.key_columns().contains(c))
         {
             crate::store::ddl::refresh_enum(
                 conn,
@@ -2180,6 +2344,7 @@ kind = "measure"
             ty: geode_core::schema::ColumnType::F64,
             required: false,
             textual: false,
+            categorical: false,
             role: ColumnRole::Measure {
                 grain: Grain::UnderlyingPair,
                 aggregate: Aggregate::Sum,

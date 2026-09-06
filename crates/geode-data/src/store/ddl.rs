@@ -7,10 +7,15 @@
 //! absence of `gen_id` from live is load-bearing, not an oversight.
 //!
 //! A grain's table carries its key columns plus the measures and attributes
-//! declared *at that grain*. A `Dimension` column outside every grain key
-//! therefore appears in no table at all — so anything worth displaying that
-//! is not itself a key (`business_date`, for one) must be declared as an
-//! `attribute` at the grain that owns it, not as a bare dimension.
+//! declared *at that grain*, plus every dimension it carries (spec §3.3):
+//! a key dimension it always had, and a *carried* dimension — one that
+//! names the grain whose key determines it — as a payload column, stored
+//! at that grain's table and every finer one's. A bare `Dimension` column
+//! outside every grain key is rejected at parse (`schema::validate_dataset`)
+//! rather than silently appearing in no table at all — so anything worth
+//! displaying that is not itself a key (`business_date`, for one) must be
+//! declared as an `attribute` at the grain that owns it, or as a dimension
+//! carried by one.
 
 use geode_core::schema::{ColumnRole, DatasetSpec, Grain};
 
@@ -44,15 +49,11 @@ pub fn enum_type_name(dataset: &str, column: &str) -> String {
     format!("{dataset}_{column}_enum")
 }
 
-/// Dimension columns whose values are worth interning (spec §3.6). Keys
-/// like `position_ref` are high-cardinality and would make a useless
-/// dictionary, so only `Dimension` columns qualify.
-pub fn dimension_columns(ds: &DatasetSpec) -> Vec<&str> {
-    ds.columns
-        .iter()
-        .filter(|c| matches!(c.role, ColumnRole::Dimension))
-        .map(|c| c.name.as_str())
-        .collect()
+/// Columns interned as ENUMs (spec §3.3, §3.6): the schema's `categorical`
+/// flag, which defaults on for dimensions and off for keys, whose
+/// vocabularies would make a useless dictionary.
+pub fn categorical_columns(ds: &DatasetSpec) -> Vec<&str> {
+    ds.categorical_columns()
 }
 
 /// Rebuild a dimension's ENUM type from the values currently live.
@@ -109,11 +110,17 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
     for c in ds.columns.iter() {
         let keep = match c.role {
             ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
-            ColumnRole::Key | ColumnRole::Dimension => false,
+            ColumnRole::Key | ColumnRole::Dimension { .. } => false,
         };
         if keep {
             cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));
         }
+    }
+
+    // Carried dimensions (spec §3.3): payload columns of the declaring
+    // grain's table and every finer grain's.
+    for c in ds.carried_dimensions_at(grain) {
+        cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));
     }
 
     // Partition key completion: `book` is already in the grain key, `batch`
@@ -182,11 +189,59 @@ grain = "position"
             .unwrap()
             .clone()
     }
+
+    /// The Phase 4 §3.3 fixture: `currency` carried by the instrument
+    /// grain, and `expiry` an attribute opted into `categorical`.
+    pub(crate) fn carried_dataset() -> DatasetSpec {
+        let text = r#"
+[risk.columns.book]
+type = "utf8"
+role = "dimension"
+[risk.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[risk.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[risk.columns.expiry]
+type = "utf8"
+role = "attribute"
+grain = "instrument"
+categorical = true
+[risk.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
+[risk.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk")
+            .unwrap()
+            .clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::sample_dataset;
+    use super::tests_support::{carried_dataset, sample_dataset};
     use super::*;
 
     #[test]
@@ -265,6 +320,31 @@ mod tests {
         assert!(
             sql.contains("\"source_time\" TIMESTAMP WITH TIME ZONE"),
             "{sql}"
+        );
+    }
+
+    #[test]
+    fn create_table_carries_a_carried_dimension_at_its_grain_and_finer() {
+        let ds = carried_dataset();
+        let sql = |g| create_table_sql(&ds, g, TableKind::Live);
+        assert!(!sql(Grain::Position).contains("\"currency\""));
+        assert!(sql(Grain::Instrument).contains("\"currency\" VARCHAR"));
+        assert!(sql(Grain::Underlying).contains("\"currency\" VARCHAR"));
+    }
+
+    #[test]
+    fn categorical_columns_follow_the_flag_not_the_role() {
+        let ds = carried_dataset();
+        assert_eq!(
+            categorical_columns(&ds),
+            vec![
+                "book",
+                "lhu",
+                "counterparty",
+                "underlying_ref",
+                "currency",
+                "expiry"
+            ]
         );
     }
 }
