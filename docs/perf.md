@@ -474,6 +474,7 @@ zero.
 | --- | --- | --- |
 | `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | **100 ms** (2026-09-06, after the `perf::reset` fix) |
 | same hold, p50 / max | overlay's p50 / max rows, same reading | 18 ms / 496 ms |
+| same hold on the `tree` view (3 columns), p50 / p95 / max | overlay, counters reset before the hold | 18 ms / 96 ms / 96 ms |
 
 **It is not under 8 ms — the swap trigger has tripped, and the shape
 of the miss matters.** The p50 of 18 ms is one 60 Hz frame, so the
@@ -490,21 +491,31 @@ this is recorded as the result, not patched here; the `DataTable` swap
 Phase 3c deliberately left undone is the open question, and it may be
 the wrong fix if the tail is periodic work outside the table.
 
-**Follow-up (open).** Before deciding on a swap, find the periodic
-work: candidates are `visible_rows_changed` → `refill_window` when the
-window crosses a row (the delta fill is cheap, but the window-wide
-`any_determined` scan and glyph pass run on every crossing),
-`TableState`'s own column/width refresh, and gpui's uniform-list
-relayout. Then take three more readings, each after `perf::reset` and a
-fresh `j` hold: (1) the same hold on the `tree` view — if its p95 is near 8 ms the cost scales with
-column count and the suspect is `DataTable`'s per-cell element tree
-(`render_td` is a cache lookup, but the table still builds one element
-per visible cell per frame); if it is also high, the suspect is the
-cursor/scroll path shared by both views; (2) the `wide` hold's **p50**
-and **max**, to see whether 100 ms is the steady cost or a tail;
-(3) the `wide` hold with the perf overlay closed, in case the overlay's
-own repaint is part of the cost. Then profile one slow frame
-(`perf::gpui_overlay` for gpui's own frame timing, and Instruments on
-the release binary) before choosing between trimming `DataTable`'s
-per-cell work and replacing it with a uniform-list of pre-laid-out
-rows.
+**Follow-up (open) — the tail is not the table's column count.** The
+`tree` view (3 columns) holds with the same p50 and a p95 pinned at its
+96 ms max, so the one-in-twenty ~96 ms frame is in the path both views
+share, and a `DataTable` swap would not remove it. Ruled out by reading
+the code: the 500 ms session-persistence tick (`session_io.rs`)
+serializes the tile each tick but writes only when the layout or a tile
+record changed, which a cursor move does not. Still open, in the order
+worth checking:
+
+1. Whether the cost is in the app at all: repeat the `tree` hold with
+   the perf overlay closed (read it after), and hold `k` at the top of
+   the table so the cursor cannot move — every keystroke still
+   dispatches and repaints, but nothing scrolls and no cache window
+   changes. If the tail survives a non-moving hold, it is not the
+   scroll/refill path.
+2. Whether it scales with data: the same hold under `--demo 1000`. The
+   1M-row demo keeps DuckDB, the discovery scheduler and the health
+   events alive on their own threads; a difference here points at the
+   bridge's deliveries or at memory pressure rather than paint.
+3. The per-crossing work in `visible_rows_changed` → `refill_window`
+   (window-wide `any_determined` scan, glyph pass) and `TableState`'s
+   per-scroll bookkeeping — cheap on paper, worth one measurement.
+4. Then attribute one slow frame: `perf::gpui_overlay` cycles gpui's
+   own frame overlay (layout/paint breakdown), and an Instruments time
+   profile of the release binary during a hold will show what a ~96 ms
+   frame spends its time in.
+
+Only after that is the `DataTable` swap a decision rather than a guess.
