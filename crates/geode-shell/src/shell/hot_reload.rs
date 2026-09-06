@@ -216,11 +216,24 @@ impl ShellView {
                 });
             }
             if views_changed {
+                // I2 (final review): gpui flushes effects FIFO, so the
+                // order these two calls *queue* their effects in is the
+                // order they run in, regardless of subscriber
+                // registration order. `frame.update`'s `cx.notify()`
+                // queues the frame's own change notification — which is
+                // what wakes every tile's `on_frame_changed` observer
+                // and (if its followed versions moved) requeries — and
+                // must not run before `ConfigReloaded` does: the app
+                // bridge's handler for that event is what replaces a
+                // factory's/handle's views (`ReplaceViews`), so a tile
+                // that requeries first would query against the *old*
+                // views while recording the *new* version, leaving
+                // nothing to trigger the requery it actually needed.
+                cx.emit(ShellEvent::ConfigReloaded);
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();
                 });
-                cx.emit(ShellEvent::ConfigReloaded);
             }
             if !restart.is_empty() {
                 let message = format!("{} changed — restart to apply", restart.join(" and "));

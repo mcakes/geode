@@ -652,3 +652,68 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
         "reverting sources.toml back to the baseline clears the message"
     );
 }
+
+/// I2 (final review): a `views`-changing reload must queue
+/// `ShellEvent::ConfigReloaded` *before* it notifies the frame. gpui
+/// flushes effects FIFO, so which of the two runs first for any given
+/// subscriber/observer pair is decided purely by which effect was
+/// *queued* first, not by subscription order — a frame observer (a real
+/// tile's `on_frame_changed`, which requeries when its followed versions
+/// moved) queued ahead of the event's own subscribers (the app bridge,
+/// which forwards `ConfigReloaded` as `ReplaceViews`) would otherwise
+/// run its requery against the still-old views while already recording
+/// the new frame version, leaving nothing to trigger the requery it
+/// actually needed. This records the firing order directly rather than
+/// the requery behaviour itself (which needs a real tile — a module
+/// `geode-shell` cannot depend on) and RED-then-GREENs the statement
+/// order in `apply_reload`'s `views_changed` branch.
+#[gpui::test]
+fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let frame = shell.read_with(&cx, |s, _| s.frame.clone());
+
+    let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let o1 = order.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            if matches!(event, ShellEvent::ConfigReloaded) {
+                o1.borrow_mut().push("event");
+            }
+        })
+        .detach();
+    });
+    let o2 = order.clone();
+    cx.update(|_, cx| {
+        cx.observe(&frame, move |_frame, _cx| {
+            o2.borrow_mut().push("frame");
+        })
+        .detach();
+    });
+
+    let mut new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin(
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+            )
+            .unwrap(),
+            LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut new_config), cx)
+    });
+
+    assert_eq!(
+        order.borrow().as_slice(),
+        &["event", "frame"],
+        "ConfigReloaded must be queued (and therefore fire) before the \
+         frame's own change notification"
+    );
+}
