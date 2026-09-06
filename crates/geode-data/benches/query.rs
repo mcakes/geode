@@ -34,10 +34,12 @@ source_name = "BusinessDate"
 type = "utf8"
 role = "dimension"
 source_name = "Book"
+textual = true
 [risk_snapshot.columns.lhu]
 type = "utf8"
 role = "dimension"
 source_name = "LHU"
+textual = true
 [risk_snapshot.columns.position_ref]
 type = "utf8"
 role = "key"
@@ -46,6 +48,7 @@ source_name = "PositionRef"
 type = "utf8"
 role = "dimension"
 source_name = "Counterparty"
+textual = true
 [risk_snapshot.columns.instrument_ref]
 type = "utf8"
 role = "key"
@@ -54,6 +57,7 @@ source_name = "InstrumentRef"
 type = "utf8"
 role = "dimension"
 source_name = "Underlying1Ref"
+textual = true
 [risk_snapshot.columns.underlying2_ref]
 type = "utf8"
 role = "dimension"
@@ -96,6 +100,24 @@ source_name = "ModelCode"
 "#;
     let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
     SchemaSpec::from_doc(&doc).0
+}
+
+/// `schema()` plus the plain-string key columns made textual too — the
+/// residual a dictionary rewrite cannot remove, since a key column's
+/// vocabulary is not small enough to be an ENUM (spec §3.5). Measures
+/// what the text filter costs when it cannot avoid a row scan.
+fn schema_with_textual_keys() -> SchemaSpec {
+    let mut s = schema();
+    let ds = s.datasets.first_mut().expect("risk_snapshot declared");
+    for c in ds.columns.iter_mut() {
+        if matches!(
+            c.name.as_str(),
+            "business_date" | "position_ref" | "instrument_ref"
+        ) {
+            c.textual = true;
+        }
+    }
+    s
 }
 
 /// Views the benchmarks query. `tree` is the shape a blotter runs.
@@ -207,6 +229,30 @@ fn service(
     })
     .unwrap();
     (db, src, service, rx, loaded)
+}
+
+/// A second service over the same database path, under a different
+/// schema. No ingest — `apply_schema` (which `DataService::open` runs for
+/// every declared dataset) is idempotent over tables that already exist,
+/// so this just lets the bench measure the same data under a schema that
+/// declares more (or fewer) textual columns.
+fn reopen(
+    db: &tempfile::TempDir,
+    _src: &tempfile::TempDir,
+    schema: SchemaSpec,
+) -> (
+    DataService,
+    std::sync::mpsc::Receiver<geode_data::DataEvent>,
+) {
+    DataService::open_channel(DataServiceConfig {
+        db_path: db.path().join("geode.duckdb"),
+        schema,
+        views: views(),
+        dimensions: DerivedDimensions::default(),
+        query_workers: 4,
+        sources: Vec::new(),
+    })
+    .unwrap()
 }
 
 /// Submit and block until the snapshot arrives — the end-to-end path the
@@ -329,6 +375,44 @@ fn bench_requery(c: &mut Criterion) {
             b.iter(|| black_box(requery(&svc, &rx, "tree", &Scope::default(), 2)))
         });
 
+        // The text filter (spec §3.4-3.5), permanent bench cases and the
+        // §7.1 gate: a broad match, a narrow one, and no match at all —
+        // each unscoped, depth-bounded, and combined with a book scope.
+        for (label, needle) in [("broad", "bk00"), ("narrow", "bk007"), ("none", "zzz")] {
+            let text_only = Scope {
+                text: Some(needle.to_string()),
+                ..Scope::default()
+            };
+            let text_and_books = Scope {
+                text: Some(needle.to_string()),
+                ..book_scope()
+            };
+            group.bench_function(format!("{rows}_rows_text_{label}_unscoped"), |b| {
+                b.iter(|| black_box(requery(&svc, &rx, "tree", &text_only, usize::MAX)))
+            });
+            group.bench_function(format!("{rows}_rows_text_{label}_depth_2"), |b| {
+                b.iter(|| black_box(requery(&svc, &rx, "tree", &text_only, 2)))
+            });
+            group.bench_function(format!("{rows}_rows_text_{label}_with_books"), |b| {
+                b.iter(|| black_box(requery(&svc, &rx, "tree", &text_and_books, usize::MAX)))
+            });
+        }
+        svc.shutdown();
+
+        // The same needle with the plain-string key columns textual too:
+        // the residual row scan the dictionary rewrite cannot remove.
+        let (svc, rx) = reopen(&_db, &_src, schema_with_textual_keys());
+        {
+            let (label, needle) = ("none", "zzz");
+            let text_only = Scope {
+                text: Some(needle.to_string()),
+                ..Scope::default()
+            };
+            group.bench_function(
+                format!("{rows}_rows_text_{label}_keys_textual_depth_2"),
+                |b| b.iter(|| black_box(requery(&svc, &rx, "tree", &text_only, 2))),
+            );
+        }
         svc.shutdown();
     }
     group.finish();

@@ -2612,6 +2612,7 @@ dependencies = [
  "geode-core",
  "geode-demo-data",
  "glob",
+ "proptest 1.11.0",
  "regex",
  "serde",
  "serde_json",
@@ -2856,7 +2857,7 @@ dependencies = [
  "pollster 0.4.0",
  "postage",
  "profiling",
- "proptest",
+ "proptest 1.10.0",
  "rand 0.9.5",
  "raw-window-handle",
  "refineable",
@@ -5611,6 +5612,25 @@ dependencies = [
  "bitflags 2.13.1",
  "num-traits",
  "proptest-macro",
+ "rand 0.9.5",
+ "rand_chacha 0.9.0",
+ "rand_xorshift",
+ "regex-syntax",
+ "rusty-fork",
+ "tempfile",
+ "unarray",
+]
+
+[[package]]
+name = "proptest"
+version = "1.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b45fcc2344c680f5025fe57779faef368840d0bd1f42f216291f0dc4ace4744"
+dependencies = [
+ "bit-set 0.8.0",
+ "bit-vec 0.8.0",
+ "bitflags 2.13.1",
+ "num-traits",
  "rand 0.9.5",
  "rand_chacha 0.9.0",
  "rand_xorshift",

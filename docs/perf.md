@@ -506,3 +506,63 @@ cleared. Deferred on 2026-09-06: subjectively, holding `j` on the
 render-duration histogram is a follow-up, not a blocker. Nothing in these readings shows a paint problem: the query
 halves (12 ms / 4.6 ms medians, 16.5 ms isolated) are the only
 end-to-end numbers so far, and they hold §7.1.
+
+## Phase 4a: the text filter (spec §3.4-3.5, §7)
+
+**Before the rewrite**, spec §7 recorded the floor a per-keystroke text
+filter would hit with all eight of the fixture's string columns marked
+textual (a real desk schema would mark most of them) — `tree`, 1M rows:
+
+| Needle | Rows matched | Full tree, unscoped | Depth 2, unscoped | Full tree + 3-book selection |
+|---|---|---|---|---|
+| `bk00` (broad) | 456k | 119 ms | 45 ms | 56 ms |
+| `bk007` (narrow) | 46k | 71 ms | 61 ms | 27 ms |
+| `zzz` (nothing) | 0 | 63 ms | 63 ms | 26 ms |
+
+The zero-match, depth-2 case — the one a trader's first keystroke hits —
+was 63 ms: over budget by construction, and matches or not made almost
+no difference, because every one of those numbers is a row scan.
+
+**After the rewrite** (`crates/geode-data/src/query/scope_sql.rs`): a
+textual column that is also categorical is ENUM-typed in the live era
+(spec §3.3), so its `ILIKE` runs over the type's dictionary
+(`enum_range`) instead of every row, and the row test becomes an `in`
+over codes. `book`, `lhu`, `counterparty` and `underlying_ref` — the
+four categorical, routable string columns the bench schema declares
+textual now — take this path; the plain-string key columns
+(`business_date`, `position_ref`, `instrument_ref`) cannot (a key's
+vocabulary is not small enough to be an ENUM), and stay a row scan —
+measured separately below as the residual. Measured 2026-09-06,
+`cargo bench -p geode-data --bench query -- "<rows>_rows_text"`
+(criterion, 20 samples), same machine as the tables above:
+
+| Case | 100k rows | 1M rows |
+|---|---|---|
+| `bk00` (broad, 456k-ish match), unscoped | 23.3 ms | 96.5 ms |
+| `bk00`, depth 2 | 10.8 ms | 23.5 ms |
+| `bk00`, + 3-book selection | 12.9 ms | 50.6 ms |
+| `bk007` (narrow), unscoped | 12.0 ms | 34.1 ms |
+| `bk007`, depth 2 | 9.8 ms | 22.5 ms |
+| `bk007`, + 3-book selection | 6.9 ms | 18.5 ms |
+| `zzz` (no match), unscoped | 8.9 ms | 20.8 ms |
+| **`zzz`, depth 2 — the §3.5 gate** | 8.8 ms | **20.6 ms** |
+| `zzz`, + 3-book selection | 6.8 ms | 17.9 ms |
+| `zzz`, depth 2, plain-string keys also textual (residual row scan) | 12.2 ms | 33.4 ms |
+
+**The gate — `1000000_rows_text_none_depth_2` under 50 ms — holds at
+20.6 ms with the subquery form as written** (`"…" in (select v from
+unnest(enum_range(null::…)) t(v) where v ilike ? escape '\\')`); the
+Rust-side literal-list fallback the spec names as a backup was not
+needed. Depth 2 unscoped is now cheaper than the full unscoped tree at
+every needle, same as the plain requery benchmarks above, because it is
+the same depth bound doing the same job — the dictionary rewrite fixes
+the *floor* the row count no longer sets, and the depth bound still
+governs how much of the tree the query materializes above that floor.
+
+The residual row — plain-string key columns made textual too, at depth
+2 with no match — is 33.4 ms at 1M rows: worse than the ENUM path's
+20.6 ms, but still inside the 50 ms contract, and it is the case a real
+schema is expected to avoid by not marking a key column textual in the
+first place (`textual` on a column no grain can route is already a
+load-time error; a key column that *can* be routed but has a
+one-per-row vocabulary is a schema choice, not a bug).

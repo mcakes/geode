@@ -8,7 +8,7 @@
 use crate::service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::query::{DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
 use geode_core::view::ViewSpec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -23,6 +23,8 @@ pub const REQUEST_BOUND: usize = 64;
 #[derive(Debug)]
 pub enum Request {
     Query(QueryParams),
+    /// The picker's distinct-values query (spec §3.4).
+    Distinct(DistinctParams),
     Cancel {
         key: QueryKey,
     },
@@ -111,6 +113,13 @@ impl DataHandle {
 
     pub fn cancel(&self, key: QueryKey) -> bool {
         self.send(Request::Cancel { key })
+    }
+
+    /// Queue the picker's distinct-values query. `false` means it was not
+    /// queued; the result, when it comes, arrives on the sink as
+    /// `DataEvent::Distinct`, keyed and tagged as asked.
+    pub fn distinct(&self, params: DistinctParams) -> bool {
+        self.send(Request::Distinct(params))
     }
 
     /// The safe hot-reload path for views (foundation §8). Diagnostics
@@ -211,6 +220,18 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                     }));
                 }
             }
+            Request::Distinct(params) => {
+                if let Err(e) = service.distinct(&params) {
+                    // Same rule as `Query`: a compile-time failure is
+                    // this key's outcome, not a lost request (§10.1).
+                    sink(DataEvent::Distinct(DistinctOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        column: params.column,
+                        values: Err(e.to_string()),
+                    }));
+                }
+            }
             Request::Cancel { key } => service.cancel(key),
             Request::ReplaceViews { views, dimensions } => {
                 let diags = service.replace_views(views, dimensions);
@@ -258,6 +279,29 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             Request::Cancel { key: QueryKey(5) }
         ));
+    }
+
+    fn distinct_params(key: u64, column: &str) -> DistinctParams {
+        DistinctParams {
+            key: QueryKey(key),
+            tag: 1,
+            column: column.to_string(),
+            scope: Scope::default(),
+            as_of: AsOf::Live,
+        }
+    }
+
+    #[test]
+    fn a_test_handle_hands_a_distinct_request_to_the_test() {
+        let (h, rx) = DataHandle::for_tests();
+        assert!(h.distinct(distinct_params(7, "book")));
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Request::Distinct(p) => {
+                assert_eq!(p.key, QueryKey(7));
+                assert_eq!(p.column, "book");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

@@ -203,8 +203,15 @@ fn sql_literal(value: &str) -> String {
 /// and an unmapped value falls through to NULL, which is the honest
 /// answer for a book the desk map does not cover.
 fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
+    format!("{} as \"{}\"", derived_case(d), d.name)
+}
+
+/// A derived dimension's `case` expression alone, unaliased — the form
+/// `compile_distinct` (Phase 4 §3.4) needs so it can alias the whole
+/// select to `value` rather than the dimension's own name.
+pub(crate) fn derived_case(d: &geode_core::dimensions::DerivedDimension) -> String {
     if d.values.is_empty() {
-        return format!("NULL::varchar as \"{}\"", d.name);
+        return "NULL::varchar".to_string();
     }
     let arms: Vec<String> = d
         .values
@@ -214,10 +221,9 @@ fn derived_expr(d: &geode_core::dimensions::DerivedDimension) -> String {
         })
         .collect();
     format!(
-        "case \"{from}\" {arms} end as \"{name}\"",
+        "case \"{from}\" {arms} end",
         from = d.from,
-        arms = arms.join(" "),
-        name = d.name
+        arms = arms.join(" ")
     )
 }
 
@@ -255,22 +261,6 @@ fn derived_for<'a>(
         .collect()
 }
 
-/// Derived ENUM type names currently present for a dataset.
-fn existing_enum_types(conn: &Connection, dataset: &str) -> Result<Vec<String>, StoreError> {
-    let sql = "select type_name from duckdb_types() where type_name like ?";
-    let err = |source| StoreError::Sql {
-        statement: sql.to_string(),
-        source,
-    };
-    let mut stmt = conn.prepare(sql).map_err(err)?;
-    let rows = stmt
-        .query_map(duckdb::params![format!("{dataset}_%_enum")], |r| {
-            r.get::<_, String>(0)
-        })
-        .map_err(err)?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(err)
-}
-
 /// Every table a dataset's history lives in: the archive **and** live for
 /// each grain. Generations are resolved across all of them — a partition
 /// can be missing from one grain while present at another (a cash-only
@@ -286,6 +276,60 @@ fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
             ]
         })
         .collect()
+}
+
+/// One dataset's resolved era (spec §6.5): which table kind to read and,
+/// for an as-of query, the generation predicate and the oldest generation
+/// actually resolved. Lifted out of `compile_view` so `compile_distinct`
+/// (Phase 4 §3.4) can resolve the same era per dataset without pulling in
+/// the whole view compiler.
+pub(crate) struct ResolvedEra {
+    pub kind: TableKind,
+    pub generations: Option<String>,
+    pub resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>>,
+}
+
+impl ResolvedEra {
+    pub(crate) fn era(&self) -> Era<'_> {
+        Era {
+            kind: self.kind,
+            generations: self.generations.as_deref(),
+        }
+    }
+}
+
+/// Resolve which era `dataset` should be read under for `as_of` (spec
+/// §6.5). Live carries no generation predicate at all; only the as-of
+/// path pays for history, resolved across every table the dataset's
+/// history lives in — not one grain's, since a partition can be missing
+/// from one grain while present at another (see `resolve_generations`).
+pub(crate) fn era_for(
+    conn: &Connection,
+    dataset: &str,
+    ds: &DatasetSpec,
+    as_of: &crate::query::as_of::AsOf,
+) -> Result<ResolvedEra, StoreError> {
+    let mut resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>> =
+        std::collections::BTreeMap::new();
+    let (kind, generations) = match as_of {
+        crate::query::as_of::AsOf::Live => (TableKind::Live, None),
+        crate::query::as_of::AsOf::At(t) => {
+            let gens =
+                crate::query::as_of::resolve_generations(conn, &history_of(dataset, ds), *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
+                resolved_as_of.insert(dataset.to_string(), oldest);
+            }
+            (
+                TableKind::Archive,
+                Some(crate::query::as_of::generation_predicate(&gens)),
+            )
+        }
+    };
+    Ok(ResolvedEra {
+        kind,
+        generations,
+        resolved_as_of,
+    })
 }
 
 fn compile_error(view: &ViewSpec, message: String) -> StoreError {
@@ -326,30 +370,13 @@ pub fn compile_view(
     // not one grain's: a partition can be missing from one grain while
     // present at another, and resolving from one would drop it from every
     // grain's answer (see `resolve_generations`).
-    let mut resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>> =
-        std::collections::BTreeMap::new();
-    let (kind, gen_pred) = match as_of {
-        crate::query::as_of::AsOf::Live => (TableKind::Live, None),
-        crate::query::as_of::AsOf::At(t) => {
-            let gens =
-                crate::query::as_of::resolve_generations(conn, &history_of(&view.dataset, ds), *t)?;
-            if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
-                resolved_as_of.insert(view.dataset.clone(), oldest);
-            }
-            (
-                TableKind::Archive,
-                Some(crate::query::as_of::generation_predicate(&gens)),
-            )
-        }
-    };
+    let resolved = era_for(conn, &view.dataset, ds, as_of)?;
+    let mut resolved_as_of = resolved.resolved_as_of.clone();
     // One era for the whole statement: every aggregate, the spine's
     // fallback scan, the scope's membership probes and the cross-dataset
     // joins must all read the same relations.
-    let era = Era {
-        kind,
-        generations: gen_pred.as_deref(),
-    };
-    let and_gen = |p: &str| match &gen_pred {
+    let era = resolved.era();
+    let and_gen = |p: &str| match era.generations {
         Some(g) => format!("({p}) and ({g})"),
         None => p.to_string(),
     };
@@ -621,7 +648,7 @@ pub fn compile_view(
     let interned: Vec<&str> = if era.kind != TableKind::Live {
         Vec::new()
     } else {
-        let existing = existing_enum_types(conn, &view.dataset)?;
+        let existing = crate::store::ddl::existing_enum_types(conn, &view.dataset)?;
         crate::store::ddl::categorical_columns(ds)
             .into_iter()
             .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))
@@ -744,7 +771,7 @@ pub fn compile_view(
             }
         };
         let joined_era = Era {
-            kind,
+            kind: era.kind,
             generations: joined_gen.as_deref(),
         };
         let projection: Vec<String> = join

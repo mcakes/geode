@@ -221,9 +221,10 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 
 /// Compile the scope for the rows of `grain`, under `era`.
 pub fn compile_scope(
-    // Kept so the signature does not change when a predicate kind needs
-    // the connection again; nothing does today.
-    _conn: &Connection,
+    // Used by the text filter (spec §3.5): whether a categorical column's
+    // ENUM type exists is a catalog lookup, not something the scope's own
+    // predicate can know.
+    conn: &Connection,
     scope: &Scope,
     ds: &DatasetSpec,
     grain: Grain,
@@ -340,11 +341,29 @@ pub fn compile_scope(
     // coarse ones on the same row, and marked nothing (spec §6.3).
     if let Some(text) = &scope.text {
         let pattern = Value::Text(like_pattern(text));
+        // Dictionary terms (spec §3.5): a categorical column is ENUM-typed
+        // in the live era, so the pattern is evaluated over the type's
+        // values and the row test becomes an `in`, which DuckDB runs on
+        // the codes. Only when the type exists: before the first load it
+        // does not, and naming it would fail the statement.
+        let enum_types = if era.kind == TableKind::Live {
+            crate::store::ddl::existing_enum_types(conn, &ds.name)?
+        } else {
+            Vec::new()
+        };
         let mut terms: Vec<String> = Vec::new();
         let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
             let name = col.name.as_str();
-            let test = format!("\"{name}\" ilike ? escape '\\'");
+            let ty = crate::store::ddl::enum_type_name(&ds.name, name);
+            let test = if col.categorical && enum_types.contains(&ty) {
+                format!(
+                    "\"{name}\" in (select v from unnest(enum_range(null::{ty})) t(v) \
+                     where v ilike ? escape '\\')"
+                )
+            } else {
+                format!("\"{name}\" ilike ? escape '\\'")
+            };
             match route(ds, dims, grain, &[name])? {
                 None => terms.push(test),
                 Some(probe) => {
@@ -549,6 +568,7 @@ mod tests {
     use geode_core::dimensions::DerivedDimensions;
     use geode_core::schema::{Grain, SchemaSpec};
     use geode_core::scope::{DimensionSelection, Scope, parse_expr};
+    use proptest::prelude::*;
 
     fn dataset() -> geode_core::schema::DatasetSpec {
         let text = r#"
@@ -1085,5 +1105,143 @@ grain = "position"
             },
             "positions that have USD risk, not the USD share of the position"
         );
+    }
+
+    /// The Phase 4 §3.5 fixture: `book` is categorical and textual, and
+    /// `risk_instrument_live` actually carries its ENUM type — twenty
+    /// books, `BK000` through `BK019`, one instrument row each. The
+    /// tempdir is deliberately leaked (not returned) so the fixture stays
+    /// a two-tuple as every call site below expects; the file lives for
+    /// the process lifetime, which a test run can afford.
+    fn enum_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
+        let mut ds = carried_dataset();
+        for c in ds.columns.iter_mut() {
+            if c.name == "book" {
+                c.categorical = true;
+                c.textual = true;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        std::mem::forget(dir);
+        store.apply_schema(&ds).unwrap();
+        let conn = store.writer();
+        for i in 0..20 {
+            conn.execute(
+                "insert into risk_instrument_live
+                     (book, lhu, position_ref, counterparty, instrument_ref,
+                      npv, currency, batch, source_file_id, gen_id, source_time)
+                 values (?, 'L', ?, 'C', ?, 1.0, 'USD', 'b', 1, 1, now())",
+                duckdb::params![format!("BK{i:03}"), format!("P{i}"), format!("I{i}")],
+            )
+            .unwrap();
+        }
+        crate::store::ddl::refresh_enum(conn, "risk", "book", "risk_instrument_live").unwrap();
+        (store, ds)
+    }
+
+    fn count(conn: &Connection, _ds: &geode_core::schema::DatasetSpec, sql: &ScopeSql) -> i64 {
+        conn.query_row(
+            &format!(
+                "select count(*) from risk_instrument_live where {}",
+                sql.predicate
+            ),
+            duckdb::params_from_iter(sql.params.iter()),
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_text_filter_over_a_categorical_column_matches_the_dictionary_not_the_rows() {
+        let (store, ds) = enum_fixture(); // books BK000..BK019 live; `book` categorical + textual
+        let scope = Scope {
+            text: Some("bk00".into()),
+            ..Scope::default()
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(
+            sql.predicate.contains("enum_range(null::risk_book_enum)"),
+            "{}",
+            sql.predicate
+        );
+        assert!(
+            sql.predicate.contains("ilike ?"),
+            "the pattern is still bound: {}",
+            sql.predicate
+        );
+        // And it selects the same rows as the row scan would.
+        let via_dict: i64 = count(store.writer(), &ds, &sql);
+        let row_scan: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from risk_instrument_live where \"book\" ilike '%bk00%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(via_dict, row_scan);
+        assert!(via_dict > 0);
+    }
+
+    #[test]
+    fn the_rewrite_falls_back_to_the_row_scan_under_as_of_and_when_the_type_is_missing() {
+        let (store, ds) = enum_fixture();
+        let scope = Scope {
+            text: Some("bk00".into()),
+            ..Scope::default()
+        };
+        let archive = Era {
+            kind: TableKind::Archive,
+            generations: Some("true"),
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            archive,
+        )
+        .unwrap();
+        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+        // Drop the type: the live path must not name a type that is not there.
+        store
+            .writer()
+            .execute_batch("drop type risk_book_enum")
+            .unwrap();
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+    }
+
+    proptest! {
+        #[test]
+        fn dictionary_and_row_scan_agree_for_any_needle(needle in "[a-zA-Z0-9%_\\\\]{0,6}") {
+            let (store, ds) = enum_fixture();
+            let scope = Scope { text: Some(needle.clone()), ..Scope::default() };
+            let sql = compile_scope(store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live()).unwrap();
+            let via_dict = count(store.writer(), &ds, &sql);
+            let pattern = like_pattern(&needle);
+            let row_scan: i64 = store.writer().query_row(
+                "select count(*) from risk_instrument_live where \"book\" ilike ? escape '\\'",
+                duckdb::params![pattern], |r| r.get(0)).unwrap();
+            prop_assert_eq!(via_dict, row_scan);
+        }
     }
 }

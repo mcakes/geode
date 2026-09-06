@@ -99,6 +99,28 @@ pub fn refresh_enum(
         })
 }
 
+/// Derived ENUM type names currently present for a dataset. Used both by
+/// the view compiler (to intern dimension columns for a live query) and
+/// the scope compiler (to route a text filter's `ILIKE` over the
+/// dictionary rather than every row, spec §3.5).
+pub fn existing_enum_types(
+    conn: &duckdb::Connection,
+    dataset: &str,
+) -> Result<Vec<String>, crate::store::StoreError> {
+    let sql = "select type_name from duckdb_types() where type_name like ?";
+    let err = |source| crate::store::StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    let mut stmt = conn.prepare(sql).map_err(err)?;
+    let rows = stmt
+        .query_map(duckdb::params![format!("{dataset}_%_enum")], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
 pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> String {
     let mut cols: Vec<String> = Vec::new();
 

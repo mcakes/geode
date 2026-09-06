@@ -272,8 +272,8 @@ run_mutation "discovery: a changed file is reloaded" \
 
 run_mutation "as-of: multi-grain generation resolution" \
   crates/geode-data/src/query/compile.rs \
-  '&history_of(&view.dataset, ds), *t)' \
-  '&history_of(&view.dataset, ds)[2..], *t)'
+  '&history_of(dataset, ds), *t)' \
+  '&history_of(dataset, ds)[2..], *t)'
 
 run_mutation "as-of: current generation read from live" \
   crates/geode-data/src/query/scope_sql.rs \
@@ -1857,6 +1857,61 @@ run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
   '        .retain(|c| !uncarriable.iter().any(|(name, _)| name == &c.name));' \
   '        .retain(|_| true);' \
   geode-core a_dimension_carried_by_the_pair_grain_is_uncarriable_and_is_dropped
+
+# ---- text filter / ENUM dictionary rewrite, distinct (Phase 4 §3.4-3.5)
+
+run_mutation "text: a categorical column matches the dictionary, not the rows" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '            let test = if col.categorical && enum_types.contains(&ty) {' \
+  '            let test = if false {' \
+  geode-data a_text_filter_over_a_categorical_column_matches_the_dictionary_not_the_rows
+
+run_mutation "text: the rewrite is live-era only" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '        let enum_types = if era.kind == TableKind::Live {' \
+  '        let enum_types = if true {' \
+  geode-data the_rewrite_falls_back_to_the_row_scan_under_as_of_and_when_the_type_is_missing
+
+run_mutation "text: the dictionary term keeps the escape clause" \
+  crates/geode-data/src/query/scope_sql.rs \
+  "                     where v ilike ? escape '\\\\')" \
+  "                     where v ilike ?)" \
+  geode-data dictionary_and_row_scan_agree_for_any_needle
+
+run_mutation "distinct: counts are taken under the given scope" \
+  crates/geode-data/src/query/distinct.rs \
+  '        let scope = compile_scope(conn, &params.scope, ds, grain, dims, era.era())?;' \
+  '        let scope = compile_scope(conn, &geode_core::scope::Scope::default(), ds, grain, dims, era.era())?;' \
+  geode-data distinct_counts_values_under_the_given_scope_and_unions_datasets
+
+run_mutation "distinct: as-of reads the archive era" \
+  crates/geode-data/src/query/distinct.rs \
+  '        let era = era_for(conn, &ds.name, ds, &params.as_of)?;' \
+  '        let era = era_for(conn, &ds.name, ds, &geode_core::query::AsOf::Live)?;' \
+  geode-data distinct_under_as_of_reads_the_archive_era
+
+# The brief's own suggested replacement — mutating the match arm's
+# pattern and struct-literal head in one string — does not compile: it
+# leaves `column: String::new()` and the later shorthand `column,` field
+# both bound on one `DistinctOutcome`, which is `field column bound
+# multiple times` (E0062), plus an unresolved `column` (E0425) since the
+# pattern no longer binds it. Mutating the `values:` mapping to
+# `Ok(Vec::new())` instead — the fallback the brief names for exactly
+# this case — compiles and is what a delivered `Distinct` with the wrong
+# payload actually looks like.
+run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
+  crates/geode-data/src/service.rs \
+  '                    values: r.snapshot.map(|s| {
+                        let v = s.column_index("value").expect("distinct selects value");
+                        let n = s.column_index("n").expect("distinct selects n");
+                        (0..s.rows())
+                            .filter_map(|row| {
+                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                            })
+                            .collect()
+                    }),' \
+  '                    values: Ok(Vec::new()),' \
+  geode-data a_distinct_query_returns_value_counts_on_the_distinct_event
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -26,6 +26,7 @@ regex = "1.11.1"
 criterion = "0.8.2"
 geode-demo-data = { path = "../geode-demo-data" }
 tempfile = "3.27.0"
+proptest = "1"
 
 [[bench]]
 name = "ingest"

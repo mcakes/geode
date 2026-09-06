@@ -269,6 +269,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             eprintln!("[data] {d}");
                         }
                     }
+                    // The picker that asks for this (spec §3.4) is not
+                    // wired up yet — a later Phase 4a task consumes it.
+                    DataEvent::Distinct(_) => {}
                 }
             });
             if handled.is_err() {

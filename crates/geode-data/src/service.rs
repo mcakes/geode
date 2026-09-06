@@ -10,14 +10,17 @@ use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
 use crate::query::compile::compile_view;
-use crate::query::pool::{QueryId, QueryPool, QueryRequest, QueryResult, ResultSink, ViewId};
+use crate::query::distinct::compile_distinct;
+use crate::query::pool::{
+    QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId,
+};
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::{QueryKey, QueryOutcome};
+use geode_core::query::{DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::{Freshness, Provenance};
@@ -42,6 +45,8 @@ pub struct DataServiceConfig {
 #[derive(Debug)]
 pub enum DataEvent {
     Query(QueryOutcome),
+    /// The picker's distinct-values result (spec §3.4).
+    Distinct(DistinctOutcome),
     /// A file was published: the frame bumps its data generation and every
     /// visible tile requeries. A burst coalesces there.
     Published {
@@ -132,13 +137,27 @@ impl DataService {
         let discovery_conn = store.reader()?;
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
-            Arc::new(move |r: QueryResult| {
-                sink(DataEvent::Query(QueryOutcome {
+            Arc::new(move |r: QueryResult| match r.kind {
+                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
                     key: r.key,
                     tag: r.tag,
                     snapshot: r.snapshot.map(Arc::new),
                     submitted: r.submitted,
-                }))
+                })),
+                RequestKind::Distinct { column } => sink(DataEvent::Distinct(DistinctOutcome {
+                    key: r.key,
+                    tag: r.tag,
+                    column,
+                    values: r.snapshot.map(|s| {
+                        let v = s.column_index("value").expect("distinct selects value");
+                        let n = s.column_index("n").expect("distinct selects n");
+                        (0..s.rows())
+                            .filter_map(|row| {
+                                Some((s.text_at(v, row)?.to_string(), s.i64_at(n, row)? as u64))
+                            })
+                            .collect()
+                    }),
+                })),
             })
         };
         let pool = QueryPool::spawn_with_sink(&store, config.query_workers.max(1), result_sink)?;
@@ -371,6 +390,32 @@ impl DataService {
             grouping: compiled.grouping.clone(),
             compiled,
             provenance,
+            kind: RequestKind::Query,
+        }))
+    }
+
+    /// The picker's distinct-values query (spec §3.4): compile and submit
+    /// under the caller's scope and era, unioned across every dataset
+    /// that carries the column. The caller has already removed the
+    /// column's own selection from `params.scope`.
+    pub fn distinct(&self, params: &DistinctParams) -> Result<QueryId, StoreError> {
+        let compiled = compile_distinct(
+            &self.conn,
+            &self.config.schema,
+            &self.config.dimensions,
+            params,
+        )?;
+        Ok(self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: Instant::now(),
+            view: ViewId(format!("distinct:{}", params.column)),
+            grouping: Vec::new(),
+            compiled,
+            provenance: Provenance::default(),
+            kind: RequestKind::Distinct {
+                column: params.column.clone(),
+            },
         }))
     }
 
@@ -572,6 +617,34 @@ mod tests {
         assert_eq!(o.key, QueryKey(42));
         assert_eq!(o.tag, 42);
         assert!(o.snapshot.unwrap().rows() > 0);
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_distinct_query_returns_value_counts_on_the_distinct_event() {
+        let (_db, _src, svc, rx) = service();
+        let params = DistinctParams {
+            key: QueryKey(3),
+            tag: 3,
+            column: "book".into(),
+            scope: Scope::default(),
+            as_of: AsOf::Live,
+        };
+        svc.distinct(&params).unwrap();
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Distinct(o) => {
+                    assert_eq!(o.key, QueryKey(3));
+                    assert_eq!(o.tag, 3);
+                    assert_eq!(o.column, "book");
+                    let values = o.values.expect("distinct query failed");
+                    assert!(!values.is_empty(), "the fixture has books");
+                    assert!(values.iter().all(|(_, n)| *n > 0));
+                    break;
+                }
+                _ => continue,
+            }
+        }
         svc.shutdown();
     }
 

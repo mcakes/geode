@@ -12,9 +12,12 @@ pub use scope_sql::{Era, ScopeSql, compile_scope};
 pub mod compile;
 
 pub use compile::{CompiledColumn, CompiledQuery, compile_view};
+pub mod distinct;
+
+pub use distinct::compile_distinct;
 pub mod as_of;
 
 pub use as_of::{AsOf, generation_predicate, resolve_generations};
 pub mod pool;
 
-pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, ResultSink, ViewId};
+pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId};

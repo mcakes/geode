@@ -34,6 +34,15 @@ pub type QueryId = u64;
 /// `submit`/`cancel` take the same lock, and std `Mutex` is not re-entrant.
 pub type ResultSink = Arc<dyn Fn(QueryResult) -> bool + Send + Sync>;
 
+/// What kind of request this is, carried through to the result so the
+/// service's sink can route it to the right `DataEvent` variant without
+/// re-deriving it from the compiled SQL (spec §3.4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestKind {
+    Query,
+    Distinct { column: String },
+}
+
 pub struct QueryRequest {
     pub key: QueryKey,
     /// The submitter's own counter, echoed back untouched.
@@ -46,6 +55,7 @@ pub struct QueryRequest {
     /// them (spec §5.5).
     pub grouping: Vec<String>,
     pub provenance: Provenance,
+    pub kind: RequestKind,
 }
 
 pub struct QueryResult {
@@ -57,6 +67,7 @@ pub struct QueryResult {
     /// `Err` carries the failure: a bad query degrades its own key and
     /// leaves the pool running (spec §10.1).
     pub snapshot: Result<Snapshot, String>,
+    pub kind: RequestKind,
 }
 
 #[derive(Default)]
@@ -309,6 +320,7 @@ fn worker(
             submitted: req.submitted,
             view: req.view.clone(),
             snapshot: outcome,
+            kind: req.kind.clone(),
         });
         if !delivered {
             return;
@@ -327,7 +339,13 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
     format!("query worker panicked: {what}")
 }
 
-fn run_one(conn: &duckdb::Connection, req: &QueryRequest) -> Result<Snapshot, duckdb::Error> {
+// `pub(crate)`: `query::distinct`'s test fixtures run a compiled
+// `DistinctParams` query the same way the pool itself does, rather than
+// re-deriving the arrow-to-Snapshot plumbing.
+pub(crate) fn run_one(
+    conn: &duckdb::Connection,
+    req: &QueryRequest,
+) -> Result<Snapshot, duckdb::Error> {
     let mut stmt = conn.prepare(&req.compiled.sql)?;
     let batches: Vec<duckdb::arrow::record_batch::RecordBatch> = stmt
         .query_arrow(duckdb::params_from_iter(req.compiled.params.iter()))?
@@ -398,6 +416,7 @@ mod tests {
             compiled: query(sql),
             grouping: Vec::new(),
             provenance: Provenance::default(),
+            kind: RequestKind::Query,
         }
     }
 

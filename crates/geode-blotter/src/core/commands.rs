@@ -2,8 +2,6 @@
 //! `Command` the tile applies, and the vocabulary for the word under the
 //! cursor is what the shell ranks (§3.4).
 
-use chrono::{DateTime, NaiveTime, Utc};
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Group(Vec<String>),
@@ -166,16 +164,10 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
     out
 }
 
-/// `HH:MM` means today at that time (UTC, the data's clock); anything
-/// else must be RFC 3339.
-pub fn parse_as_of(text: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
-    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
-        return Ok(now.date_naive().and_time(t).and_utc());
-    }
-    DateTime::parse_from_rfc3339(text)
-        .map(|t| t.with_timezone(&Utc))
-        .map_err(|_| format!("'{text}' is not HH:MM or an RFC 3339 time"))
-}
+// `parse_as_of` lives in `geode_core::query` now (both the shell and the
+// data layer need it, and this crate depended only on `chrono`, which
+// `geode-core` already has).
+pub use geode_core::query::parse_as_of;
 
 #[cfg(test)]
 mod tests {
@@ -320,21 +312,5 @@ mod tests {
         // inside the character, not on a char boundary.
         let cursor = line.find('é').unwrap() + 1;
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
-    }
-
-    #[test]
-    fn as_of_accepts_a_clock_time_today_or_rfc3339() {
-        use chrono::{TimeZone, Utc};
-        let now = Utc.with_ymd_and_hms(2026, 9, 3, 16, 0, 0).unwrap();
-        assert_eq!(
-            parse_as_of("14:05", now),
-            Ok(Utc.with_ymd_and_hms(2026, 9, 3, 14, 5, 0).unwrap())
-        );
-        assert_eq!(
-            parse_as_of("2026-09-01T07:00:00Z", now),
-            Ok(Utc.with_ymd_and_hms(2026, 9, 1, 7, 0, 0).unwrap())
-        );
-        assert!(parse_as_of("25:00", now).is_err());
-        assert!(parse_as_of("yesterday", now).unwrap_err().contains("HH:MM"));
     }
 }
