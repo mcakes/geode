@@ -125,14 +125,116 @@ context = "workspace"
 "ctrl+=" = "fontsize::increase"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
-"mod+shift+d" = "data::toggle_probe"
 
 [[bindings]]
 context = "tile"
 [bindings.keys]
 ":" = "tile::command_line"
 "/" = "tile::find"
+
+[[bindings]]
+context = "blotter && mode == normal"
+[bindings.keys]
+"j" = "blotter::down"
+"k" = "blotter::up"
+"h" = "blotter::left"
+"l" = "blotter::right"
+"g g" = "blotter::top"
+"shift+g" = "blotter::bottom"
+"ctrl+d" = "blotter::page_down"
+"ctrl+u" = "blotter::page_up"
+"home" = "blotter::first_col"
+"end" = "blotter::last_col"
+"z o" = "blotter::expand"
+"z c" = "blotter::collapse"
+"z a" = "blotter::toggle"
+"z shift+r" = "blotter::expand_all"
+"z shift+m" = "blotter::collapse_all"
+"enter" = "blotter::toggle"
+"v" = "blotter::visual"
+"y" = "blotter::yank"
+"n" = "blotter::find_next"
+"shift+n" = "blotter::find_prev"
+"s" = "blotter::sort_cycle"
+"escape" = "blotter::escape"
+
+[[bindings]]
+context = "blotter && mode == visual"
+[bindings.keys]
+"j" = "blotter::down"
+"k" = "blotter::up"
+"g g" = "blotter::top"
+"shift+g" = "blotter::bottom"
+"ctrl+d" = "blotter::page_down"
+"ctrl+u" = "blotter::page_up"
+"y" = "blotter::yank"
+"v" = "blotter::escape"
+"escape" = "blotter::escape"
 "#;
+
+/// Mirrors `geode_blotter::tile::ACTIONS` (id, title) exactly — the
+/// shell cannot depend on the blotter crate, so `BUILTIN_KEYMAP`'s own
+/// `blotter::*` bindings (above) carry their own copy of the ids they
+/// name, registered here so `build_keymap` never has to drop them for
+/// want of a registered action, even in a shell-only build that has
+/// never loaded `geode-blotter`. When `BlotterFactory::register_actions`
+/// (Phase 3 §3.2) later tries to register the same ids against the
+/// same registry, `ActionRegistry::register` reports each as already
+/// registered — an `Err` it already discards — so the titles below are
+/// the ones actually shown in the palette; keep them identical to
+/// `geode_blotter::tile::ACTIONS`. `pub` (final review) so
+/// `geode-blotter`'s own `the_shells_reserved_blotter_actions_match_ours`
+/// test can compare titles as well as ids — the shell cannot depend on
+/// the blotter crate to run that check itself, so the mirroring only
+/// runs from the blotter side.
+pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
+    ("blotter::down", "Cursor down"),
+    ("blotter::up", "Cursor up"),
+    ("blotter::left", "Cursor left"),
+    ("blotter::right", "Cursor right"),
+    ("blotter::top", "Cursor to top"),
+    ("blotter::bottom", "Cursor to bottom"),
+    ("blotter::page_down", "Half page down"),
+    ("blotter::page_up", "Half page up"),
+    ("blotter::first_col", "First column"),
+    ("blotter::last_col", "Last column"),
+    ("blotter::expand", "Expand node"),
+    ("blotter::collapse", "Collapse node"),
+    ("blotter::toggle", "Toggle node"),
+    ("blotter::expand_all", "Expand all"),
+    ("blotter::collapse_all", "Collapse all"),
+    ("blotter::visual", "Visual mode"),
+    ("blotter::escape", "Leave visual / clear narrowing"),
+    ("blotter::yank", "Yank rows as TSV"),
+    ("blotter::find_next", "Next match"),
+    ("blotter::find_prev", "Previous match"),
+    ("blotter::sort_cycle", "Sort by cursor column"),
+];
+
+/// Just the ids from [`BLOTTER_ACTION_DEFS`], for the mirror test.
+pub const BLOTTER_ACTIONS: &[&str] = &[
+    "blotter::down",
+    "blotter::up",
+    "blotter::left",
+    "blotter::right",
+    "blotter::top",
+    "blotter::bottom",
+    "blotter::page_down",
+    "blotter::page_up",
+    "blotter::first_col",
+    "blotter::last_col",
+    "blotter::expand",
+    "blotter::collapse",
+    "blotter::toggle",
+    "blotter::expand_all",
+    "blotter::collapse_all",
+    "blotter::visual",
+    "blotter::escape",
+    "blotter::yank",
+    "blotter::find_next",
+    "blotter::find_prev",
+    "blotter::sort_cycle",
+];
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
     reg.register(ActionDef {
@@ -303,15 +405,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Clear grouping slot (views' own grouping)",
         "Frame",
     );
-    // The throwaway data probe (spec §7's vertical slice) — the only way
-    // to see the §7.1 end-to-end budget through a painted frame. Deleted
-    // when the blotter lands; see `crate::dataprobe`.
-    action(
-        reg,
-        "data::toggle_probe",
-        "Toggle data probe",
-        "Diagnostics",
-    );
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.
@@ -329,6 +422,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
             "Dump frame-time stats to stderr",
             "Diagnostics",
         );
+    }
+    // The blotter's own actions (Phase 3 §3.2), reserved here so
+    // BUILTIN_KEYMAP's `blotter::*` bindings above never get dropped as
+    // unregistered — see `BLOTTER_ACTION_DEFS`'s doc comment.
+    for (id, title) in BLOTTER_ACTION_DEFS {
+        action(reg, id, title, "Blotter");
     }
 }
 
@@ -450,6 +549,33 @@ mod tests {
                 assert_eq!(action.0, "frame::slot_1");
             }
             other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
+    /// `BLOTTER_ACTIONS` and `BLOTTER_ACTION_DEFS` are two separate
+    /// consts in this file (a plain id list for the cross-crate mirror
+    /// test, a (id, title) list to register with) — this guards them
+    /// against drifting apart from each other, since `geode-blotter`'s
+    /// own mirror test only ever sees `BLOTTER_ACTIONS`.
+    #[test]
+    fn the_two_blotter_action_lists_in_this_file_agree() {
+        let ids: Vec<&str> = BLOTTER_ACTION_DEFS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, BLOTTER_ACTIONS.to_vec());
+    }
+
+    /// Every `blotter::*` id the builtin keymap binds (Step 5) must be
+    /// registered here — this is what makes
+    /// `builtin_keymap_builds_clean_against_builtin_actions` diagnostic-
+    /// free once the blotter bindings are appended.
+    #[test]
+    fn every_blotter_binding_target_is_reserved() {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        for id in BLOTTER_ACTIONS {
+            assert!(
+                reg.contains(&ActionId((*id).to_string())),
+                "{id} must be reserved by register_builtin_actions"
+            );
         }
     }
 }

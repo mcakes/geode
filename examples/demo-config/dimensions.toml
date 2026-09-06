@@ -1,0 +1,6 @@
+config_version = 1
+[desk]
+from = "book"
+[desk.values]
+IDX_EXO_EU = ["BK000", "BK001", "BK002", "BK003", "BK004", "BK005", "BK006", "BK007", "BK008", "BK009"]
+IDX_EXO_US = ["BK010", "BK011", "BK012", "BK013", "BK014", "BK015", "BK016", "BK017", "BK018", "BK019"]

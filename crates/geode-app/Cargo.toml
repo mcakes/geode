@@ -23,6 +23,27 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
-# The throwaway data probe (spec §7) is the one place the shell and the
-# data layer meet — see src/probe.rs. Goes when the blotter lands.
+# The data bridge (spec §5.1, src/bridge.rs) is the one place the shell
+# and the data layer meet — it replaced the throwaway probe deleted in
+# Phase 3c.
 geode-data = { path = "../geode-data" }
+geode-blotter = { path = "../geode-blotter" }
+geode-demo-data = { path = "../geode-demo-data" }
+# The bridge's event channel (spec §5.1): bounded, `try_send`-only, and
+# awaited on the foreground executor so the drain task wakes on arrival
+# rather than polling.
+async-channel = "2.5"
+# The roster's restored-tile state is opaque `toml::Table` (the module
+# hosting contract, geode-shell::module) — `BlotterFactoryHandle::create`
+# forwards it verbatim.
+toml = "1.1.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# `#[gpui::test]` / `TestAppContext` / `VisualTestContext` for the bridge's
+# window-close drain-task test (`src/bridge.rs`), and `DataHandle::
+# for_tests()` for a service-thread-free handle — same pattern as
+# `geode-blotter`'s dev-dependencies re-declaring the same crates with
+# `test-support` turned on.
+gpui = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }

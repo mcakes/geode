@@ -284,6 +284,9 @@ impl ViewSpec {
         let mut diags = Vec::new();
 
         for (name, value) in &doc.value {
+            if name == "config_version" {
+                continue;
+            }
             let bad = |m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
@@ -574,6 +577,16 @@ grain = "instrument"
                 descending: true
             }]
         );
+    }
+
+    #[test]
+    fn a_view_config_version_header_is_not_a_spurious_diagnostic() {
+        // Every config doc carries this header by convention
+        // (`groupings.toml`'s own `GroupingSlots::from_doc` already
+        // skips it) — it must not be treated as a malformed view.
+        let (views, diags) = ViewSpec::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(views.iter().any(|v| v.name == "desk_risk"));
     }
 
     #[test]

@@ -114,6 +114,19 @@ pub const SESSION_CONFIG_VERSION: i64 = 1;
 /// `ShellView::ensure_occupants` consumes it as tiles get their occupants.
 /// `state` is whatever the module's `serialize` returned; the shell never
 /// reads inside it.
+///
+/// `kind` is stored exactly as written in the file — `from_toml` has no
+/// module roster to check it against, so a `kind` from an unregistered or
+/// downgraded module round-trips here unchanged. Resolution happens one
+/// layer up, in `occupants::ensure_occupants`: when the roster has no
+/// factory for `kind`, it falls back to the default factory with `state`
+/// discarded (a factory must never see state shaped for a different
+/// module), so the occupant it creates is really the *default* kind with
+/// empty state. `to_toml`'s flush then serializes whatever the live
+/// occupant reports (`current_tiles`), so that healed default silently
+/// overwrites the original unknown-kind record on the very next save —
+/// acceptable healing (M15, 3b final review), but real state loss for a
+/// misconfigured or downgraded run, worth knowing rather than discovering.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,
@@ -221,7 +234,12 @@ pub fn to_toml(workspaces: &Workspaces, tiles: &TileRecords) -> toml::Table {
         // — a record for an id that isn't here (a closed tile whose
         // `current_tiles` snapshot hasn't been refreshed yet, or a hand-
         // edited file) is simply not written; `from_toml` applies the same
-        // membership check symmetrically on the way back in.
+        // membership check symmetrically on the way back in. This writes
+        // whatever `tiles` currently holds for each id with no notion of
+        // where that record came from — see [`TileRecord`]'s own doc
+        // comment: if `id`'s original record named a kind the roster
+        // healed away on load, `tiles` by now holds the healed default
+        // kind with empty state instead, and that is what lands here.
         let mut tiles_table = toml::Table::new();
         let mut here: Vec<TileId> = tree.tiles();
         for (_, dock) in workspace.docks().iter() {
@@ -424,6 +442,11 @@ fn parse_workspace(
                         warnings.push(format!("workspace {ix}: tile {id} is not a table; ignored"));
                         continue;
                     };
+                    // Stored as-is, not checked against a module roster —
+                    // this layer has none. See [`TileRecord`]'s doc
+                    // comment for how an unrecognised `kind` is healed one
+                    // layer up, and rewritten as that healed default on
+                    // the next flush.
                     let Some(kind) = t.get("module").and_then(|v| v.as_str()) else {
                         warnings.push(format!("workspace {ix}: tile {id} has no module; ignored"));
                         continue;

@@ -1,0 +1,325 @@
+# `risk_snapshot` (Phase 3 spec §3, §9.1): the blotter's `--demo` layer
+# uses this file as-is, and it doubles as the reference `datasets.toml`
+# for the desk's own config — every measure `geode-demo-data` emits is
+# declared here, at the grain the generator produces it (spec §3.2/§3.3),
+# so `SUM` never double-counts a coarser-grain measure repeated across
+# finer rows.
+#
+# `source_name` is the CSV header spelling; the bare key is the canonical
+# name everything else (views, dimensions, groupings) uses. The `_usd`
+# twins are the FX-converted columns the generator emits alongside their
+# base measure (`crates/geode-demo-data/src/emit.rs`'s `USD_TWINS`) —
+# read that file if this list and the generator's output ever disagree.
+#
+# **If you change the columns below, delete the demo/probe database
+# first.** `apply_schema` is CREATE TABLE IF NOT EXISTS, so an existing
+# table is never migrated; a schema that has grown a column then fails
+# every publish with "table ... has N columns but N+1 values were
+# supplied".
+
+[risk_snapshot.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+source_name = "Book"
+
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+source_name = "LHU"
+
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+source_name = "PositionRef"
+
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+source_name = "InstrumentRef"
+
+[risk_snapshot.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+source_name = "Underlying1Ref"
+
+[risk_snapshot.columns.underlying2_ref]
+type = "utf8"
+role = "dimension"
+source_name = "Underlying2Ref"
+
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+source_name = "Counterparty"
+
+# Instrument reference attributes.
+[risk_snapshot.columns.strike]
+type = "f64"
+role = "attribute"
+grain = "instrument"
+source_name = "Strike"
+
+[risk_snapshot.columns.expiry]
+type = "utf8"
+role = "attribute"
+grain = "instrument"
+source_name = "Expiry"
+
+[risk_snapshot.columns.currency]
+type = "utf8"
+role = "attribute"
+grain = "instrument"
+source_name = "Currency"
+
+[risk_snapshot.columns.model_code]
+type = "utf8"
+role = "attribute"
+grain = "instrument"
+source_name = "ModelCode"
+
+# ---- Underlying grain: one row per (position, underlying). ----
+
+[risk_snapshot.columns.delta01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta01"
+
+[risk_snapshot.columns.delta01_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta01_USD"
+
+[risk_snapshot.columns.delta02]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta02"
+
+[risk_snapshot.columns.delta02_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta02_USD"
+
+[risk_snapshot.columns.delta05]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta05"
+
+[risk_snapshot.columns.delta05_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta05_USD"
+
+[risk_snapshot.columns.gamma01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma01"
+
+[risk_snapshot.columns.gamma01_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma01_USD"
+
+[risk_snapshot.columns.gamma02]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma02"
+
+[risk_snapshot.columns.gamma02_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma02_USD"
+
+[risk_snapshot.columns.gamma05]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma05"
+
+[risk_snapshot.columns.gamma05_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma05_USD"
+
+[risk_snapshot.columns.vega01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega01"
+
+[risk_snapshot.columns.vega01_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega01_USD"
+
+[risk_snapshot.columns.normalized_vega01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "NormalizedVega01"
+
+[risk_snapshot.columns.normalized_vega01_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "NormalizedVega01_USD"
+
+# Omitted from some files (spec §3.6's tolerance case) — declared like
+# every other column; a missing one is a health degradation, not an
+# absent schema entry.
+[risk_snapshot.columns.skew01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Skew01"
+
+[risk_snapshot.columns.skew01_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Skew01_USD"
+
+[risk_snapshot.columns.rho010]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Rho010"
+
+[risk_snapshot.columns.rho010_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Rho010_USD"
+
+[risk_snapshot.columns.rho_rfr010]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "RhoRFR010"
+
+[risk_snapshot.columns.rho_rfr010_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "RhoRFR010_USD"
+
+[risk_snapshot.columns.rho_ois010]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "RhoOIS010"
+
+[risk_snapshot.columns.rho_ois010_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "RhoOIS010_USD"
+
+# ---- Pair grain. Cross gamma belongs to a *pair* of underlyings, so at
+# an underlying-level grouping it is NonAttributable (spec §6.3) and the
+# compiler blanks it — that blank must render empty, not 0.00. ----
+
+[risk_snapshot.columns.cross_gamma02]
+type = "f64"
+role = "measure"
+grain = "underlying_pair"
+source_name = "CrossGamma02"
+
+[risk_snapshot.columns.cross_gamma02_usd]
+type = "f64"
+role = "measure"
+grain = "underlying_pair"
+source_name = "CrossGamma02_USD"
+
+[risk_snapshot.columns.cross_gamma05]
+type = "f64"
+role = "measure"
+grain = "underlying_pair"
+source_name = "CrossGamma05"
+
+[risk_snapshot.columns.cross_gamma05_usd]
+type = "f64"
+role = "measure"
+grain = "underlying_pair"
+source_name = "CrossGamma05_USD"
+
+# ---- Instrument grain. ----
+
+[risk_snapshot.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "NPV"
+
+[risk_snapshot.columns.daily_pnl]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "DailyPNL"
+
+[risk_snapshot.columns.daily_m2m_pnl]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "DailyM2MPNL"
+
+[risk_snapshot.columns.daily_fx_pnl]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "DailyFXPNL"
+
+[risk_snapshot.columns.clean_theta_business_day]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "CleanThetaBusinessDay"
+
+[risk_snapshot.columns.clean_theta_business_day_usd]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "CleanThetaBusinessDay_USD"
+
+[risk_snapshot.columns.realized_theta]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "RealizedTheta"
+
+[risk_snapshot.columns.realized_theta_usd]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "RealizedTheta_USD"
+
+# ---- Position grain. ----
+
+[risk_snapshot.columns.daily_trading_pnl]
+type = "f64"
+role = "measure"
+grain = "position"
+source_name = "DailyTradingPNL"
+
+[risk_snapshot.columns.sc]
+type = "f64"
+role = "measure"
+grain = "position"
+source_name = "SC"

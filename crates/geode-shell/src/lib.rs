@@ -6,7 +6,6 @@
 
 pub mod actions;
 pub mod commandline;
-pub mod dataprobe;
 pub mod defaults;
 pub mod fonts;
 pub mod fontsize;

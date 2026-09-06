@@ -87,7 +87,13 @@ fn is_delimiter(c: char) -> bool {
 /// word ahead; anywhere else the full word touching the cursor is
 /// returned, extending forward past it to the word's real end.
 pub fn word_at(line: &str, cursor: usize) -> Range<usize> {
-    let cursor = cursor.min(line.len());
+    let mut cursor = cursor.min(line.len());
+    // M4: `InputState::cursor` should always be on a char boundary, but
+    // this pure core must not depend on that — clamp down to the nearest
+    // boundary at or before it rather than panicking on the slices below.
+    while !line.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
     if line[..cursor].chars().next_back().is_none_or(is_delimiter) {
         return cursor..cursor;
     }
@@ -208,6 +214,21 @@ mod tests {
         assert_eq!(word_at("group lhu,und", 13), 10..13, "commas split");
         assert_eq!(word_at("", 0), 0..0);
         assert_eq!(word_at("sort ", 5), 5..5);
+    }
+
+    #[test]
+    fn a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking() {
+        // M4: "café" — 'é' is a 2-byte UTF-8 char occupying bytes 8..10 of
+        // this line, so byte 9 sits inside it. `InputState::cursor` should
+        // always land on a boundary, but the pure core must not depend on
+        // that: it clamps down to the nearest boundary at or before the
+        // given cursor rather than panicking on the slice.
+        let line = "sort café";
+        assert_eq!(
+            word_at(line, 9),
+            5..line.len(),
+            "clamped to the boundary before the multi-byte char, still inside the word"
+        );
     }
 
     #[test]

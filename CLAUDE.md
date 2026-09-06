@@ -8,13 +8,13 @@ Geode is the everything-tool for an index exotic equity derivatives desk: risk, 
 
 **Phase 2 (DataService) is complete**, governed by `docs/superpowers/specs/2026-08-30-geode-phase-2-data-design.md`. Phase 2a built storage and ingest: sentinel-gated discovery, CSV → DuckDB load, the grain split (`Position`/`Instrument`/`Underlying`/`UnderlyingPair`, so `SUM` cannot double-count), per-file generations with a live/archive pair per `(dataset, grain)`, `(dataset, batch, book)` partitioning, retention, and the freshness catalog. Phase 2b built the query path: the restricted scope grammar and its compiler, views and derived dimensions, `Attribution`/`ScopeSemantics`, the grain-aware tree compiler (one statement per view, `GROUPING SETS` bounded to the expanded depth), cross-dataset joins, ENUM dictionary encoding, the query pool with cancellation and coalescing, as-of routing, `Snapshot`, and the `DataService` facade. The §7.1 <50ms requery contract holds at 1M rows — numbers in `docs/perf.md`.
 
-**Phase 3 (blotter) is next, and its prerequisites are done** — `docs/phase-3-prerequisites.md` records what was fixed and the three items deliberately not implemented as written. Phase 3 deletes the throwaway data probe (`geode-shell::dataprobe` + `geode-app/src/probe.rs`, `mod+shift+d`, opt-in via `GEODE_PROBE_DIR`), which exists only because the §7.1 budget is specified through a painted frame and the benchmarks stop at the snapshot. The probe can be run against a working sample config: see `examples/probe-config/datasets.toml`.
+**Phase 3c is implemented and merged-ready**, governed by `docs/superpowers/specs/2026-09-03-geode-phase-3-blotter-design.md`. `geode-blotter` renders any view definition (spec §6) as a collapsible, keyboard-driven hierarchy — dataset rows folded into a tree by grouping, honest attribution markers on cells the compiler said not to sum — hosted through Phase 3b's module contract. `cargo run -p geode-app -- --demo [rows]` (default 100,000) boots the shell on generated data with no real source configured, using the compiled-in `examples/demo-config/` layer; the shared frame's grouping slots (`ctrl+1..9`) regroup a blotter tile live, and its per-tile command line (`/` to find, `:` for `sort`/`group`/`yank` and the rest of spec §4.3) is the keyboard surface every row-shaping action goes through. `docs/phase-3-prerequisites.md` records what Phase 3's prerequisites fixed and the three items deliberately not implemented as written. The throwaway data probe — `geode-shell::dataprobe`, `geode-app/src/probe.rs`, `mod+shift+d`, opt-in via `GEODE_PROBE_DIR` — is deleted: it existed only to exercise the §7.1 budget's painted-frame half before the blotter existed to do that job for real (benchmarks recorded in `docs/perf.md`, which also records the painted-frame numbers themselves, or their template if a display was not available to measure them). Spec §1.2's done state — the painted frame, the 2s file-arrival update, and the §7.1 numbers themselves — still awaits Matthew running `cargo run --release -p geode-app -- --demo 1000000` on a machine with a display (none was available in the sandbox this branch was built in); see `docs/perf.md`'s "Phase 3: the painted frame" section for the exact recipe and readings to fill in.
 
-**Phase 3a is done:** `[sources]` is read (`sources.toml`, `SourceSpec::from_doc`), `DataService` owns a discovery scheduler and one ingest runner, and modules reach it through `DataHandle` (`geode_data::handle`). The probe now rides the handle; it is deleted in Phase 3c.
+**Phase 3a is done:** `[sources]` is read (`sources.toml`, `SourceSpec::from_doc`), `DataService` owns a discovery scheduler and one ingest runner, and modules reach it through `DataHandle` (`geode_data::handle`).
 
-**Phase 3b is done:** the shell now hosts module occupants through the hosting contract (`geode_shell::module`), with one shared `Frame` entity every tile observes, count prefixes in the keymap engine (`KeyContext::counts`), session `tiles` restored from layout, a per-tile command line (`/` and `:` in the `tile` context), slot numbering via `ctrl+0..9` (`ctrl+0` clears a slot; under `keymap.mod = "ctrl"` the shipped `workspace::switch_N` bindings win `ctrl+1..9`, so setting a slot is reached via the palette instead — `ctrl+0` still works, since no `mod+0` binding exists to collide with it), and `RequeryStats` displayed in the perf overlay. Plan 3c (the blotter, `--demo`, probe deletion) follows.
+**Phase 3b is done:** the shell now hosts module occupants through the hosting contract (`geode_shell::module`), with one shared `Frame` entity every tile observes, count prefixes in the keymap engine (`KeyContext::counts`), session `tiles` restored from layout, a per-tile command line (`/` and `:` in the `tile` context), slot numbering via `ctrl+0..9` (`ctrl+0` clears a slot; under `keymap.mod = "ctrl"` the shipped `workspace::switch_N` bindings win `ctrl+1..9`, so setting a slot is reached via the palette instead — `ctrl+0` still works, since no `mod+0` binding exists to collide with it), and `RequeryStats` displayed in the perf overlay.
 
-**Sequencing constraint, satisfied by Phase 3a:** `[sources]` landed before the probe's deletion. The probe (`geode-app/src/probe.rs`) now builds its `SourceSpec`s from `sources.toml` when present and from `GEODE_PROBE_DIR` otherwise; Phase 3c deletes it.
+**Phase 3c is done:** the blotter crate, `--demo`, and probe deletion above. Its Task 0, gating every other task in the plan, split `crates/geode-shell/src/shell/mod.rs` (which had grown past 11,000 lines, including a ~7,880-line embedded test module) by seam into `render`, `drag`, `input`, `palette_ctl`, `commandline_ctl`, `occupants`, `session_io`, `hot_reload`, and a `shell/tests/` directory (one file per seam), leaving `shell/mod.rs` itself at roughly 800 lines of struct definition, construction and the handful of methods no seam owns.
 
 **Cold start is on hold pending measurement — read `docs/ingest-cold-start-handoff.md` before touching it.** The 1.87× parallel-staging figure in `docs/perf.md` measures `read_csv` alone, not the real staging path (`read_csv` + `split_by_grain`), so it describes a narrower operation than the change would affect. That handoff also records what implementation hits — chiefly that `staging_raw` and `staging_{grain}` are fixed global names created with `create or replace table`, so concurrent staging would overwrite itself.
 
@@ -27,6 +27,7 @@ Two documents govern all work and are worth reading before non-trivial changes:
 
 ```sh
 cargo run -p geode-app                                 # run the app (binary is named `geode`)
+cargo run -p geode-app -- --demo [rows]                # run on generated data, no real source (default 100,000 rows)
 cargo test --workspace                                 # all tests
 cargo test -p geode-demo-data same_seed                # single test by name filter
 cargo fmt --check                                      # format check (CI-enforced)
@@ -34,12 +35,13 @@ cargo clippy --workspace --all-targets -- -D warnings  # lint (CI-enforced, warn
 cargo bench --workspace --no-run                       # compile benches (CI-enforced)
 cargo bench -p geode-demo-data                         # run criterion benchmarks (data generator)
 cargo bench -p geode-shell                             # run criterion benchmarks (shell pure cores — see docs/perf.md)
-zsh scripts/mutation-check.sh                          # mutation harness (137 entries) — see below
+cargo bench -p geode-blotter                           # run criterion benchmarks (blotter pure core — see docs/perf.md)
+zsh scripts/mutation-check.sh                          # mutation harness (179 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
 ```
 
-CI (`.github/workflows/ci.yml`) runs all four checks on **both macOS and Windows** — keep both platforms building.
+CI (`.github/workflows/ci.yml`) runs the four checks above plus `cargo check -p geode-shell --features test-support --all-targets` (added in Phase 3c, handoff finding M14: `test-support` is the feature modules' tests depend on, and nothing was otherwise keeping it building) on **both macOS and Windows** — keep both platforms building.
 
 ## Architecture
 
@@ -48,7 +50,8 @@ Cargo workspace with strict layering, enforced by crate visibility:
 ```
 geode-app          the binary: wires shell + modules + services together
   ├─ geode-shell   tiling WM, workspaces, palette, keymap engine, scope/as-of state, theming
-  ├─ (modules)     future per-module crates: blotter, config editor, diagnostics…
+  ├─ geode-blotter any view definition as a collapsible, keyboard-driven hierarchy (Phase 3)
+  ├─ (modules)     future per-module crates: config editor, diagnostics…
   ├─ geode-data    DataService: sources, ingestion, DuckDB, archive, query API
   └─ geode-core    shared vocabulary: types, config model, ids, errors, perf utilities
 geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterion bench harness
@@ -72,6 +75,8 @@ geode-demo-data    deterministic seeded synthetic risk data (SoA) + the criterio
 - `geode_demo_data::write_csv` does no quoting/escaping — it relies on all string columns drawing from fixed comma-free vocabularies. Revisit if a vocabulary ever grows free-form values.
 - Release and bench profiles keep debug symbols on purpose (profiling support, spec §7.4).
 - **A tile occupant that tracks its own focus handle takes focus on click; the tile's mouse-down handler re-arms `pending_focus_restore` so the shell's chords survive. Keep it.**
+- **`DataTable` is never focused; its key context is bound to `NoAction` in `geode_blotter::init`, and a tile click re-arms the shell's focus restore.** Same door and reasoning as `geode_shell::shell::dialog::init_reclaimed_keybindings` — the table would otherwise swallow the vim-idiom keys the blotter's own bindings depend on.
+- **A `NonAttributable` cell is NULL — read only through `f64_at`/`f64_value`; the blotter's cache is the one place a cell becomes text.** Reading a numeric column any other way (e.g. an `Array`'s own getter, which reads the underlying storage regardless of nullness) risks painting `0.00` for a cell the compiler explicitly declined to sum.
 
 ## gpui skills
 

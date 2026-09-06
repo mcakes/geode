@@ -39,8 +39,11 @@ pub const HEIGHT: f32 = 26.0;
 /// `None` when config is healthy), then the restart indicator when
 /// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
 /// reload the frame cannot pick up live, so this asks for a restart in the
-/// same `warning` token the readout's AS OF badge uses); right — the
-/// active theme name in `muted_foreground`. All colors come from
+/// same `warning` token the readout's AS OF badge uses), then the data
+/// status indicator when `data_status_message` is `Some` (Phase 3 §5.1:
+/// a source's degraded health, or events the app bridge's bounded
+/// channel had to refuse — same `warning` token, same reasoning); right —
+/// the active theme name in `muted_foreground`. All colors come from
 /// `cx.theme()`; no other input is read, so the same call always renders
 /// the same tree for the same arguments.
 pub fn status_bar(
@@ -48,6 +51,7 @@ pub fn status_bar(
     count: Option<u32>,
     reload_message: Option<&str>,
     restart_message: Option<&str>,
+    data_status_message: Option<&str>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
@@ -82,6 +86,14 @@ pub fn status_bar(
             div()
                 .text_color(theme.warning)
                 .debug_selector(|| "restart-required".to_string())
+                .child(message.to_string()),
+        );
+    }
+    if let Some(message) = data_status_message {
+        bar = bar.left(
+            div()
+                .text_color(theme.warning)
+                .debug_selector(|| "data-status".to_string())
                 .child(message.to_string()),
         );
     }

@@ -526,7 +526,7 @@ pub(crate) fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), St
 
     let pid = std::process::id();
     let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = dir.join(format!(".app.toml.{pid}-{counter}.tmp"));
+    let tmp_path = dir.join(tmp_file_name(path, pid, counter));
     {
         let mut file = std::fs::File::create(&tmp_path)
             .map_err(|e| format!("failed to create {}: {e}", tmp_path.display()))?;
@@ -542,6 +542,41 @@ pub(crate) fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), St
             path.display()
         )
     })
+}
+
+/// The temp file's name for one atomic write to `path` (M9, 3b final
+/// review): was hardcoded to `.app.toml.{pid}-{counter}.tmp` from when
+/// [`write_atomic`] only ever wrote `app.toml`; it now also writes
+/// `groupings.toml` (`frame.rs`'s slot-save path — see [`persist_slot_to_user_config`]),
+/// so a name naming the wrong file lied. Derived from `path`'s own file
+/// name instead, and kept as a separate pure function so the naming can
+/// be tested without touching a filesystem.
+fn tmp_file_name(path: &Path, pid: u32, counter: u64) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("geode-write");
+    format!(".{file_name}.{pid}-{counter}.tmp")
+}
+
+#[cfg(test)]
+mod tmp_file_name_tests {
+    use super::*;
+
+    #[test]
+    fn the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml() {
+        // M9: write_atomic now also writes groupings.toml
+        // (persist_slot_to_user_config), so a name hardcoded to
+        // `.app.toml.*` lied about what it was staging.
+        assert_eq!(
+            tmp_file_name(Path::new("/x/groupings.toml"), 7, 3),
+            ".groupings.toml.7-3.tmp"
+        );
+        assert_eq!(
+            tmp_file_name(Path::new("/x/app.toml"), 7, 4),
+            ".app.toml.7-4.tmp"
+        );
+    }
 }
 
 #[cfg(test)]

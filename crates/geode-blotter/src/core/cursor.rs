@@ -1,0 +1,291 @@
+//! The cursor (Phase 3 spec §6.1): a visible-row and column pair driven
+//! by the shell's `vimnav` vocabulary, multiplied by the engine's count.
+
+use crate::core::expansion::path_of;
+use crate::core::plan::ColumnPlan;
+use geode_core::snapshot::Snapshot;
+use geode_shell::vimnav::{NavCommand, apply};
+use std::ops::Range;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Cursor {
+    pub row: usize,
+    pub col: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mode {
+    #[default]
+    Normal,
+    Visual {
+        anchor: usize,
+    },
+}
+
+impl Cursor {
+    pub fn move_rows(&mut self, len: usize, cmd: NavCommand, count: Option<u32>) {
+        let n = count.unwrap_or(1) as i64;
+        let cmd = match (cmd, count) {
+            (NavCommand::Move(d), _) => NavCommand::Move(d * n),
+            // `12G` is "row 12", vim-style, 1-based.
+            (NavCommand::Bottom, Some(c)) => {
+                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));
+                return;
+            }
+            (other, _) => other,
+        };
+        self.row = apply(self.row, len, cmd);
+    }
+
+    pub fn move_cols(&mut self, cols: usize, delta: i64, count: Option<u32>) {
+        let n = count.unwrap_or(1) as i64;
+        self.col = apply(self.col, cols, NavCommand::Move(delta * n));
+    }
+
+    pub fn to_row(&mut self, row: usize, len: usize) {
+        self.row = row.min(len.saturating_sub(1));
+    }
+
+    pub fn clamp(&mut self, len: usize, cols: usize) {
+        self.row = self.row.min(len.saturating_sub(1));
+        self.col = self.col.min(cols.saturating_sub(1));
+    }
+}
+
+/// The rows a yank covers: anchor..=cursor in visual mode, the cursor
+/// row alone otherwise. Returned as a half-open range.
+pub fn selection(mode: &Mode, cursor: &Cursor) -> Range<usize> {
+    match mode {
+        Mode::Normal => cursor.row..cursor.row + 1,
+        Mode::Visual { anchor } => {
+            let (a, b) = (cursor.row.min(*anchor), cursor.row.max(*anchor));
+            a..b + 1
+        }
+    }
+}
+
+/// The visible index whose node has `path`, or `fallback` clamped.
+///
+/// I3 (final review): this runs inside every `reflatten_keeping`, i.e.
+/// on every keypress that expands/collapses/sorts/regroups, so its cost
+/// is the render-thread's, not a background one. Two things kept the
+/// naive scan-from-zero-and-`path_of`-everything shape expensive at row
+/// counts in the hundreds of thousands: `path_of` allocates a `Vec<
+/// Option<String>>` plus one `String` per ancestor, and it ran for every
+/// row from index 0 up to the match regardless of that row's depth or
+/// how close the match actually was to where the cursor already was.
+/// Fixed by (1) `tree.depth(row) == path.len()` first — an O(1), non-
+/// allocating check that skips the overwhelming majority of rows (most
+/// depths in a tree aren't the cursor's) before ever calling `path_of`,
+/// and (2) searching outward from `fallback` (the cursor's previous row)
+/// rather than from row 0 — the common case is that the cursor's node
+/// moved by a handful of positions or not at all, so this finds it in
+/// O(1) `path_of` calls instead of O(fallback).
+pub fn restore_by_path(
+    visible: &[u32],
+    snapshot: &Snapshot,
+    plan: &ColumnPlan,
+    path: &[Option<String>],
+    fallback: usize,
+) -> usize {
+    let len = visible.len();
+    if len == 0 {
+        return 0;
+    }
+    let tree = snapshot.tree();
+    let depth = path.len();
+    let matches = |i: usize| -> bool {
+        let row = visible[i] as usize;
+        tree.depth(row) == depth && path_of(snapshot, plan, row) == path
+    };
+    let start = fallback.min(len - 1);
+    if matches(start) {
+        return start;
+    }
+    let (mut lo, mut hi) = (start, start);
+    loop {
+        let can_dec = lo > 0;
+        let can_inc = hi + 1 < len;
+        if !can_dec && !can_inc {
+            break;
+        }
+        if can_dec {
+            lo -= 1;
+            if matches(lo) {
+                return lo;
+            }
+        }
+        if can_inc {
+            hi += 1;
+            if matches(hi) {
+                return hi;
+            }
+        }
+    }
+    fallback.min(len - 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_shell::vimnav::NavCommand;
+
+    #[test]
+    fn row_motion_is_counted_and_clamped() {
+        let mut c = Cursor { row: 0, col: 0 };
+        c.move_rows(10, NavCommand::Move(1), Some(5));
+        assert_eq!(c.row, 5);
+        c.move_rows(10, NavCommand::Move(1), Some(50));
+        assert_eq!(c.row, 9, "clamped, no wrap");
+        c.move_rows(10, NavCommand::Top, None);
+        assert_eq!(c.row, 0);
+        c.move_rows(10, NavCommand::Bottom, Some(3));
+        assert_eq!(c.row, 2, "a counted G goes to that row (1-based)");
+        c.move_rows(10, NavCommand::Bottom, None);
+        assert_eq!(c.row, 9);
+        c.move_rows(0, NavCommand::Move(1), None);
+        assert_eq!(c.row, 0, "empty list");
+    }
+
+    #[test]
+    fn column_motion_is_counted_and_clamped() {
+        let mut c = Cursor { row: 0, col: 0 };
+        c.move_cols(5, 1, Some(3));
+        assert_eq!(c.col, 3);
+        c.move_cols(5, 1, Some(9));
+        assert_eq!(c.col, 4);
+        c.move_cols(5, -1, None);
+        assert_eq!(c.col, 3);
+        c.clamp(1, 2);
+        assert_eq!((c.row, c.col), (0, 1));
+    }
+
+    #[test]
+    fn a_visual_selection_spans_anchor_to_cursor_either_way() {
+        let c = Cursor { row: 2, col: 0 };
+        assert_eq!(selection(&Mode::Visual { anchor: 5 }, &c), 2..6);
+        assert_eq!(selection(&Mode::Visual { anchor: 0 }, &c), 0..3);
+        assert_eq!(selection(&Mode::Normal, &c), 2..3);
+    }
+
+    #[test]
+    fn the_cursor_returns_to_the_same_node_after_a_requery_or_the_clamped_index() {
+        use crate::core::plan::ColumnPlan;
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        use geode_core::view::ViewSpec;
+        let dim = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let snap = Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Str(vec![None, Some("L2"), Some("L1")]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+            ],
+            1,
+        );
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n").unwrap()],
+        );
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let visible = vec![0u32, 1, 2];
+        assert_eq!(
+            restore_by_path(&visible, &snap, &plan, &[Some("L1".into())], 0),
+            2
+        );
+        assert_eq!(
+            restore_by_path(&visible, &snap, &plan, &[Some("GONE".into())], 7),
+            2,
+            "fallback clamped"
+        );
+        assert_eq!(
+            restore_by_path(&visible, &snap, &plan, &[], 1),
+            0,
+            "the root's path is empty"
+        );
+    }
+
+    /// I3 (final review): 500 rows of mixed depth-1/depth-2 filler precede
+    /// the target, none of them at the target's own depth — a fixture
+    /// built exactly so the O(1) `tree.depth(row) == path.len()` check
+    /// must reject every one of them before `path_of` ever runs on a
+    /// row that couldn't possibly match, and the outward-from-`fallback`
+    /// search must still land on the right index when `fallback` is
+    /// nowhere near the target (row 0 here, target near the end).
+    #[test]
+    fn restore_by_path_finds_the_row_when_many_precede_it_at_other_depths() {
+        use crate::core::plan::ColumnPlan;
+        use geode_core::attribution::{Attribution, ScopeSemantics};
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+        use geode_core::view::ViewSpec;
+
+        let dim = |n: &str| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: vec![Attribution::Additive; 3],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let mut lhu: Vec<Option<String>> = vec![None]; // root
+        let mut und: Vec<Option<String>> = vec![None];
+        let mut pos: Vec<Option<String>> = vec![None];
+        let mut depth: Vec<i32> = vec![0];
+        const N: usize = 250;
+        for i in 0..N {
+            // depth-1 filler
+            lhu.push(Some(format!("L{i}")));
+            und.push(None);
+            pos.push(None);
+            depth.push(1);
+        }
+        for i in 0..N {
+            // depth-2 filler, a *different* depth than the target below
+            lhu.push(Some(format!("L{i}")));
+            und.push(Some(format!("U{i}")));
+            pos.push(None);
+            depth.push(2);
+        }
+        // The target: one more depth-1 row, at the very end — 2*N = 500
+        // rows of mixed-depth filler precede it.
+        lhu.push(Some("TARGET".into()));
+        und.push(None);
+        pos.push(None);
+        depth.push(1);
+
+        let snap = Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(lhu)),
+                (dim("underlying_ref"), TestColumn::Dict(und)),
+                (dim("position_ref"), TestColumn::Dict(pos)),
+                (dim("row_depth"), TestColumn::I32(depth)),
+            ],
+            3,
+        );
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[t]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\", \"position_ref\"]\n",
+            )
+            .unwrap()],
+        );
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        let visible: Vec<u32> = (0..snap.rows() as u32).collect();
+        let target_row = snap.rows() - 1;
+
+        assert_eq!(
+            restore_by_path(&visible, &snap, &plan, &[Some("TARGET".to_string())], 0),
+            target_row,
+            "the depth-1 target is found correctly past 500 rows of \
+             mixed-depth filler, with `fallback` (0) nowhere near it"
+        );
+    }
+}

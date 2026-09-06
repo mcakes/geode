@@ -161,6 +161,14 @@ run_mutation() {
     skipped=$((skipped + 1))
     return 0
   fi
+  # geode-app is bin-only (no [lib] target — see its Cargo.toml), so
+  # `--lib` fails outright with "no library targets found"; `--bins`
+  # is the equivalent for it. Every other package here is lib-only, so
+  # `--lib` stays the default.
+  local target_flag="--lib"
+  if [[ "$pkg" == "geode-app" ]]; then
+    target_flag="--bins"
+  fi
   cp "$file" "$bak"
   in_flight="$file"
   local rc=0
@@ -180,7 +188,7 @@ PY
     return 0
   fi
   if [[ -n "$filter" ]]; then
-    if cargo test -p "$pkg" --lib -- "$filter" >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
         echo "FILTER    $name  <-- '$filter' matches no test"
         filter=""
@@ -194,13 +202,13 @@ PY
   if [[ -n "$filter" ]]; then
     # The named test passed despite the mutation; the full suite is the
     # real verdict, and a failure here means some other test caught it.
-    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       echo "caught*   $name  <-- caught by a test other than '$filter'"
     fi
   else
-    if cargo test -p "$pkg" --lib >"$log" 2>&1; then
+    if cargo test -p "$pkg" $target_flag >"$log" 2>&1; then
       echo "SURVIVED  $name  <-- no test sees this"
     else
       echo "caught    $name"
@@ -430,6 +438,28 @@ run_mutation "validation: a derived dimension shadowing a column is reported" \
   '                if ds.column(g).is_some() {' \
   '                if false {' \
   geode-core
+
+run_mutation "views: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/view.rs \
+  '            if name == "config_version" {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-core \
+  a_view_config_version_header_is_not_a_spurious_diagnostic
+
+run_mutation "dimensions: a config_version header is not a spurious diagnostic" \
+  crates/geode-core/src/dimensions.rs \
+  '            if name == "config_version" {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-core \
+  a_dimension_config_version_header_is_not_a_spurious_diagnostic
 
 # ---- findings from the phase-2b/prerequisites review round
 
@@ -699,11 +729,12 @@ run_mutation "snapshot: a null measure is not zero" \
   '(row < values.len()).then(|| values.value(row))' \
   geode-core
 
-run_mutation "probe: a blanked cell renders blank, not 0.00" \
-  crates/geode-shell/src/dataprobe.rs \
-  'return snap.f64_value(column, row).map(|v| format!("{v:.2}"));' \
-  'return snap.f64_column(column)?.get(row).map(|v| format!("{v:.2}"));' \
-  geode-shell
+# "probe: a blanked cell renders blank, not 0.00" retired (Phase 3c
+# Task 9): the throwaway diagnostic tile it anchored on is deleted
+# entirely (spec §9 step 5). The behaviour it defended — a NULL measure
+# reads as blank, never 0.00 — lives on as the blotter's own read path
+# and is covered there by "cache: a NULL measure is None, never a
+# number" a few entries below (`crates/geode-blotter/src/core/cache.rs`).
 
 run_mutation "snapshot: depth reads at DuckDB's own integer width" \
   crates/geode-core/src/snapshot.rs \
@@ -1054,35 +1085,35 @@ run_mutation "frame: a vanished active slot is cleared on reload" \
 # ---- module hosting (Phase 3 §3)
 
 run_mutation "hosting: an unknown action reaches the focused occupant with its count" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/input.rs \
   '                o.content.dispatch(action, count, window, cx);' \
   '                o.content.dispatch(action, None, window, cx);' \
   geode-shell \
   a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count
 
 run_mutation "hosting: a closed tile drops its occupant" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '        self.occupants.retain(|id, _| all.contains(id));' \
   '        let _ = &all;' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
 run_mutation "hosting: leaving the screen is announced" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '                o.content.set_visible(false, cx);' \
   '                let _ = o;' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
 run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
   '            let state = restored.as_ref().map(|r| &r.state);' \
   geode-shell \
   a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
 
 run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/occupants.rs \
   '            occupant.content.set_visible(active.contains(id), cx);' \
   '            occupant.content.set_visible(true, cx);' \
   geode-shell \
@@ -1110,7 +1141,7 @@ run_mutation "session: tile state round-trips" \
   tiles_round_trip_with_their_kind_and_opaque_state
 
 run_mutation "session: a state-only change alone still flushes" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/session_io.rs \
   '        if !self.session_dirty && tiles == self.last_tiles_written {' \
   '        if !self.session_dirty {' \
   geode-shell \
@@ -1133,7 +1164,7 @@ run_mutation "commandline: an exact word runs as typed" \
   submit_runs_accepts_or_refuses
 
 run_mutation "commandline: escape on a find is a cancel" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
   '            o.content.find(FindEvent::Cancelled, window, cx);' \
   '            let _ = o;' \
   geode-shell \
@@ -1158,21 +1189,21 @@ run_mutation "commandline: escape on a find is a cancel" \
 # describes.
 
 run_mutation "commandline: a second tab refreshes the accepted word range instead of corrupting it (C1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/commandline_ctl.rs \
   '                        c.word = c.word.start..cursor;' \
   '                        let _ = cursor;' \
   geode-shell \
   a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
 
 run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/render.rs \
   '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
   '            false' \
   geode-shell \
   switching_workspaces_cancels_an_open_command_line
 
 run_mutation "commandline: losing keyboard focus to another surface cancels an open line (I1, final review)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/render.rs \
   '                || !self
                     .command_input
                     .read(cx)
@@ -1185,25 +1216,558 @@ run_mutation "commandline: losing keyboard focus to another surface cancels an o
 # ---- frame keys, the readout, and config reload (Phase 3 §4.2, §4.5)
 
 run_mutation "frame: a sources change is a restart, not a silent apply" \
-  crates/geode-shell/src/shell/mod.rs \
-  '            let restart = ["sources", "datasets"]' \
-  '            let restart = ["nonesuch"]' \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("sources", &self.sources_baseline),
+                ("datasets", &self.datasets_baseline),' \
+  '                ("nonesuch", &self.sources_baseline),
+                ("nonesuch", &self.datasets_baseline),' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
 run_mutation "frame: a groupings/datasets/dimensions change replaces the frame's slots (fix round 1)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '            if groupings_changed {' \
   '            if false {' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
 run_mutation "frame: a views/dimensions change reaches the frame and emits ConfigReloaded (fix round 1)" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '            if views_changed {' \
   '            if false {' \
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+# ---- Phase 3c Task 0 (deferred 3b cleanups: M4, M8, M9, slot-rebuild DRY)
+
+run_mutation "hot_reload: rebuild_slots is the one place both ShellView::new and apply_reload build GroupingSlots (DRY)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '    let (slots, diags) = config
+        .doc("groupings")
+        .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+        .unwrap_or_default();' \
+  '    let (slots, diags) = config
+        .doc("nonesuch")
+        .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
+        .unwrap_or_default();' \
+  geode-shell \
+  a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
+
+run_mutation "commandline: word_at clamps a non-char-boundary cursor down before slicing (M4)" \
+  crates/geode-shell/src/commandline.rs \
+  '    while !line.is_char_boundary(cursor) {' \
+  '    while false {' \
+  geode-shell \
+  a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking
+
+run_mutation "frame: restart_required clears once sources/datasets match the baseline again (M8)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                self.restart_required = None;' \
+  '                let _ = &self.restart_required;' \
+  geode-shell \
+  reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
+
+run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's (I2, residual fix)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if views_changed {
+                cx.emit(ShellEvent::ConfigReloaded);
+            }
+            if groupings_changed {
+                let slots = rebuild_slots(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if views_changed {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+            }' \
+  '            if groupings_changed {
+                let slots = rebuild_slots(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if views_changed {
+                cx.emit(ShellEvent::ConfigReloaded);
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+            }' \
+  geode-shell \
+  emits_config_reloaded_before_the_frame_notifies
+
+run_mutation "frame: readout is rebuilt when versions change" \
+  crates/geode-shell/src/frame.rs \
+  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+            && *cached_versions == versions
+        {
+            return Rc::clone(cached);
+        }' \
+  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+            && *cached_versions != versions
+        {
+            return Rc::clone(cached);
+        }' \
+  geode-shell \
+  readout_is_rebuilt_only_when_versions_change
+
+run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
+  crates/geode-shell/src/theme.rs \
+  '    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("geode-write");' \
+  '    let file_name = "app.toml";' \
+  geode-shell \
+  the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml
+
+# ---- blotter core (Phase 3 §6)
+
+run_mutation "plan: attribution is per depth" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            .and_then(|c| c.attribution.get(depth).copied())' \
+  '            .and_then(|c| c.attribution.first().copied())' \
+  geode-blotter \
+  attribution_is_per_column_per_depth_and_semi_joined_dimensions_are_named
+
+run_mutation "flatten: only open nodes are descended into" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    if expansion.is_open(path) {' \
+  '    if true {' \
+  geode-blotter \
+  opening_a_node_shows_its_children_in_row_order_and_descends_only_into_open_nodes
+
+run_mutation "flatten: NULL sorts last in both directions" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                if is_null(snapshot, idx, numeric, a) || is_null(snapshot, idx, numeric, b) =>' \
+  '                if false =>' \
+  geode-blotter \
+  a_sort_orders_siblings_within_their_parent_with_null_last
+
+run_mutation "expansion: the depth bound is one past the deepest open node" \
+  crates/geode-blotter/src/core/expansion.rs \
+  '        .saturating_add(1)' \
+  '        .saturating_add(2)' \
+  geode-blotter \
+  the_depth_bound_is_one_past_the_deepest_open_node_capped_at_the_grouping
+
+run_mutation "expansion: closing one node under open_all leaves its siblings open" \
+  crates/geode-blotter/src/core/expansion.rs \
+  '            !self.closed.contains(path)' \
+  '            true' \
+  geode-blotter \
+  close_under_open_all_closes_only_that_node
+
+run_mutation "find: fzf narrows and vim does not" \
+  crates/geode-blotter/src/core/find.rs \
+  '            FindStyle::Vim => find_match(texts, self.origin, FindDirection::Forward, query),' \
+  '            FindStyle::Vim => { self.narrowed = Some(filter_matches(texts, query)); find_match(texts, self.origin, FindDirection::Forward, query) }' \
+  geode-blotter \
+  vim_style_jumps_as_typed_commits_and_repeats
+
+run_mutation "cursor: a counted G is a row number" \
+  crates/geode-blotter/src/core/cursor.rs \
+  '                self.row = (c.max(1) as usize - 1).min(len.saturating_sub(1));' \
+  '                self.row = len.saturating_sub(1); let _ = c;' \
+  geode-blotter \
+  row_motion_is_counted_and_clamped
+
+run_mutation "cache: a NULL measure is None, never a number" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            let value = snapshot.f64_at(idx, row)?;' \
+  '            let value = snapshot.f64_at(idx, row).unwrap_or(0.0);' \
+  geode-blotter \
+  cells_honour_the_read_paths_opinions
+
+run_mutation "cache: a window move keeps overlapping rows" \
+  crates/geode-blotter/src/core/cache.rs \
+  '            if old.contains(&r) {' \
+  '            if false {' \
+  geode-blotter \
+  a_window_move_refills_only_the_rows_that_entered
+
+run_mutation "format: the sign is of the rounded value" \
+  crates/geode-blotter/src/core/format.rs \
+  '    let sign = if rounded == 0.0 {' \
+  '    let sign = if scaled == 0.0 {' \
+  geode-blotter \
+  precision_thousands_and_sign
+
+run_mutation "format: scale divides before precision" \
+  crates/geode-blotter/src/core/format.rs \
+  '        s => value / s.divisor(),' \
+  '        s => { let _ = s; value }' \
+  geode-blotter \
+  parentheses_and_scale
+
+run_mutation "yank: numbers are raw and unscaled" \
+  crates/geode-blotter/src/core/yank.rs \
+  '                        let _ = write!(s, "{v}");' \
+  '                        let _ = write!(s, "{:.2}", v);' \
+  geode-blotter \
+  tsv_has_a_header_indented_tree_text_raw_numbers_and_blanks
+
+run_mutation "commands: sort desc is parsed" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                    descending: true,' \
+  '                    descending: false,' \
+  geode-blotter \
+  every_command_parses
+
+run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
+  crates/geode-blotter/src/core/commands.rs \
+  '    while !line.is_char_boundary(cursor) {' \
+  '    while false {' \
+  geode-blotter \
+  completions_clamp_a_cursor_inside_a_multibyte_char
+
+run_mutation "delegate: the cursor follows its node across a new snapshot" \
+  crates/geode-blotter/src/delegate.rs \
+  '            self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
+  '            let _ = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
+  geode-blotter \
+  applying_a_snapshot_builds_the_plan_flattens_and_keeps_the_cursor_node
+
+run_mutation "delegate: a regroup with a different grouping rebuilds the plan" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(p) => p.grouping != grouping || !p.same_columns(&snapshot),' \
+  '            Some(_p) => false,' \
+  geode-blotter \
+  a_regroup_prunes_expansion_and_rebuilds_the_plan
+
+run_mutation "delegate: narrowed positions actually filter what is shown" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(positions) => self.shown.extend(
+                positions
+                    .iter()
+                    .filter_map(|&i| self.visible.get(i).copied()),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  '            Some(_positions) => self.shown.extend_from_slice(&self.visible),
+        }
+    }
+
+    pub fn set_narrowed' \
+  geode-blotter \
+  narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
+run_mutation "delegate: narrowed values are positions into visible, not row ids" \
+  crates/geode-blotter/src/delegate.rs \
+  '            Some(positions) => self.shown.extend(
+                positions
+                    .iter()
+                    .filter_map(|&i| self.visible.get(i).copied()),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  '            Some(positions) => self.shown.extend(
+                self.visible
+                    .iter()
+                    .copied()
+                    .filter(|r| positions.contains(&(*r as usize))),
+            ),
+        }
+    }
+
+    pub fn set_narrowed' \
+  geode-blotter \
+  narrowing_uses_positions_into_visible_not_row_ids_even_when_they_differ
+
+run_mutation "delegate: narrowing invalidates the cache" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cursor.clamp(self.shown.len(), cols);
+        self.invalidate_cells();
+    }' \
+  '        self.cursor.clamp(self.shown.len(), cols);
+    }' \
+  geode-blotter \
+  narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows
+
+run_mutation "delegate: apply_snapshot prunes expansion to the new grouping" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.expansion.prune_to(grouping.len());' \
+  '        let _ = grouping.len();' \
+  geode-blotter \
+  a_regroup_to_a_shallower_grouping_prunes_a_path_deeper_than_it_can_reach
+
+run_mutation "delegate: apply_snapshot invalidates the cache even without narrowing" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+        self.invalidate_cells();
+    }' \
+  '        self.cursor.clamp(self.shown.len(), plan.columns.len());
+    }' \
+  geode-blotter \
+  apply_snapshot_invalidates_the_cache_and_refills_it
+
+run_mutation "delegate: invalidate_cells also clears the cached tree glyphs" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cache.invalidate();
+        self.glyphs.clear();
+        if !w.is_empty() {' \
+  '        self.cache.invalidate();
+        if !w.is_empty() {' \
+  geode-blotter \
+  invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window
+
+run_mutation "delegate: invalidate_cells refills the window it had" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.glyphs.clear();
+        if !w.is_empty() {
+            let end = w.end.min(self.shown.len());
+            if w.start < end {
+                self.refill_window(w.start..end);
+            }
+        }
+    }' \
+  '        self.glyphs.clear();
+    }' \
+  geode-blotter \
+  a_regroup_that_keeps_the_window_refills_it_immediately
+
+run_mutation "delegate: any_determined reflects the whole cached window" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.cache
+            .set_window(window.clone(), cols, |shown_row, col| {
+                let row = *shown.get(shown_row)? as usize;
+                cell(snapshot, plan, row, col)
+            });
+        // Scanned over the *whole* current window, not just the rows
+        // this call'"'"'s `fill` closure actually ran for: `set_window`
+        // keeps overlapping rows without re-invoking `fill`, so a row
+        // that entered on an earlier call and stayed cached must still
+        // be able to hold the flag up after a scroll that brings in
+        // nothing but non-determined rows.
+        let determined_window = self.cache.window();
+        self.any_determined = determined_window.into_iter().any(|row: usize| {
+            (0..cols).any(|col| {
+                self.cache
+                    .get(row, col)
+                    .is_some_and(|c| c.attribution == Attribution::DeterminedNonAdditive)
+            })
+        });' \
+  '        let mut any_determined = false;
+        self.cache
+            .set_window(window.clone(), cols, |shown_row, col| {
+                let row = *shown.get(shown_row)? as usize;
+                let c = cell(snapshot, plan, row, col)?;
+                if c.attribution == Attribution::DeterminedNonAdditive {
+                    any_determined = true;
+                }
+                Some(c)
+            });
+        self.any_determined = any_determined;' \
+  geode-blotter \
+  any_determined_reflects_the_whole_window_not_just_newly_entered_rows
+
+# ---- blotter tile (Phase 3 §6.5, §6.7, §6.8, §3.1, §4.3)
+
+run_mutation "tile: a stale tag is dropped" \
+  crates/geode-blotter/src/tile.rs \
+  '        if outcome.tag != self.tag {' \
+  '        if false {' \
+  geode-blotter \
+  a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
+
+run_mutation "tile: a pinned tile ignores the slot" \
+  crates/geode-blotter/src/tile.rs \
+  '            || (self.pin == Pin::None && acted.grouping != now.grouping)' \
+  '            || acted.grouping != now.grouping' \
+  geode-blotter \
+  a_frame_slot_change_requeries_once_and_a_pinned_tile_ignores_it
+
+run_mutation "tile: the depth bound is requested, not everything" \
+  crates/geode-blotter/src/tile.rs \
+  '            d.depth_bound(grouping.len()).max(1)' \
+  '            usize::MAX' \
+  geode-blotter \
+  showing_the_tile_submits_one_query_keyed_by_the_tile_with_the_views_grouping
+
+run_mutation "tile: a query error keeps the last snapshot" \
+  crates/geode-blotter/src/tile.rs \
+  '            Err(e) => self.error = Some(e),' \
+  '            Err(e) => { self.error = Some(e); self.table.update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new()); }' \
+  geode-blotter \
+  a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
+
+run_mutation "tile: fzf narrowing matches the un-narrowed list" \
+  crates/geode-blotter/src/tile.rs \
+  '                    self.table.read(cx).delegate().visible_texts()' \
+  '                    self.table.read(cx).delegate().shown_texts()' \
+  geode-blotter \
+  find_jumps_under_vim_and_narrows_under_fzf
+
+run_mutation "tile: the configured threshold is the one used" \
+  crates/geode-blotter/src/tile.rs \
+  '                    > self.stale_after.get()' \
+  '                    > Duration::from_secs(15 * 60)' \
+  geode-blotter \
+  a_tiles_stale_threshold_is_the_factorys_configured_value
+
+run_mutation "delegate: move_column refills the window it already had" \
+  crates/geode-blotter/src/delegate.rs \
+  '        // same tree, and the window is only ever tens of rows.
+        self.invalidate_cells();
+        cx.notify();
+    }' \
+  '        // same tree, and the window is only ever tens of rows.
+        cx.notify();
+    }' \
+  geode-blotter \
+  move_column_refills_the_window_immediately
+
+# ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
+
+run_mutation "bridge: dropped_events counted on a refused try_send" \
+  crates/geode-app/src/bridge.rs \
+  '            dropped.fetch_add(1, Ordering::Relaxed);
+            false' \
+  '            false' \
+  geode-app \
+  a_refused_event_is_counted_as_dropped_rather_than_lost_silently
+
+run_mutation "bridge: db_path precedence — config wins over demo and the platform dir" \
+  crates/geode-app/src/bridge.rs \
+  '    if let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
+  '    if false && let Some(p) = config.get("app", "data.db_path").and_then(|v| v.as_str()) {' \
+  geode-app \
+  the_database_path_prefers_config_then_demo_then_the_platform_dir
+
+run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted directory" \
+  crates/geode-app/src/demo.rs \
+  '        source_dir.join("*.csv").to_string_lossy()' \
+  '        "/nonexistent/*.csv".to_string()' \
+  geode-app \
+  the_demo_layer_is_complete_and_points_sources_at_the_directory
+
+# Fix round 1, Finding 1: every branch of the drain loop, not just
+# `Query`, must reach the shell through `window.update` and end the task
+# the first time the window is gone. This entry restores the pre-fix
+# shape — only `Query` routes through `window.update`; the dropped-events
+# status update, `Published`, and `Health` go back to a bare `cx.update`
+# on a standalone `Entity<ShellView>` clone the task keeps alive forever
+# — so a `Health` event sent after the window closes no longer ends the
+# task, which is exactly what the covering test sends and checks for.
+run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
+  crates/geode-app/src/bridge.rs \
+  '            let handled = window.update(cx, |root, window, cx| {
+                let Ok(shell) = root.view().clone().downcast::<ShellView>() else {
+                    return;
+                };
+                if now_dropped != last_dropped {
+                    shell.update(cx, |s, cx| {
+                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
+                    });
+                }
+                match event {
+                    DataEvent::Query(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    }
+                    DataEvent::Published {
+                        dataset,
+                        batch,
+                        gen_id,
+                        ..
+                    } => {
+                        eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
+                        let frame = shell.read(cx).frame().clone();
+                        frame.update(cx, |f, cx| {
+                            f.note_published();
+                            cx.notify();
+                        });
+                    }
+                    DataEvent::Health {
+                        source,
+                        worst,
+                        detail,
+                    } => {
+                        eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                        shell.update(cx, |s, cx| {
+                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                        });
+                    }
+                    DataEvent::Diagnostics(diags) => {
+                        for d in diags {
+                            eprintln!("[data] {d}");
+                        }
+                    }
+                }
+            });
+            if handled.is_err() {
+                return; // the window is gone
+            }
+            last_dropped = now_dropped;' \
+  '            if now_dropped != last_dropped {
+                last_dropped = now_dropped;
+                cx.update(|cx| {
+                    shell.update(cx, |s, cx| {
+                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
+                    });
+                });
+            }
+            let outcome = match event {
+                DataEvent::Query(outcome) => Some(outcome),
+                DataEvent::Published {
+                    dataset,
+                    batch,
+                    gen_id,
+                    ..
+                } => {
+                    eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
+                    cx.update(|cx| {
+                        let frame = shell.read(cx).frame().clone();
+                        frame.update(cx, |f, cx| {
+                            f.note_published();
+                            cx.notify();
+                        });
+                    });
+                    None
+                }
+                DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                } => {
+                    eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                    cx.update(|cx| {
+                        shell.update(cx, |s, cx| {
+                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                        });
+                    });
+                    None
+                }
+                DataEvent::Diagnostics(diags) => {
+                    for d in diags {
+                        eprintln!("[data] {d}");
+                    }
+                    None
+                }
+            };
+            if let Some(outcome) = outcome {
+                let delivered = window.update(cx, |root, window, cx| {
+                    if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
+                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
+                    }
+                });
+                if delivered.is_err() {
+                    return; // the window is gone
+                }
+            }' \
+  geode-app \
+  the_drain_task_ends_on_the_first_event_after_the_window_closes
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

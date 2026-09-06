@@ -1,0 +1,1224 @@
+//! `ShellView`'s `Render` implementation (spec §3): chrome (toolbar, sidebar,
+//! status bar), the tiling tree, dividers, drag ghosts, palette and dialogs.
+//! Split out of `shell/mod.rs` (Phase 3c Task 0) because the one `render`
+//! function was ~1,190 lines, far from the pure cores in `input.rs`,
+//! `commandline_ctl.rs`, `palette_ctl.rs`, `drag.rs` and `occupants.rs` that
+//! it calls into every frame.
+
+use gpui::prelude::*;
+use gpui::{
+    AnyView, App, Context, Focusable as _, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Window, div, px,
+};
+use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, h_flex, v_flex};
+
+use crate::fonts;
+use crate::palette;
+use crate::perf;
+use crate::tiling::{
+    DIVIDER_HIT_WIDTH, DropTarget, Orientation, Rect, divider_strips, dock_edge_strips,
+    drop_highlight_rect,
+};
+
+use super::drag::{
+    DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
+};
+use super::{
+    ShellView, commandline_view, dialog, perf_overlay, sidebar, status, toolbar, whichkey,
+};
+
+/// gpui hover-group name shared by every divider strip (drag-splitters
+/// task): the strip is the group, its inner 2px line is the member that
+/// tints on `group_hover`. One shared name is correct — gpui resolves a
+/// `group_hover` against the *innermost enclosing* group's bounds during
+/// paint, so each strip's line only lights for its own strip (precedent:
+/// gpui-component's `ResizeHandle` shares the name "handle" across every
+/// handle the same way).
+const DIVIDER_GROUP: &str = "divider-strip";
+
+impl Render for ShellView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Frame-time instrumentation (spec §7.4), first thing so the
+        // interval is measured from the true top of each render. Records
+        // the render-to-render interval — see `crate::perf`'s module doc
+        // for exactly what this signal captures (consecutive renders
+        // during interaction bursts) and doesn't (compositor time, the
+        // last frame before idleness). O(1), allocation-free, and it
+        // never notifies or schedules anything, so recording can't force
+        // a frame; intervals >= IDLE_CUTOFF are counted as idle gaps,
+        // not frames.
+        let render_started = std::time::Instant::now();
+        if let Some(prev) = self.last_render_started {
+            let interval = render_started.saturating_duration_since(prev);
+            if interval < perf::IDLE_CUTOFF {
+                self.perf.record_micros(interval.as_micros() as u64);
+            } else {
+                self.perf.note_discarded_idle();
+            }
+        }
+        self.last_render_started = Some(render_started);
+
+        // Fix-round finding: consume a pending focus restore left by a
+        // background path that closed the palette with no `Window` in hand
+        // (see `pending_focus_restore`'s and `apply_reload`'s own doc
+        // comments for the orphaned-`FocusId` bug this closes). `render`
+        // is the first point downstream that actually has a `&mut Window`
+        // — and the *only* point that will reliably run at all in the
+        // failure state being fixed, since an orphaned focus is exactly
+        // what makes `handle_key_down` stop firing until a mouse click
+        // claims focus elsewhere first. Kept ahead of everything else in
+        // render, per its contract.
+        if self.pending_focus_restore {
+            self.pending_focus_restore = false;
+            self.focus_handle.focus(window, cx);
+        }
+
+        // Create occupants for any tile that lacks one, drop occupants
+        // whose tile is gone, and tell occupants when they enter/leave the
+        // screen (Phase 3 §3.2) — the one place every path that can change
+        // the tile set (split, close, restore, workspace switch) reliably
+        // funnels through with a `Window` in hand.
+        self.ensure_occupants(window, cx);
+
+        // Cancel an in-flight divider drag when the surface it was
+        // resizing is no longer the one on screen (drag-splitters task):
+        // the palette or a modal opened mid-drag (keyboard stays live
+        // during a drag — ctrl+k works with the button held), a tree tile
+        // went fullscreen (mod+f likewise), or mod+N switched to another
+        // workspace (review fix: the recorded address and bounds belong to
+        // the workspace the drag started in; without this, the next move
+        // would apply them to the new workspace's tree). All of these hide
+        // the dragged boundary, and letting the drag keep mutating an
+        // invisible layout would be a surprise on return. Cancel means
+        // "stop tracking the mouse", NOT "undo": whatever the drag already
+        // applied stays applied and — review fix — still persists like
+        // any resize (`cancel_divider_drag` dirties the session when the
+        // drag had moved; the first cut silently dropped that, leaving a
+        // visible layout the next restore wouldn't reproduce). Same
+        // consume-state-at-the-top-of-render precedent as
+        // `pending_focus_restore` just above: render is the one place
+        // every one of those paths reliably funnels through with the
+        // state fresh.
+        if self.divider_drag.as_ref().is_some_and(|drag| {
+            self.palette.is_some()
+                || self.modal.is_some()
+                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                || drag.epoch != self.services.workspaces.switch_epoch()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .fullscreen()
+                    .is_some()
+        }) {
+            self.cancel_divider_drag();
+        }
+
+        // Cancel an in-flight tile drag on the same conditions (tile-drag
+        // task) — palette/modal opened, workspace switched, fullscreen
+        // toggled — PLUS a which-key hint appearing: unlike a divider
+        // drag (which keeps its already-applied resize live behind the
+        // handler-less hint), a tile drag is all about *choosing a drop
+        // target among the tiles*, and doing that under a panel that
+        // covers part of them would be blind targeting. PLUS (post-merge
+        // review BUG 3) the dragged tile no longer existing anywhere:
+        // ctrl+w can close it mid-drag (the keyboard stays hot), and
+        // without this check the ghost and zone highlight kept painting
+        // — promising a drop the verbs would silently refuse. All of
+        // these make cancelling truly free here: a tile drag applies
+        // nothing until its drop, so cancel undoes nothing, dirties
+        // nothing, and needs none of the divider guard's `moved`
+        // bookkeeping.
+        if self.tile_drag.as_ref().is_some_and(|drag| {
+            self.palette.is_some()
+                || self.modal.is_some()
+                || !self.matcher.pending().is_empty()
+                // Epoch, not index (finding 7) — see `DividerDrag::epoch`.
+                || drag.epoch != self.services.workspaces.switch_epoch()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .tree()
+                    .fullscreen()
+                    .is_some()
+                || self
+                    .services
+                    .workspaces
+                    .active()
+                    .region_of(drag.tile)
+                    .is_none()
+        }) {
+            self.cancel_tile_drag();
+        }
+
+        // The per-tile command line's own invariant (I1, final review):
+        // "the focused tile IS `command_line.tile`, for as long as the
+        // line is open" holds only while BOTH (a) the active workspace's
+        // own focused tile is still that tile, and (b) `command_input`
+        // still holds keyboard focus. Both tile mouse-down handlers
+        // (`render`, below) already call `cancel_command_line` before
+        // acting, and that remains the fast, explicit path for the two
+        // surfaces that need it — this is the generic backstop for
+        // everything else that can change (a) or (b) without going
+        // through one of those call sites: the sidebar's workspace-switch
+        // mouse-down (`sidebar::sidebar`) changes (a) — a plain, non-
+        // focusable `div`, so keyboard focus never moves — and a click
+        // into the toolbar's `filter_input` changes (b) — a real `Input`
+        // that takes focus on click, with no workspace-state change at
+        // all. One check here, at the top of render (same "reliably
+        // funnels through with fresh state" precedent as `pending_focus_
+        // restore` above), covers both without a third and fourth
+        // `cancel_command_line` call site — and is a no-op on the tile-
+        // mouse-down paths, since they already set `command_line` to
+        // `None` before this runs, so there is no double cancel (no
+        // second `FindEvent::Cancelled`).
+        if self.command_line.as_ref().is_some_and(|line| {
+            self.services.workspaces.active().focused_tile() != Some(line.tile)
+                || !self
+                    .command_input
+                    .read(cx)
+                    .focus_handle(cx)
+                    .is_focused(window)
+        }) {
+            self.cancel_command_line(window, cx);
+        }
+
+        // Apply the UI font size (see the `fontsize` module doc): the rem
+        // size scales every rem-based text size in the shell. Guarded so
+        // the setter only runs on an actual change, not every frame.
+        let rem = gpui::px(self.font_size.rem_px());
+        if window.rem_size() != rem {
+            window.set_rem_size(rem);
+        }
+
+        // `viewport_size` is the drawable area (excludes window chrome),
+        // which is what `Tree::layout` should partition (gpui/window.rs).
+        // Task 4 adds a top toolbar (the native title bar,
+        // `TITLE_BAR_HEIGHT`) and a left sidebar (`sidebar::WIDTH`) on top
+        // of the existing bottom status bar (`status::HEIGHT`); the tile
+        // area gets the viewport minus all three, and `Tree::layout` is
+        // still called exactly once, over those shrunk bounds.
+        let viewport = window.viewport_size();
+        let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
+        let content_height =
+            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+
+        // One layout pass for the whole surface (dock-regions task,
+        // generalized by dock-trees): the pure `tiling::dock_layout`
+        // carves the visible docks' pixel rects out of the content area,
+        // `Tree::layout` partitions what's left for the main tree, and
+        // each visible dock's rect feeds that dock's own `Tree::layout` —
+        // one geometry call per region (main + up to three visible docks),
+        // still a single pass overall. While a tree tile is fullscreen it
+        // covers the entire surface and the docks are not painted at all
+        // (the docks keep their state; they're just not part of the
+        // fullscreen picture).
+        let area = Rect {
+            x: 0.0,
+            y: 0.0,
+            w: tile_width,
+            h: content_height,
+        };
+        type DockCell = (
+            crate::tiling::DockSide,
+            Rect,
+            Vec<(crate::tiling::TileId, Rect)>,
+            Option<crate::tiling::TileId>,
+        );
+        // Divider strips are painted (and their listeners armed) only
+        // while no overlay is up: the palette's click-catcher and the
+        // modal's backdrop both cover the whole window ABOVE the strips
+        // but without occluding them, so a live strip underneath would
+        // still take the same mouse-down that dismisses the overlay and
+        // start a drag from under it. The which-key hint (review fix) is
+        // the same leak in miniature: `whichkey::render` paints a solid
+        // panel with no `.occlude()` and no handlers, so a mouse-down
+        // inside its bounds would fall straight through to a strip
+        // beneath — it shows exactly while a keystroke sequence is
+        // pending, so that state gates too. (An already-in-flight drag is
+        // NOT cancelled for which-key the way palette/modal cancel it:
+        // the hint has no mouse handlers to fight the drag catcher, and
+        // the dragged boundary stays visible behind it.) Gating at paint
+        // time keeps the rule simple: strips exist exactly when the tiles
+        // they resize are the frontmost interactive surface.
+        let dividers_active =
+            self.palette.is_none() && self.modal.is_none() && self.matcher.pending().is_empty();
+        // Mouse events arrive in window coordinates while the tile
+        // geometry lives in surface coordinates (the surface starts below
+        // the toolbar, right of the sidebar) — the drag rects captured at
+        // mouse-down are pre-offset into window space so the per-move math
+        // never converts.
+        let to_window_space = |r: Rect| Rect {
+            x: r.x + sidebar::WIDTH,
+            y: r.y + toolbar_height,
+            w: r.w,
+            h: r.h,
+        };
+        let (region, focused, tree_area, rects, dock_cells, strips) = {
+            let workspace = self.services.workspaces.active();
+            let tree = workspace.tree();
+            let (tree_area, dock_rects) = if tree.fullscreen().is_some() {
+                (area, Vec::new())
+            } else {
+                crate::tiling::dock_layout(workspace.docks(), area)
+            };
+            // The frame's divider strips, from the same rects this pass
+            // just computed (drag-splitters task): the main tree's
+            // interior boundaries, each visible dock tree's interior
+            // boundaries, then the dock frame edges — edges last so they
+            // paint above a dock tree's own strips where the two meet at
+            // a corner (hit-testing follows paint order). `divider_strips`
+            // itself yields nothing for a fullscreen tree, and
+            // `dock_rects` is already empty then, so fullscreen suppresses
+            // every strip without a separate check here.
+            let mut strips: Vec<StripSpec> = Vec::new();
+            if dividers_active {
+                let tree_bounds = to_window_space(tree_area);
+                for s in divider_strips(tree, tree_area, DIVIDER_HIT_WIDTH) {
+                    strips.push(StripSpec {
+                        rect: s.rect,
+                        axis: s.orientation,
+                        target: DividerDragTarget::MainTree { address: s.address },
+                        drag_bounds: tree_bounds,
+                    });
+                }
+                for &(side, r) in &dock_rects {
+                    let dock_bounds = to_window_space(r);
+                    for s in
+                        divider_strips(workspace.docks().get(side).tree(), r, DIVIDER_HIT_WIDTH)
+                    {
+                        strips.push(StripSpec {
+                            rect: s.rect,
+                            axis: s.orientation,
+                            target: DividerDragTarget::DockTree {
+                                side,
+                                address: s.address,
+                            },
+                            drag_bounds: dock_bounds,
+                        });
+                    }
+                }
+                let area_bounds = to_window_space(area);
+                for e in dock_edge_strips(&dock_rects, DIVIDER_HIT_WIDTH) {
+                    strips.push(StripSpec {
+                        rect: e.rect,
+                        axis: e.orientation,
+                        target: DividerDragTarget::DockEdge { side: e.side },
+                        drag_bounds: area_bounds,
+                    });
+                }
+            }
+            // Each visible dock carries its own tile layout plus its
+            // tree's focused tile (the ring shows on the focused dock's
+            // focused tile only — still at most one ring per workspace,
+            // region-gated below).
+            let dock_cells: Vec<DockCell> = dock_rects
+                .into_iter()
+                .map(|(side, r)| {
+                    let dock_tree = workspace.docks().get(side).tree();
+                    (side, r, dock_tree.layout(r), dock_tree.focused())
+                })
+                .collect();
+            (
+                workspace.region(),
+                tree.focused(),
+                tree_area,
+                tree.layout(tree_area),
+                dock_cells,
+                strips,
+            )
+        };
+
+        // The active drop target's zone highlight (tile-drag task): the
+        // SAME resolution core the drop itself uses
+        // (`tiling::resolve_drop_target` — post-merge review cleanup 8:
+        // the first cut restated the dock-frame → dock-tile →
+        // dock-background → tree-tile order here by hand, and two copies
+        // of a targeting rule is how a highlight drifts from the drop it
+        // promises), fed the rects the single layout pass above just
+        // produced — no second layout, no I/O, and no allocation (the
+        // core takes a borrowed iterator), per the render-discipline
+        // constraint. An edge zone highlights the half of the target tile
+        // the insert would occupy, center the whole tile, a dock
+        // background the dock's frame. What stays HERE, on top of the
+        // core, is the Workspace-side no-op filtering — targets whose
+        // drop the verbs would refuse paint nothing, because
+        // highlighting them would promise a rearrangement that won't
+        // happen: the dragged tile itself (self-drops are recorded
+        // no-ops for every zone), and the background of the dock the
+        // tile already lives in (defensive — an occupied dock's tiles
+        // cover its whole frame, so this is unreachable in practice).
+        let drop_highlight: Option<Rect> = self
+            .tile_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .and_then(|drag| {
+                let sx = drag.cursor.0 - sidebar::WIDTH;
+                let sy = drag.cursor.1 - toolbar_height;
+                let dragged = drag.tile;
+                let target = crate::tiling::resolve_drop_target(
+                    dock_cells
+                        .iter()
+                        .map(|(side, r, tiles, _)| (*side, *r, tiles.as_slice())),
+                    &rects,
+                    sx,
+                    sy,
+                )?;
+                match target {
+                    (DropTarget::Tile { id, .. }, _) if id == dragged => None,
+                    (DropTarget::Tile { id: _, zone }, tr) => Some(drop_highlight_rect(tr, zone)),
+                    (DropTarget::DockBackground { side }, frame) => {
+                        let already_here = self
+                            .services
+                            .workspaces
+                            .active()
+                            .docks()
+                            .get(side)
+                            .tree()
+                            .contains(dragged);
+                        (!already_here).then_some(frame)
+                    }
+                }
+            });
+
+        // The shared tile chrome — identical for tree tiles and docked
+        // tiles (a docked tile is the same kind of tile, just parked): 1px
+        // inset, themed background, `primary` 2px ring on the one focused
+        // tile, mono placeholder label. At most one tile per workspace
+        // shows the focused ring: the main tree's focused tile only counts
+        // as focused while `region == Main`, and a dock tile only when
+        // focus lives in that dock AND the dock's own tree has it focused
+        // (dock-trees task — a dock holds many tiles, one ring).
+        let tile_cell = |id: crate::tiling::TileId,
+                         r: Rect,
+                         is_focused: bool,
+                         view: Option<AnyView>,
+                         cx: &App| {
+            div()
+                .absolute()
+                .left(px(r.x + 1.0))
+                .top(px(r.y + 1.0))
+                .w(px((r.w - 2.0).max(0.0)))
+                .h(px((r.h - 2.0).max(0.0)))
+                .bg(cx.theme().background)
+                .border_color(if is_focused {
+                    cx.theme().primary
+                } else {
+                    cx.theme().border
+                })
+                .when(is_focused, |el| el.border_2())
+                .when(!is_focused, |el| el.border_1())
+                .overflow_hidden()
+                .map(|el| match view {
+                    Some(view) => el.child(view),
+                    None => el
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .font_family(fonts::MONO)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("tile {}", id.0)),
+                })
+        };
+
+        // Fixed-size (not `size_full`) so it never competes with the
+        // sidebar/status bar for space: the tile tree is laid out over
+        // exactly this rect above, and the container must match.
+        let mut surface = div()
+            .relative()
+            .w(px(tile_width))
+            .h(px(content_height))
+            .flex_none();
+
+        // The focused tile's rect, in window space (`to_window_space`),
+        // for the command line strip (§3.4): it paints along that tile's
+        // bottom edge, not the surface's, so it must follow focus into a
+        // dock exactly like the focused ring does. Captured from the same
+        // per-tile `is_focused` computed in the loops below rather than a
+        // second lookup — `region`/`focused`/`dock_cells` already say
+        // which tile, if any, is the one ring shows.
+        let mut focused_rect: Option<Rect> = None;
+        if rects.is_empty() {
+            // The empty hint fills the *tree's* remaining area (not the
+            // whole surface — visible docks keep their columns), so it is
+            // its own absolutely-positioned, internally-centered child
+            // rather than turning the surface itself into a flex row.
+            //
+            // State-aware (review nit): while a dock holds focus, a split
+            // lands in the *dock's* tree (dock-trees task), so advertising
+            // ctrl+h/ctrl+v as the way to fill the empty main area would
+            // be misleading advice; name the move-back chord for the
+            // focused dock instead, in the same physical-key spelling the
+            // dock hints use (the user presses ctrl+shift+[; the binding
+            // is spelled `ctrl+{` — see BUILTIN_KEYMAP's doc comment).
+            // "the focused docked tile": a dock can hold several tiles
+            // now, and the chord moves exactly the one its tree has
+            // focused, one per press.
+            let (hint, selector) = match region {
+                crate::tiling::FocusRegion::Main => {
+                    ("ctrl+h / ctrl+v to open a tile", "empty-hint")
+                }
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left) => (
+                    "ctrl+shift+[ moves the focused docked tile back here",
+                    "empty-hint-return-left",
+                ),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Right) => (
+                    "ctrl+shift+] moves the focused docked tile back here",
+                    "empty-hint-return-right",
+                ),
+                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Bottom) => (
+                    "ctrl+shift+/ moves the focused docked tile back here",
+                    "empty-hint-return-bottom",
+                ),
+            };
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(tree_area.x))
+                    .top(px(tree_area.y))
+                    .w(px(tree_area.w))
+                    .h(px(tree_area.h))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            // Test-only hook (no-op outside test/test-support
+                            // builds): lets a `#[gpui::test]` confirm this branch
+                            // actually painted via `VisualTestContext::debug_bounds`
+                            // — gpui's test API has no way to inspect painted text
+                            // content itself, so this is the closest honest check
+                            // available for "the hint painted".
+                            .debug_selector(|| selector.to_string())
+                            .text_color(cx.theme().muted_foreground)
+                            .child(hint),
+                    ),
+            );
+        } else {
+            for (id, r) in rects {
+                let is_focused = region == crate::tiling::FocusRegion::Main && focused == Some(id);
+                if is_focused {
+                    focused_rect = Some(to_window_space(r));
+                }
+                let view = self.occupants.get(&id).map(|o| o.view.clone());
+                surface = surface.child(
+                    tile_cell(id, r, is_focused, view, cx)
+                        // Click-to-focus is a convenience: keyboard (hjkl)
+                        // remains the primary path through the same
+                        // `Workspace::focus_main_tile` seam — a click on a
+                        // tree tile also returns the region to Main, and
+                        // both region and focus persist, so the session
+                        // goes dirty like any workspace-mutating dispatch.
+                        // With the configured mod key held, the same
+                        // mouse-down instead arms a pending tile drag
+                        // (tile-drag task) — and deliberately does NOT
+                        // focus: see `try_arm_tile_drag` / `TileDrag`.
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                                // Any tile mouse-down cancels an open
+                                // command line first, unconditionally
+                                // (fix round 1, finding 2 —
+                                // `cancel_command_line`'s own doc
+                                // comment): this is the fast, explicit
+                                // path for the one focus-stealing surface
+                                // that is itself a tile click. The
+                                // render-time check (I1, final review —
+                                // see the comment just above
+                                // `ensure_occupants`'s drag-cancel
+                                // neighbours) is the generic backstop
+                                // that also covers surfaces that are NOT
+                                // a tile mouse-down (the sidebar's
+                                // workspace switch, the toolbar's filter
+                                // field) — this call just means a tile
+                                // click doesn't wait a frame for that
+                                // backstop to notice. Together they keep
+                                // "the focused tile IS the line's tile,
+                                // whenever it's open" an invariant — see
+                                // the comment where the strip is painted,
+                                // below.
+                                view.cancel_command_line(window, cx);
+                                if view.try_arm_tile_drag(id, event, cx) {
+                                    return;
+                                }
+                                if view.services.workspaces.active_mut().focus_main_tile(id) {
+                                    view.session_dirty = true;
+                                }
+                                // An occupant may track its own
+                                // `FocusHandle` (the recording module does
+                                // — `RecordingView` — and `DataTable` will
+                                // too) and take focus with this
+                                // mouse-down; without re-arming the same
+                                // restore `apply_reload` uses, the shell
+                                // root would never get focus back and
+                                // every shell chord would go dead (§3.3).
+                                view.pending_focus_restore = true;
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+        }
+
+        // The docks, painted with the identical chrome (dock-trees task:
+        // each visible dock lays its own tree's tiles into its frame —
+        // same `tile_cell`, click-to-focus included; a click focuses that
+        // tile *within* the dock's tree AND moves the region there). A
+        // visible but empty dock renders a centered muted hint naming the
+        // *physical* keys that would move a tile into it (the user presses
+        // ctrl+shift+[ even though the binding is spelled `ctrl+{` — see
+        // BUILTIN_KEYMAP's doc comment).
+        for (side, r, dock_tiles, dock_focused) in dock_cells {
+            if !dock_tiles.is_empty() {
+                for (id, tr) in dock_tiles {
+                    let is_focused = region == crate::tiling::FocusRegion::Dock(side)
+                        && dock_focused == Some(id);
+                    if is_focused {
+                        focused_rect = Some(to_window_space(tr));
+                    }
+                    // Same mod+down drag-arming branch as the tree tiles
+                    // above — a docked tile is the same kind of tile, and
+                    // drags work from any source region.
+                    let view = self.occupants.get(&id).map(|o| o.view.clone());
+                    surface = surface.child(tile_cell(id, tr, is_focused, view, cx).on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, event: &MouseDownEvent, window, cx| {
+                            // Same command-line cancel as the tree-tile
+                            // listener above, and for the identical
+                            // reason (fix round 1, finding 2).
+                            view.cancel_command_line(window, cx);
+                            if view.try_arm_tile_drag(id, event, cx) {
+                                return;
+                            }
+                            if view
+                                .services
+                                .workspaces
+                                .active_mut()
+                                .focus_dock_tile(side, id)
+                            {
+                                view.session_dirty = true;
+                            }
+                            // Docked tiles get real occupants too (a
+                            // focus-tracking occupant like the recording
+                            // module can steal focus on this same
+                            // mouse-down) — re-arm the identical restore
+                            // the tree-tile listener above uses (§3.3).
+                            view.pending_focus_restore = true;
+                            cx.notify();
+                        }),
+                    ));
+                }
+            } else {
+                let (hint, selector) = match side {
+                    crate::tiling::DockSide::Left => {
+                        ("ctrl+shift+[ moves a tile here", "dock-empty-hint-left")
+                    }
+                    crate::tiling::DockSide::Right => {
+                        ("ctrl+shift+] moves a tile here", "dock-empty-hint-right")
+                    }
+                    crate::tiling::DockSide::Bottom => {
+                        ("ctrl+shift+/ moves a tile here", "dock-empty-hint-bottom")
+                    }
+                };
+                surface = surface.child(
+                    div()
+                        .absolute()
+                        .left(px(r.x + 1.0))
+                        .top(px(r.y + 1.0))
+                        .w(px((r.w - 2.0).max(0.0)))
+                        .h(px((r.h - 2.0).max(0.0)))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().muted_foreground)
+                        .child(div().debug_selector(|| selector.to_string()).child(hint)),
+                );
+            }
+        }
+
+        // The divider strips (drag-splitters task), painted after — so
+        // above — every tile and dock cell: transparent hit areas
+        // `DIVIDER_HIT_WIDTH` wide centered on each draggable boundary,
+        // each carrying a 2px line that lights up `primary` on hover (and
+        // stays lit on the strip being dragged, whose cursor may be far
+        // away mid-drag). `.occlude()` is what makes a strip's mouse-down
+        // win over the click-to-focus listener of the tile edges it
+        // overlaps: an occluding hitbox removes everything painted below
+        // it from the hover chain, so the tile's own `on_mouse_down`
+        // (hover-gated by gpui) never fires — same mechanism
+        // gpui-component's `ResizeHandle` relies on. The mouse-down only
+        // *records* the drag; the moves are handled by the full-window
+        // drag catcher near the end of this method, because a fast drag
+        // leaves this thin strip immediately (the capture problem).
+        for (i, spec) in strips.into_iter().enumerate() {
+            let StripSpec {
+                rect: r,
+                axis,
+                target,
+                drag_bounds,
+            } = spec;
+            let is_active = self
+                .divider_drag
+                .as_ref()
+                .is_some_and(|drag| drag.target == target);
+            let line = div()
+                .group_hover(DIVIDER_GROUP, |s| s.bg(cx.theme().primary))
+                .when(is_active, |el| el.bg(cx.theme().primary))
+                .map(|el| match axis {
+                    Orientation::Horizontal => el.w(px(2.0)).h_full(),
+                    Orientation::Vertical => el.h(px(2.0)).w_full(),
+                });
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(r.x))
+                    .top(px(r.y))
+                    .w(px(r.w))
+                    .h(px(r.h))
+                    .occlude()
+                    .group(DIVIDER_GROUP)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .map(|el| match axis {
+                        Orientation::Horizontal => el.cursor_col_resize(),
+                        Orientation::Vertical => el.cursor_row_resize(),
+                    })
+                    // Test-only hook (no-op outside test builds), same
+                    // honest-limitation story as the empty hints above:
+                    // lets a `#[gpui::test]` confirm strips painted (or
+                    // didn't — fullscreen) via `debug_bounds`.
+                    .debug_selector(|| format!("divider-strip-{i}"))
+                    // Recorded interaction with the tile-drag gesture: a
+                    // mod+mouse-down landing within the 8px strip starts a
+                    // divider RESIZE, never a tile drag — the strip
+                    // occludes the tile body it overlaps and this handler
+                    // checks no modifiers. Deterministic and accepted: a
+                    // mod+drag aimed within ~4px of a tile's edge grabs
+                    // the divider instead of the tile.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |view, _event, _window, cx| {
+                            view.divider_drag = Some(DividerDrag {
+                                target: target.clone(),
+                                bounds: drag_bounds,
+                                axis,
+                                // Pin the workspace era the drag belongs
+                                // to (read at mouse-down, not paint): a
+                                // mod+N switch mid-drag cancels rather
+                                // than retargeting — see `DividerDrag`.
+                                epoch: view.services.workspaces.switch_epoch(),
+                                moved: false,
+                            });
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(line),
+            );
+        }
+
+        // The zone highlight (tile-drag task), painted after — so above —
+        // every tile, dock cell, and divider strip: a translucent
+        // theme-primary wash over exactly the area the drop would occupy.
+        // Instant, no animation; no handlers and no `.occlude()`, so it
+        // never competes for the mouse events the tile-drag catcher below
+        // owns. `primary.opacity(0.2)` is the established translucent-
+        // accent pattern (sidebar workspace pill, keybindings match
+        // highlight), not a raw color.
+        if let Some(hr) = drop_highlight {
+            surface = surface.child(
+                div()
+                    .absolute()
+                    .left(px(hr.x))
+                    .top(px(hr.y))
+                    .w(px(hr.w))
+                    .h(px(hr.h))
+                    .bg(cx.theme().primary.opacity(0.2))
+                    // Test hook, same honest-limitation story as the
+                    // divider strips': painted-or-not via `debug_bounds`.
+                    .debug_selector(|| "tile-drop-highlight".to_string()),
+            );
+        }
+
+        let active_index = self.services.workspaces.active_index();
+        let non_empty = self.services.workspaces.non_empty_indices();
+        let reload_message = self.last_reload.status_message();
+        let status_bar = status::status_bar(
+            self.matcher.pending(),
+            self.matcher.count(),
+            reload_message.as_deref(),
+            self.restart_required.as_deref(),
+            self.data_status.as_deref(),
+            self.services.theme.active_name(),
+            cx,
+        );
+        let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
+        // Computed once per frame (§4.4) rather than read field-by-field
+        // from inside `toolbar::toolbar` — the frame is an entity, and this
+        // is the one place `render` already has `cx` in hand to read it.
+        let readout = self.frame.read(cx).readout();
+        let toolbar = toolbar::toolbar(&self.filter_input, &readout, cx);
+
+        let body = h_flex()
+            .w_full()
+            .h(px(content_height))
+            .flex_none()
+            .child(sidebar)
+            .child(surface);
+
+        let width = f32::from(viewport.width);
+        let viewport_height = f32::from(viewport.height);
+
+        // Which-key hint (Task 8): only computed while a sequence is
+        // actually pending — `continuations` over an empty `pending` would
+        // be well-defined (every binding "strictly extends" it) but the
+        // overlay has nothing to say when no sequence is in flight, so it
+        // must not appear then. Display-only: this reads `self.matcher`
+        // without touching it, so it can never affect what `handle_key_down`
+        // does with the next keystroke.
+        //
+        // M10 (3b final review): this same gate also hides `whichkey::
+        // render`'s count row for a *bare* count (e.g. `4` with no chord
+        // typed yet), since a bare count leaves `pending` empty. Spec §3.3
+        // describes the overlay appearing "after a held prefix"; the
+        // reading chosen here is that a bare count alone is not yet a held
+        // prefix — nothing is "held" until a key extends it into an actual
+        // sequence — so the overlay stays hidden and the status bar (a
+        // separate reading: it always has a count to show, held-prefix or
+        // not) is where a bare count surfaces instead.
+        let pending = self.matcher.pending();
+        let which_key_continuations = (!pending.is_empty()).then(|| {
+            whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
+        });
+        let registry = &self.services.registry;
+
+        // Task 9 instant-modal redesign: clone the two cheap pieces
+        // (`title`: `SharedString`, `build`: `Rc<dyn Fn>`) out of `self.
+        // modal` up front — the same "extract into a local ahead of the
+        // render chain" move `pending`/`registry` just above already make,
+        // one field further in. See `ShellModal`'s own doc comment for why
+        // this step is required rather than just reading `self.modal.
+        // as_ref()` inline inside the `when_some` below.
+        let modal = self
+            .modal
+            .as_ref()
+            .map(|modal| (modal.title.clone(), modal.build.clone()));
+
+        // Extracted ahead of the render chain like `modal` above: all the
+        // drag catcher below needs from the active drag is which resize
+        // cursor to show — the drag itself is applied through
+        // `apply_divider_drag`, which re-reads `self.divider_drag` per
+        // event.
+        let drag_axis = self.divider_drag.as_ref().map(|drag| drag.axis);
+
+        // Extracted the same way for the tile-drag catcher and ghost: the
+        // catcher exists from arm (so it can see the threshold-crossing
+        // moves), the ghost only once the drag is active.
+        let tile_drag_armed = self.tile_drag.is_some();
+        let tile_drag_ghost = self
+            .tile_drag
+            .as_ref()
+            .filter(|drag| drag.active)
+            .map(|drag| drag.cursor);
+
+        v_flex()
+            .size_full()
+            .relative()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(Self::handle_key_down))
+            // Root-level left-release fallback (post-merge review BUG 1,
+            // extended to divider drags by the fix-round should-fix):
+            // ends a drag of either kind whose release landed in the
+            // arm-to-first-paint gap, before its catcher's own up
+            // handlers exist — see `heal_drags_on_root_release`'s doc
+            // comment for the full mechanism, the four modality×state
+            // combinations, and why BOTH listeners are needed
+            // (`on_mouse_up` is bubble-phase and hover-gated,
+            // `on_mouse_up_out` capture-phase and NOT-hovered-gated;
+            // input modality and occluding overlays flip which one
+            // fires, and together they cover every left release).
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _event, _window, cx| {
+                    view.heal_drags_on_root_release(cx);
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _event, _window, cx| {
+                    view.heal_drags_on_root_release(cx);
+                }),
+            )
+            .bg(cx.theme().background)
+            .text_color(cx.theme().foreground)
+            .child(toolbar)
+            .child(body)
+            .child(status_bar)
+            // The divider drag catcher (drag-splitters task): while a drag
+            // is active, a transparent full-window layer above the tiles
+            // and status bar (but below the palette/modal overlays, which
+            // cancel drags anyway — see the guard at the top of `render`)
+            // owns every mouse-move and mouse-up until the button is
+            // released. This is the capture mechanism: a fast drag leaves
+            // the thin strip immediately, and gpui's element-level
+            // `on_mouse_move` is hover-gated — but this layer's hitbox IS
+            // the whole window, so hover-gating is satisfied wherever the
+            // cursor goes (the div-composition equivalent of the
+            // window-level `window.on_mouse_event` listeners Zed's own
+            // pane-resize custom element registers in paint). `.occlude()`
+            // also suppresses tile hover/click behavior for the drag's
+            // duration, and the layer carries the axis resize cursor so
+            // the pointer keeps its col/row-resize shape even while it's
+            // off the strip — the same effect as Zed's
+            // `set_window_cursor_style` during a handle drag. Mouse-up out
+            // of the window (capture-phase `on_mouse_up_out`) and a move
+            // arriving with the button no longer pressed (a missed
+            // release) both end the drag too, so it can never get stuck.
+            .when_some(drag_axis, |el, axis| {
+                el.child(
+                    div()
+                        .id("divider-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .map(|el| match axis {
+                            Orientation::Horizontal => el.cursor_col_resize(),
+                            Orientation::Vertical => el.cursor_row_resize(),
+                        })
+                        .debug_selector(|| "divider-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            // Post-merge review BUG 4 (platform-uniform
+                            // rule, shared with the tile catcher below —
+                            // see its comment for the verified platform
+                            // evidence): only a BUTTONLESS move is the
+                            // lost-release finish; a move reporting a
+                            // non-Left button is a chorded second button
+                            // and is ignored entirely.
+                            match event.pressed_button {
+                                None => {
+                                    // The release happened where we
+                                    // couldn't see it — treat the first
+                                    // buttonless move as the mouse-up.
+                                    view.finish_divider_drag(cx);
+                                }
+                                Some(MouseButton::Left) => {
+                                    if view.apply_divider_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                    ) {
+                                        cx.notify();
+                                    }
+                                }
+                                Some(_) => {}
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, _window, cx| {
+                                view.finish_divider_drag(cx);
+                            }),
+                        ),
+                )
+            })
+            // The tile-drag catcher (tile-drag task): the same full-window
+            // capture mechanism as the divider catcher above — while a
+            // drag is armed or active, a transparent occluding layer owns
+            // every mouse-move and the release, wherever the cursor goes.
+            // Its `.occlude()` is also what keeps the divider strips (and
+            // tile click-to-focus, and strip hover styling) from fighting
+            // an in-flight tile drag: the catcher is painted after the
+            // whole tile surface, so everything under it leaves the hover
+            // chain for the drag's duration. The two catchers can never
+            // coexist — each drag kind's mouse-down is unreachable while
+            // the other's catcher occludes the window (and
+            // `try_arm_tile_drag` checks anyway). A move arriving with
+            // the button no longer pressed cancels with nothing applied
+            // — see `TileDrag`'s doc for why that differs from the
+            // divider catcher's finish. `on_mouse_up_out` routes through
+            // the DROP, not a cancel (review blocker fix): gpui's
+            // input-modality hover suppression means it fires for a
+            // perfectly ordinary in-window release whenever a keystroke
+            // was the last input — a KeyDown sets the window's
+            // `last_input_modality` to Keyboard (pinned window.rs,
+            // `dispatch_event`), a MouseUp does NOT reset it, and
+            // `HitboxId::is_hovered` returns false under keyboard
+            // modality, which flips the hovered-gated `on_mouse_up` off
+            // and the `!is_hovered`-gated `on_mouse_up_out` on. The
+            // keyboard is documented hot mid-drag, so "press any key,
+            // release without moving" is a real user path and must drop,
+            // not silently cancel. A genuinely outside-window release
+            // still applies nothing through this route:
+            // `locate_drop_target` has no target at a position outside
+            // every tile and dock, and a no-target drop is a no-op.
+            .when(tile_drag_armed, |el| {
+                el.child(
+                    div()
+                        .id("tile-drag-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .occlude()
+                        .cursor_grabbing()
+                        .debug_selector(|| "tile-drag-catcher".to_string())
+                        .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, _window, cx| {
+                            // Post-merge review BUG 4 (recorded decision +
+                            // platform evidence): the old
+                            // `pressed_button != Some(Left)` test made
+                            // this catcher platform-divergent. macOS
+                            // translates NSRightMouseDragged /
+                            // NSOtherMouseDragged into MouseMoveEvents
+                            // whose `pressed_button` is that button
+                            // (`gpui_macos/src/events.rs`, the
+                            // `*MouseDragged` arm — buttonNumber mapped
+                            // verbatim, no left-first normalization), so
+                            // pressing a second button mid-drag CANCELLED
+                            // here; Windows' WM_MOUSEMOVE translation
+                            // (`gpui_windows/src/events.rs`,
+                            // `handle_mouse_move_msg`) checks MK_LBUTTON
+                            // first, so the same chord SURVIVED there.
+                            // Unified rule: only a BUTTONLESS move is the
+                            // lost-release cancel (every platform reports
+                            // `None` once all buttons are up); a move
+                            // reporting a non-Left button is a chorded
+                            // second press and is IGNORED — it neither
+                            // advances the drag (its position belongs to
+                            // another button's stream) nor cancels it.
+                            match event.pressed_button {
+                                None => {
+                                    view.cancel_tile_drag();
+                                    cx.notify();
+                                }
+                                Some(MouseButton::Left) => {
+                                    view.update_tile_drag(
+                                        f32::from(event.position.x),
+                                        f32::from(event.position.y),
+                                        cx,
+                                    );
+                                }
+                                Some(_) => {}
+                            }
+                        }))
+                        .on_mouse_up(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        )
+                        .on_mouse_up_out(
+                            MouseButton::Left,
+                            cx.listener(|view, event: &MouseUpEvent, window, cx| {
+                                view.finish_tile_drag(
+                                    f32::from(event.position.x),
+                                    f32::from(event.position.y),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ),
+                )
+            })
+            // The drag ghost (tile-drag task): a lightweight fixed-size
+            // outline following the cursor — deliberately NOT a copy of
+            // the tile content (see TILE_DRAG_GHOST_SIZE's recorded
+            // choice). Painted above the catcher; a plain div with no
+            // handlers and no `.occlude()`, so it can never swallow the
+            // catcher's events even when the cursor overlaps it.
+            .when_some(tile_drag_ghost, |el, (gx, gy)| {
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(gx + TILE_DRAG_GHOST_OFFSET))
+                        .top(px(gy + TILE_DRAG_GHOST_OFFSET))
+                        .w(px(TILE_DRAG_GHOST_SIZE.0))
+                        .h(px(TILE_DRAG_GHOST_SIZE.1))
+                        .border_2()
+                        .border_color(cx.theme().primary)
+                        .debug_selector(|| "tile-drag-ghost".to_string()),
+                )
+            })
+            // The per-tile command line (§3.4): a one-line strip along
+            // the focused tile's bottom edge, plus a completions popup
+            // above it. Painted at `focused_rect` — the WORKSPACE's own
+            // notion of the focused tile, computed in the loops above —
+            // rather than by looking up `self.command_line.tile`'s own
+            // rect. That is only correct because "the focused tile IS
+            // `command_line.tile`, for as long as the line is open" is an
+            // invariant, not a coincidence — but (I1, final review) a
+            // tile mouse-down is NOT the only other way it could move:
+            // keyboard input can't (the command-line branch in
+            // `handle_key_down` intercepts every key ahead of the matcher
+            // and every workspace action), and both tile mouse-down
+            // handlers (tree and dock, above) cancel an open command line
+            // before acting on their click — but the sidebar's
+            // workspace-switch mouse-down changes the active workspace's
+            // own focused tile without touching either of those, and a
+            // click into the toolbar's `filter_input` steals keyboard
+            // focus without touching the workspace at all. The generic
+            // check at the top of render (see its own doc comment, just
+            // above `ensure_occupants`'s drag-cancel neighbours) closes
+            // both, so by the time this runs `command_line` is `None`
+            // whenever the tile it named is no longer the workspace's
+            // focused one. Painted only while both a line is open AND
+            // that tile still has a rect this frame (a tile can close
+            // out from under an open line — `ensure_occupants` above
+            // already drops the occupant; `handle_command_line_key`'s own
+            // `None` arms handle the same race for dispatch, this is
+            // render's twin).
+            .when_some(
+                self.command_line.as_ref().zip(focused_rect),
+                |el, (line, rect)| {
+                    el.child(commandline_view::render(
+                        line,
+                        &self.command_input,
+                        rect,
+                        cx,
+                    ))
+                },
+            )
+            // The palette overlay paints above the tiles/status bar (later
+            // children paint above earlier siblings) but below gpui-
+            // component's own dialog/notification layers below.
+            .when_some(self.palette.as_ref(), |el, state| {
+                // Row click -> select (no dispatch — Enter still
+                // dispatches, via `handle_palette_key`): a small `Clone`-
+                // able closure over a `WeakEntity<Self>`, not `cx.listener`
+                // directly (its returned `impl Fn` isn't itself `Clone`,
+                // and `palette::render` clones this once per row to close
+                // over each row's own index — see that function's doc
+                // comment) — this way building it costs one stack closure,
+                // not a heap allocation per row, per frame, while the
+                // palette is open (PHILOSOPHY.md: "per-frame heap churn is
+                // a defect").
+                let weak = cx.entity().downgrade();
+                let on_row_click = move |idx: usize, _window: &mut Window, cx: &mut App| {
+                    let _ = weak.update(cx, |view, cx| {
+                        if let Some(palette) = view.palette.as_mut() {
+                            palette.set_selected(idx);
+                        }
+                        view.sync_palette_scroll();
+                        cx.notify();
+                    });
+                };
+                let panel = palette::render(
+                    state,
+                    &self.palette_scroll,
+                    &self.palette_input,
+                    on_row_click,
+                    width,
+                    viewport_height,
+                    cx,
+                );
+                // Click-outside dismiss: a transparent (no dimming — the
+                // palette is an overlay, not a modal) full-window click-
+                // catcher behind the panel. Precedent: `dialog::
+                // render_modal`'s own backdrop, minus the `.bg(overlay)`
+                // dimming a real modal wants and this doesn't. The panel
+                // itself stops propagation on its own `on_mouse_down` (see
+                // `palette::render`'s doc comment), so a click landing
+                // anywhere inside it — a row, the query input, empty space
+                // — never also reaches this catcher's handler below.
+                el.child(
+                    div()
+                        .id("palette-click-catcher")
+                        .absolute()
+                        .left(px(0.))
+                        .top(px(0.))
+                        .w(px(width))
+                        .h(px(viewport_height))
+                        .debug_selector(|| "palette-click-catcher".to_string())
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|view, _event, window, cx| {
+                                view.close_palette(window, cx);
+                            }),
+                        )
+                        .child(panel),
+                )
+            })
+            // The modal overlay paints above the palette (later children
+            // paint above earlier siblings) but still below gpui-
+            // component's own dialog/notification layers below — Task 9
+            // instant-modal redesign, see `dialog`'s module doc. `palette`
+            // is always `None` by the time `modal` is `Some`
+            // (`open_shell_dialog` closes it on open), so this and the
+            // block above never both add a child in the same frame, but
+            // the ordering here is what would govern it if that ever
+            // changed.
+            .when_some(modal, |el, (title, build)| {
+                let content = build(self, window, cx);
+                el.child(dialog::render_modal(
+                    title,
+                    content,
+                    width,
+                    viewport_height,
+                    cx,
+                ))
+            })
+            // Painted after (so above) the modal for the same reason as the
+            // modal-vs-palette ordering above: never both `Some` in the same
+            // frame, but the ordering here is what would govern it if that
+            // ever changed. This one, though, is a real invariant rather
+            // than an incidental one — while the modal is open, `self.
+            // matcher` can never go pending at all: `open_shell_dialog`
+            // cancels it on open, and `handle_key_down`'s modal branch
+            // returns before ever reaching `self.matcher.press` for as long
+            // as `self.modal` stays `Some`, so `which_key_continuations`
+            // (computed from `self.matcher.pending()`, just above) is always
+            // `None` whenever `modal` is `Some`.
+            .when_some(which_key_continuations, |el, continuations| {
+                el.child(whichkey::render(
+                    &continuations,
+                    self.matcher.count(),
+                    registry,
+                    width,
+                    status::HEIGHT,
+                    cx,
+                ))
+            })
+            // The frame-time readout (spec §7.4, `perf::toggle_overlay`),
+            // painted above every other shell layer — a diagnostic that
+            // must stay visible while the palette/modal/which-key it might
+            // be measuring are up. Top-right, clear of the which-key panel
+            // (bottom-right) and the status bar. No handlers, no timer:
+            // it repaints only when something else invalidates the window,
+            // showing values as-of the last invalidation (see
+            // `perf_overlay`'s module doc for why that's deliberate).
+            .when(self.perf_overlay, |el| {
+                el.child(perf_overlay::render(
+                    &self.perf,
+                    &self.frame.read(cx).requery,
+                    toolbar_height,
+                    cx,
+                ))
+            })
+            // ShellView is the first-level view Root wraps; Root's own
+            // Render impl does not paint these overlay layers itself, so
+            // whoever it wraps must (spec: gpui-component usage.md "Overlay
+            // Layers"). Task 6's palette/dialogs need this in place now.
+            .children(Root::render_dialog_layer(window, cx))
+            .children(Root::render_notification_layer(window, cx))
+    }
+}

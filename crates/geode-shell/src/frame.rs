@@ -13,7 +13,9 @@ use crate::perf::RequeryStats;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::AsOf;
 use geode_core::scope::Scope;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use toml_edit::{DocumentMut, value};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -51,6 +53,16 @@ pub struct Frame {
     /// — observed off an entity-change notification — and does the actual
     /// background write with [`persist_slot_to_user_config`] (§4.2).
     pending_persist: Option<(u8, Vec<String>)>,
+    /// Lazy cache for [`readout`](Self::readout), keyed on `versions()`
+    /// (Phase 3c final review, deferred 3b M1): `render` calls `readout`
+    /// every frame (`shell/render.rs`), and building one fresh each time
+    /// allocates a `Vec<String>`, a `join`, and label `String`s for a
+    /// value that's almost always identical to the previous frame's.
+    /// `RefCell` because `readout` takes `&self` (every other read-only
+    /// accessor on `Frame` does) but still needs to update this cache;
+    /// `Rc<FrameReadout>` rather than an owned clone so a cache hit costs
+    /// a refcount bump, not a fresh `Vec`/`String` allocation.
+    readout_cache: RefCell<Option<(FrameVersions, Rc<FrameReadout>)>>,
 }
 
 impl Frame {
@@ -65,6 +77,7 @@ impl Frame {
             requery: RequeryStats::new(),
             user_dir,
             pending_persist: None,
+            readout_cache: RefCell::new(None),
         }
     }
 
@@ -103,9 +116,6 @@ impl Frame {
         let Some(previous) = self.previous_scope.take() else {
             return false;
         };
-        if previous == self.scope {
-            return false;
-        }
         self.scope = previous;
         self.versions.scope += 1;
         true
@@ -211,7 +221,23 @@ impl Frame {
         self.scope.and_then(tile)
     }
 
-    pub fn readout(&self) -> FrameReadout {
+    /// What the title bar shows (§4.4). Cached (see `readout_cache`'s
+    /// doc comment) keyed on `versions()`: a call with nothing changed
+    /// since the last one returns the exact same `Rc` — a refcount
+    /// bump, no `Vec`/`String` allocation — rather than rebuilding.
+    pub fn readout(&self) -> Rc<FrameReadout> {
+        let versions = self.versions();
+        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+            && *cached_versions == versions
+        {
+            return Rc::clone(cached);
+        }
+        let built = Rc::new(self.build_readout());
+        *self.readout_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
+        built
+    }
+
+    fn build_readout(&self) -> FrameReadout {
         let slot = self
             .active_slot
             .and_then(|n| self.slots.label(n).map(|l| (n, l)));
@@ -447,6 +473,36 @@ mod tests {
         assert_eq!(r.slot, Some((1, "book / lhu".to_string())));
         assert_eq!(r.scope, "book ∈ {3} · text \"spx\" · expr");
         assert_eq!(r.as_of.as_deref(), Some("2026-09-03 14:05"));
+    }
+
+    /// M1 (deferred from 3b, done here): `readout` must not rebuild
+    /// (allocate a fresh `Vec`/`String`s) when nothing has changed since
+    /// the last call — two calls with no mutation in between must return
+    /// the exact same cached `Rc`, not two equal-but-distinct ones.
+    #[test]
+    fn readout_is_rebuilt_only_when_versions_change() {
+        let mut f = Frame::new(slots(), None);
+        let r1 = f.readout();
+        let r2 = f.readout();
+        assert!(
+            Rc::ptr_eq(&r1, &r2),
+            "no mutation happened between the two calls: the second must \
+             reuse the first's cached Rc rather than rebuild"
+        );
+
+        f.set_active_slot(Some(1));
+        let r3 = f.readout();
+        assert!(
+            !Rc::ptr_eq(&r2, &r3),
+            "a real change (the active slot) must invalidate the cache"
+        );
+        assert_eq!(r3.slot, Some((1, "book / lhu".to_string())));
+
+        let r4 = f.readout();
+        assert!(
+            Rc::ptr_eq(&r3, &r4),
+            "stable again once nothing has changed since the last call"
+        );
     }
 
     #[test]
