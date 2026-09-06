@@ -501,6 +501,8 @@ that records `Instant::now() - render_started` at the end of
 `ShellView::render` and an overlay row for it — a small change, and the
 right instrument for the 8 ms pure-UI budget going forward. Until one
 of those is read, the `DataTable` swap is neither triggered nor
-cleared. Nothing in these readings shows a paint problem: the query
+cleared. Deferred on 2026-09-06: subjectively, holding `j` on the
+100-column `wide` view at 1M rows feels fast enough, so the
+render-duration histogram is a follow-up, not a blocker. Nothing in these readings shows a paint problem: the query
 halves (12 ms / 4.6 ms medians, 16.5 ms isolated) are the only
 end-to-end numbers so far, and they hold §7.1.
