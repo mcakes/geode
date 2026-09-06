@@ -34,6 +34,11 @@ use std::time::{Duration, Instant};
 /// (foundation §7.1's 50–200 ms affordance).
 const IN_FLIGHT_AFTER: Duration = Duration::from_millis(50);
 
+/// Spec §6.5's default for `[app] blotter.stale_after`, until Task 8
+/// reads the real config value. Exposed so `BlotterFactory::new`'s
+/// caller (`geode-app`) has a sensible value to pass before then.
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+
 pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::down", "Cursor down"),
     ("blotter::up", "Cursor up"),
@@ -71,6 +76,10 @@ pub struct BlotterTile {
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
     pub find_style: Rc<Cell<FindStyle>>,
+    /// `[app] blotter.stale_after` (spec §6.5; 15m default, read by the
+    /// app in Task 8) — carried in exactly like `find_style` so a config
+    /// reload can update every open tile without recreating it.
+    pub stale_after: Rc<Cell<Duration>>,
     table: Entity<TableState<BlotterDelegate>>,
     view_name: String,
     pin: Pin,
@@ -95,6 +104,7 @@ impl BlotterTile {
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
         find_style: Rc<Cell<FindStyle>>,
+        stale_after: Rc<Cell<Duration>>,
         restored: Option<&toml::Table>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -152,6 +162,7 @@ impl BlotterTile {
             data,
             views,
             find_style,
+            stale_after,
             table,
             view_name,
             pin,
@@ -659,7 +670,22 @@ impl BlotterTile {
                     self.find = Some(FindState::begin(self.find_style.get(), origin));
                 }
                 let style = self.find_style.get();
-                let texts = self.table.read(cx).delegate().shown_texts();
+                // Fzf narrows progressively: every keystroke must match
+                // against the full `visible` list (`set_narrowed`'s own
+                // domain), never against the previous keystroke's already-
+                // narrowed `shown` — otherwise the second keystroke's
+                // match positions land in the wrong domain and a
+                // shortened query can never widen the result back out
+                // (review round 1, Finding 1). Vim never narrows, so
+                // `shown` and `visible` agree for it either way; keep it
+                // on `shown_texts()` to match its own cursor-jump domain
+                // exactly (`cursor.to_row` elsewhere in this file always
+                // takes a position into `shown`).
+                let texts = if style == FindStyle::Fzf {
+                    self.table.read(cx).delegate().visible_texts()
+                } else {
+                    self.table.read(cx).delegate().shown_texts()
+                };
                 let find = self.find.as_mut().unwrap();
                 let hit = find.changed(&texts, &query);
                 let narrowed = find.narrowed.clone();
@@ -714,6 +740,20 @@ impl BlotterTile {
         t.insert("unscoped".into(), toml::Value::Boolean(self.unscoped));
         t
     }
+
+    /// Whether a per-dataset freshness reading (§6.5) is old enough to
+    /// warrant the header's stale marker, per this tile's configured
+    /// `stale_after` (review round 1, Finding 2: was a hardcoded 15m).
+    pub(crate) fn is_stale(&self, as_of: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> bool {
+        as_of
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .is_some_and(|t| {
+                now.signed_duration_since(t.with_timezone(&chrono::Utc))
+                    .to_std()
+                    .unwrap_or_default()
+                    > self.stale_after.get()
+            })
+    }
 }
 
 impl gpui::Render for BlotterTile {
@@ -726,7 +766,6 @@ impl gpui::Render for BlotterTile {
         }
         let theme = cx.theme();
         let frame = self.frame.read(cx);
-        let stale_after = Duration::from_secs(15 * 60);
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
 
@@ -782,16 +821,7 @@ impl gpui::Render for BlotterTile {
                     Some(t) => format!("{} {}", f.dataset, &t[11..16.min(t.len())]),
                     None => format!("{} —", f.dataset),
                 };
-                let stale = f
-                    .as_of
-                    .as_deref()
-                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .is_some_and(|t| {
-                        now.signed_duration_since(t.with_timezone(&chrono::Utc))
-                            .to_std()
-                            .unwrap_or_default()
-                            > stale_after
-                    });
+                let stale = self.is_stale(f.as_of.as_deref(), now);
                 header = header.child(
                     div()
                         .when(stale, |el| el.text_color(theme.warning))
@@ -964,6 +994,7 @@ mod tests {
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
                                 Rc::new(Cell::new(FindStyle::Vim)),
+                                Rc::new(Cell::new(DEFAULT_STALE_AFTER)),
                                 None,
                                 window,
                                 cx,
@@ -1234,6 +1265,26 @@ mod tests {
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
             vec![1, 2]
+        );
+        // Progressive narrowing (review round 1, Finding 1): the second
+        // keystroke must match against the un-narrowed `visible` list,
+        // not against the previous keystroke's already-narrowed `shown`
+        // — otherwise "l2"'s match position lands in the wrong domain.
+        h.tile
+            .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l2".into()), cx));
+        assert_eq!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
+            vec![2],
+            "narrows further to just L2, not L1"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.find(FindEvent::Changed("l".into()), cx));
+        assert_eq!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone()),
+            vec![1, 2],
+            "a shortened query widens back out, not stuck within the prior narrow"
         );
         h.tile.update(&mut cx, |t, cx| {
             t.find(FindEvent::Committed("l".into()), cx)

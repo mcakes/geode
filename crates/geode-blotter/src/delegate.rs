@@ -217,6 +217,28 @@ impl BlotterDelegate {
             .collect()
     }
 
+    /// The tree text of every *un-narrowed* visible row — the domain
+    /// `set_narrowed`'s positions are into. An fzf `/` session must match
+    /// against this on every keystroke rather than `shown_texts()`:
+    /// after the first narrow, `shown` is already the previous match
+    /// subset, so re-matching against it would return positions in that
+    /// subset's own index space, not in `visible`'s — silently narrowing
+    /// into the wrong rows and making backspace unable to widen back out
+    /// (review round 1, Finding 1).
+    pub fn visible_texts(&self) -> Vec<String> {
+        let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
+            return Vec::new();
+        };
+        self.visible
+            .iter()
+            .map(|&r| {
+                plan.tree_text(snapshot, r as usize)
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .collect()
+    }
+
     pub fn depth_bound(&self, grouping_len: usize) -> usize {
         depth_bound(&self.expansion, grouping_len)
     }
