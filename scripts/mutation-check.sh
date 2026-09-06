@@ -1507,6 +1507,20 @@ run_mutation "tile: a query error keeps the last snapshot" \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
+run_mutation "tile: fzf narrowing matches the un-narrowed list" \
+  crates/geode-blotter/src/tile.rs \
+  '                    self.table.read(cx).delegate().visible_texts()' \
+  '                    self.table.read(cx).delegate().shown_texts()' \
+  geode-blotter \
+  find_jumps_under_vim_and_narrows_under_fzf
+
+run_mutation "tile: the configured threshold is the one used" \
+  crates/geode-blotter/src/tile.rs \
+  '                    > self.stale_after.get()' \
+  '                    > Duration::from_secs(15 * 60)' \
+  geode-blotter \
+  a_tiles_stale_threshold_is_the_factorys_configured_value
+
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
   '        let w = self.cache.window();
