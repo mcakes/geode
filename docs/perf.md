@@ -473,19 +473,30 @@ zero.
 | reading | where read | value |
 | --- | --- | --- |
 | `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | **100 ms** (2026-09-06, after the `perf::reset` fix) |
+| same hold, p50 / max | overlay's p50 / max rows, same reading | 18 ms / 496 ms |
 
-**It is not under 8 ms — the swap trigger has tripped.** 100 ms is the
-histogram's top regular bucket (12 buckets per decade up to 100 ms, so
-this bucket spans roughly 83–100 ms), which means at least one frame in
-twenty during the hold cost that much. Key-repeat cadence cannot
-account for it: macOS repeats every 15–30 ms, and the initial repeat
-delay is one sample in forty-plus. Per the plan this is recorded as the
-result, not patched here; the `DataTable` swap Phase 3c deliberately
-left undone is now the open question.
+**It is not under 8 ms — the swap trigger has tripped, and the shape
+of the miss matters.** The p50 of 18 ms is one 60 Hz frame, so the
+steady per-frame cost of painting 40 × 100 cells is not the problem.
+The p95 of 100 ms is the histogram's top regular bucket (12 buckets per
+decade up to 100 ms, so roughly 83–100 ms): at least one frame in
+twenty during the hold cost that much. The max of 496 ms sits just
+under the 500 ms idle cutoff and is a single sample, most likely the
+initial key-repeat delay or one hitch. Key-repeat cadence cannot
+account for the p95: macOS repeats every 15–30 ms. A fine median with a
+one-in-twenty tail of ~90 ms says some piece of work runs every few
+frames, not every frame — that is the first thing to find. Per the plan
+this is recorded as the result, not patched here; the `DataTable` swap
+Phase 3c deliberately left undone is the open question, and it may be
+the wrong fix if the tail is periodic work outside the table.
 
-**Follow-up (open).** Before deciding on a swap, take three more
-readings, each after `perf::reset` and a fresh `j` hold: (1) the same
-hold on the `tree` view — if its p95 is near 8 ms the cost scales with
+**Follow-up (open).** Before deciding on a swap, find the periodic
+work: candidates are `visible_rows_changed` → `refill_window` when the
+window crosses a row (the delta fill is cheap, but the window-wide
+`any_determined` scan and glyph pass run on every crossing),
+`TableState`'s own column/width refresh, and gpui's uniform-list
+relayout. Then take three more readings, each after `perf::reset` and a
+fresh `j` hold: (1) the same hold on the `tree` view — if its p95 is near 8 ms the cost scales with
 column count and the suspect is `DataTable`'s per-cell element tree
 (`render_td` is a cache lookup, but the table still builds one element
 per visible cell per frame); if it is also high, the suspect is the
