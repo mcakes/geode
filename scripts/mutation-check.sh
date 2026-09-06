@@ -1712,6 +1712,9 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                             eprintln!("[data] {d}");
                         }
                     }
+                    // The picker that asks for this (spec §3.4) is not
+                    // wired up yet — a later Phase 4a task consumes it.
+                    DataEvent::Distinct(_) => {}
                 }
             });
             if handled.is_err() {
@@ -1763,6 +1766,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
                     }
                     None
                 }
+                DataEvent::Distinct(_) => None,
             };
             if let Some(outcome) = outcome {
                 let delivered = window.update(cx, |root, window, cx| {

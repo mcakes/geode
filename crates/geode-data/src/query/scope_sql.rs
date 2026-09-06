@@ -1109,10 +1109,16 @@ grain = "position"
 
     /// The Phase 4 §3.5 fixture: `book` is categorical and textual, and
     /// `risk_instrument_live` actually carries its ENUM type — twenty
-    /// books, `BK000` through `BK019`, one instrument row each. The
-    /// tempdir is deliberately leaked (not returned) so the fixture stays
-    /// a two-tuple as every call site below expects; the file lives for
-    /// the process lifetime, which a test run can afford.
+    /// plain books, `BK000` through `BK019`, plus three whose *value*
+    /// carries a LIKE special character (`BK_01`, `BK%02`, `BK\03`). The
+    /// escape clause only matters for a needle that can meet one of
+    /// those: none of BK000..BK019 does, which is why the first version
+    /// of this fixture let a mutation dropping `escape '\'` survive —
+    /// a fixture that cannot reach the defect, the class CLAUDE.md warns
+    /// about. One instrument row each. The tempdir is deliberately
+    /// leaked (not returned) so the fixture stays a two-tuple as every
+    /// call site below expects; the file lives for the process lifetime,
+    /// which a test run can afford.
     fn enum_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
         let mut ds = carried_dataset();
         for c in ds.columns.iter_mut() {
@@ -1126,13 +1132,21 @@ grain = "position"
         std::mem::forget(dir);
         store.apply_schema(&ds).unwrap();
         let conn = store.writer();
-        for i in 0..20 {
-            conn.execute(
-                "insert into risk_instrument_live
+        let insert = "insert into risk_instrument_live
                      (book, lhu, position_ref, counterparty, instrument_ref,
                       npv, currency, batch, source_file_id, gen_id, source_time)
-                 values (?, 'L', ?, 'C', ?, 1.0, 'USD', 'b', 1, 1, now())",
+                 values (?, 'L', ?, 'C', ?, 1.0, 'USD', 'b', 1, 1, now())";
+        for i in 0..20 {
+            conn.execute(
+                insert,
                 duckdb::params![format!("BK{i:03}"), format!("P{i}"), format!("I{i}")],
+            )
+            .unwrap();
+        }
+        for (n, book) in ["BK_01", "BK%02", "BK\\03"].into_iter().enumerate() {
+            conn.execute(
+                insert,
+                duckdb::params![book, format!("PS{n}"), format!("IS{n}")],
             )
             .unwrap();
         }
