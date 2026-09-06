@@ -472,9 +472,28 @@ zero.
 
 | reading | where read | value |
 | --- | --- | --- |
-| `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | not yet isolated (session p95 is dominated by inter-keystroke pauses; see above) |
+| `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | **100 ms** (2026-09-06, after the `perf::reset` fix) |
 
-Whether that p95 is under the 8ms pure-UI budget is the finding this
-row exists to produce. **If it is not under 8ms, that is itself the
-result** — record it as such rather than reaching for the `DataTable`
-swap this plan deliberately left undone; open a follow-up instead.
+**It is not under 8 ms — the swap trigger has tripped.** 100 ms is the
+histogram's top regular bucket (12 buckets per decade up to 100 ms, so
+this bucket spans roughly 83–100 ms), which means at least one frame in
+twenty during the hold cost that much. Key-repeat cadence cannot
+account for it: macOS repeats every 15–30 ms, and the initial repeat
+delay is one sample in forty-plus. Per the plan this is recorded as the
+result, not patched here; the `DataTable` swap Phase 3c deliberately
+left undone is now the open question.
+
+**Follow-up (open).** Before deciding on a swap, take three more
+readings, each after `perf::reset` and a fresh `j` hold: (1) the same
+hold on the `tree` view — if its p95 is near 8 ms the cost scales with
+column count and the suspect is `DataTable`'s per-cell element tree
+(`render_td` is a cache lookup, but the table still builds one element
+per visible cell per frame); if it is also high, the suspect is the
+cursor/scroll path shared by both views; (2) the `wide` hold's **p50**
+and **max**, to see whether 100 ms is the steady cost or a tail;
+(3) the `wide` hold with the perf overlay closed, in case the overlay's
+own repaint is part of the cost. Then profile one slow frame
+(`perf::gpui_overlay` for gpui's own frame timing, and Instruments on
+the release binary) before choosing between trimming `DataTable`'s
+per-cell work and replacing it with a uniform-list of pre-laid-out
+rows.
