@@ -756,6 +756,18 @@ impl BlotterTile {
     }
 }
 
+/// The `HH:MM` slice of an RFC-3339 `as_of` timestamp, for the header's
+/// per-dataset freshness readout. `str::get` rather than direct
+/// indexing (`&t[11..16]`), so an `as_of` string shorter than 11 bytes
+/// (start > end — a panic on direct indexing, not just a truncation) or
+/// one whose 11/16 byte offsets don't land on a char boundary both fall
+/// back to the whole string instead of panicking on the render thread —
+/// a malformed freshness timestamp must never be able to take the
+/// render thread down with it.
+fn short_time(t: &str) -> &str {
+    t.get(11..16.min(t.len())).unwrap_or(t)
+}
+
 impl gpui::Render for BlotterTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // The paint half of §7.1 (§6.8): the first render after a delivery.
@@ -765,7 +777,6 @@ impl gpui::Render for BlotterTile {
                 .update(cx, |f, _| f.requery.record_snapshot_to_paint(micros));
         }
         let theme = cx.theme();
-        let frame = self.frame.read(cx);
         let delegate = self.table.read(cx).delegate();
         let snapshot = delegate.snapshot.clone();
 
@@ -818,7 +829,7 @@ impl gpui::Render for BlotterTile {
             let now = chrono::Utc::now();
             for f in datasets {
                 let text = match &f.as_of {
-                    Some(t) => format!("{} {}", f.dataset, &t[11..16.min(t.len())]),
+                    Some(t) => format!("{} {}", f.dataset, short_time(t)),
                     None => format!("{} —", f.dataset),
                 };
                 let stale = self.is_stale(f.as_of.as_deref(), now);
@@ -877,7 +888,6 @@ impl gpui::Render for BlotterTile {
                     .child(format!("{} rows unplaced", delegate.unplaced)),
             );
         }
-        let _ = frame;
 
         v_flex()
             .size_full()
@@ -893,6 +903,18 @@ impl gpui::Render for BlotterTile {
             )
             .child(footer)
     }
+}
+
+#[test]
+fn short_time_falls_back_to_the_whole_string_instead_of_panicking() {
+    assert_eq!(short_time("2026-08-30T14:32:00Z"), "14:32");
+    // Shorter than the 11-byte offset the slice starts at: direct
+    // indexing (`&t[11..16.min(t.len())]`) would panic here (start >
+    // end); `short_time` falls back to the whole string.
+    assert_eq!(short_time("2026"), "2026");
+    assert_eq!(short_time(""), "");
+    // Exactly 11 bytes: the slice is `11..11`, valid but empty.
+    assert_eq!(short_time("2026-08-30T"), "");
 }
 
 #[cfg(test)]
@@ -1362,15 +1384,299 @@ mod tests {
         );
     }
 
+    /// Fixture for the two painted-cell tests below: identical to
+    /// `snapshot()` above, except `delta01` is also `DeterminedNonAdditive`
+    /// at the leaf depth, so SPX (row id 3) carries both markers at once
+    /// — a NonAttributable `daily_trading_pnl` and a DeterminedNonAdditive
+    /// `delta01`.
+    fn attributed_snapshot() -> Arc<Snapshot> {
+        let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: by_depth,
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![
+                        None,
+                        Some("L1".into()),
+                        Some("L2".into()),
+                        Some("L1".into()),
+                    ]),
+                ),
+                (
+                    meta("underlying_ref", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![None, None, None, Some("SPX".into())]),
+                ),
+                (
+                    meta("row_depth", vec![Attribution::Additive; 3]),
+                    TestColumn::I32(vec![0, 1, 1, 2]),
+                ),
+                (
+                    meta(
+                        "delta01",
+                        vec![
+                            Attribution::Additive,
+                            Attribution::Additive,
+                            Attribution::DeterminedNonAdditive,
+                        ],
+                    ),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
+                ),
+                (
+                    meta(
+                        "daily_trading_pnl",
+                        vec![
+                            Attribution::Additive,
+                            Attribution::Additive,
+                            Attribution::NonAttributable,
+                        ],
+                    ),
+                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
+                ),
+            ],
+            2,
+        ))
+    }
+
+    /// A flat, single-level shape (root plus `n` leaves) for the C1
+    /// regression test below: `n` large enough that the test window's
+    /// viewport shows only a fraction of it.
+    fn flat_snapshot(n: usize, delta_base: f64) -> Arc<Snapshot> {
+        let meta = |name: &str| ColumnMeta {
+            name: name.into(),
+            attribution_by_depth: vec![Attribution::Additive; 2],
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        let mut lhu: Vec<Option<String>> = vec![None];
+        let mut depth: Vec<i32> = vec![0];
+        let mut delta: Vec<Option<f64>> = vec![Some(delta_base)];
+        for i in 0..n {
+            lhu.push(Some(format!("L{i}")));
+            depth.push(1);
+            delta.push(Some(delta_base + i as f64));
+        }
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (meta("lhu"), TestColumn::Dict(lhu)),
+                (meta("row_depth"), TestColumn::I32(depth)),
+                (meta("delta01"), TestColumn::F64(delta)),
+            ],
+            1,
+        ))
+    }
+
+    /// I4, test 1: a `NonAttributable` cell (a NULL the compiler said was
+    /// never a number here, §6.5) paints no text. gpui's test harness has
+    /// no pixel/text reader, so "no text" is checked the way every other
+    /// test in this module checks what painted — through the delegate's
+    /// `FormatCache`, which is the sole input `render_td`'s `match
+    /// cell.attribution` branches on (see that match: `NonAttributable`
+    /// is the only arm that never calls `.child(text)`) — backed by
+    /// `debug_bounds` proving the cell's own element painted at all.
+    #[gpui::test]
+    fn a_non_attributable_cells_element_has_no_text(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(attributed_snapshot()));
+
+        // shown starts [root, L1, L2]; expand L1 to reveal SPX (row id 3,
+        // already materialised — no requery needed, per
+        // `motions_expansion_and_yank`).
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::expand".into()), None, cx)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let shown = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().shown.clone());
+        assert_eq!(
+            shown,
+            vec![0, 1, 3, 2],
+            "SPX (row id 3) is now visible under L1"
+        );
+
+        let row_ix = 2; // SPX
+        let col_ix = 2; // daily_trading_pnl
+        // The column's own declared attribution at this depth really is
+        // NonAttributable (not merely "happens to be NULL", which would
+        // also cache as `None` — `cache::cell`'s NULL check and the
+        // attribution the compiler assigned are two different things
+        // that agree here by construction).
+        let depth_attribution = h.tile.read_with(&cx, |t, cx| {
+            let d = t.table().read(cx).delegate();
+            d.plan.as_ref().unwrap().attribution(col_ix, 2)
+        });
+        assert_eq!(depth_attribution, Attribution::NonAttributable);
+        let cell = h.tile.read_with(&cx, |t, cx| {
+            t.table()
+                .read(cx)
+                .delegate()
+                .cache
+                .get(row_ix, col_ix)
+                .cloned()
+        });
+        assert!(
+            cell.is_none(),
+            "a NonAttributable NULL is never cached — render_td's own \
+             early return when the cache has nothing for a cell is \
+             exactly what makes its element carry no text"
+        );
+        let selector: &'static str =
+            Box::leak(format!("blotter-cell-{row_ix}-{col_ix}").into_boxed_str());
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the cell's own element still painted (an empty div, not a \
+             missing row) even though it carries no text"
+        );
+    }
+
+    /// I4, test 2: a `DeterminedNonAdditive` cell carries the dagger — in
+    /// practice, the delegate's cached attribution `render_td` paints the
+    /// dagger from, plus the footer's `any_determined` flag it drives
+    /// (see `render_td`'s `DeterminedNonAdditive` arm, which appends
+    /// `DETERMINED_MARK` after the text).
+    #[gpui::test]
+    fn a_determined_non_additive_cells_element_carries_the_dagger(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(attributed_snapshot()));
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), None, cx)
+        });
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::expand".into()), None, cx)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let row_ix = 2; // SPX
+        let col_ix = 1; // delta01
+        let cell = h.tile.read_with(&cx, |t, cx| {
+            t.table()
+                .read(cx)
+                .delegate()
+                .cache
+                .get(row_ix, col_ix)
+                .cloned()
+        });
+        assert_eq!(
+            cell.map(|c| c.attribution),
+            Some(Attribution::DeterminedNonAdditive),
+            "delta01 is DeterminedNonAdditive at this leaf — render_td \
+             paints the dagger for it"
+        );
+        assert!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).delegate().any_determined),
+            "the footer's dagger legend flag follows the cached window"
+        );
+        let selector: &'static str =
+            Box::leak(format!("blotter-cell-{row_ix}-{col_ix}").into_boxed_str());
+        assert!(cx.debug_bounds(selector).is_some(), "the cell painted");
+    }
+
+    /// I4, test 3 — the C1 regression. With more rows than the test
+    /// viewport shows, the visible row *range* `TableState` computes is
+    /// the same after a second snapshot delivery as after the first
+    /// (there's nothing new to scroll to), so `visible_rows_changed` —
+    /// the only other refill path besides `invalidate_cells` — never
+    /// fires again for it. Before the C1 fix this left every cell in
+    /// that unchanged range painting blank forever, the first time this
+    /// happened onward.
+    #[gpui::test]
+    fn a_cell_still_has_text_after_a_second_snapshot_with_an_unchanged_visible_range(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests); // the initial "tree" view query, unused
+        h.tile
+            .update(&mut cx, |t, cx| t.command("view wide", cx).unwrap());
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(flat_snapshot(200, 0.0)));
+
+        let window_before = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().cache.window());
+        assert!(
+            !window_before.is_empty(),
+            "sanity: the first draw filled a real cache window"
+        );
+        assert!(
+            window_before.end < 201,
+            "sanity: fewer rows are visible than exist — {window_before:?} of 201"
+        );
+
+        // A second delivery for the *same* outstanding query (no new
+        // requery) — the way a live tile receives a re-published
+        // snapshot for the query it already has in flight.
+        deliver(&h, &mut cx, p.tag, Ok(flat_snapshot(200, 1000.0)));
+
+        let window_after = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().cache.window());
+        assert!(
+            !window_after.is_empty(),
+            "the cache window must still cover real rows after the second \
+             delivery, not collapse to empty just because nothing gave \
+             `visible_rows_changed` a reason to fire again — got \
+             {window_after:?} (was {window_before:?})"
+        );
+
+        let row_ix = window_after.start;
+        let text = h.tile.read_with(&cx, |t, cx| {
+            t.table()
+                .read(cx)
+                .delegate()
+                .cache
+                .get(row_ix, 1)
+                .map(|c| c.text.to_string())
+        });
+        assert_eq!(
+            text,
+            Some("1,000.00".to_string()),
+            "a visible cell must still have (fresh) text after a second \
+             snapshot whose visible range didn't change — before the C1 \
+             fix this cell painted blank forever once the range stopped \
+             changing"
+        );
+        let selector: &'static str = Box::leak(format!("blotter-cell-{row_ix}-1").into_boxed_str());
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the cell's element actually painted"
+        );
+    }
+
     /// The shell cannot depend on `geode-blotter` (layering: shell never
     /// depends on a module), so `geode_shell::defaults` carries its own
-    /// copy of these ids to reserve, ahead of `BlotterFactory::
-    /// register_actions`, so `BUILTIN_KEYMAP`'s `blotter::*` bindings
-    /// are never dropped as unregistered. This pins the two lists
-    /// identical.
+    /// copy of these ids (and, since the final review, titles too) to
+    /// reserve, ahead of `BlotterFactory::register_actions`, so
+    /// `BUILTIN_KEYMAP`'s `blotter::*` bindings are never dropped as
+    /// unregistered and the palette shows the same title either way.
+    /// This pins both lists identical — ids via `BLOTTER_ACTIONS` (kept
+    /// for the id-only comparison), titles via `BLOTTER_ACTION_DEFS`
+    /// directly, since it was made `pub` for exactly this.
     #[test]
     fn the_shells_reserved_blotter_actions_match_ours() {
         let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
         assert_eq!(ours, geode_shell::defaults::BLOTTER_ACTIONS.to_vec());
+        assert_eq!(
+            ACTIONS, geode_shell::defaults::BLOTTER_ACTION_DEFS,
+            "titles must match too, not just ids — `ActionRegistry::register`'s \
+             discarded `Err` on the shell's duplicate registration means the \
+             shell's title, not the blotter's, is what actually reaches the palette"
+        );
     }
 }

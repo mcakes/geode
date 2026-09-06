@@ -163,18 +163,39 @@ impl BlotterDelegate {
         self.invalidate_cells();
     }
 
-    /// Invalidate the format cache and the cached tree glyphs together.
+    /// Invalidate the format cache and the cached tree glyphs together,
+    /// then immediately refill whatever window was on screen.
+    ///
     /// `FormatCache::invalidate` clears its rows but leaves `start`
     /// unchanged, so `render_td`'s `glyphs` lookup (keyed off
     /// `cache.window().start`) would otherwise keep serving a stale
     /// glyph for a row whose text just went blank — exactly when the
     /// visible row *range* doesn't change across a regroup/sort/narrow
     /// (so `TableState` never calls `visible_rows_changed` to refill
-    /// either of them). Every `self.cache.invalidate()` call site must
-    /// go through this instead.
+    /// either of them). Clearing alone was C1 (final review): with more
+    /// rows than the viewport the visible range essentially never
+    /// changes, so `visible_rows_changed` was the *only* refill path and
+    /// it never fired again — every `render_td` after the first
+    /// regroup/sort/narrow/expand/collapse painted blank forever.
+    /// `move_column` (gpui-component calls it directly, bypassing
+    /// `visible_rows_changed` too) already captured its window and
+    /// refilled immediately; this generalises that fix to every call
+    /// site instead of just that one. `end` clamps to `self.shown.len()`
+    /// because a narrow/regroup can shrink `shown` out from under the
+    /// old window — nothing to refill then, and the cache/glyphs stay
+    /// cleared, which is correct (there's nothing there to paint).
+    /// Every `self.cache.invalidate()` call site must go through this
+    /// instead.
     fn invalidate_cells(&mut self) {
+        let w = self.cache.window();
         self.cache.invalidate();
         self.glyphs.clear();
+        if !w.is_empty() {
+            let end = w.end.min(self.shown.len());
+            if w.start < end {
+                self.refill_window(w.start..end);
+            }
+        }
     }
 
     /// `narrowed` names *positions* into `visible` (the domain
@@ -446,19 +467,15 @@ impl TableDelegate for BlotterDelegate {
             p.move_column(col_ix, to_ix);
         }
         // `TableState::move_column` (gpui-component) calls this directly
-        // and never fires `visible_rows_changed`, so a bare
-        // `self.cache.invalidate()` here would leave the window's cells
-        // blank until the next scroll. Capture the window that was
-        // already on screen *before* invalidating (`invalidate` clears
-        // `rows` but keeps `start`, so `window()` after it is an empty
-        // range), then refill it immediately with the reordered plan.
-        // The glyphs are untouched by a column reorder — the tree
-        // column never moves (`ColumnPlan::move_column` refuses `from ==
-        // 0 || to == 0`) — so this goes through `self.cache.invalidate()`
-        // + `refill_window`, not `invalidate_cells`, deliberately.
-        let w = self.cache.window();
-        self.cache.invalidate();
-        self.refill_window(w);
+        // and never fires `visible_rows_changed`, so this needs its own
+        // immediate refill rather than waiting for the next scroll —
+        // `invalidate_cells` now does exactly that (C1 fix; this method
+        // is what the fix generalised from). Recomputing the glyphs here
+        // too is unnecessary work (the tree column never moves —
+        // `ColumnPlan::move_column` refuses `from == 0 || to == 0`) but
+        // harmless: `refill_window` recomputes the same values from the
+        // same tree, and the window is only ever tens of rows.
+        self.invalidate_cells();
         cx.notify();
     }
 
@@ -509,6 +526,14 @@ impl TableDelegate for BlotterDelegate {
             .items_center()
             .px_1()
             .font_family(fonts::MONO)
+            // I4 (final review): lets a test locate this exact cell with
+            // `cx.debug_bounds` and, via `TableDelegate::cache`, read
+            // back what was painted into it. `debug_selector` is a
+            // gpui-provided no-op in a non-test/non-`test-support` build
+            // (the closure is dropped unevaluated, `crates/gpui/src/
+            // elements/div.rs`), so this costs nothing on the render
+            // thread in release.
+            .debug_selector(|| format!("blotter-cell-{row_ix}-{col_ix}"))
             .when(kind == Some(ColumnKind::Measure), |el| el.justify_end())
             .when(is_cursor, |el| {
                 el.border_1().border_color(theme.table_active_border)
@@ -705,9 +730,14 @@ mod tests {
         );
         d.set_narrowed(None);
         assert_eq!(d.shown, vec![0, 1, 3, 4, 2]);
-        assert!(
-            d.cache.get(1, 0).is_none(),
-            "invalidated with the narrowing"
+        // C1 (final review): `set_narrowed` still invalidates the stale
+        // narrowed-window cache, but `invalidate_cells` now also refills
+        // the window it had immediately (against the un-narrowed
+        // `shown` list here) — it is not simply left blank.
+        assert_eq!(
+            d.cache.get(1, 0).map(|c| c.text.to_string()),
+            Some("L1".to_string()),
+            "the window was refilled immediately against the widened shown list"
         );
     }
 
@@ -785,36 +815,72 @@ mod tests {
     }
 
     #[test]
-    fn apply_snapshot_invalidates_the_cache_even_without_narrowing() {
+    fn apply_snapshot_invalidates_the_cache_and_refills_it() {
         // The cache-invalidation entry the reviewer asked for: distinct
         // from `narrowing_changes_what_is_shown_and_the_cache_window_follows_shown_rows`,
         // whose final assertion goes through `set_narrowed`'s own
         // `invalidate()` call, not `apply_snapshot`'s.
+        //
+        // C1 (final review) updated this test's shape: `apply_snapshot`
+        // still invalidates the stale cache on its own, but
+        // `invalidate_cells` now also refills the window it had
+        // immediately — so this proves invalidation actually happened
+        // by re-applying a snapshot whose grand-total value genuinely
+        // changed and checking the cache holds the *new* value, not a
+        // stale (or blank) one.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         d.refill_window(0..3);
-        assert!(
-            d.cache.get(0, 1).is_some(),
+        assert_eq!(
+            d.cache.get(0, 1).map(|c| c.text.to_string()),
+            Some("9.00".to_string()),
             "the grand total's delta01 is cached"
         );
         assert_eq!(d.narrowed, None, "narrowing plays no part in this");
-        d.apply_snapshot(snapshot(), &view(), &grouping());
-        assert!(
-            d.cache.get(0, 1).is_none(),
-            "apply_snapshot invalidates the cache on its own"
+        let changed = Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Dict(vec![None, s("L1"), s("L2"), s("L1"), s("L1")]),
+                ),
+                (
+                    dim("underlying_ref"),
+                    TestColumn::Dict(vec![None, None, None, s("SPX"), s("NDX")]),
+                ),
+                (dim("position_ref"), TestColumn::Str(vec![None; 5])),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1, 2, 2])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(99.0), Some(5.0), Some(4.0), Some(2.0), Some(3.0)]),
+                ),
+            ],
+            3,
+        ));
+        d.apply_snapshot(changed, &view(), &grouping());
+        assert_eq!(
+            d.cache.get(0, 1).map(|c| c.text.to_string()),
+            Some("99.00".to_string()),
+            "apply_snapshot invalidated the stale cache and refilled it \
+             from the new snapshot, with no explicit refill_window call"
         );
     }
 
     #[test]
-    fn a_regroup_that_keeps_the_window_clears_the_cached_glyphs() {
-        // Reviewer-caught defect: `FormatCache::invalidate` clears the
-        // cache's rows but leaves `start` unchanged, and neither
-        // `reflatten_keeping` nor `set_narrowed` touched `glyphs` when
-        // they called it — so a regroup/sort/narrow whose visible row
-        // range doesn't change (gpui-component's `TableState` only
-        // calls `visible_rows_changed` when the numeric range differs)
-        // left `render_td` painting the pre-invalidation glyph for a
-        // row whose cell text correctly went blank.
+    fn a_regroup_that_keeps_the_window_refills_it_immediately() {
+        // C1 (final review): the previous shape of this test asserted
+        // that a regroup/sort/narrow whose visible row range doesn't
+        // change (gpui-component's `TableState` only calls
+        // `visible_rows_changed` when the numeric range differs, which
+        // it never does once there are more rows than the viewport)
+        // left the window blank — and called that correct. It wasn't:
+        // with `visible_rows_changed` as the *only* other refill path,
+        // "blank until invalidated" meant "blank forever" for any tile
+        // with a scrollbar. `invalidate_cells` now captures the window
+        // it had and refills it immediately (the same fix `move_column`
+        // already needed on its own, generalised here), so this asserts
+        // the glyph AND the cell text are back with no explicit
+        // `refill_window` call in between — this doubles as test (a)
+        // from I4.
         let mut d = BlotterDelegate::new();
         d.apply_snapshot(snapshot(), &view(), &grouping());
         // shown = [0, 1, 2]; row 1 (L1) has children (SPX, NDX) and is
@@ -829,14 +895,47 @@ mod tests {
         // Re-apply the same snapshot/grouping without calling
         // `refill_window` again: `shown`'s numeric range is unchanged,
         // matching the scenario where `TableState` would not re-fire
-        // `visible_rows_changed` — but the cache itself was invalidated
-        // and the glyph must not survive stale.
+        // `visible_rows_changed`.
         d.apply_snapshot(snapshot(), &view(), &grouping());
         assert_eq!(d.shown, vec![0, 1, 2], "the visible row range is unchanged");
         assert_eq!(
             d.glyph_at(1),
+            Some("▸"),
+            "invalidate_cells refills the window it had — the glyph is \
+             back with no explicit refill_window call"
+        );
+        assert_eq!(
+            d.cache.get(1, 0).map(|c| c.text.to_string()),
+            Some("L1".to_string()),
+            "the cell text is refilled too, not just the glyph"
+        );
+    }
+
+    #[test]
+    fn invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window() {
+        // The half of the old defect that's still real: `invalidate_
+        // cells`'s refill only reaches rows `shown` still has (`end =
+        // w.end.min(shown.len())`) — when the old window's start is at
+        // or past the new, shorter `shown.len()` there is nothing left
+        // to refill, and the explicit `self.glyphs.clear()` is what
+        // stops a stale glyph surviving that. `render_td` itself would
+        // never surface this (a row index past `shown.len()` is never
+        // painted), so this reaches directly for `glyph_at`, which
+        // (like `render_td`) only guards against an empty cache window,
+        // not against `shown` having shrunk.
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        assert_eq!(d.glyph_at(1), Some("▸"), "sanity: a real glyph is cached");
+        // Narrow to no matches: `shown` becomes empty, well short of the
+        // old window's start (0), so `invalidate_cells` cannot refill.
+        d.set_narrowed(Some(vec![]));
+        assert!(d.shown.is_empty());
+        assert_eq!(
+            d.glyph_at(1),
             None,
-            "the cache was invalidated; the glyph must not paint stale"
+            "the stale glyph must not survive just because nothing could \
+             be refilled"
         );
     }
 
