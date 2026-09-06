@@ -327,3 +327,91 @@ no room wasted. The cost is linear in rows × depth (one FNV-1a hash of
 the grouping prefix per row per level, then a CSR fill), so it scales
 with the result the compiler was told to materialize, which is what the
 depth bound exists to keep small.
+
+## Phase 3c: blotter core (`cargo bench -p geode-blotter`)
+
+The blotter's pure-core costs (`crates/geode-blotter/src/core/`, Phase 3
+§6.1) at the same three shapes: flatten fully expanded, flatten with
+everything collapsed (the shell-of-a-tree cost — the DFS still visits
+every root), filling a 40-row cache window over a 7-column plan (a tree
+column plus the fixture's 6 measure columns), and building a 100-column
+plan. Measured with `cargo bench -p geode-blotter -- --warm-up-time 1
+--measurement-time 3` (10 samples per `benchmark_group`'s
+`sample_size(10)`; the shortened warm-up/measurement window, rather than
+criterion's defaults, is what fit this run inside the harness's 590s
+foreground budget — medians below are otherwise unmodified criterion
+output). The fixture (`crates/geode-blotter/benches/blotter.rs::shape`)
+reuses `crates/geode-core/benches/tree.rs`'s three-level lhu > underlying
+> position tree builder, adding 6 `F64` measure columns (100 for the
+plan-build case) and a view grouped on the three tree dimensions with
+every measure column selected:
+
+| bench | 133 rows | 137k rows | 729k rows |
+| --- | ---: | ---: | ---: |
+| `flatten_all` (fully expanded) | **441.16 ns** | **205.87 µs** | **1.1836 ms** |
+| `flatten_collapsed` (roots only) | **244.96 ns** | **265.72 ns** | **1.6720 µs** |
+| `cache_fill_40x7` (40-row window) | **31.559 µs** | **33.132 µs** | **39.008 µs** |
+
+`plan_build_100_columns` (13-row shape, 100 measure columns): **14.048
+µs**.
+
+None of this runs on the render thread (spec §6.1: the plan is rebuilt
+only when the snapshot's column set changes, flatten runs on snapshot
+arrival/expand/collapse/sort, and the cache fills only the visible
+window on scroll) — every number here is comfortably inside a single
+frame's 8ms budget, including the 729k fully-expanded flatten at 1.18ms,
+which is the most expensive of the group and still under a sixth of that
+budget. The cache fill barely moves with row count (31.6µs → 39.0µs
+across three orders of magnitude of rows) because it only ever touches
+the 40 visible rows; `flatten_collapsed`'s near-flat cost the same way
+reflects that collapsed roots are the only rows a DFS ever visits
+regardless of how many rows are hiding beneath them.
+
+## Phase 3: the painted frame
+
+The §7.1 budget is specified end to end, submit to painted frame, and
+the query-path/tree-index/blotter-core benchmarks above each stop at
+one boundary short of that (submit→snapshot, or a pure-core cost that
+never touches gpui). Closing that gap needs a live window with a real
+compositor, which this run could not do — **no display was available in
+the sandbox this measurement was attempted from, so the cells below are
+templates, not numbers.** Whoever has a display should fill them in
+exactly as follows, and update this section's prose (in particular the
+paragraph after the table) once real numbers are in — it currently
+states nothing was measured.
+
+**Setup:**
+
+```sh
+cargo run -p geode-app -- --demo 1000000
+```
+
+**Readings**, all from the perf overlay (`mod+shift+p`, described above
+under "Debug overlay") unless noted:
+
+| reading | where read | value |
+| --- | --- | --- |
+| `ctrl+2` (regroups to grouping slot 2, `["book", "lhu"]` — `examples/demo-config/groupings.toml`) submit→snapshot | overlay's **q p50** row, read immediately after the regroup settles | not yet measured (needs a display) |
+| `ctrl+2` snapshot→paint | overlay's **paint p50** row, same settle point | not yet measured (needs a display) |
+| `zo` (open-all) at the bound, submit→snapshot | overlay's **q p50** row, read immediately after `zo` settles | not yet measured (needs a display) |
+| `zo` at the bound, snapshot→paint | overlay's **paint p50** row, same settle point | not yet measured (needs a display) |
+
+**Whether the §7.1 <50ms requery contract holds end to end:** not yet
+measured (needs a display) — do not assert it from the query-path/
+tree-index numbers alone; this section exists because those stop short
+of the painted frame the contract is actually specified against.
+
+**The `DataTable` swap trigger** (spec §6.6): open the `wide` view
+(Task 8's 100+ column demo view) in a tile, scroll with `j` held so at
+least 40 rows of key-repeat pass through, and read the frame-time
+overlay's **p95** (the overlay's frame-time row, not the requery rows —
+this measures paint cost, not query latency).
+
+| reading | where read | value |
+| --- | --- | --- |
+| `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95 | not yet measured (needs a display) |
+
+Whether that p95 is under the 8ms pure-UI budget is the finding this
+row exists to produce. **If it is not under 8ms, that is itself the
+result** — record it as such rather than reaching for the `DataTable`
+swap this plan deliberately left undone; open a follow-up instead.
