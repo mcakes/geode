@@ -408,12 +408,8 @@ The §7.1 budget is specified end to end, submit to painted frame, and
 the query-path/tree-index/blotter-core benchmarks above each stop at
 one boundary short of that (submit→snapshot, or a pure-core cost that
 never touches gpui). Closing that gap needs a live window with a real
-compositor, which this run could not do — **no display was available in
-the sandbox this measurement was attempted from, so the cells below are
-templates, not numbers.** Whoever has a display should fill them in
-exactly as follows, and update this section's prose (in particular the
-paragraph after the table) once real numbers are in — it currently
-states nothing was measured.
+compositor. The branch was built in a sandbox without one; the readings
+below are from Matthew's first run on 2026-09-06, after the merge.
 
 **Setup:**
 
@@ -421,39 +417,54 @@ states nothing was measured.
 cargo run --release -p geode-app -- --demo 1000000
 ```
 
-`--release`, matching the query-path section's own convention above
-("Measured on an M-series Mac, `--release`, DuckDB..."): this is a
-performance measurement against the §7.1 <50ms/8ms budgets, and a debug
-build's unoptimized codegen would make any reading here meaningless as
-a check against those contracts — the numbers below need to reflect
-what a user's build actually pays. The `--demo 1000` smoke check (does
-the app open at all on generated data) stays a debug build; only this
-budget-verifying run needs `--release`.
+`--release`, matching the query-path section's own convention above:
+this is a measurement against the §7.1 <50ms/8ms budgets, and a debug
+build would make any reading meaningless as a check against them. The
+`--demo 1000` smoke check stays a debug build.
 
-**Readings**, all from the perf overlay (`mod+shift+p`, described above
-under "Debug overlay") unless noted:
+**Readings** (perf overlay, `mod+shift+p`, described above under
+"Debug overlay"), one session, 2,965 recorded frame intervals:
 
 | reading | where read | value |
 | --- | --- | --- |
-| `ctrl+2` (regroups to grouping slot 2, `["book", "lhu"]` — `examples/demo-config/groupings.toml`) submit→snapshot | overlay's **q p50** row, read immediately after the regroup settles | not yet measured (needs a display) |
-| `ctrl+2` snapshot→paint | overlay's **paint p50** row, same settle point | not yet measured (needs a display) |
-| `zo` (open-all) at the bound, submit→snapshot | overlay's **q p50** row, read immediately after `zo` settles | not yet measured (needs a display) |
-| `zo` at the bound, snapshot→paint | overlay's **paint p50** row, same settle point | not yet measured (needs a display) |
+| last requery, submit→snapshot + snapshot→paint | overlay's **requery** row | 17 ms + 21 ms = 38 ms |
+| requery submit→snapshot, session p50 | overlay's **q p50** row | 12 ms |
+| requery snapshot→paint, session p50 | overlay's **paint p50** row | 4.6 ms |
+| frame interval, session p50 | overlay's **p50** row | 18 ms |
+| frame interval, session p95 / max | overlay's **p95** / **max** rows | 500 ms / 500 ms — see below |
 
-**Whether the §7.1 <50ms requery contract holds end to end:** not yet
-measured (needs a display) — do not assert it from the query-path/
-tree-index numbers alone; this section exists because those stop short
-of the painted frame the contract is actually specified against.
+**Whether the §7.1 <50ms requery contract holds end to end:** yes on
+this evidence. The last requery's two halves sum to 38 ms, and the
+session medians (12 ms query, 4.6 ms paint) leave the same margin. The
+reading was not labelled by action; the `ctrl+2` regroup and the `zo`
+at the bound should each be read separately on the next run (press the
+key, wait for the header to settle, read the **requery** row before
+pressing anything else).
 
-**The `DataTable` swap trigger** (spec §6.6): open the `wide` view
-(Task 8's 100+ column demo view) in a tile, scroll with `j` held so at
-least 40 rows of key-repeat pass through, and read the frame-time
-overlay's **p95** (the overlay's frame-time row, not the requery rows —
-this measures paint cost, not query latency).
+**The frame-interval p95 of 500 ms is not a paint cost.** The histogram
+(`geode-shell::perf`) buckets intervals up to 100 ms; anything between
+100 ms and the 500 ms idle cutoff lands in one overflow bucket, and a
+percentile that falls there reports the observed max, which the overlay
+rounds to the cutoff. So p95 = max = 500 ms means at least 5% of the
+2,965 intervals were longer than 100 ms and shorter than 500 ms. Over a
+session of hand-driven keys those are the pauses between keystrokes,
+which the histogram cannot tell apart from stalls (its module doc names
+this blind spot: it measures consecutive renders during interaction
+bursts). The interaction-burst signal is the p50, 18 ms, one 60 Hz
+frame. A stall would show as a max well above the cutoff's rounding, or
+as a p95 that stays in the overflow bucket during a single continuous
+`j` hold with the counters reset just before it.
+
+**The `DataTable` swap trigger** (spec §6.6) needs exactly that
+isolated reading: open the `wide` view in a tile, reset the overlay's
+counters (`perf::reset`, palette-only: `ctrl+k`, type `reset`), hold `j`
+until at least 40 rows of key-repeat have passed, and
+read **p95** before releasing anything else. The session-wide p95 above
+does not separate the hold from the pauses around it.
 
 | reading | where read | value |
 | --- | --- | --- |
-| `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95 | not yet measured (needs a display) |
+| `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | not yet isolated (session p95 is dominated by inter-keystroke pauses; see above) |
 
 Whether that p95 is under the 8ms pure-UI budget is the finding this
 row exists to produce. **If it is not under 8ms, that is itself the
