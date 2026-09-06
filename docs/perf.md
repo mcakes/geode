@@ -475,47 +475,32 @@ zero.
 | `j`-scroll frame time, p95, `wide` view, 40 visible rows | overlay's frame-time p95, counters reset before the hold | **100 ms** (2026-09-06, after the `perf::reset` fix) |
 | same hold, p50 / max | overlay's p50 / max rows, same reading | 18 ms / 496 ms |
 | same hold on the `tree` view (3 columns), p50 / p95 / max | overlay, counters reset before the hold | 18 ms / 96 ms / 96 ms |
+| `k` held at the top of the table (cursor cannot move), p50 / p95 / max | overlay, counters reset before the hold | 100 ms / 100 ms / 267 ms |
 
-**It is not under 8 ms — the swap trigger has tripped, and the shape
-of the miss matters.** The p50 of 18 ms is one 60 Hz frame, so the
-steady per-frame cost of painting 40 × 100 cells is not the problem.
-The p95 of 100 ms is the histogram's top regular bucket (12 buckets per
-decade up to 100 ms, so roughly 83–100 ms): at least one frame in
-twenty during the hold cost that much. The max of 496 ms sits just
-under the 500 ms idle cutoff and is a single sample, most likely the
-initial key-repeat delay or one hitch. Key-repeat cadence cannot
-account for the p95: macOS repeats every 15–30 ms. A fine median with a
-one-in-twenty tail of ~90 ms says some piece of work runs every few
-frames, not every frame — that is the first thing to find. Per the plan
-this is recorded as the result, not patched here; the `DataTable` swap
-Phase 3c deliberately left undone is the open question, and it may be
-the wrong fix if the tail is periodic work outside the table.
+**Reinterpretation (2026-09-06): the interval histogram cannot measure
+paint cost during a held key, and these readings are the key-repeat
+period, not the blotter.** The `k`-at-the-top hold is the proof: the
+cursor cannot move, so each key repeat produces one cheap repaint and
+nothing else, and the interval between repaints is the interval between
+key repeats — a 100 ms median, which is macOS's default key-repeat rate
+(setting 6 = 6 × 15 ms = 90 ms; initial delay 25 × 15 ms = 375 ms,
+which the 267 ms max and the earlier 496 ms sample fall under). During
+a `j` hold the scroll adds a few repaints per key at vsync spacing (the
+18 ms median) and the gap back to the next repeat is the one-in-twenty
+~96 ms tail; the `tree` view shows the same tail because it has the
+same keyboard. `geode-shell::perf`'s module doc names this blind spot:
+it records render-to-render intervals, so a held key at a repeat period
+longer than a frame reads as slow frames however cheap the paint is.
 
-**Follow-up (open) — the tail is not the table's column count.** The
-`tree` view (3 columns) holds with the same p50 and a p95 pinned at its
-96 ms max, so the one-in-twenty ~96 ms frame is in the path both views
-share, and a `DataTable` swap would not remove it. Ruled out by reading
-the code: the 500 ms session-persistence tick (`session_io.rs`)
-serializes the tile each tick but writes only when the layout or a tile
-record changed, which a cursor move does not. Still open, in the order
-worth checking:
-
-1. Whether the cost is in the app at all: repeat the `tree` hold with
-   the perf overlay closed (read it after), and hold `k` at the top of
-   the table so the cursor cannot move — every keystroke still
-   dispatches and repaints, but nothing scrolls and no cache window
-   changes. If the tail survives a non-moving hold, it is not the
-   scroll/refill path.
-2. Whether it scales with data: the same hold under `--demo 1000`. The
-   1M-row demo keeps DuckDB, the discovery scheduler and the health
-   events alive on their own threads; a difference here points at the
-   bridge's deliveries or at memory pressure rather than paint.
-3. The per-crossing work in `visible_rows_changed` → `refill_window`
-   (window-wide `any_determined` scan, glyph pass) and `TableState`'s
-   per-scroll bookkeeping — cheap on paper, worth one measurement.
-4. Then attribute one slow frame: `perf::gpui_overlay` cycles gpui's
-   own frame overlay (layout/paint breakdown), and an Instruments time
-   profile of the release binary during a hold will show what a ~96 ms
-   frame spends its time in.
-
-Only after that is the `DataTable` swap a decision rather than a guess.
+**Consequence for the swap trigger (spec §6.6): still unmeasured.** The
+plan's recipe (frame-time p95 during a `j` hold) needs render
+*duration*, not interval. Two ways to get it: `perf::gpui_overlay`
+cycles gpui's own frame overlay, which reports what a frame spent in
+layout and paint; or add a second histogram to `geode-shell::perf`
+that records `Instant::now() - render_started` at the end of
+`ShellView::render` and an overlay row for it — a small change, and the
+right instrument for the 8 ms pure-UI budget going forward. Until one
+of those is read, the `DataTable` swap is neither triggered nor
+cleared. Nothing in these readings shows a paint problem: the query
+halves (12 ms / 4.6 ms medians, 16.5 ms isolated) are the only
+end-to-end numbers so far, and they hold §7.1.
