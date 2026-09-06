@@ -1477,6 +1477,45 @@ run_mutation "delegate: any_determined reflects the whole cached window" \
   geode-blotter \
   any_determined_reflects_the_whole_window_not_just_newly_entered_rows
 
+# ---- blotter tile (Phase 3 §6.5, §6.7, §6.8, §3.1, §4.3)
+
+run_mutation "tile: a stale tag is dropped" \
+  crates/geode-blotter/src/tile.rs \
+  '        if outcome.tag != self.tag {' \
+  '        if false {' \
+  geode-blotter \
+  a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
+
+run_mutation "tile: a pinned tile ignores the slot" \
+  crates/geode-blotter/src/tile.rs \
+  '            || (self.pin == Pin::None && acted.grouping != now.grouping)' \
+  '            || acted.grouping != now.grouping' \
+  geode-blotter \
+  a_frame_slot_change_requeries_once_and_a_pinned_tile_ignores_it
+
+run_mutation "tile: the depth bound is requested, not everything" \
+  crates/geode-blotter/src/tile.rs \
+  '            d.depth_bound(grouping.len()).max(1)' \
+  '            usize::MAX' \
+  geode-blotter \
+  showing_the_tile_submits_one_query_keyed_by_the_tile_with_the_views_grouping
+
+run_mutation "tile: a query error keeps the last snapshot" \
+  crates/geode-blotter/src/tile.rs \
+  '            Err(e) => self.error = Some(e),' \
+  '            Err(e) => { self.error = Some(e); self.table.update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new()); }' \
+  geode-blotter \
+  a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
+
+run_mutation "delegate: move_column refills the window it already had" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let w = self.cache.window();
+        self.cache.invalidate();
+        self.refill_window(w);' \
+  '        self.cache.invalidate();' \
+  geode-blotter \
+  move_column_refills_the_window_immediately
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
