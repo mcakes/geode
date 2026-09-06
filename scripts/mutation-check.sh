@@ -600,8 +600,8 @@ run_mutation "attribution: a derived dimension resolves to its base column" \
 
 run_mutation "attribution: decided on dimension keys" \
   crates/geode-core/src/attribution.rs \
-  'let key = grain.dimension_key_columns();' \
-  'let key = grain.key_columns();'
+  '    let key = ds.dimensions_at(grain);' \
+  '    let key: Vec<&str> = grain.key_columns().to_vec();'
 
 # ---- scope lowering (spec §6.2, §6.3)
 

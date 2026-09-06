@@ -1632,6 +1632,32 @@ grain = "underlying"
         }
         // and the grand total still carries it.
         assert!(by_currency.iter().any(|r| r.depth == 0 && r.npv.is_some()));
+
+        // A view that selects only the position-grain measure has no
+        // aggregate whose own grouping covers "currency" (npv's grain,
+        // Position, does not carry it) — the spine for the currency
+        // level then falls back to `finest_carrying`/`carries_all`,
+        // which only `DatasetSpec::carries` (not the raw dimension key)
+        // can name as carrying a currency column at all.
+        let text = "[t2]\ndataset = \"risk_carried\"\ngrouping = [\"currency\"]\n\
+                     [[t2.columns]]\nname = \"npv\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let npv_only = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        let q = compile_view(
+            store.writer(),
+            &npv_only,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("a currency-only spine must still compile: {e}"));
+        let rows = run(&store, &q, &["row_depth", "currency"]);
+        assert!(
+            rows.iter().any(|r| r[0] == "Some(1.0)"),
+            "the currency level must exist even with no covering measure: {rows:?}"
+        );
     }
 
     #[test]
