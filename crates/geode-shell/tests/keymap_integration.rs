@@ -33,7 +33,8 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
 
     let mut registry = ActionRegistry::default();
     defaults::register_builtin_actions(&mut registry);
-    let mod_alias = defaults::mod_alias_from_config(&config);
+    let (mod_alias, mod_diags) = defaults::mod_alias_from_config(&config);
+    assert!(mod_diags.is_empty(), "{mod_diags:?}");
     let (keymap, diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
     assert!(diags.is_empty(), "{diags:?}");
 

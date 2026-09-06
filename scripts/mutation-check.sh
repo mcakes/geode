@@ -2029,6 +2029,12 @@ run_mutation "bar: a chip close drops the dimension" \
   '                    if false {' \
   geode-shell a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension
 
+run_mutation "keymap: mod = ctrl is refused" \
+  crates/geode-shell/src/defaults.rs \
+  '        Some("ctrl") => (' \
+  '        Some("ctrl-never") => (' \
+  geode-shell mod_alias_ctrl_is_refused_with_an_error_and_the_default_stands
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

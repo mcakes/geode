@@ -2,7 +2,6 @@
 //! with the painted bar itself.
 
 use super::*;
-use crate::defaults::mod_alias_from_config;
 use geode_core::config::ConfigSources;
 use geode_core::scope::{DimensionSelection, Scope};
 
@@ -16,10 +15,17 @@ fn book_scope(book: &str) -> Scope {
     }
 }
 
-/// `mod+z`/`mod+shift+z` (spec §3.6) under `keymap.mod = "ctrl"`, so the
-/// real chords dispatched here are `ctrl-z`/`ctrl-shift-z` — same pattern
-/// `config_with_mod` uses elsewhere, built inline since this is the
-/// starting config rather than a reload.
+/// `mod+z`/`mod+shift+z` (spec §3.6) dispatched here as literal
+/// `ctrl-z`/`ctrl-shift-z` — a non-default alias, proving the bindings
+/// aren't hardcoded to `alt`. Built directly with `Modifiers::CTRL`
+/// rather than through `mod_alias_from_config`: config no longer offers
+/// this alias at all (Task 4b, Phase 4a user ruling — `keymap.mod =
+/// "ctrl"` is refused as invalid config), so this helper feeds the raw
+/// `Modifiers` value straight to `build_keymap`, the same way
+/// `defaults.rs`'s own `resolve` test helper exercises the matcher
+/// directly. `config`'s `[keymap] mod = "ctrl"` text is unused by this
+/// helper (kept only as documentation of intent) — it is never run
+/// through `mod_alias_from_config`.
 fn test_services_with_ctrl_mod() -> ShellServices {
     let config = Config::load(&ConfigSources {
         builtin: vec![LayerDoc::builtin("app", "[keymap]\nmod = \"ctrl\"\n").unwrap()],
@@ -27,7 +33,7 @@ fn test_services_with_ctrl_mod() -> ShellServices {
     });
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
-    let mod_alias = mod_alias_from_config(&config);
+    let mod_alias = Modifiers::CTRL;
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
     assert!(diags.is_empty(), "{diags:?}");

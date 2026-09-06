@@ -123,12 +123,18 @@ impl ShellView {
     /// `#[gpui::test]`; this is the real apply path either way; the
     /// watcher is just what schedules calling it.
     pub(super) fn apply_reload(&mut self, mut new_config: Config, cx: &mut Context<Self>) {
-        let mod_alias = mod_alias_from_config(&new_config);
+        let (mod_alias, mod_diags) = mod_alias_from_config(&new_config);
         let (keymap, keymap_diags) = build_keymap(
             new_config.layered_docs("keymap"),
             mod_alias,
             &self.services.registry,
         );
+        // `mod_diags` extended in here, BEFORE `reload::decide` runs below: an
+        // error-severity diagnostic (the refused `keymap.mod = "ctrl"`
+        // alias, Task 4b) must reject the whole reload as last-good,
+        // exactly like any other invalid config — `decide` only ever
+        // looks at `new_config.diagnostics`.
+        new_config.diagnostics.extend(mod_diags);
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);

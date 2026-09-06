@@ -289,7 +289,10 @@ fn build_shell_services(
     // Modules register their actions before the keymap builds (§3.2).
     roster.register_actions(&mut registry);
 
-    let mod_alias = mod_alias_from_config(&config);
+    let (mod_alias, mod_diags) = mod_alias_from_config(&config);
+    for diag in &mod_diags {
+        print_diagnostic("keymap", diag);
+    }
     let (keymap, keymap_diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
     for diag in &keymap_diags {
         print_diagnostic("keymap", diag);

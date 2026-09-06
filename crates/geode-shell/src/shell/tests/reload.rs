@@ -43,13 +43,16 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     cx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
-    let new_config = config_with_mod("ctrl");
+    // "cmd" (not "ctrl" — Task 4b, Phase 4a user ruling: `keymap.mod =
+    // "ctrl"` is refused as invalid config) is the non-default alias
+    // exercised here.
+    let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     shell.read_with(&cx, |shell, _| {
         assert_eq!(
             shell.services.mod_alias,
-            Modifiers::CTRL,
+            Modifiers::CMD,
             "a clean reload should rebuild the mod alias from the new config"
         );
         assert!(
@@ -136,6 +139,89 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
             }
             other => panic!("expected KeptLastGood, got {other:?}"),
         }
+    });
+}
+
+/// Task 4b (Phase 4a, user ruling): `keymap.mod = "ctrl"` is refused as
+/// invalid config, exactly like the unsupported-`config_version` case
+/// above (`reload::decide` folds the mod-alias error diagnostic into
+/// `new_config.diagnostics` the same as any other error, so "any error
+/// diagnostic ⇒ keep last-good entire Config" applies unchanged) — a
+/// reload carrying it keeps the previous mod alias untouched, surfaces
+/// the error in the status bar's reload message, and a later reload back
+/// to a real alias clears it.
+#[gpui::test]
+fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
+    assert_eq!(
+        original_mod_alias,
+        Modifiers::ALT,
+        "sanity: test_services() starts on the default (alt) alias"
+    );
+
+    let ctrl_config = config_with_mod("ctrl");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(ctrl_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.services.mod_alias, original_mod_alias,
+            "keymap.mod = \"ctrl\" must be refused: the previous alias stands"
+        );
+        let message = shell
+            .last_reload
+            .status_message()
+            .expect("a refused keymap.mod = \"ctrl\" reload must surface a status message");
+        assert!(
+            message.contains("1 error"),
+            "expected the one mod-alias error to be counted: {message}"
+        );
+        match &shell.last_reload {
+            reload::ReloadOutcome::KeptLastGood { errors } => {
+                assert_eq!(errors.len(), 1);
+                assert!(errors[0].contains("keymap.mod"), "{}", errors[0]);
+                assert!(errors[0].contains("ctrl"), "{}", errors[0]);
+            }
+            other => panic!("expected KeptLastGood, got {other:?}"),
+        }
+    });
+
+    // A later reload back to a real alias clears the error.
+    let good_config = config_with_mod("alt");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(good_config, cx));
+
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(shell.services.mod_alias, Modifiers::ALT);
+        assert_eq!(
+            shell.last_reload.status_message(),
+            None,
+            "a later clean reload must clear the error status"
+        );
     });
 }
 
@@ -382,13 +468,16 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
     cx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
 
-    let new_config = config_with_mod("ctrl");
+    // "cmd" (not "ctrl" — Task 4b, Phase 4a user ruling: `keymap.mod =
+    // "ctrl"` is refused as invalid config) is the non-default alias
+    // exercised here.
+    let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     shell.read_with(&cx, |shell, _| {
         assert_eq!(
             shell.services.mod_alias,
-            Modifiers::CTRL,
+            Modifiers::CMD,
             "sanity: the mod alias must actually have changed"
         );
         assert!(
@@ -452,8 +541,10 @@ fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
     // A keymap-differing reload (not just a theme-only one — see the
     // contrasting pair of tests above) closes the palette out from
     // under that still-focused input, with no Window available to
-    // `apply_reload` itself to redirect focus.
-    let new_config = config_with_mod("ctrl");
+    // `apply_reload` itself to redirect focus. "cmd" (not "ctrl" —
+    // Task 4b, Phase 4a user ruling: `keymap.mod = "ctrl"` is refused as
+    // invalid config) is the non-default alias exercised here.
+    let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     assert!(

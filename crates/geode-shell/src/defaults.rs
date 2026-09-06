@@ -3,7 +3,7 @@
 
 use crate::actions::{ActionDef, ActionId, ActionRegistry};
 use crate::keymap::Modifiers;
-use geode_core::config::Config;
+use geode_core::config::{Config, Diagnostic, Severity};
 
 /// The builtin keymap document, layered under desk/user keymaps.
 ///
@@ -53,19 +53,16 @@ use geode_core::config::Config;
 /// alongside the other context-less bindings further down. The matcher
 /// keeps the *last* declaration-order match among exact keystroke ties
 /// (`Matcher::press`, "Bindings are in layer-then-definition order; keep
-/// the last"), and under a user's `keymap.mod = "ctrl"` (a supported
-/// alias — `defaults::mod_alias_from_config`), `mod+1` parses to the exact
-/// same keystroke as `ctrl+1`. Declaring the frame table first means the
-/// shipped `workspace::switch_N` bindings are declared *later* and so win
-/// that tie — a `mod = "ctrl"` user keeps their workspace switcher intact.
-/// The slots are not stranded by this: they stay reachable through the
-/// palette regardless of `mod`, and a user who wants the ctrl+N keys for
-/// slots instead can rebind either side in their own keymap layer. Note
-/// the asymmetry this creates under `mod = "ctrl"`: `ctrl+0`
-/// (`frame::slot_clear`) keeps working by key, because no shipped
-/// `mod+0`/`workspace::switch_0` binding exists to collide with it and
-/// win the tie the way `ctrl+1..9` do — so a slot can be cleared by key
-/// but not set, without the palette.
+/// the last"). This ordering was originally defense-in-depth against a
+/// user's `keymap.mod = "ctrl"` aliasing `mod+1` onto the exact same
+/// keystroke as the shipped `ctrl+1`: Task 4b (Phase 4a, user ruling)
+/// refused that alias outright as invalid config instead of relying on
+/// tie-break ordering to keep it safe (`defaults::mod_alias_from_config`
+/// returns an error diagnostic and keeps the default alias) — `mod` and
+/// `ctrl` can no longer collide, so this file's declaration order is no
+/// longer load-bearing for that reason. It stays as written: removing it
+/// buys nothing, and the tie-break rule is worth keeping documented for
+/// whatever binding table lands here next.
 pub const BUILTIN_KEYMAP: &str = r#"
 [[bindings]]
 [bindings.keys]
@@ -360,11 +357,13 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no
-    // builtin binding claims it under the default mod). Known remap hazard,
-    // shared with every mod+letter chord (e.g. mod+h vs ctrl+h): under
-    // `keymap.mod = "ctrl"` this aliases onto `ctrl+shift+p`, and the
-    // matcher's last-exact-match rule lets it shadow the palette's second
-    // binding (ctrl+k still opens the palette). `perf::reset` is palette-only —
+    // builtin binding claims it under the default mod). This used to be a
+    // remap hazard: under `keymap.mod = "ctrl"` it aliased onto
+    // `ctrl+shift+p`, and the matcher's last-exact-match rule let it
+    // shadow the palette's second binding (ctrl+k still opened the
+    // palette). Task 4b (Phase 4a, user ruling) refused that alias
+    // outright as invalid config, so `mod` and `ctrl` can no longer
+    // collide here or anywhere else. `perf::reset` is palette-only —
     // resetting counters is an occasional deliberate act, not muscle
     // memory worth a chord.
     action(
@@ -458,12 +457,30 @@ pub fn default_mod() -> Modifiers {
 }
 
 /// Resolve the `mod` alias from config: doc `app`, key `keymap.mod`.
-pub fn mod_alias_from_config(config: &Config) -> Modifiers {
+/// `"ctrl"` is refused with an error diagnostic and the default alias is
+/// returned — ctrl is reserved for the shipped literal bindings
+/// (`ctrl+1..9`, `ctrl+0`, `ctrl+k`, `ctrl+/` …), and aliasing `mod` onto
+/// it makes every `mod` chord collide with one of them (Phase 4a user
+/// ruling, Task 4b: rather than document the collisions, refuse the
+/// alias). Any other unknown value keeps today's behaviour: it silently
+/// falls back to the default, with no diagnostic.
+pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
     match config.get("app", "keymap.mod").and_then(|v| v.as_str()) {
-        Some("ctrl") => Modifiers::CTRL,
-        Some("cmd") => Modifiers::CMD,
-        Some("alt") => Modifiers::ALT,
-        _ => default_mod(),
+        Some("ctrl") => (
+            default_mod(),
+            vec![Diagnostic {
+                severity: Severity::Error,
+                layer: config.explain("app", "keymap.mod"),
+                file: None,
+                message: "app: keymap.mod = \"ctrl\" is not allowed — ctrl is reserved for the \
+                          shipped literal bindings (ctrl+1..9, ctrl+0, ctrl+k, ctrl+/ …); \
+                          use \"alt\", \"cmd\" or \"super\""
+                    .into(),
+            }],
+        ),
+        Some("cmd") => (Modifiers::CMD, Vec::new()),
+        Some("alt") => (Modifiers::ALT, Vec::new()),
+        _ => (default_mod(), Vec::new()),
     }
 }
 
@@ -485,6 +502,16 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         let keystroke = parse_keystroke(spec, mod_alias).unwrap();
         Matcher::default().press(&keymap, keystroke, &[KeyContext::new("workspace")])
+    }
+
+    /// A `Config` with only a builtin `app` doc holding `text` — the
+    /// minimal fixture `mod_alias_from_config`'s own tests need.
+    fn config_from_app(text: &str) -> Config {
+        Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+            desk: None,
+            user: None,
+        })
     }
 
     #[test]
@@ -527,29 +554,54 @@ mod tests {
 
     #[test]
     fn mod_alias_read_from_config_with_fallback() {
-        let config = Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("app", "[keymap]\nmod = \"ctrl\"\n").unwrap()],
-            desk: None,
-            user: None,
-        });
-        assert_eq!(mod_alias_from_config(&config), Modifiers::CTRL);
         let empty = Config::load(&ConfigSources::default());
-        assert_eq!(mod_alias_from_config(&empty), default_mod());
-        let bogus = Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("app", "[keymap]\nmod = \"hyper\"\n").unwrap()],
-            desk: None,
-            user: None,
-        });
-        assert_eq!(mod_alias_from_config(&bogus), default_mod());
+        let (alias, diags) = mod_alias_from_config(&empty);
+        assert_eq!(alias, default_mod());
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let bogus = config_from_app("[keymap]\nmod = \"hyper\"\n");
+        let (alias, diags) = mod_alias_from_config(&bogus);
+        assert_eq!(alias, default_mod());
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
-    /// Fix round 1 (review Finding 1): under a `keymap.mod = "ctrl"` user
-    /// (`mod_alias_from_config`'s supported "ctrl" alias), `mod+1` parses
-    /// to the exact same keystroke as `ctrl+1` — so BUILTIN_KEYMAP's
-    /// shipped `workspace::switch_1` must still win that tie. It does
-    /// because the frame-slot table is declared *before* the `workspace`
-    /// table (see `BUILTIN_KEYMAP`'s own doc comment) and the matcher
-    /// keeps the last declaration-order match.
+    /// Task 4b (Phase 4a, user ruling): `keymap.mod = "ctrl"` is refused
+    /// as invalid config rather than merely documented as a collision
+    /// hazard — see `mod_alias_from_config`'s own doc comment.
+    #[test]
+    fn mod_alias_ctrl_is_refused_with_an_error_and_the_default_stands() {
+        let config = config_from_app("[keymap]\nmod = \"ctrl\"\n");
+        let (alias, diags) = mod_alias_from_config(&config);
+        assert_eq!(alias, default_mod());
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("keymap.mod"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("ctrl"), "{}", d.message);
+    }
+
+    #[test]
+    fn mod_alias_alt_and_cmd_are_accepted_without_diagnostics() {
+        for (value, expect_ctrl) in [("alt", false), ("cmd", false)] {
+            let (alias, diags) =
+                mod_alias_from_config(&config_from_app(&format!("[keymap]\nmod = \"{value}\"\n")));
+            assert!(diags.is_empty(), "{value}: {diags:?}");
+            assert_eq!(alias.ctrl, expect_ctrl);
+        }
+    }
+
+    /// Fix round 1 (review Finding 1): if `mod_alias` were ever
+    /// `Modifiers::CTRL`, `mod+1` would parse to the exact same keystroke
+    /// as `ctrl+1` — so BUILTIN_KEYMAP's shipped `workspace::switch_1`
+    /// must still win that tie. It does because the frame-slot table is
+    /// declared *before* the `workspace` table (see `BUILTIN_KEYMAP`'s
+    /// own doc comment) and the matcher keeps the last declaration-order
+    /// match. `mod_alias_from_config` itself now refuses to ever produce
+    /// `Modifiers::CTRL` from config (Task 4b), so this test exercises
+    /// the matcher's tie-break directly with the raw `Modifiers` value —
+    /// a regression guard kept for defense in depth, independent of
+    /// config validation.
     #[test]
     fn ctrl_1_resolves_to_the_shipped_workspace_switch_under_a_ctrl_mod_alias() {
         match resolve(Modifiers::CTRL, "ctrl+1") {
