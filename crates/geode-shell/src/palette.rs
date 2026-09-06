@@ -40,18 +40,27 @@ const THEME_CATEGORY: &str = "Appearance";
 /// theme name (e.g. `"Gruvbox Dark"`) — exactly what
 /// `ThemeService::apply`/`resolve` expect, so dispatch needs no further
 /// lookup.
+/// Palette-facing category for saved-scope rows (Phase 4a §3.9: `"Scope:
+/// {name}"`, listed after the theme rows).
+const SCOPE_CATEGORY: &str = "Scope";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaletteItem {
     Action(ActionId, String, String, Option<String>),
     Theme(String),
+    /// A saved scope's name (Phase 4a §3.9) — selecting it loads that
+    /// scope via `Frame::load_scope`.
+    Scope(String),
 }
 
 impl PaletteItem {
-    /// Display/match title: the action's own title, or `"Theme: {name}"`.
+    /// Display/match title: the action's own title, `"Theme: {name}"`, or
+    /// `"Scope: {name}"`.
     pub fn title(&self) -> String {
         match self {
             PaletteItem::Action(_, title, _, _) => title.clone(),
             PaletteItem::Theme(name) => format!("Theme: {name}"),
+            PaletteItem::Scope(name) => format!("Scope: {name}"),
         }
     }
 
@@ -59,16 +68,17 @@ impl PaletteItem {
         match self {
             PaletteItem::Action(_, _, category, _) => category,
             PaletteItem::Theme(_) => THEME_CATEGORY,
+            PaletteItem::Scope(_) => SCOPE_CATEGORY,
         }
     }
 
     /// Rendered keybinding text (e.g. `"alt+p"`), if any — always `None`
-    /// for a theme row, since themes are only ever reached by selecting
-    /// them in the palette itself.
+    /// for a theme or saved-scope row, since both are only ever reached by
+    /// selecting them in the palette itself.
     pub fn binding(&self) -> Option<&str> {
         match self {
             PaletteItem::Action(_, _, _, binding) => binding.as_deref(),
-            PaletteItem::Theme(_) => None,
+            PaletteItem::Theme(_) | PaletteItem::Scope(_) => None,
         }
     }
 }
@@ -457,11 +467,14 @@ pub fn build_binding_index(keymap: &Keymap) -> BTreeMap<ActionId, String> {
 /// Build the full palette item list: every registered action, in registry
 /// order (`ActionRegistry::iter`, sorted by id), each paired with its
 /// rendered binding from `bindings` if it has one; then every bundled theme
-/// (`ThemeService::names`' sorted order) as a `Theme` row.
+/// (`ThemeService::names`' sorted order) as a `Theme` row; then every saved
+/// scope (`saved`'s own `BTreeMap` order — spelling, per Phase 4a's
+/// interface note) as a `Scope` row.
 pub fn build_items(
     registry: &ActionRegistry,
     theme: &ThemeService,
     bindings: &BTreeMap<ActionId, String>,
+    saved: &geode_core::scopes::SavedScopes,
 ) -> Vec<PaletteItem> {
     let mut items: Vec<PaletteItem> = registry
         .iter()
@@ -475,6 +488,7 @@ pub fn build_items(
         })
         .collect();
     items.extend(theme.names().into_iter().map(PaletteItem::Theme));
+    items.extend(saved.keys().cloned().map(PaletteItem::Scope));
     items
 }
 
@@ -1310,7 +1324,12 @@ mod tests {
             Some("ctrl+k")
         );
 
-        let items = build_items(&registry, &theme, &bindings);
+        let items = build_items(
+            &registry,
+            &theme,
+            &bindings,
+            &geode_core::scopes::SavedScopes::new(),
+        );
 
         for def in registry.iter() {
             let found = items

@@ -8,22 +8,36 @@
 use gpui::App;
 use std::path::PathBuf;
 
-use crate::session;
+use crate::session::{self, FrameRecord};
 
 use super::ShellView;
 
 impl ShellView {
-    /// If a workspace mutation happened since the last flush, or a live
+    /// Build the `[frame]` record `to_toml`/`save` write from the frame's
+    /// current state (Phase 4a §3.6) — shared by the flush path below and
+    /// `save_session`'s synchronous one-shot.
+    fn frame_record(&self, cx: &App) -> FrameRecord {
+        let frame = self.frame.read(cx);
+        FrameRecord {
+            scope: frame.scope().clone(),
+            active_slot: frame.active_slot(),
+            as_of: frame.as_of().clone(),
+        }
+    }
+
+    /// If a workspace mutation happened since the last flush, a live
     /// occupant's serialized state differs from what was last written
     /// (Task 4 — a state-only change never sets `session_dirty`, since
-    /// that flag tracks the layout only), serialize the current session
-    /// state (cheap: `session::to_string_pretty` over a handful of small
-    /// TOML tables — safe to run synchronously here, on the UI thread,
-    /// unlike the actual file write) and clear the dirty flag, handing the
-    /// caller `(path, text)` to write off the UI thread. Returns `None`
-    /// when there's nothing to flush (neither dirty, no session path
-    /// configured, or serialization somehow failed — logged as a warning
-    /// either way, never a panic).
+    /// that flag tracks the layout only), or the frame's own restorable
+    /// state (scope, active slot, as-of — Phase 4a §3.6) changed since the
+    /// last flush, serialize the current session state (cheap:
+    /// `session::to_string_pretty` over a handful of small TOML tables —
+    /// safe to run synchronously here, on the UI thread, unlike the actual
+    /// file write) and clear the dirty flag, handing the caller `(path,
+    /// text)` to write off the UI thread. Returns `None` when there's
+    /// nothing to flush (nothing dirty, no session path configured, or
+    /// serialization somehow failed — logged as a warning either way,
+    /// never a panic).
     ///
     /// Called from the background watcher's ~500ms tick (`new`) in
     /// production. Tests call it directly instead of driving that timer:
@@ -34,19 +48,25 @@ impl ShellView {
     /// watcher loop is just what schedules calling it.
     pub(super) fn take_dirty_session_write(&mut self, cx: &App) -> Option<(PathBuf, String)> {
         let tiles = self.current_tiles(cx);
+        let versions = self.frame.read(cx).versions();
+        let frame_versions = (versions.scope, versions.grouping, versions.as_of);
+        let frame_dirty = frame_versions != self.last_frame_versions_written;
         // A module state change never sets `session_dirty` (that flag
         // tracks the layout only), so this compares the freshly-gathered
-        // tiles against what was last written — a state-only change is
-        // still noticed here, on the same tick, without dirtying the
-        // layout flag on every keystroke inside a module.
-        if !self.session_dirty && tiles == self.last_tiles_written {
+        // tiles (and the frame's own restorable versions) against what was
+        // last written — either kind of change is still noticed here, on
+        // the same tick, without dirtying the layout flag on every
+        // keystroke inside a module or every scope edit.
+        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {
             return None;
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
-        match session::to_string_pretty(&self.services.workspaces, &tiles) {
+        let record = self.frame_record(cx);
+        match session::to_string_pretty(&self.services.workspaces, &tiles, Some(&record)) {
             Ok(text) => {
                 self.last_tiles_written = tiles;
+                self.last_frame_versions_written = frame_versions;
                 Some((path, text))
             }
             Err(e) => {
@@ -73,7 +93,13 @@ impl ShellView {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
-        if let Err(e) = session::save(path, &self.services.workspaces, &self.current_tiles(cx)) {
+        let record = self.frame_record(cx);
+        if let Err(e) = session::save(
+            path,
+            &self.services.workspaces,
+            &self.current_tiles(cx),
+            Some(&record),
+        ) {
             eprintln!("[session] warning: failed to save session: {e}");
         }
     }

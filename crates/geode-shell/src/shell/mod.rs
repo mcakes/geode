@@ -73,6 +73,12 @@ pub struct ShellServices {
     /// Per-tile module kind and state restored from `session.toml`
     /// (Task 4); consumed as occupants are created.
     pub restored_tiles: crate::session::TileRecords,
+    /// The frame's own restored state (Phase 4a §3.6: scope, active slot,
+    /// as-of) from `session.toml`'s `[frame]` table, if the file had one
+    /// — `ShellView::new` applies it to the just-built frame. `None` for a
+    /// fresh session (no file, or one with no `[frame]` table yet) and in
+    /// every test setup that doesn't opt in.
+    pub restored_frame: Option<crate::session::FrameRecord>,
 }
 
 /// What `ShellView` tells the rest of the app about a config reload (§4.5).
@@ -290,6 +296,11 @@ pub struct ShellView {
     /// `session_dirty`, that flag tracks the layout only — is still
     /// noticed by the watcher's tick (Task 4).
     last_tiles_written: crate::session::TileRecords,
+    /// The frame's `(scope, grouping, as_of)` versions as of the last
+    /// flush (Phase 4a §3.6) — same reasoning as `last_tiles_written`
+    /// just above: a frame-only change (no workspace mutation, no tile
+    /// state change) must still be noticed by the watcher's tick.
+    last_frame_versions_written: (u64, u64, u64),
     /// Set by a background path that closed the palette without a `Window`
     /// to restore focus with (today: only `apply_reload`'s palette-
     /// snapshot-changed branch) — see that call site's own comment for the
@@ -649,20 +660,39 @@ impl ShellView {
         let font_size = FontSize::from_config(&services.config);
         let find_style = FindStyle::from_config(&services.config);
 
-        // The shared frame (§4): built from whatever `[groupings]` (plus
-        // the `datasets`/`dimensions` docs it validates slots against)
-        // config resolved to — see `hot_reload::rebuild_slots`, shared
-        // with `apply_reload`'s own slot rebuild.
+        // The shared frame (§4): built from whatever `[groupings]`/
+        // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
+        // against) config resolved to — see `hot_reload::rebuild_slots`/
+        // `rebuild_saved_scopes`, shared with `apply_reload`'s own
+        // rebuilds.
         let frame = {
             let slots = hot_reload::rebuild_slots(&services.config);
-            cx.new(|_| Frame::new(slots, user_dir.clone()))
+            let saved = hot_reload::rebuild_saved_scopes(&services.config);
+            cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
         };
-        // A slot saved by a module (`:group save N`) is drained and
-        // persisted here — see `on_frame_changed`'s own doc comment (§4.2:
-        // the frame is pure and has no file access, so `ShellView` is the
-        // one place that can do the write).
+        // A slot or scope saved by a module (`:group save N`, `:scope
+        // save NAME`) is drained and persisted here — see
+        // `on_frame_changed`'s own doc comment (§4.2/§3.9: the frame is
+        // pure and has no file access, so `ShellView` is the one place
+        // that can do the write).
         cx.observe(&frame, |view, frame, cx| view.on_frame_changed(frame, cx))
             .detach();
+
+        // Restore a saved session's scope/slot/as-of (Task 3, spec §3.6
+        // "state-as-config"), applied directly to the just-built frame
+        // rather than threaded through `Frame::new` — `main.rs` restores
+        // the workspace layout the exact same way, after `services` is
+        // built. `clear_history` afterwards drops the undo entry
+        // `set_scope` just pushed: a restored session must not start with
+        // a phantom "undo" back to the empty scope nobody actually chose.
+        if let Some(record) = services.restored_frame.clone() {
+            frame.update(cx, |f, _cx| {
+                f.set_scope(record.scope);
+                f.set_active_slot(record.active_slot);
+                f.set_as_of(record.as_of);
+                f.clear_history();
+            });
+        }
 
         // M8: the docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -692,6 +722,7 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             session_dirty: false,
             last_tiles_written: crate::session::TileRecords::new(),
+            last_frame_versions_written: (0, 0, 0),
             pending_focus_restore: false,
             divider_drag: None,
             tile_drag: None,
@@ -748,6 +779,21 @@ impl ShellView {
                     if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping)
                     {
                         eprintln!("[groupings] warning: {e}");
+                    }
+                })
+                .detach();
+        }
+        // A scope saved by a module (`:scope save NAME`, spec §3.9) is
+        // persisted here too — same reasoning as the grouping slot above:
+        // the frame is pure and has no file access.
+        if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
+            && let Some(dir) = self.user_dir.clone()
+        {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope)
+                    {
+                        eprintln!("[scopes] warning: {e}");
                     }
                 })
                 .detach();

@@ -1064,9 +1064,11 @@ run_mutation "frame: an empty slot cannot be activated" \
 
 run_mutation "frame: set_scope bumps only the scope counter" \
   crates/geode-shell/src/frame.rs \
-  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+  '        let outgoing = std::mem::replace(&mut self.scope, scope);
+        self.push_undo(outgoing);
         self.versions.scope += 1;' \
-  '        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+  '        let outgoing = std::mem::replace(&mut self.scope, scope);
+        self.push_undo(outgoing);
         self.versions.scope += 1;
         self.versions.grouping += 1;' \
   geode-shell \
@@ -1312,20 +1314,20 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
   geode-shell \
   emits_config_reloaded_before_the_frame_notifies
 
-run_mutation "frame: readout is rebuilt when versions change" \
+run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
         {
             return Rc::clone(cached);
         }' \
-  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions != versions
         {
             return Rc::clone(cached);
         }' \
   geode-shell \
-  readout_is_rebuilt_only_when_versions_change
+  the_bar_model_is_cached_on_versions_and_describes_the_scope
 
 run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
   crates/geode-shell/src/theme.rs \
@@ -1916,6 +1918,67 @@ run_mutation "distinct: the sink maps a Distinct result to a Distinct event" \
                     }),' \
   '                    values: Ok(Vec::new()),' \
   geode-data a_distinct_query_returns_value_counts_on_the_distinct_event
+
+# --- Phase 4a Task 3: frame undo/redo, previous as-of, recent
+# publishes, saved scopes, the bar model, session [frame] -------------
+
+run_mutation "frame: undo is bounded" \
+  crates/geode-shell/src/frame.rs \
+  '        if self.scope_undo.len() > UNDO_DEPTH {' \
+  '        if false {' \
+  geode-shell undo_and_redo_walk_a_bounded_stack
+
+run_mutation "frame: a new set clears redo" \
+  crates/geode-shell/src/frame.rs \
+  '        self.scope_redo.clear();' \
+  '        let _ = &self.scope_redo;' \
+  geode-shell undo_and_redo_walk_a_bounded_stack
+
+run_mutation "frame: a text session pushes once" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(None) => self.scope_session = Some(None),' \
+  '            Some(None) => {
+                let o = self.scope.clone();
+                self.push_undo(o);
+                self.scope_session = Some(None)
+            }' \
+  geode-shell a_text_session_coalesces_into_one_undo_entry
+
+run_mutation "frame: as-of undo swaps rather than consumes" \
+  crates/geode-shell/src/frame.rs \
+  '        self.previous_as_of = Some(current);' \
+  '        let _ = current;' \
+  geode-shell as_of_remembers_one_previous_value_in_both_directions
+
+run_mutation "frame: recent publishes are bounded and newest first" \
+  crates/geode-shell/src/frame.rs \
+  '        self.recent_publishes.push_front(publish);' \
+  '        self.recent_publishes.push_back(publish);' \
+  geode-shell recent_publishes_keep_the_last_thirty_two_newest_first
+
+run_mutation "frame: the bar names a contradiction" \
+  crates/geode-shell/src/scopebar.rs \
+  '    let impossible = scope.impossible.then(|| {' \
+  '    let impossible = false.then(|| {' \
+  geode-shell a_contradiction_is_named_not_hidden
+
+run_mutation "scopes: an unknown column drops the scope" \
+  crates/geode-core/src/scopes.rs \
+  '        if !bad.is_empty() {' \
+  '        if false {' \
+  geode-core a_scope_naming_an_unknown_column_is_dropped_with_a_warning
+
+run_mutation "session: [frame] restores as-of" \
+  crates/geode-shell/src/session.rs \
+  '            t.insert("as_of".into(), toml::Value::String(at.to_rfc3339()));' \
+  '            let _ = at;' \
+  geode-shell a_frame_record_round_trips_through_session_toml_with_every_field
+
+run_mutation "palette: selecting a saved scope loads it" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '                    if let Ok(true) = f.load_scope(&name) {' \
+  '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
+  geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -53,7 +53,13 @@ impl ShellView {
         // against whatever key closes the palette.
         self.matcher.cancel();
         let bindings = palette::build_binding_index(&self.services.keymap);
-        let items = palette::build_items(&self.services.registry, &self.services.theme, &bindings);
+        let saved = self.frame.read(cx).saved_scopes().clone();
+        let items = palette::build_items(
+            &self.services.registry,
+            &self.services.theme,
+            &bindings,
+            &saved,
+        );
         self.palette = Some(PaletteState::new(items));
         // Fresh scroll state for a fresh palette session — a stale offset
         // left over from a previous open (a different query, a different
@@ -131,6 +137,17 @@ impl ShellView {
                     .theme
                     .apply(name, crate::theme::Mode::Dark, cx);
                 self.persist_theme(cx);
+            }
+            PaletteItem::Scope(name) => {
+                // Phase 4a §3.9: load a saved scope, undoable like any
+                // other scope change (`Frame::load_scope` goes through
+                // `set_scope`).
+                let name = name.clone();
+                self.frame.update(cx, |f, cx| {
+                    if let Ok(true) = f.load_scope(&name) {
+                        cx.notify();
+                    }
+                });
             }
         }
     }

@@ -28,14 +28,14 @@ gpui-component.workspace = true
 toml = "1.1.4"
 serde_json = "1.0.151"
 toml_edit = "0.25.13"
+# Phase 4a (M6's earlier "test-only" note no longer holds): `Frame::
+# note_published`'s `Publish::at`, `scopebar::build_model`'s "is the as-of
+# date today" check (`chrono::Local::now()`), and the scope bar's as-of
+# formatting are all runtime code now, not just `#[cfg(test)]` fixtures.
+chrono = "0.4.42"
 
 [dev-dependencies]
 tempfile = "3.27.0"
-# M6 (3b final review): only `#[cfg(test)]` code in frame.rs reaches
-# `chrono::` — `AsOf::At(t).format(..)` is an inherent method on
-# geode-core's public type, so this crate's own runtime code never names
-# chrono directly.
-chrono = "0.4.42"
 # The Snapshot fixture builder, so probe tests never name an Arrow type.
 geode-core = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }

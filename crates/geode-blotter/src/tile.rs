@@ -924,6 +924,7 @@ mod tests {
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::groupings::GroupingSlots;
     use geode_core::query::{QueryKey, QueryOutcome};
+    use geode_core::scopes::SavedScopes;
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
@@ -1007,7 +1008,7 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let frame = cx.new(|_| Frame::new(slots(), None));
+                    let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
                             BlotterTile::new(

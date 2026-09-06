@@ -94,6 +94,7 @@ fn main() {
                 }
                 services.workspaces = restored.workspaces;
                 services.restored_tiles = restored.tiles;
+                services.restored_frame = restored.frame;
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
@@ -314,6 +315,7 @@ fn build_shell_services(
         session_path,
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
+        restored_frame: None,
     };
     (services, desk, user, bridge)
 }

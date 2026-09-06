@@ -17,6 +17,7 @@ pub mod module;
 pub mod palette;
 pub mod perf;
 pub mod reload;
+pub mod scopebar;
 pub mod session;
 pub mod shell;
 pub mod theme;

@@ -26,17 +26,33 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::{ActiveTheme as _, Icon, IconName, TitleBar, h_flex};
 
 use crate::fonts;
-use crate::frame::FrameReadout;
+use crate::scopebar::ScopeBarModel;
 
 /// Compact width of the filter field (brief: "~200px").
 const FILTER_WIDTH: f32 = 200.0;
 
 pub fn toolbar(
     filter_input: &Entity<InputState>,
-    readout: &FrameReadout,
+    model: &ScopeBarModel,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
+
+    // Task 3: chips render as one joined summary line, the same shape
+    // `Frame::readout` (deleted this task) used to build — Task 4 gives
+    // each chip its own painted element; this keeps the toolbar showing
+    // the same information in the meantime.
+    let mut parts: Vec<String> = model.chips.iter().map(|c| c.summary.clone()).collect();
+    if let Some(t) = &model.text {
+        parts.push(format!("text \"{t}\""));
+    }
+    if model.expr.is_some() {
+        parts.push("expr".to_string());
+    }
+    if let Some(named) = &model.impossible {
+        parts.push(named.clone());
+    }
+    let scope_summary = parts.join(" · ");
 
     TitleBar::new().child(
         h_flex()
@@ -57,7 +73,7 @@ pub fn toolbar(
                     .font_family(fonts::MONO)
                     .text_sm()
                     .debug_selector(|| "frame-readout".to_string())
-                    .when_some(readout.as_of.as_ref(), |el, t| {
+                    .when_some(model.as_of.as_ref(), |el, t| {
                         el.bg(theme.warning.opacity(0.25))
                             .px_2()
                             .rounded(px(4.))
@@ -70,16 +86,16 @@ pub fn toolbar(
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
-                            .child(match &readout.slot {
+                            .child(match &model.slot {
                                 Some((n, label)) => format!("{n} · {label}"),
                                 None => "view default".to_string(),
                             }),
                     )
-                    .when(!readout.scope.is_empty(), |el| {
+                    .when(!scope_summary.is_empty(), |el| {
                         el.child(
                             div()
                                 .text_color(theme.foreground)
-                                .child(readout.scope.clone()),
+                                .child(scope_summary.clone()),
                         )
                     }),
             )

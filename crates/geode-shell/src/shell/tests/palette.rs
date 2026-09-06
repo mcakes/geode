@@ -1125,6 +1125,7 @@ fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
         session_path: None,
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
+        restored_frame: None,
     }
 }
 
@@ -1254,5 +1255,77 @@ fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
         "enter on the palette::toggle row must leave the palette closed, not \
          reopen it"
+    );
+}
+
+// --- Phase 4a §3.9: saved scopes in the palette ----------------------
+
+/// A saved scope appears as `Scope: {name}` (category "Scope") and
+/// selecting it loads it onto the frame via `Frame::load_scope`, bumping
+/// the scope version exactly once.
+#[gpui::test]
+fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    let scopes =
+        LayerDoc::builtin("scopes", "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n").unwrap();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+        ],
+        ..ConfigSources::default()
+    });
+
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let eu_scope = geode_core::scope::Scope {
+        dimensions: vec![geode_core::scope::DimensionSelection {
+            column: "book".into(),
+            values: vec!["BK001".into()],
+        }],
+        ..geode_core::scope::Scope::default()
+    };
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).saved_scopes().clone())["eu"],
+        eu_scope,
+        "sanity: the scope loaded from config before the palette is even opened"
+    );
+
+    let v0 = shell.read_with(&cx, |s, cx| s.frame().read(cx).versions().scope);
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("Scope: eu");
+
+    let selected_title = shell.read_with(&cx, |shell, _| {
+        shell
+            .palette
+            .as_ref()
+            .and_then(PaletteState::selected_item)
+            .map(|item| item.title())
+    });
+    assert_eq!(selected_title, Some("Scope: eu".to_string()));
+
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("enter");
+
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).scope().clone()),
+        eu_scope,
+        "selecting the row must load the saved scope onto the frame"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.frame().read(cx).versions().scope),
+        v0 + 1,
+        "loading the scope must bump the scope version exactly once"
     );
 }

@@ -763,8 +763,8 @@ impl Render for ShellView {
         // Computed once per frame (§4.4) rather than read field-by-field
         // from inside `toolbar::toolbar` — the frame is an entity, and this
         // is the one place `render` already has `cx` in hand to read it.
-        let readout = self.frame.read(cx).readout();
-        let toolbar = toolbar::toolbar(&self.filter_input, &readout, cx);
+        let bar_model = self.frame.read(cx).bar_model();
+        let toolbar = toolbar::toolbar(&self.filter_input, &bar_model, cx);
 
         let body = h_flex()
             .w_full()

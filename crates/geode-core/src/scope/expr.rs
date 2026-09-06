@@ -93,6 +93,70 @@ impl Expr {
     }
 }
 
+impl CompareOp {
+    /// The grammar's own spelling — distinct from [`CompareOp::sql`], which
+    /// is the SQL text the compiler emits (`Ne` as `<>`, `Like` as
+    /// `ilike`). `parse_op` accepts both `!=` and `<>` for `Ne`; either
+    /// round-trips, so `Display` just picks one.
+    fn grammar(self) -> &'static str {
+        match self {
+            CompareOp::Eq => "=",
+            CompareOp::Ne => "!=",
+            CompareOp::Lt => "<",
+            CompareOp::Le => "<=",
+            CompareOp::Gt => ">",
+            CompareOp::Ge => ">=",
+            CompareOp::Like => "like",
+        }
+    }
+}
+
+impl std::fmt::Display for Literal {
+    /// A string is single-quoted with no escape — the parser's own string
+    /// lexing (`Parser::parse_literal`) has none either: the first `'`
+    /// after the opening quote always closes the string, so a literal
+    /// containing one cannot round-trip through this grammar at all.
+    /// `Num` uses `f64`'s own `Display`, which already omits a trailing
+    /// `.0` on a whole number (`100.0` prints `100`) — exactly the
+    /// spelling `parse_literal`'s `f64::from_str` accepts back.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Literal::Str(s) => write!(f, "'{s}'"),
+            Literal::Num(n) => write!(f, "{n}"),
+            Literal::Bool(b) => write!(f, "{b}"),
+        }
+    }
+}
+
+impl std::fmt::Display for Expr {
+    /// Grammar text such that `parse_expr(e.to_string()) == e` for every
+    /// `Expr` this parser can produce. Every `And`/`Or`/`Not` operand is
+    /// fully parenthesised regardless of whether precedence would already
+    /// disambiguate it — the round trip is what matters here, not
+    /// brevity, and parentheses are the one construct that can never be
+    /// misread by the parser above.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::And(a, b) => write!(f, "({a}) and ({b})"),
+            Expr::Or(a, b) => write!(f, "({a}) or ({b})"),
+            Expr::Not(e) => write!(f, "not ({e})"),
+            Expr::Compare { column, op, value } => {
+                write!(f, "{column} {} {value}", op.grammar())
+            }
+            Expr::In { column, values } => {
+                write!(f, "{column} in (")?;
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
@@ -428,6 +492,26 @@ mod tests {
             "book = version()",
         ] {
             assert!(parse_expr(hostile).is_err(), "accepted: {hostile}");
+        }
+    }
+
+    #[test]
+    fn rendering_an_expression_round_trips_through_the_parser() {
+        for src in [
+            "model_code = 'EURP'",
+            "model_code = 'EURP' and underlying_ref = 'SPX'",
+            "not (book = 'BK001' or lhu = 'X')",
+            "npv > 100.5",
+            "strike <= -3",
+            "book in ('A', 'B')",
+            "name like 'sp%'", // the grammar's own spelling of Like
+            "flag = true",
+            "note = 'its'", // the grammar has no in-string quote escape
+        ] {
+            let e = parse_expr(src).unwrap_or_else(|err| panic!("{src}: {err}"));
+            let rendered = e.to_string();
+            let again = parse_expr(&rendered).unwrap_or_else(|err| panic!("{rendered}: {err}"));
+            assert_eq!(e, again, "{src} -> {rendered}");
         }
     }
 

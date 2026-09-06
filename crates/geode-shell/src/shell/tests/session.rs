@@ -374,7 +374,7 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     // through `session::from_toml`, exactly as `main.rs` restores a
     // real session file — must have its `state` handed to the
     // recorder's `create` as `Some(...)`.
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new());
+    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
     let ws1: toml::Table = r#"
         focused = 1
         [node]
@@ -486,4 +486,81 @@ fn mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file(
         Some(expected_mode),
         "the persisted [theme].mode must match the mode the keystroke applied"
     );
+}
+
+// --- Phase 4a: [frame] restore --------------------------------------
+
+/// `ShellServices::restored_frame` (Phase 4a §3.6) is applied to the
+/// just-built frame — scope and as-of land on it directly, with no
+/// leftover undo entry back to the empty scope nobody chose — and the
+/// first watcher-tick flush after that writes it straight back out to
+/// `[frame]`.
+#[gpui::test]
+fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_writes_it_back(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.toml");
+
+    let record = session::FrameRecord {
+        scope: geode_core::scope::Scope {
+            dimensions: vec![geode_core::scope::DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK001".into()],
+            }],
+            ..geode_core::scope::Scope::default()
+        },
+        active_slot: None,
+        as_of: geode_core::query::AsOf::At(chrono::Utc::now()),
+    };
+
+    let mut services = test_services_with_session(session_path.clone());
+    services.restored_frame = Some(record.clone());
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+
+    let (scope, as_of) = shell.read_with(&cx, |shell, cx| {
+        let frame = shell.frame().read(cx);
+        (frame.scope().clone(), frame.as_of().clone())
+    });
+    assert_eq!(scope, record.scope, "the restored scope must apply");
+    assert_eq!(as_of, record.as_of, "the restored as-of must apply");
+
+    let undid = shell.update(&mut cx, |shell, cx| {
+        shell.frame().update(cx, |f, _| f.undo_scope())
+    });
+    assert!(
+        !undid,
+        "clear_history must leave no phantom undo entry from applying the restore"
+    );
+
+    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let (path, text) = pending.expect("the first tick after a restore must flush [frame]");
+    session::write_atomic(&path, &text).unwrap();
+
+    let restored = session::load(&session_path);
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    assert_eq!(restored.frame, Some(record));
 }

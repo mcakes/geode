@@ -144,6 +144,7 @@ impl ModuleFactory for BlotterFactory {
 mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
+    use geode_core::scopes::SavedScopes;
 
     /// One tile per open window, its own `VisualTestContext`.
     fn open_tile(
@@ -153,7 +154,8 @@ mod tests {
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let frame = cx.new(|_| Frame::new(GroupingSlots::default(), None));
+                    let frame =
+                        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
                     let occupant = factory.create(TileId(1), None, frame, window, cx);
                     occupant.view.downcast::<BlotterTile>().unwrap()
                 })

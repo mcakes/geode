@@ -1,7 +1,9 @@
-//! The shared frame (foundation §4, Phase 3 §4): global scope, the active
-//! grouping slot, as-of, and the data and config generations, as one
-//! value every tile observes. Pure: `ShellView` holds it in a gpui
-//! entity and notifies; a module reads it through that entity.
+//! The shared frame (foundation §4, Phase 3 §4, Phase 4 §3.1/§3.6/§3.8/
+//! §3.9/§3.12): global scope, undo/redo history, the active grouping slot,
+//! as-of (with one remembered previous value), recent publishes, saved
+//! scopes, and the data and config generations, as one value every tile
+//! observes. Pure: `ShellView` holds it in a gpui entity and notifies; a
+//! module reads it through that entity.
 //!
 //! Every mutation bumps exactly the counters it affects, so a tile can
 //! compare the fields it follows against the ones it last acted on with
@@ -10,13 +12,38 @@
 //! `config` (§4.1).
 
 use crate::perf::RequeryStats;
+use crate::scopebar::{self, ScopeBarModel};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::AsOf;
 use geode_core::scope::Scope;
+use geode_core::scopes::SavedScopes;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use toml_edit::{DocumentMut, value};
+
+/// How many scope edits [`Frame::undo_scope`] can walk back through (spec
+/// §3.6). Bounded, not unlimited: an unbounded history is an unbounded
+/// per-frame allocation waiting to happen (every `set_scope` clones the
+/// outgoing `Scope` onto the stack).
+pub const UNDO_DEPTH: usize = 32;
+
+/// How many recent publishes [`Frame::recent_publishes`] remembers (spec
+/// §3.12), newest first.
+pub const RECENT_PUBLISHES: usize = 32;
+
+/// One file publish the frame was told about (spec §3.12) — enough for a
+/// "recent publishes" picker to name what changed and when, without the
+/// frame depending on `geode-data` (CLAUDE.md: shell and data never depend
+/// on each other) to know what a `DataEvent::Published` looked like.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Publish {
+    pub dataset: String,
+    pub batch: String,
+    pub books: usize,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrameVersions {
@@ -27,21 +54,37 @@ pub struct FrameVersions {
     pub config: u64,
 }
 
-/// What the title bar shows (§4.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameReadout {
-    pub slot: Option<(u8, String)>,
-    pub scope: String,
-    pub as_of: Option<String>,
-}
-
 #[derive(Debug)]
 pub struct Frame {
     scope: Scope,
-    previous_scope: Option<Scope>,
+    /// Bounded stack of outgoing scopes, oldest first — `undo_scope` pops
+    /// the back, `redo_scope` pushes it back on. Capped at [`UNDO_DEPTH`]
+    /// by `push_undo`, which drops the oldest entry once full.
+    scope_undo: Vec<Scope>,
+    scope_redo: Vec<Scope>,
+    /// `Some` while the text field has focus (spec §3.8): the first
+    /// mutation of the session pushes the base scope onto `scope_undo`,
+    /// later ones in the same session push nothing, so a whole typing
+    /// burst coalesces into one undo entry. `None`: no session open;
+    /// `Some(Some(base))`: open, not yet pushed; `Some(None)`: open,
+    /// already pushed once.
+    scope_session: Option<Option<Scope>>,
     slots: GroupingSlots,
     active_slot: Option<u8>,
     as_of: AsOf,
+    /// The one previous as-of value `undo_as_of` swaps back in (spec
+    /// §3.6) — not a stack: undoing twice in a row toggles between the
+    /// current and previous value rather than walking further back.
+    previous_as_of: Option<AsOf>,
+    /// The most recent publishes, newest first, capped at
+    /// [`RECENT_PUBLISHES`] (spec §3.12).
+    recent_publishes: VecDeque<Publish>,
+    saved_scopes: SavedScopes,
+    /// A scope saved by `save_scope`, waiting to be written to the user
+    /// layer's `scopes.toml` — drained by `ShellView`'s frame observer via
+    /// [`take_pending_scope_persist`](Self::take_pending_scope_persist),
+    /// same pattern as `pending_persist` below (§3.9).
+    pending_scope_persist: Option<(String, Scope)>,
     versions: FrameVersions,
     /// Requery timing the blotter records (Phase 3 §6.8). Here because
     /// the frame is the one shell-side handle every module holds.
@@ -53,31 +96,38 @@ pub struct Frame {
     /// — observed off an entity-change notification — and does the actual
     /// background write with [`persist_slot_to_user_config`] (§4.2).
     pending_persist: Option<(u8, Vec<String>)>,
-    /// Lazy cache for [`readout`](Self::readout), keyed on `versions()`
-    /// (Phase 3c final review, deferred 3b M1): `render` calls `readout`
-    /// every frame (`shell/render.rs`), and building one fresh each time
-    /// allocates a `Vec<String>`, a `join`, and label `String`s for a
-    /// value that's almost always identical to the previous frame's.
-    /// `RefCell` because `readout` takes `&self` (every other read-only
-    /// accessor on `Frame` does) but still needs to update this cache;
-    /// `Rc<FrameReadout>` rather than an owned clone so a cache hit costs
-    /// a refcount bump, not a fresh `Vec`/`String` allocation.
-    readout_cache: RefCell<Option<(FrameVersions, Rc<FrameReadout>)>>,
+    /// Lazy cache for [`bar_model`](Self::bar_model), keyed on
+    /// `versions()` (carried over from the Phase 3c `readout` cache this
+    /// replaces — same reasoning): `render` calls `bar_model` every frame
+    /// (`shell/render.rs`), and building one fresh each time allocates a
+    /// `Vec<Chip>`, several `String`s, for a value that's almost always
+    /// identical to the previous frame's. `RefCell` because `bar_model`
+    /// takes `&self` (every other read-only accessor on `Frame` does) but
+    /// still needs to update this cache; `Rc<ScopeBarModel>` rather than
+    /// an owned clone so a cache hit costs a refcount bump, not a fresh
+    /// allocation.
+    bar_cache: RefCell<Option<(FrameVersions, Rc<ScopeBarModel>)>>,
 }
 
 impl Frame {
-    pub fn new(slots: GroupingSlots, user_dir: Option<PathBuf>) -> Frame {
+    pub fn new(slots: GroupingSlots, saved: SavedScopes, user_dir: Option<PathBuf>) -> Frame {
         Frame {
             scope: Scope::default(),
-            previous_scope: None,
+            scope_undo: Vec::new(),
+            scope_redo: Vec::new(),
+            scope_session: None,
             slots,
             active_slot: None,
             as_of: AsOf::Live,
+            previous_as_of: None,
+            recent_publishes: VecDeque::new(),
+            saved_scopes: saved,
+            pending_scope_persist: None,
             versions: FrameVersions::default(),
             requery: RequeryStats::new(),
             user_dir,
             pending_persist: None,
-            readout_cache: RefCell::new(None),
+            bar_cache: RefCell::new(None),
         }
     }
 
@@ -93,13 +143,27 @@ impl Frame {
         &self.scope
     }
 
-    /// Replace the global scope, remembering the previous one for
-    /// `undo_scope`. `false` when nothing changed.
+    /// Push `outgoing` onto the bounded undo stack (spec §3.6) and clear
+    /// redo — a fresh edit invalidates whatever `redo_scope` could have
+    /// replayed. Shared by every path that replaces `self.scope` outright:
+    /// `set_scope` and the first mutation of a text-editing session.
+    fn push_undo(&mut self, outgoing: Scope) {
+        self.scope_undo.push(outgoing);
+        if self.scope_undo.len() > UNDO_DEPTH {
+            self.scope_undo.remove(0);
+        }
+        self.scope_redo.clear();
+    }
+
+    /// Replace the global scope, pushing the outgoing one onto the undo
+    /// stack and clearing redo (spec §3.6). `false` when nothing changed —
+    /// no push, no version bump.
     pub fn set_scope(&mut self, scope: Scope) -> bool {
         if self.scope == scope {
             return false;
         }
-        self.previous_scope = Some(std::mem::replace(&mut self.scope, scope));
+        let outgoing = std::mem::replace(&mut self.scope, scope);
+        self.push_undo(outgoing);
         self.versions.scope += 1;
         true
     }
@@ -108,17 +172,98 @@ impl Frame {
         self.set_scope(Scope::default())
     }
 
-    /// Restore the previous scope, one level (§4.3). This consumes the
-    /// remembered scope rather than swapping it back in, so a second
-    /// `undo_scope` in a row does nothing — only a further `set_scope` or
-    /// `clear_scope` refills `previous_scope`.
-    pub fn undo_scope(&mut self) -> bool {
-        let Some(previous) = self.previous_scope.take() else {
+    /// Open a text-editing session (spec §3.8): the text field just took
+    /// focus. The base scope is remembered but not yet pushed — only the
+    /// session's first actual mutation (`set_scope_in_session`) pushes it,
+    /// so opening a session that never edits anything leaves undo
+    /// untouched.
+    pub fn begin_scope_session(&mut self) {
+        self.scope_session = Some(Some(self.scope.clone()));
+    }
+
+    /// Set the scope during an open text-editing session, coalescing every
+    /// mutation in the session into a single undo entry (spec §3.8): the
+    /// first call pushes the session's base scope; later calls in the same
+    /// session push nothing, so undoing once after typing "s", "sp", "spx"
+    /// returns straight to the pre-session scope rather than walking back
+    /// one keystroke at a time. Falls back to `set_scope`'s own
+    /// push-every-time behaviour when no session is open — a caller that
+    /// forgets `begin_scope_session` still gets correct (if less
+    /// convenient) undo semantics rather than silently losing history.
+    pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
+        if self.scope == scope {
             return false;
-        };
-        self.scope = previous;
+        }
+        match self.scope_session.take() {
+            Some(Some(base)) => {
+                self.push_undo(base);
+                self.scope_session = Some(None);
+            }
+            Some(None) => self.scope_session = Some(None),
+            None => {
+                let outgoing = self.scope.clone();
+                self.push_undo(outgoing);
+            }
+        }
+        self.scope = scope;
         self.versions.scope += 1;
         true
+    }
+
+    /// Close a text-editing session (spec §3.8): the text field lost
+    /// focus. The next `set_scope_in_session` call (if any) starts a fresh
+    /// session rather than continuing to coalesce into this one.
+    pub fn end_scope_session(&mut self) {
+        self.scope_session = None;
+    }
+
+    /// Walk back one entry in the undo stack (spec §3.6). `false` when the
+    /// stack is empty — nothing to undo, no version bump.
+    pub fn undo_scope(&mut self) -> bool {
+        let Some(previous) = self.scope_undo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.scope, previous);
+        self.scope_redo.push(current);
+        self.versions.scope += 1;
+        true
+    }
+
+    /// Walk forward one entry in the redo stack (spec §3.6) — only
+    /// non-empty right after one or more `undo_scope` calls; any
+    /// intervening `set_scope`/`set_scope_in_session` clears it.
+    pub fn redo_scope(&mut self) -> bool {
+        let Some(next) = self.scope_redo.pop() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.scope, next);
+        self.scope_undo.push(current);
+        self.versions.scope += 1;
+        true
+    }
+
+    /// Drop one dimension's selection from the current scope — an
+    /// undoable edit (spec §3.6), same as `set_text`. `false` when the
+    /// scope doesn't constrain `column` at all.
+    pub fn drop_dimension(&mut self, column: &str) -> bool {
+        let mut s = self.scope.clone();
+        let before = s.dimensions.len();
+        s.dimensions.retain(|d| d.column != column);
+        if s.dimensions.len() == before {
+            return false;
+        }
+        self.set_scope(s)
+    }
+
+    /// Set (or clear, with `None`/whitespace-only) the scope's text
+    /// filter — an undoable edit like `drop_dimension`, going through the
+    /// ordinary (non-session) `set_scope` path. `begin_scope_session`/
+    /// `set_scope_in_session` is the coalescing alternative a live text
+    /// field drives per keystroke.
+    pub fn set_text(&mut self, text: Option<String>) -> bool {
+        let mut s = self.scope.clone();
+        s.text = text.filter(|t| !t.trim().is_empty());
+        self.set_scope(s)
     }
 
     pub fn slots(&self) -> &GroupingSlots {
@@ -198,17 +343,108 @@ impl Frame {
         &self.as_of
     }
 
+    /// Replace as-of, remembering the outgoing value (spec §3.6) so
+    /// `undo_as_of` can swap back to it. `false` when nothing changed.
     pub fn set_as_of(&mut self, as_of: AsOf) -> bool {
         if self.as_of == as_of {
             return false;
         }
-        self.as_of = as_of;
+        self.previous_as_of = Some(std::mem::replace(&mut self.as_of, as_of));
         self.versions.as_of += 1;
         true
     }
 
-    pub fn note_published(&mut self) {
+    /// Swap the current and remembered-previous as-of (spec §3.6): unlike
+    /// `undo_scope`, this is a *swap*, not a pop — calling it twice in a
+    /// row toggles back and forth between the two values rather than
+    /// exhausting a stack after one call.
+    pub fn undo_as_of(&mut self) -> bool {
+        let Some(previous) = self.previous_as_of.take() else {
+            return false;
+        };
+        let current = std::mem::replace(&mut self.as_of, previous);
+        self.previous_as_of = Some(current);
+        self.versions.as_of += 1;
+        true
+    }
+
+    /// Record a file publish (spec §3.12): bumps `data` (every visible
+    /// tile requeries) and keeps it in `recent_publishes`, newest first,
+    /// capped at [`RECENT_PUBLISHES`].
+    pub fn note_published(&mut self, publish: Publish) {
+        self.recent_publishes.push_front(publish);
+        self.recent_publishes.truncate(RECENT_PUBLISHES);
         self.versions.data += 1;
+    }
+
+    pub fn recent_publishes(&self) -> &VecDeque<Publish> {
+        &self.recent_publishes
+    }
+
+    pub fn saved_scopes(&self) -> &SavedScopes {
+        &self.saved_scopes
+    }
+
+    /// A reloaded `scopes.toml` (spec §4.5-style live pickup, mirroring
+    /// `replace_slots`). Bumps `config` only — saved scopes are a picker
+    /// input, not something a following tile requeries against by
+    /// themselves.
+    pub fn replace_saved_scopes(&mut self, saved: SavedScopes) -> bool {
+        if self.saved_scopes == saved {
+            return false;
+        }
+        self.saved_scopes = saved;
+        self.versions.config += 1;
+        true
+    }
+
+    /// Save the current scope under `name`, in memory immediately and
+    /// queued for the user layer's `scopes.toml` (spec §3.9) — see
+    /// [`take_pending_scope_persist`](Self::take_pending_scope_persist).
+    /// Rejects a name that couldn't round-trip through a TOML key or the
+    /// reserved `config_version` key.
+    pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty()
+            || name == "config_version"
+            || name.contains(|c: char| c.is_whitespace() || c == '.' || c == '"')
+        {
+            return Err(format!("'{name}' is not a usable scope name"));
+        }
+        self.saved_scopes
+            .insert(name.to_string(), self.scope.clone());
+        self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));
+        self.versions.config += 1;
+        Ok(())
+    }
+
+    /// Load a saved scope by name, going through `set_scope` so it's
+    /// undoable like any other scope change. `Err` when no scope by that
+    /// name exists; `Ok(false)` when it exists but is already the current
+    /// scope.
+    pub fn load_scope(&mut self, name: &str) -> Result<bool, String> {
+        let scope = self
+            .saved_scopes
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("no saved scope '{name}'"))?;
+        Ok(self.set_scope(scope))
+    }
+
+    /// Take the scope a `save_scope` call is waiting to have written to
+    /// the user layer's `scopes.toml`, if any (§3.9) — same pattern as
+    /// `take_pending_persist`.
+    pub fn take_pending_scope_persist(&mut self) -> Option<(String, Scope)> {
+        self.pending_scope_persist.take()
+    }
+
+    /// Empty both undo and redo stacks without touching the current scope
+    /// (spec §3.6) — `ShellView::new` calls this right after applying a
+    /// restored session's scope, so a restored session doesn't start with
+    /// a phantom undo entry back to the empty scope nobody actually chose.
+    pub fn clear_history(&mut self) {
+        self.scope_undo.clear();
+        self.scope_redo.clear();
     }
 
     pub fn note_config_reloaded(&mut self) {
@@ -221,50 +457,20 @@ impl Frame {
         self.scope.and_then(tile)
     }
 
-    /// What the title bar shows (§4.4). Cached (see `readout_cache`'s
-    /// doc comment) keyed on `versions()`: a call with nothing changed
-    /// since the last one returns the exact same `Rc` — a refcount
-    /// bump, no `Vec`/`String` allocation — rather than rebuilding.
-    pub fn readout(&self) -> Rc<FrameReadout> {
+    /// What the toolbar's scope bar shows (spec §3.1/§3.6/§4.4). Cached
+    /// (see `bar_cache`'s doc comment) keyed on `versions()`: a call with
+    /// nothing changed since the last one returns the exact same `Rc` — a
+    /// refcount bump, no fresh allocation — rather than rebuilding.
+    pub fn bar_model(&self) -> Rc<ScopeBarModel> {
         let versions = self.versions();
-        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
         {
             return Rc::clone(cached);
         }
-        let built = Rc::new(self.build_readout());
-        *self.readout_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
+        let built = Rc::new(scopebar::build_model(self, chrono::Local::now()));
+        *self.bar_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
         built
-    }
-
-    fn build_readout(&self) -> FrameReadout {
-        let slot = self
-            .active_slot
-            .and_then(|n| self.slots.label(n).map(|l| (n, l)));
-        let mut parts: Vec<String> = Vec::new();
-        for d in &self.scope.dimensions {
-            if !d.values.is_empty() {
-                parts.push(format!("{} ∈ {{{}}}", d.column, d.values.len()));
-            }
-        }
-        if let Some(t) = &self.scope.text {
-            parts.push(format!("text \"{t}\""));
-        }
-        if self.scope.expression.is_some() {
-            parts.push("expr".into());
-        }
-        if self.scope.impossible {
-            parts.push("∅".into());
-        }
-        let as_of = match &self.as_of {
-            AsOf::Live => None,
-            AsOf::At(t) => Some(t.format("%Y-%m-%d %H:%M").to_string()),
-        };
-        FrameReadout {
-            slot,
-            scope: parts.join(" · "),
-            as_of,
-        }
     }
 }
 
@@ -305,6 +511,36 @@ pub fn persist_slot_to_user_config(
     crate::theme::write_atomic(user_dir, &path, &doc.to_string())
 }
 
+/// Write one named scope into the user layer's `scopes.toml`, keeping
+/// every other key (spec §3.9) — `persist_slot_to_user_config`'s own
+/// `toml_edit` read-modify-write and atomic rename, over a different file
+/// and using `geode_core::scopes::scope_to_table` for the value shape.
+pub fn persist_scope_to_user_config(
+    user_dir: &Path,
+    name: &str,
+    scope: &Scope,
+) -> Result<(), String> {
+    let path = user_dir.join("scopes.toml");
+    let existed = path.exists();
+    let mut doc = if existed {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?
+    } else {
+        DocumentMut::new()
+    };
+    if !existed {
+        doc["config_version"] = value(1_i64);
+    }
+    doc[name] = toml_edit::Item::Table(geode_core::scopes::scope_to_table(scope));
+    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,7 +565,7 @@ mod tests {
 
     #[test]
     fn each_mutation_bumps_exactly_its_own_counter() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let v0 = f.versions();
 
         assert!(f.set_scope(book_scope("BK000")));
@@ -354,7 +590,12 @@ mod tests {
         );
         assert_eq!(f.versions().as_of, v2.as_of + 1);
 
-        f.note_published();
+        f.note_published(Publish {
+            dataset: "risk".into(),
+            batch: "EOD".into(),
+            books: 1,
+            at: chrono::Utc::now(),
+        });
         assert_eq!(f.versions().data, v2.data + 1);
         f.note_config_reloaded();
         assert_eq!(f.versions().config, v2.config + 1);
@@ -362,7 +603,7 @@ mod tests {
 
     #[test]
     fn an_unchanged_value_bumps_nothing() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let v0 = f.versions();
         assert!(!f.set_scope(Scope::default()));
         assert!(!f.set_active_slot(None));
@@ -372,7 +613,7 @@ mod tests {
 
     #[test]
     fn an_empty_slot_cannot_be_activated() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         assert!(!f.set_active_slot(Some(5)));
         assert_eq!(f.active_slot(), None);
         assert!(f.set_active_slot(Some(1)));
@@ -385,23 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn scope_clear_remembers_one_level_and_undo_restores_it() {
-        let mut f = Frame::new(slots(), None);
-        f.set_scope(book_scope("BK000"));
-        assert!(f.clear_scope());
-        assert!(f.scope().is_empty());
-        assert!(f.undo_scope());
-        assert_eq!(f.scope(), &book_scope("BK000"));
-        assert!(!f.undo_scope(), "one level only");
-        // Setting a new scope also remembers the previous one.
-        f.set_scope(book_scope("BK001"));
-        assert!(f.undo_scope());
-        assert_eq!(f.scope(), &book_scope("BK000"));
-    }
-
-    #[test]
     fn effective_scope_composes_global_and_tile() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_scope(book_scope("BK000"));
         let tile = Scope {
             text: Some("spx".into()),
@@ -415,7 +641,7 @@ mod tests {
 
     #[test]
     fn replacing_slots_bumps_config_and_grouping_and_drops_a_vanished_active_slot() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_active_slot(Some(2));
         let v = f.versions();
         let mut fewer = GroupingSlots::default();
@@ -428,7 +654,7 @@ mod tests {
 
     #[test]
     fn saving_a_slot_updates_memory_and_bumps_grouping_only_when_active() {
-        let mut f = Frame::new(slots(), None);
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
         let v = f.versions();
         assert!(f.save_slot(3, vec!["lhu".into()]).is_ok());
         assert_eq!(f.slots().label(3).as_deref(), Some("lhu"));
@@ -444,65 +670,6 @@ mod tests {
         );
         assert!(f.save_slot(0, vec!["book".into()]).is_err());
         assert!(f.save_slot(3, Vec::new()).is_err());
-    }
-
-    #[test]
-    fn the_readout_names_the_slot_scope_and_as_of() {
-        let mut f = Frame::new(slots(), None);
-        let r = f.readout();
-        assert_eq!(r.slot, None);
-        assert_eq!(r.scope, "");
-        assert_eq!(r.as_of, None);
-
-        f.set_active_slot(Some(1));
-        f.set_scope(Scope {
-            dimensions: vec![DimensionSelection {
-                column: "book".into(),
-                values: vec!["BK000".into(), "BK001".into(), "BK002".into()],
-            }],
-            text: Some("spx".into()),
-            expression: geode_core::scope::parse_expr("delta01 > 5").ok(),
-            ..Scope::default()
-        });
-        f.set_as_of(AsOf::At(
-            chrono::DateTime::parse_from_rfc3339("2026-09-03T14:05:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc),
-        ));
-        let r = f.readout();
-        assert_eq!(r.slot, Some((1, "book / lhu".to_string())));
-        assert_eq!(r.scope, "book ∈ {3} · text \"spx\" · expr");
-        assert_eq!(r.as_of.as_deref(), Some("2026-09-03 14:05"));
-    }
-
-    /// M1 (deferred from 3b, done here): `readout` must not rebuild
-    /// (allocate a fresh `Vec`/`String`s) when nothing has changed since
-    /// the last call — two calls with no mutation in between must return
-    /// the exact same cached `Rc`, not two equal-but-distinct ones.
-    #[test]
-    fn readout_is_rebuilt_only_when_versions_change() {
-        let mut f = Frame::new(slots(), None);
-        let r1 = f.readout();
-        let r2 = f.readout();
-        assert!(
-            Rc::ptr_eq(&r1, &r2),
-            "no mutation happened between the two calls: the second must \
-             reuse the first's cached Rc rather than rebuild"
-        );
-
-        f.set_active_slot(Some(1));
-        let r3 = f.readout();
-        assert!(
-            !Rc::ptr_eq(&r2, &r3),
-            "a real change (the active slot) must invalidate the cache"
-        );
-        assert_eq!(r3.slot, Some((1, "book / lhu".to_string())));
-
-        let r4 = f.readout();
-        assert!(
-            Rc::ptr_eq(&r3, &r4),
-            "stable again once nothing has changed since the last call"
-        );
     }
 
     #[test]
@@ -526,5 +693,192 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
         let table: toml::Table = text.parse().unwrap();
         assert!(table.contains_key("3") && table.contains_key("5"));
+    }
+
+    // --- Phase 4a: undo/redo, previous as-of, recent publishes, saved
+    // scopes, the bar model --------------------------------------------
+
+    #[test]
+    fn undo_and_redo_walk_a_bounded_stack() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        for i in 0..40 {
+            assert!(f.set_scope(book_scope(&format!("BK{i:03}"))));
+        }
+        // 32 undos land on BK007 (40 sets, depth 32); a 33rd does nothing.
+        for _ in 0..32 {
+            assert!(f.undo_scope());
+        }
+        assert_eq!(f.scope().dimensions[0].values, vec!["BK007".to_string()]);
+        assert!(!f.undo_scope());
+        assert!(f.redo_scope());
+        assert_eq!(f.scope().dimensions[0].values, vec!["BK008".to_string()]);
+        // A new set clears redo.
+        assert!(f.set_scope(book_scope("X")));
+        assert!(!f.redo_scope());
+    }
+
+    #[test]
+    fn a_no_op_set_pushes_nothing() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        assert!(f.set_scope(book_scope("A")));
+        assert!(!f.set_scope(book_scope("A")));
+        assert!(f.undo_scope());
+        assert!(f.scope().is_empty());
+        assert!(!f.undo_scope());
+    }
+
+    #[test]
+    fn a_text_session_coalesces_into_one_undo_entry() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        f.begin_scope_session();
+        for t in ["s", "sp", "spx"] {
+            let mut s = f.scope().clone();
+            s.text = Some(t.into());
+            assert!(f.set_scope_in_session(s));
+        }
+        f.end_scope_session();
+        assert!(f.undo_scope());
+        assert_eq!(
+            f.scope().text,
+            None,
+            "one undo returns to before the session"
+        );
+        assert_eq!(f.scope().dimensions[0].values, vec!["A".to_string()]);
+        assert!(f.redo_scope());
+        assert_eq!(f.scope().text.as_deref(), Some("spx"));
+    }
+
+    #[test]
+    fn as_of_remembers_one_previous_value_in_both_directions() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let t = chrono::Utc::now();
+        assert!(f.set_as_of(AsOf::At(t)));
+        assert!(f.set_as_of(AsOf::Live));
+        assert!(f.undo_as_of());
+        assert_eq!(f.as_of(), &AsOf::At(t));
+        assert!(f.undo_as_of(), "undo swaps, so it can go back again");
+        assert_eq!(f.as_of(), &AsOf::Live);
+    }
+
+    #[test]
+    fn recent_publishes_keep_the_last_thirty_two_newest_first() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v0 = f.versions().data;
+        for i in 0..40u32 {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 3,
+                at: chrono::Utc::now() + chrono::Duration::seconds(i as i64),
+            });
+        }
+        assert_eq!(f.versions().data, v0 + 40);
+        assert_eq!(f.recent_publishes().len(), RECENT_PUBLISHES);
+        assert!(f.recent_publishes()[0].at > f.recent_publishes()[1].at);
+    }
+
+    #[test]
+    fn saved_scopes_load_save_and_persist_pending() {
+        let mut saved = SavedScopes::new();
+        saved.insert("eu".into(), book_scope("BK001"));
+        let mut f = Frame::new(slots(), saved, None);
+        assert!(f.load_scope("eu").unwrap());
+        assert_eq!(f.scope(), &book_scope("BK001"));
+        assert!(f.load_scope("nope").is_err());
+        f.set_scope(book_scope("BK002"));
+        f.save_scope("mine").unwrap();
+        assert_eq!(f.saved_scopes()["mine"], book_scope("BK002"));
+        assert_eq!(
+            f.take_pending_scope_persist(),
+            Some(("mine".into(), book_scope("BK002")))
+        );
+        assert_eq!(f.take_pending_scope_persist(), None);
+        assert!(f.save_scope("").is_err());
+    }
+
+    #[test]
+    fn drop_dimension_and_set_text_are_undoable_edits() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        assert!(f.drop_dimension("book"));
+        assert!(f.scope().is_empty());
+        assert!(!f.drop_dimension("book"));
+        assert!(f.set_text(Some("spx".into())));
+        assert!(!f.set_text(Some("spx".into())));
+        assert!(f.undo_scope());
+        assert!(f.scope().is_empty());
+        assert!(f.undo_scope());
+        assert_eq!(f.scope(), &book_scope("A"));
+    }
+
+    #[test]
+    fn the_bar_model_is_cached_on_versions_and_describes_the_scope() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_active_slot(Some(1));
+        let mut s = book_scope("BK001");
+        s.dimensions[0].values.push("BK002".into());
+        s.dimensions.push(DimensionSelection {
+            column: "lhu".into(),
+            values: (0..7).map(|i| i.to_string()).collect(),
+        });
+        s.text = Some("spx".into());
+        s.expression = Some(geode_core::scope::parse_expr("npv > 0").unwrap());
+        f.set_scope(s);
+        let m1 = f.bar_model();
+        let m2 = f.bar_model();
+        assert!(Rc::ptr_eq(&m1, &m2));
+        assert_eq!(m1.slot, Some((1, "book / lhu".into())));
+        assert_eq!(m1.chips[0].summary, "book ∈ BK001, BK002");
+        assert_eq!(m1.chips[1].summary, "lhu ∈ {7}");
+        assert_eq!(m1.text.as_deref(), Some("spx"));
+        assert_eq!(m1.expr.as_deref(), Some("npv > 0"));
+        assert_eq!(m1.as_of, None);
+        f.set_text(None);
+        assert!(!Rc::ptr_eq(&m1, &f.bar_model()));
+    }
+
+    #[test]
+    fn a_contradiction_is_named_not_hidden() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let s = book_scope("A").and_then(&book_scope("B"));
+        assert!(s.impossible);
+        f.set_scope(s);
+        assert_eq!(f.bar_model().impossible.as_deref(), Some("∅ book"));
+    }
+
+    #[test]
+    fn a_saved_scope_is_persisted_alongside_a_pre_existing_sibling_and_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("scopes.toml"),
+            "config_version = 1\n# a hand-written comment\n[keep]\n[keep.dimensions]\nbook = [\"BK000\"]\n",
+        )
+        .unwrap();
+
+        persist_scope_to_user_config(dir.path(), "mine", &book_scope("BK002")).unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+        assert!(text.contains("# a hand-written comment"), "{text}");
+
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        let table: toml::Table = doc.to_string().parse().unwrap();
+        let merged = geode_core::config::merge_docs(
+            "scopes",
+            &[geode_core::config::LayerDoc {
+                layer: geode_core::config::Layer::Builtin,
+                name: "scopes".to_string(),
+                file: "<test>".into(),
+                table,
+            }],
+        );
+        let (saved, diags) = geode_core::scopes::saved_scopes_from_doc(
+            &merged,
+            &geode_core::schema::SchemaSpec::default(),
+            &geode_core::dimensions::DerivedDimensions::default(),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(saved["keep"], book_scope("BK000"));
+        assert_eq!(saved["mine"], book_scope("BK002"));
     }
 }

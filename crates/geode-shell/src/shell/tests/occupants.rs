@@ -64,7 +64,7 @@ fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(cx: &mut gpui
 fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
     cx: &mut gpui::TestAppContext,
 ) {
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new());
+    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
     // Workspace 1 (the default active one) stays empty. Workspace 2
     // gets one tile, restored with the recorder's own kind — this is
     // the occupant that is created on the very first render while

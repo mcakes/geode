@@ -8,6 +8,7 @@ pub mod groupings;
 pub mod query;
 pub mod schema;
 pub mod scope;
+pub mod scopes;
 pub mod snapshot;
 pub mod tree;
 pub mod view;

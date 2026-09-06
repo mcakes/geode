@@ -125,6 +125,8 @@ context = "workspace"
 "ctrl+=" = "fontsize::increase"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
+"mod+z" = "frame::scope_undo"
+"mod+shift+z" = "frame::scope_redo"
 
 [[bindings]]
 context = "tile"
@@ -405,6 +407,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Clear grouping slot (views' own grouping)",
         "Frame",
     );
+    // Scope undo/redo/clear (Phase 4a §3.6): `mod+z`/`mod+shift+z` walk
+    // the bounded undo/redo stacks `Frame::set_scope` maintains;
+    // `scope_clear` is palette-only, like `perf::reset` above — clearing
+    // the whole scope is an occasional deliberate act, not muscle memory
+    // worth a chord of its own.
+    action(reg, "frame::scope_undo", "Undo scope change", "Frame");
+    action(reg, "frame::scope_redo", "Redo scope change", "Frame");
+    action(reg, "frame::scope_clear", "Clear scope", "Frame");
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,
     // so the palette never advertises a no-op.

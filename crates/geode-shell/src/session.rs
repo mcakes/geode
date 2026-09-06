@@ -97,6 +97,8 @@ use crate::tiling::{
     DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
     Tree, Workspace, Workspaces,
 };
+use geode_core::query::AsOf;
+use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
 /// Schema version written into every session file, and enforced on load
 /// exactly like `geode_core::config::load_layer` enforces `config_version`
@@ -139,12 +141,152 @@ pub struct TileRecord {
 pub type TileRecords = BTreeMap<u64, TileRecord>;
 
 /// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
-/// module record, and any non-fatal warnings accumulated healing either.
+/// module record, the frame's own restored state if the file had one, and
+/// any non-fatal warnings accumulated healing any of it.
 #[derive(Debug)]
 pub struct Restored {
     pub workspaces: Workspaces,
     pub tiles: TileRecords,
+    pub frame: Option<FrameRecord>,
     pub warnings: Vec<String>,
+}
+
+/// The frame's own restored state (Phase 4a §3.6, §3.12): the global
+/// scope, the active grouping slot, and as-of. Written under session.toml's
+/// `[frame]` table by [`to_toml`] when a caller passes one, and read back
+/// by [`from_toml`] into [`Restored::frame`] — `ShellView::new` applies it
+/// to the just-built `Frame` and then clears the undo entry that push
+/// leaves behind (`Frame::clear_history`), so a restored session doesn't
+/// start with a phantom "undo" back to the empty scope nobody chose.
+///
+/// Deliberately not the whole `Frame`: undo/redo history, recent
+/// publishes, and saved scopes are either transient (nothing to undo back
+/// to yet) or already config (`scopes.toml`) — restoring them here would
+/// either mean nothing on a fresh process or duplicate what the config
+/// layer already owns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FrameRecord {
+    pub scope: Scope,
+    pub active_slot: Option<u8>,
+    pub as_of: AsOf,
+}
+
+impl FrameRecord {
+    /// The `[frame]` table `to_toml` writes — present-only-when-meaningful
+    /// like every other optional field in this file (`slot`/`as_of` are
+    /// omitted rather than written as their empty/live default).
+    pub fn to_toml(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        let mut dims = toml::Table::new();
+        for d in self
+            .scope
+            .dimensions
+            .iter()
+            .filter(|d| !d.values.is_empty())
+        {
+            dims.insert(
+                d.column.clone(),
+                toml::Value::Array(
+                    d.values
+                        .iter()
+                        .map(|v| toml::Value::String(v.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        t.insert("dimensions".into(), toml::Value::Table(dims));
+        if let Some(text) = &self.scope.text {
+            t.insert("text".into(), toml::Value::String(text.clone()));
+        }
+        if let Some(e) = &self.scope.expression {
+            t.insert("expression".into(), toml::Value::String(e.to_string()));
+        }
+        if let Some(n) = self.active_slot {
+            t.insert("slot".into(), toml::Value::Integer(n as i64));
+        }
+        if let AsOf::At(at) = &self.as_of {
+            t.insert("as_of".into(), toml::Value::String(at.to_rfc3339()));
+        }
+        t
+    }
+
+    /// Lenient: a field that does not parse is dropped with a warning, the
+    /// rest of the record survives — same philosophy as the tiles/docks
+    /// healing elsewhere in this file. No schema/dataset validation here
+    /// (unlike `geode_core::scopes::saved_scopes_from_doc`): this layer
+    /// has no schema to check against, so a dangling column name simply
+    /// round-trips through unchanged, the same way a `TileRecord`'s
+    /// unrecognised `kind` does.
+    pub fn from_toml(t: &toml::Table, warnings: &mut Vec<String>) -> FrameRecord {
+        let mut dimensions = Vec::new();
+        if let Some(dims_table) = t.get("dimensions").and_then(|v| v.as_table()) {
+            for (column, values) in dims_table {
+                let Some(arr) = values.as_array() else {
+                    warnings.push(format!(
+                        "frame: dimension '{column}' is not an array; ignored"
+                    ));
+                    continue;
+                };
+                let values: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect();
+                if !values.is_empty() {
+                    dimensions.push(DimensionSelection {
+                        column: column.clone(),
+                        values,
+                    });
+                }
+            }
+        }
+        let text = t
+            .get("text")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let expression = t
+            .get("expression")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| match parse_expr(s) {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    warnings.push(format!("frame: expression '{s}': {e}; dropped"));
+                    None
+                }
+            });
+        let active_slot = match t.get("slot") {
+            None => None,
+            Some(v) => match v.as_integer() {
+                Some(n) if (1..=9).contains(&n) => Some(n as u8),
+                other => {
+                    warnings.push(format!("frame: slot {other:?} is not 1-9; ignored"));
+                    None
+                }
+            },
+        };
+        let as_of = match t.get("as_of").and_then(|v| v.as_str()) {
+            None => AsOf::Live,
+            Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
+                Ok(dt) => AsOf::At(dt.with_timezone(&chrono::Utc)),
+                Err(e) => {
+                    warnings.push(format!("frame: as_of '{s}': {e}; using live"));
+                    AsOf::Live
+                }
+            },
+        };
+        FrameRecord {
+            scope: Scope {
+                dimensions,
+                text,
+                expression,
+                impossible: false,
+            },
+            active_slot,
+            as_of,
+        }
+    }
 }
 
 /// Serialize `workspaces` and each tile's `tiles` record into a session
@@ -153,8 +295,14 @@ pub struct Restored {
 /// records whose id actually lives in the workspace being written land
 /// under that workspace's `tiles` table — a stale entry (a tile since
 /// closed) is silently dropped, never written to a workspace it doesn't
-/// belong to.
-pub fn to_toml(workspaces: &Workspaces, tiles: &TileRecords) -> toml::Table {
+/// belong to. `frame` writes a top-level `[frame]` table (Phase 4a §3.6)
+/// when `Some`, and is omitted entirely (not written as an empty table)
+/// when `None` — every pre-4a session file keeps loading unchanged.
+pub fn to_toml(
+    workspaces: &Workspaces,
+    tiles: &TileRecords,
+    frame: Option<&FrameRecord>,
+) -> toml::Table {
     let mut root = toml::Table::new();
     root.insert(
         "config_version".to_string(),
@@ -270,6 +418,10 @@ pub fn to_toml(workspaces: &Workspaces, tiles: &TileRecords) -> toml::Table {
     }
     root.insert("workspaces".to_string(), toml::Value::Table(spaces_table));
 
+    if let Some(record) = frame {
+        root.insert("frame".to_string(), toml::Value::Table(record.to_toml()));
+    }
+
     root
 }
 
@@ -353,9 +505,23 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         Workspaces::from_parts(spaces, active).map_err(|e| vec![e])?;
     warnings.extend(heal_warnings);
 
+    // Phase 4a §3.6: the frame's own restored state, if the file had one.
+    // Absent entirely (every pre-4a file) means "nothing to restore", not
+    // an error; present but not a table is a warning, same tolerance the
+    // rest of this function extends to every other optional shape.
+    let frame = match table.get("frame") {
+        None => None,
+        Some(toml::Value::Table(t)) => Some(FrameRecord::from_toml(t, &mut warnings)),
+        Some(_) => {
+            warnings.push("frame is not a table; ignored".to_string());
+            None
+        }
+    };
+
     Ok(Restored {
         workspaces,
         tiles,
+        frame,
         warnings,
     })
 }
@@ -738,8 +904,12 @@ fn node_from_toml(value: &toml::Value) -> Result<Node, String> {
 /// `shell::mod`'s `take_dirty_session_write`), which serializes here on the
 /// UI thread and hands the resulting `String` to a background executor for
 /// [`write_atomic`].
-pub fn to_string_pretty(workspaces: &Workspaces, tiles: &TileRecords) -> Result<String, String> {
-    let table = to_toml(workspaces, tiles);
+pub fn to_string_pretty(
+    workspaces: &Workspaces,
+    tiles: &TileRecords,
+    frame: Option<&FrameRecord>,
+) -> Result<String, String> {
+    let table = to_toml(workspaces, tiles, frame);
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
@@ -825,8 +995,13 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 /// UI/background boundary (direct test use; `ShellView`'s best-effort
 /// `on_app_quit` flush, which is a one-shot at shutdown, not a per-keystroke
 /// hot path).
-pub fn save(path: &Path, workspaces: &Workspaces, tiles: &TileRecords) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces, tiles)
+pub fn save(
+    path: &Path,
+    workspaces: &Workspaces,
+    tiles: &TileRecords,
+    frame: Option<&FrameRecord>,
+) -> std::io::Result<()> {
+    let text = to_string_pretty(workspaces, tiles, frame)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -842,6 +1017,7 @@ pub fn load(path: &Path) -> Restored {
     let fresh = |warnings: Vec<String>| Restored {
         workspaces: Workspaces::new(),
         tiles: TileRecords::new(),
+        frame: None,
         warnings,
     };
 
@@ -910,7 +1086,7 @@ mod tests {
             },
         );
 
-        let text = to_string_pretty(&ws, &tiles).unwrap();
+        let text = to_string_pretty(&ws, &tiles, None).unwrap();
         assert!(
             text.contains(&format!("[workspaces.1.tiles.{}]", ids[0].0)),
             "{text}"
@@ -935,7 +1111,7 @@ mod tests {
                 state: toml::Table::new(),
             },
         );
-        let mut table = to_toml(&ws, &tiles);
+        let mut table = to_toml(&ws, &tiles, None);
         // Force the stray record in under workspace 1 regardless of what
         // `to_toml` filtered.
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
@@ -962,7 +1138,7 @@ mod tests {
     fn a_tile_record_without_a_module_or_with_a_bad_state_is_dropped_with_a_warning() {
         let ws = two_tile_workspaces();
         let id = ws.active().tree().tiles()[0].0;
-        let mut table = to_toml(&ws, &TileRecords::new());
+        let mut table = to_toml(&ws, &TileRecords::new(), None);
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
         let mut tiles_table = toml::Table::new();
         let mut no_module = toml::Table::new();
@@ -978,7 +1154,7 @@ mod tests {
     fn a_session_without_tiles_still_loads_and_writes_no_tiles_table() {
         // Every pre-Phase-3 session file.
         let ws = two_tile_workspaces();
-        let text = to_string_pretty(&ws, &TileRecords::new()).unwrap();
+        let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
         assert!(!text.contains("tiles"), "{text}");
         let restored = from_toml(&text.parse().unwrap()).unwrap();
         assert!(restored.tiles.is_empty());
@@ -989,7 +1165,7 @@ mod tests {
     #[test]
     fn round_trips_a_fresh_workspaces() {
         let ws = Workspaces::new();
-        let table = to_toml(&ws, &TileRecords::new());
+        let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: restored,
             warnings,
@@ -1011,7 +1187,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
-        let table = to_toml(&ws, &TileRecords::new());
+        let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: restored,
             warnings,
@@ -1055,7 +1231,7 @@ mod tests {
         // `from_toml` no longer reads `extra` at all — the layout must
         // still load intact, with the legacy key simply ignored like any
         // other unknown key.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let mut extra_table = toml::Table::new();
         extra_table.insert(
             "theme_mode".to_string(),
@@ -1075,7 +1251,7 @@ mod tests {
 
     #[test]
     fn from_toml_tolerates_unknown_keys() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         table.insert(
             "some_future_field".to_string(),
             toml::Value::String("ignored".to_string()),
@@ -1381,7 +1557,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
 
-        save(&path, &ws, &TileRecords::new()).unwrap();
+        save(&path, &ws, &TileRecords::new(), None).unwrap();
         assert!(path.exists());
         // The atomic-write temp file must not be left behind, whatever its
         // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
@@ -1411,7 +1587,7 @@ mod tests {
     fn save_does_not_write_a_theme_mode_or_extra_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
-        save(&path, &Workspaces::new(), &TileRecords::new()).unwrap();
+        save(&path, &Workspaces::new(), &TileRecords::new(), None).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("theme_mode"), "{text}");
         assert!(!text.contains("[extra]"), "{text}");
@@ -1421,7 +1597,7 @@ mod tests {
     fn save_creates_the_parent_directory_if_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("session.toml");
-        save(&path, &Workspaces::new(), &TileRecords::new()).unwrap();
+        save(&path, &Workspaces::new(), &TileRecords::new(), None).unwrap();
         assert!(path.exists());
     }
 
@@ -1431,7 +1607,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let table = to_toml(&ws, &TileRecords::new());
+        let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: mut restored,
             warnings,
@@ -1477,7 +1653,7 @@ mod tests {
     #[test]
     fn round_trips_docks_and_region() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new());
+        let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: restored,
             warnings,
@@ -1519,7 +1695,7 @@ mod tests {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
         let mut ws = Workspaces::new();
         apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        let text = to_string_pretty(&ws, &TileRecords::new()).unwrap();
+        let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
     }
@@ -1527,7 +1703,7 @@ mod tests {
     #[test]
     fn restored_docked_tile_ids_do_not_collide_with_new_allocations() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new());
+        let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: mut restored,
             warnings: _,
@@ -1560,7 +1736,7 @@ mod tests {
 
     #[test]
     fn from_toml_drops_a_dock_tile_also_present_in_the_tree() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1_text = r#"
             focused = 1
             region = "left"
@@ -1596,7 +1772,7 @@ mod tests {
 
     #[test]
     fn from_toml_heals_a_region_pointing_at_a_hidden_or_absent_dock() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             focused = 1
             region = "bottom"
@@ -1621,7 +1797,7 @@ mod tests {
     #[test]
     fn from_toml_heals_an_out_of_range_or_nan_dock_size_to_default() {
         for bad in ["size = 0.9", "size = -3.0", "size = nan"] {
-            let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+            let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
             let ws1: toml::Table = format!(
                 r#"
                     [docks.right]
@@ -1660,7 +1836,7 @@ mod tests {
         // live: fullscreen blocks focus from entering docks, and mod+f is
         // a no-op while dock-focused). Heals by clearing fullscreen and
         // keeping the dock focus, with a warning.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             focused = 1
             fullscreen = 1
@@ -1697,7 +1873,7 @@ mod tests {
 
     #[test]
     fn from_toml_heals_an_unknown_region_string_to_main() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
@@ -1718,7 +1894,7 @@ mod tests {
     fn from_toml_tolerates_hostile_dock_shapes_without_failing() {
         // docks not a table; a side not a table; tile negative/non-integer;
         // visible non-bool — every one heals with a warning, none fails.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             [node]
             kind = "leaf"
@@ -1815,7 +1991,7 @@ mod tests {
 
     #[test]
     fn a_dock_with_both_node_and_legacy_tile_picks_the_node_with_a_warning() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             [docks.left]
             tile = 9
@@ -1850,7 +2026,7 @@ mod tests {
         // Dock trees never have fullscreen — a hand-edited `fullscreen`
         // key inside a dock table is ignored (warned), and the dock's
         // tree loads without it.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             [docks.bottom]
             visible = true
@@ -1884,7 +2060,7 @@ mod tests {
         // A structurally invalid dock subtree (single-child split) heals
         // to an empty dock with a warning — the workspace's main tree is
         // never discarded over a dock (docks are an adornment).
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -1925,7 +2101,7 @@ mod tests {
         // AND its right dock tree; tile 2 only in the right dock. The
         // main tree wins, then first dock claim wins; the right dock
         // keeps its unique tile.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -1980,7 +2156,7 @@ mod tests {
         // exactly one warning is emitted for the one healed duplicate
         // (the pre-fix all-copies prune deleted both leaves and, walking
         // a pre-removal snapshot, warned twice).
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -2023,7 +2199,7 @@ mod tests {
 
     #[test]
     fn a_dangling_dock_focused_reference_heals_to_the_first_tile() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new());
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -2047,6 +2223,69 @@ mod tests {
             Some(TileId(4)),
             "Tree::from_parts heals the dangling ref to None; Dock::from_parts \
              then refocuses the first tile so the dock's verbs stay usable"
+        );
+    }
+
+    // --- Phase 4a: [frame] ------------------------------------------
+
+    fn sample_frame_record() -> FrameRecord {
+        FrameRecord {
+            scope: Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "book".into(),
+                    values: vec!["BK000".into(), "BK001".into()],
+                }],
+                text: Some("spx".into()),
+                expression: Some(parse_expr("delta01 > 100").unwrap()),
+                impossible: false,
+            },
+            active_slot: Some(3),
+            as_of: AsOf::At(
+                chrono::DateTime::parse_from_rfc3339("2026-09-05T14:05:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_frame_record_round_trips_through_session_toml_with_every_field() {
+        let record = sample_frame_record();
+        let table = to_toml(&Workspaces::new(), &TileRecords::new(), Some(&record));
+        assert!(table.contains_key("frame"), "{table:?}");
+
+        let Restored {
+            frame: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, Some(record));
+    }
+
+    #[test]
+    fn no_frame_record_writes_no_frame_table() {
+        let table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        assert!(!table.contains_key("frame"), "{table:?}");
+        let Restored { frame, .. } = from_toml(&table).unwrap();
+        assert_eq!(frame, None);
+    }
+
+    #[test]
+    fn a_bad_as_of_keeps_the_rest_of_the_frame_record_and_warns() {
+        let mut record_table = sample_frame_record().to_toml();
+        record_table.insert(
+            "as_of".into(),
+            toml::Value::String("not-a-timestamp".into()),
+        );
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&record_table, &mut warnings);
+        assert!(warnings.iter().any(|w| w.contains("as_of")), "{warnings:?}");
+        assert_eq!(restored.as_of, AsOf::Live);
+        assert_eq!(restored.active_slot, Some(3));
+        assert_eq!(
+            restored.scope.dimensions,
+            sample_frame_record().scope.dimensions
         );
     }
 }

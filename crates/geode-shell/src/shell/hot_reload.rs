@@ -58,6 +58,31 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
     slots
 }
 
+/// Rebuild [`SavedScopes`](geode_core::scopes::SavedScopes) from whatever
+/// `[scopes]` (plus the `datasets`/`dimensions` docs a scope validates
+/// against) a `Config` resolves to — same shape as [`rebuild_slots`], and
+/// shared the same way between `ShellView::new` (seeds the frame's
+/// initial saved scopes) and `apply_reload` (replaces them when `scopes`/
+/// `datasets`/`dimensions` changes, spec §4.5-style live pickup).
+pub(super) fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    let (saved, diags) = config
+        .doc("scopes")
+        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims))
+        .unwrap_or_default();
+    for d in &diags {
+        eprintln!("[scopes] {d}");
+    }
+    saved
+}
+
 impl ShellView {
     /// Apply (or reject) a freshly loaded `Config` (Task 1c-1): rebuild the
     /// keymap and mod alias from it, re-apply the theme only if `[theme]`
@@ -150,6 +175,7 @@ impl ShellView {
             };
             let groupings_changed =
                 changed("groupings") || changed("datasets") || changed("dimensions");
+            let scopes_changed = changed("scopes") || changed("datasets") || changed("dimensions");
             let views_changed = changed("views") || changed("dimensions");
             // M8 (3b final review): compared against the docs the running
             // data engine was actually built from
@@ -241,6 +267,14 @@ impl ShellView {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_slots(slots) {
+                        cx.notify();
+                    }
+                });
+            }
+            if scopes_changed {
+                let saved = rebuild_saved_scopes(&self.services.config);
+                self.frame.update(cx, |f, cx| {
+                    if f.replace_saved_scopes(saved) {
                         cx.notify();
                     }
                 });

@@ -34,6 +34,7 @@ pub(super) fn test_services() -> ShellServices {
         session_path: None,
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
+        restored_frame: None,
     }
 }
 
@@ -222,6 +223,7 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
         session_path: None,
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
+        restored_frame: None,
     }
 }
 /// `apply_reload` is `ShellView`'s real config-hot-reload apply path
@@ -252,5 +254,6 @@ mod occupants;
 mod palette;
 mod perf;
 mod reload;
+mod scopebar;
 mod session;
 mod tiling_keys;

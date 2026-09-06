@@ -29,6 +29,10 @@ geode-core.workspace = true
 geode-data = { path = "../geode-data" }
 geode-blotter = { path = "../geode-blotter" }
 geode-demo-data = { path = "../geode-demo-data" }
+# `DataEvent::Published` carries no timestamp of its own; the bridge
+# stamps the arrival instant onto the `Publish` record a "recent
+# publishes" preset needs (Phase 4a §3.12).
+chrono = "0.4.42"
 # The bridge's event channel (spec §5.1): bounded, `try_send`-only, and
 # awaited on the foreground executor so the drain task wakes on arrival
 # rather than polling.

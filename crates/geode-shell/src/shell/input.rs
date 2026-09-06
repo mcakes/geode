@@ -184,6 +184,29 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if action.0 == "frame::scope_undo" {
+            // mod+z (spec §3.6): walk the bounded undo stack.
+            self.frame.update(cx, |f, cx| {
+                if f.undo_scope() {
+                    cx.notify();
+                }
+            });
+        } else if action.0 == "frame::scope_redo" {
+            // mod+shift+z: walk the redo stack; cleared by the next
+            // `set_scope`/`set_scope_in_session`.
+            self.frame.update(cx, |f, cx| {
+                if f.redo_scope() {
+                    cx.notify();
+                }
+            });
+        } else if action.0 == "frame::scope_clear" {
+            // Palette-only (no chord — occasional deliberate act, not
+            // muscle memory): clear the whole scope, itself undoable.
+            self.frame.update(cx, |f, cx| {
+                if f.clear_scope() {
+                    cx.notify();
+                }
+            });
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`

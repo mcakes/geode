@@ -245,12 +245,21 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         dataset,
                         batch,
                         gen_id,
-                        ..
+                        books,
                     } => {
                         eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
                         let frame = shell.read(cx).frame().clone();
+                        // The event carries no timestamp of its own; the
+                        // arrival instant is what a "recent publishes"
+                        // preset needs (Phase 4a §3.12).
+                        let publish = geode_shell::frame::Publish {
+                            dataset,
+                            batch,
+                            books: books.len(),
+                            at: chrono::Utc::now(),
+                        };
                         frame.update(cx, |f, cx| {
-                            f.note_published();
+                            f.note_published(publish);
                             cx.notify();
                         });
                     }
@@ -321,6 +330,7 @@ mod tests {
             session_path: None,
             roster: ModuleRoster::default(),
             restored_tiles: TileRecords::new(),
+            restored_frame: None,
         }
     }
 
