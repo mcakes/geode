@@ -31,6 +31,11 @@ Phase 4 is one spec and three implementation plans, sequenced 4a → 4b →
 - The scope bar in the toolbar's middle: slot readout, one chip per
   dimension selection, text and expression chips, a live text field, and
   the as-of marker. Rebuilt only when `Frame::versions()` changes.
+- Carried dimensions: a `dimension` may declare the grain whose key
+  determines it (`currency` at `instrument`), becoming groupable,
+  scopeable and pickable at that grain and finer without joining a
+  key. The split checks the dependency per file and reports a
+  violation as degraded health.
 - A `categorical` flag on schema columns — the one rule that decides
   which columns are ENUM-interned at ingest, which get a picker, and
   which the text rewrite applies to.
@@ -101,7 +106,10 @@ Phase 4 is done when `geode --demo` opens and: typing in the scope bar
 narrows every blotter as you type, one requery per keystroke, with the
 1M-row zero-match bench case inside the §7.1 budget for ENUM columns;
 `mod+p` then `book` then two selections flips every visible tile to the
-same scope in the same paint; `:asof 14:05` paints the warning stripe
+same scope in the same paint; `mod+p` then `currency` lists the demo's
+currencies with counts, and `:group currency,underlying_ref` groups by
+a carried dimension with position-grain cells blank at the currency
+level; `:asof 14:05` paints the warning stripe
 and the status segment and every tile reads historical, `:live` clears
 both and `:asof undo` restores them; `:filter model_code = 'EURP'`
 narrows one tile, marks it `filtered`, and survives a restart; `:scope
@@ -172,13 +180,15 @@ older document does not have to be re-read with a correction in mind.
    such a column is a load-time error for that column (§3.5).
 10. **P2 §3.6, "dimension columns are stored as DuckDB ENUM types".**
     Becomes "categorical columns are". Every `Dimension` is categorical
-    by default, so nothing already ingested changes encoding; the
-    difference is that an `Attribute` such as `currency` or
-    `model_code` can opt in, and a high-cardinality `Dimension` can opt
-    out. Selections (§4.1's chips) may then name any categorical
-    column, not only `Dimension`-role ones; the compiler routes a
-    categorical attribute the way it already routes a textual attribute
-    (a membership term at the carrying grain).
+    by default, so nothing already ingested changes encoding; an
+    `Attribute` can opt in and a high-cardinality `Dimension` can opt
+    out.
+11. **P2 §3.1–3.3, the grain vocabulary.** A `dimension` is no longer
+    only a column of a grain's built-in key. It may declare the grain
+    whose key determines it and is then *carried* by that grain and
+    every finer one (§3.3): groupable, scopeable and pickable there,
+    stored as a payload column, never added to a key. The built-in keys
+    and the pair canonicalisation are unchanged.
 
 ## 3. Phase 4a — the frame's face
 
@@ -257,13 +267,68 @@ picker, and is stored as `VARCHAR`. The compiler's dictionary-code
 paths (`dict_value`, the ENUM `try_cast`) already tolerate a plain
 string column because as-of tables are plain strings in every era.
 
-**Selections on categorical attributes.** `DimensionSelection.column`
-may name any categorical column. `Scope::validate` accepts it, and
-`scope_sql.rs` routes it as it routes a textual attribute today: a
-direct predicate at a grain that carries the column, a membership term
-at grains that do not. The plan verifies this by execution against a
-selection on `currency`, which is an attribute at `position` grain in
-the demo schema, before any picker is built on it.
+**Carried dimensions.** Today a `dimension` must be one of the columns
+in a grain's hardcoded key (`book`, `lhu`, `position_ref`,
+`counterparty`, `instrument_ref`, `underlying_ref`, `underlying2_ref`);
+nothing else can be grouped by, and a selection on anything else fails
+with "not carried as a dimension by any grain". That leaves
+`currency`, `model_code` and `expiry` — one value per instrument, and
+things a trader groups by — stuck as attributes that can be scoped
+through the expression filter but never grouped or picked.
+
+A dimension may now name the grain whose key determines it:
+
+```toml
+[risk_snapshot.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"     # exactly one currency per instrument_ref
+```
+
+This is a *carried* dimension. It is not part of any key: the key stays
+the minimal row identity, and adding a functionally dependent column
+to it would change nothing about the rows while misdescribing what
+identifies them. Instead it is carried by its grain and by every finer
+grain, meaning every grain whose key includes the declaring grain's
+key (`instrument` → `underlying` → `underlying_pair`; not `position`,
+whose rows span instruments). `ColumnRole::Dimension` gains an
+`Option<Grain>`; `None` is a built-in key column and anything else
+there is a load-time error, which also turns the bench's
+`underlying2_ref` failure (§7) into a diagnostic.
+
+One function, `DatasetSpec::carried_at(grain) -> Vec<&ColumnSpec>`,
+returns a grain's dimension key columns plus every carried dimension
+whose grain the key includes, and the four consumers read it:
+
+- **The split.** A carried dimension is a payload column of its own
+  grain's table and of every finer grain's, selected as `any_value`
+  over the key group rather than added to the `GROUP BY`. Because the
+  dependency is a claim the schema makes, the split checks it per file
+  — one `HAVING count(distinct currency) > 1` over the key — and a
+  violation is a `Degraded` health reason naming the column and the
+  count of offending keys. The row is still written with one of the
+  values, so the load succeeds; the honesty principle says the file's
+  disagreement with the schema is reported, not hidden.
+- **Scope routing.** `evaluable_at` treats a carried dimension as
+  evaluable at every grain that carries it, and `route` reaches it by
+  membership from grains that do not, exactly as it reaches a key
+  dimension today.
+- **The tree compiler.** The grouping-column check ("must be a
+  dimension key of some grain") becomes "must be carried by some
+  grain", and attribution follows: a view grouped by `currency` shows
+  its position-grain measures as `NonAttributable` at that level,
+  since a position can span currencies — the existing rule for cross
+  gamma at an underlying grouping, applied where the schema says it
+  applies.
+- **Interning.** Carried dimensions are categorical by default like
+  every dimension, so they are ENUM-stored, pickable, and covered by
+  the text rewrite.
+
+In the demo schema `currency`, `model_code` and `expiry` become
+carried dimensions at `instrument` grain; `business_date` stays an
+attribute. The demo schema also declares `textual = true` on its string
+columns, since none is textual today and the scope bar's text field
+would otherwise do nothing in `--demo`.
 
 **The pickers.** `frame::pick` opens a two-stage modal through
 `open_shell_dialog`:
@@ -987,11 +1052,16 @@ excluded); `ScopeSpec` and `ViewPresentationSpec` readers with their
 per-object atomicity; the ring (capacity, wrap, `drain_since`, two
 writers); the key-path-to-span walk; the doc-and-layer picker's listing.
 
-**Data layer:** the `categorical` default per role and the `utf8`-only
-rule; interning follows the flag (an opted-in attribute comes back as
-a dictionary, an opted-out dimension as plain strings); a selection on
-a categorical attribute selects the same rows as the equivalent
-expression filter; `Distinct` under scope-minus-own-dimension, under
+**Data layer:** carried dimensions — present in the declaring grain's
+table and every finer one, absent from `position`; grouping by one
+yields the same sums as grouping by the key it depends on; a
+position-grain measure is `NonAttributable` under it; a file violating
+the dependency loads with a `Degraded` reason naming the column; a
+`dimension` with no grain outside the built-in key is a load error.
+The `categorical` default per role and the `utf8`-only rule; interning
+follows the flag (an opted-in attribute comes back as a dictionary, an
+opted-out dimension as plain strings). `Distinct` under
+scope-minus-own-dimension, under
 as-of, unioned across two datasets; the ENUM rewrite selecting the
 same rows as the row scan for a property-tested set of needles
 (including `%`, `_` and `\`); the `textual` validation; `Catalog`'s
@@ -1027,11 +1097,11 @@ geode-app              + tracing init, Diagnostics feed, DataService restart, ro
   ├─ geode-config-editor   NEW: editor tile, validation, save through the write door
   ├─ geode-shell           + scope bar, picker, as-of modal, Diagnostics entity, flip barrier,
   │                          undo/redo, saved scopes, pick_* actions, config_write
-  ├─ geode-data            + Distinct and Catalog, interning and text rewrite by `categorical`,
-  │                          selections on categorical attributes, swappable handle,
-  │                          ingest boundary, textual validation
-  └─ geode-core            + `categorical` column flag, log ring, Diagnostic.path, ScopeSpec,
-                             ViewPresentationSpec
+  ├─ geode-data            + carried dimensions in split, routing and compile; Distinct and
+  │                          Catalog; interning and text rewrite by `categorical`; swappable
+  │                          handle; ingest boundary; textual validation
+  └─ geode-core            + Dimension { grain }, carried_at, `categorical` flag, log ring,
+                             Diagnostic.path, ScopeSpec, ViewPresentationSpec
 geode-demo-data          unchanged
 ```
 
@@ -1051,21 +1121,27 @@ full harness at branch end.
 
 **4a**
 
-1. Data: the `categorical` flag with interning switched to it;
-   selections on categorical attributes verified by execution;
-   `Request::Distinct`; the ENUM rewrite with the bench cases added
-   permanently and the gate met or the Rust-side fallback taken;
-   `textual` validation. Mutation entries for each.
-2. Core and frame: `ScopeSpec`; undo and redo stacks; `previous_as_of`;
+1. Data, part one — the grain vocabulary: carried dimensions through
+   `carried_at`, the split's `any_value` payload and dependency check,
+   routing, the grouping check and attribution, the load-time rules;
+   the `categorical` flag with interning switched to it; the demo
+   schema's three carried dimensions and its `textual` declarations.
+   This touches everything `CLAUDE.md` names as mutation-mandatory, so
+   it is its own task with its own harness entries and review before
+   anything is built on it.
+2. Data, part two: `Request::Distinct`; the ENUM rewrite with the
+   bench cases added permanently and the gate met or the Rust-side
+   fallback taken; `textual` validation. Mutation entries for each.
+3. Core and frame: `ScopeSpec`; undo and redo stacks; `previous_as_of`;
    `scopebar::layout` replacing `readout`; session `[frame]`.
-3. The bar: chips, the live text field, `mod+/`, the contradiction chip.
-4. Pickers: the modal, `deliver_distinct`, `frame::pick` and the
+4. The bar: chips, the live text field, `mod+/`, the contradiction chip.
+5. Pickers: the modal, `deliver_distinct`, `frame::pick` and the
    per-column actions.
-5. As-of: the modal with presets, the stripe, the status segment,
+6. As-of: the modal with presets, the stripe, the status segment,
    `frame::live` and undo.
-6. Blotter: `:filter`, the `filtered` marker, session round-trip.
-7. The flip barrier: frame state, blotter staging, deadline sweep.
-8. Docs: `CLAUDE.md`, `docs/perf.md` with the text-filter table before
+7. Blotter: `:filter`, the `filtered` marker, session round-trip.
+8. The flip barrier: frame state, blotter staging, deadline sweep.
+9. Docs: `CLAUDE.md`, `docs/perf.md` with the text-filter table before
    and after, harness entries reconciled.
 
 **4b**
