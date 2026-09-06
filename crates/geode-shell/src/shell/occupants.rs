@@ -58,9 +58,8 @@ impl ShellView {
     /// because the app bridge's bounded channel refused a `try_send`.
     /// `None` clears it. The shell cannot query for itself — it does not
     /// depend on `geode-data` (CLAUDE.md) — so `geode-app` is the only
-    /// caller, the same relationship [`ShellView::set_probe`] has to the
-    /// throwaway probe. Notifies unconditionally, like `set_probe`: a
-    /// status the user cannot see is not surfaced.
+    /// caller. Notifies unconditionally: a status the user cannot see is
+    /// not surfaced.
     pub fn set_data_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
         self.data_status = status;
         cx.notify();

@@ -125,7 +125,6 @@ context = "workspace"
 "ctrl+=" = "fontsize::increase"
 "ctrl+-" = "fontsize::decrease"
 "mod+shift+p" = "perf::toggle_overlay"
-"mod+shift+d" = "data::toggle_probe"
 
 [[bindings]]
 context = "tile"
@@ -404,15 +403,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "frame::slot_clear",
         "Clear grouping slot (views' own grouping)",
         "Frame",
-    );
-    // The throwaway data probe (spec §7's vertical slice) — the only way
-    // to see the §7.1 end-to-end budget through a painted frame. Deleted
-    // when the blotter lands; see `crate::dataprobe`.
-    action(
-        reg,
-        "data::toggle_probe",
-        "Toggle data probe",
-        "Diagnostics",
     );
     // Profiler-feature actions (the `profiling` feature — gpui's own
     // `profiler` histograms/overlay): registered only when compiled in,

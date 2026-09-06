@@ -142,11 +142,6 @@ impl ShellView {
             // toggle is just a bool flip plus a repaint.
             self.perf_overlay = !self.perf_overlay;
             cx.notify();
-        } else if action.0 == "data::toggle_probe" {
-            // Display-only, like the perf overlay: the binary keeps
-            // pushing readings whether or not anyone is looking.
-            self.data_probe = !self.data_probe;
-            cx.notify();
         } else if action.0 == "tile::command_line" {
             self.open_command_line(Prompt::Command, window, cx);
         } else if action.0 == "tile::find" {

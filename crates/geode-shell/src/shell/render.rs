@@ -1059,19 +1059,6 @@ impl Render for ShellView {
                         .debug_selector(|| "tile-drag-ghost".to_string()),
                 )
             })
-            // The throwaway data probe (spec §7), painted above the tiles
-            // but *below* the palette, the modal and which-key.
-            //
-            // Unlike the perf overlay — small, top-right, and painted above
-            // everything so it can measure the layers it sits over — this
-            // panel is full-window and opaque. Painted last it covered the
-            // palette completely, so the one route to `data::toggle_probe`
-            // that does not need the keybinding was invisible: the palette
-            // was open and taking keys, and nothing on screen said so. A
-            // diagnostic must not be able to hide the way out of itself.
-            .when(self.data_probe, |el| {
-                el.child(crate::dataprobe::render(&self.probe, toolbar_height, cx))
-            })
             // The per-tile command line (§3.4): a one-line strip along
             // the focused tile's bottom edge, plus a completions popup
             // above it. Painted at `focused_rect` — the WORKSPACE's own

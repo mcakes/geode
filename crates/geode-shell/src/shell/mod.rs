@@ -364,14 +364,6 @@ pub struct ShellView {
     /// palette-reachable, bound `mod+shift+p`). Display-only: toggling it
     /// changes nothing about recording, which always runs.
     perf_overlay: bool,
-    /// Whether the throwaway data probe is painted (`data::toggle_probe`,
-    /// bound `mod+shift+d`). Deleted with the probe when the blotter
-    /// lands — see [`crate::dataprobe`].
-    data_probe: bool,
-    /// The latest reading pushed in by the binary. The shell cannot query
-    /// for itself: it does not depend on `geode-data` (CLAUDE.md), so
-    /// `geode-app` owns the service and calls [`ShellView::set_probe`].
-    probe: crate::dataprobe::ProbeState,
     /// The shared frame (§4), created here so every occupant can hold it.
     frame: Entity<Frame>,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
@@ -707,8 +699,6 @@ impl ShellView {
             perf: FrameHistogram::new(),
             last_render_started: None,
             perf_overlay: false,
-            data_probe: false,
-            probe: crate::dataprobe::ProbeState::default(),
             frame,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
@@ -797,23 +787,6 @@ impl ShellView {
     /// The shared frame entity every occupant holds (§4).
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
-    }
-
-    /// Hand the probe a new reading (spec §7's vertical slice).
-    ///
-    /// The shell cannot query for itself — it does not depend on
-    /// `geode-data` — so `geode-app` polls the `DataService` result
-    /// channel and pushes what arrives here. Notifies unconditionally:
-    /// the §7.1 budget is measured to the painted frame, so a reading that
-    /// did not repaint would not have been measured.
-    pub fn set_probe(&mut self, probe: crate::dataprobe::ProbeState, cx: &mut Context<Self>) {
-        self.probe = probe;
-        cx.notify();
-    }
-
-    /// Whether the probe is currently painted.
-    pub fn data_probe_visible(&self) -> bool {
-        self.data_probe
     }
 }
 

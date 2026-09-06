@@ -729,11 +729,12 @@ run_mutation "snapshot: a null measure is not zero" \
   '(row < values.len()).then(|| values.value(row))' \
   geode-core
 
-run_mutation "probe: a blanked cell renders blank, not 0.00" \
-  crates/geode-shell/src/dataprobe.rs \
-  'return snap.f64_value(column, row).map(|v| format!("{v:.2}"));' \
-  'return snap.f64_column(column)?.get(row).map(|v| format!("{v:.2}"));' \
-  geode-shell
+# "probe: a blanked cell renders blank, not 0.00" retired (Phase 3c
+# Task 9): the throwaway diagnostic tile it anchored on is deleted
+# entirely (spec §9 step 5). The behaviour it defended — a NULL measure
+# reads as blank, never 0.00 — lives on as the blotter's own read path
+# and is covered there by "cache: a NULL measure is None, never a
+# number" a few entries below (`crates/geode-blotter/src/core/cache.rs`).
 
 run_mutation "snapshot: depth reads at DuckDB's own integer width" \
   crates/geode-core/src/snapshot.rs \

@@ -23,9 +23,9 @@ gpui-component.workspace = true
 gpui-component-assets.workspace = true
 geode-shell = { path = "../geode-shell" }
 geode-core.workspace = true
-# The throwaway data probe (spec §7) is the one place the shell and the
-# data layer meet — see src/probe.rs. Deleted with the probe (Phase 3c
-# Task 9); the data bridge below (src/bridge.rs) is its replacement.
+# The data bridge (spec §5.1, src/bridge.rs) is the one place the shell
+# and the data layer meet — it replaced the throwaway probe deleted in
+# Phase 3c.
 geode-data = { path = "../geode-data" }
 geode-blotter = { path = "../geode-blotter" }
 geode-demo-data = { path = "../geode-demo-data" }

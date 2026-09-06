@@ -1,5 +1,9 @@
 # Phase 3c handoff — start here in a fresh session
 
+**Phase 3c landed** — the blotter, `--demo`, and the probe deletion are
+done. See `CLAUDE.md`'s Phase 3 paragraphs for the current state; this
+document is kept as the historical kickoff note.
+
 Written 2026-09-05 at the end of the Phase 3b session. Everything a new
 session needs to execute Plan 3c, with the `shell/mod.rs` split done first.
 
