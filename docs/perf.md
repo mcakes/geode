@@ -331,22 +331,27 @@ depth bound exists to keep small.
 ## Phase 3c: blotter core (`cargo bench -p geode-blotter`)
 
 The blotter's pure-core costs (`crates/geode-blotter/src/core/`, Phase 3
-§6.1) at the same three shapes: flatten fully expanded, flatten with
-everything collapsed (the shell-of-a-tree cost — the DFS still visits
-every root), filling a 40-row cache window over a 7-column plan (a tree
-column plus the fixture's 6 measure columns), and building a 100-column
-plan. Measured with `cargo bench -p geode-blotter -- --warm-up-time 1
---measurement-time 3` (10 samples per `benchmark_group`'s
-`sample_size(10)`; the shortened warm-up/measurement window, rather than
-criterion's defaults, is what fit this run inside the harness's 590s
-foreground budget — medians below are otherwise unmodified criterion
-output). The fixture (`crates/geode-blotter/benches/blotter.rs::shape`)
-reuses `crates/geode-core/benches/tree.rs`'s three-level lhu > underlying
-> position tree builder, adding 6 `F64` measure columns (100 for the
+§6.1) at the same three shapes as the tree-index section above (133 /
+135,733 / 720,881 rows): flatten fully expanded, flatten with everything
+collapsed (the shell-of-a-tree cost — the DFS still visits every root),
+filling a 40-row cache window over a 7-column plan, and building a
+100-column plan. The cache window is 40×7, not the 40×20 spec §7.3
+mentions, because this brief's fixture carries 6 measure columns plus
+the tree column (7 total), not 20; the column count is a property of
+the fixture, not the cache, which fills however many columns the plan
+actually has. Measured with `cargo bench -p geode-blotter --
+--warm-up-time 1 --measurement-time 3` (10 samples per
+`benchmark_group`'s `sample_size(10)`; the shortened warm-up/measurement
+window, rather than criterion's defaults, is what fit this run inside
+the harness's 590s foreground budget — medians below are otherwise
+unmodified criterion output). The fixture
+(`crates/geode-blotter/benches/blotter.rs::shape`) reuses
+`crates/geode-core/benches/tree.rs`'s three-level lhu > underlying >
+position tree builder, adding 6 `F64` measure columns (100 for the
 plan-build case) and a view grouped on the three tree dimensions with
 every measure column selected:
 
-| bench | 133 rows | 137k rows | 729k rows |
+| bench | 133 rows | 135,733 rows | 720,881 rows |
 | --- | ---: | ---: | ---: |
 | `flatten_all` (fully expanded) | **441.16 ns** | **205.87 µs** | **1.1836 ms** |
 | `flatten_collapsed` (roots only) | **244.96 ns** | **265.72 ns** | **1.6720 µs** |
@@ -355,17 +360,47 @@ every measure column selected:
 `plan_build_100_columns` (13-row shape, 100 measure columns): **14.048
 µs**.
 
-None of this runs on the render thread (spec §6.1: the plan is rebuilt
-only when the snapshot's column set changes, flatten runs on snapshot
-arrival/expand/collapse/sort, and the cache fills only the visible
-window on scroll) — every number here is comfortably inside a single
-frame's 8ms budget, including the 729k fully-expanded flatten at 1.18ms,
-which is the most expensive of the group and still under a sixth of that
-budget. The cache fill barely moves with row count (31.6µs → 39.0µs
-across three orders of magnitude of rows) because it only ever touches
-the 40 visible rows; `flatten_collapsed`'s near-flat cost the same way
-reflects that collapsed roots are the only rows a DFS ever visits
-regardless of how many rows are hiding beneath them.
+`restore_by_path` (I3, final review — the keypress-path cost
+`reflatten_keeping` pays on every requery/expand/collapse/sort, fixed to
+skip the O(1) depth check before allocating a path and to search
+outward from the previous cursor row instead of scanning from row 0),
+at the 720,881-row shape, fully expanded, target the very last row (a
+depth-3 leaf — 720,000 of the 720,881 rows share its depth, so the
+depth check alone can't reject much of the list for this particular
+target):
+
+| bench | fallback 50 rows away | fallback 720,830 rows away |
+| --- | ---: | ---: |
+| `restore_by_path_729k_rows_{nearby,far_fallback}` | **6.7446 µs** | **55.011 ms** |
+
+The first column (`_nearby`) is the realistic case the fix targets — the
+cursor's node usually moves by a handful of rows between one reflatten
+and the next, and finding it costs a handful of `path_of` calls, not a
+scan of the whole list. The second (`_far_fallback`) is the adversarial
+bound: `fallback` at row 0, on the opposite end of the list from the
+target, forces the outward search to walk (and `path_of`-allocate for)
+essentially every depth-3 row in between, since almost the whole shape
+shares the target's depth here. It's recorded for honesty about the
+worst case — a `gg`-to-top-then-jump-to-the-bottom kind of move — not
+because ordinary use pays it; a real UI session's cursor moves locally
+almost always, which is exactly the `_nearby` number.
+
+None of the first four benches run on the render thread (spec §6.1: the
+plan is rebuilt only when the snapshot's column set changes, flatten
+runs on snapshot arrival/expand/collapse/sort, and the cache fills only
+the visible window on scroll) — every number among them is comfortably
+inside a single frame's 8ms budget, including the 720,881-row fully-
+expanded flatten at 1.18ms, which is the most expensive of the group and
+still under a sixth of that budget. The cache fill barely moves with row
+count (31.6µs → 39.0µs across three orders of magnitude of rows) because
+it only ever touches the 40 visible rows; `flatten_collapsed`'s near-flat
+cost the same way reflects that collapsed roots are the only rows a DFS
+ever visits regardless of how many rows are hiding beneath them.
+`restore_by_path` *does* run on the render thread (it's called from
+`reflatten_keeping`, at exactly the same trigger points as flatten
+above) — its nearby-fallback cost is well inside budget, and even its
+adversarial worst case (55ms) is a rare, cursor-teleporting motion, not
+the steady-state cost a normal session pays per keypress.
 
 ## Phase 3: the painted frame
 
@@ -383,8 +418,17 @@ states nothing was measured.
 **Setup:**
 
 ```sh
-cargo run -p geode-app -- --demo 1000000
+cargo run --release -p geode-app -- --demo 1000000
 ```
+
+`--release`, matching the query-path section's own convention above
+("Measured on an M-series Mac, `--release`, DuckDB..."): this is a
+performance measurement against the §7.1 <50ms/8ms budgets, and a debug
+build's unoptimized codegen would make any reading here meaningless as
+a check against those contracts — the numbers below need to reflect
+what a user's build actually pays. The `--demo 1000` smoke check (does
+the app open at all on generated data) stays a debug build; only this
+budget-verifying run needs `--release`.
 
 **Readings**, all from the perf overlay (`mod+shift+p`, described above
 under "Debug overlay") unless noted:

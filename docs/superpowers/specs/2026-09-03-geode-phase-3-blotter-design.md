@@ -445,8 +445,12 @@ schema is on hand, nothing the data thread needs to hear about. Only a
 the app bridge forwards to the data thread as `ReplaceViews` (correction,
 3b final review: an earlier draft of this section had groupings firing
 the event too). Both kinds of change bump `config`. A change to
-`sources` or `datasets` sets a status-bar diagnostic "sources changed —
-restart to apply" and does nothing else.
+`sources` sets a status-bar diagnostic "sources changed — restart to
+apply" and does nothing else. A `datasets` change sets that same
+diagnostic too, but — per the first sentence above — is not otherwise
+inert: `datasets` counts toward `groupings_changed` as well, so the
+frame's slots (pure presentation, recomputed shell-side) are replaced
+immediately regardless of whether a restart is also pending.
 
 ## 5. The data path
 
@@ -628,7 +632,7 @@ alone — the prerequisites document's standing warning.
 
 **Column plan.** Built when a snapshot arrives whose column set differs
 from the last (compared by name list, once per snapshot): per visible
-column, `{ name, index, kind: Grouping | Measure | Attribute | Depth,
+column, `{ name, index, kind: Tree | Measure | Dimension,
 format, width, header }`. The first column is the tree column: the
 grouping value for the row's own depth, indented by depth, with a
 disclosure glyph when the row has children or could (depth <

@@ -182,11 +182,12 @@ context = "blotter && mode == visual"
 /// same registry, `ActionRegistry::register` reports each as already
 /// registered — an `Err` it already discards — so the titles below are
 /// the ones actually shown in the palette; keep them identical to
-/// `geode_blotter::tile::ACTIONS`. The id list alone is pinned
-/// identical to `tile::ACTIONS` by `geode-blotter`'s own
-/// `the_shells_reserved_blotter_actions_match_ours` test (the shell
-/// cannot depend on the blotter crate to run that check itself).
-const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
+/// `geode_blotter::tile::ACTIONS`. `pub` (final review) so
+/// `geode-blotter`'s own `the_shells_reserved_blotter_actions_match_ours`
+/// test can compare titles as well as ids — the shell cannot depend on
+/// the blotter crate to run that check itself, so the mirroring only
+/// runs from the blotter side.
+pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
     ("blotter::down", "Cursor down"),
     ("blotter::up", "Cursor up"),
     ("blotter::left", "Cursor left"),

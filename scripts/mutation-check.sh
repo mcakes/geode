@@ -1267,6 +1267,38 @@ run_mutation "frame: restart_required clears once sources/datasets match the bas
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
 
+run_mutation "reload: ConfigReloaded is emitted before the frame notifies its observers (I2)" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                cx.emit(ShellEvent::ConfigReloaded);
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+            }' \
+  '                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();
+                    cx.notify();
+                });
+                cx.emit(ShellEvent::ConfigReloaded);
+            }' \
+  geode-shell \
+  a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers
+
+run_mutation "frame: readout is rebuilt when versions change" \
+  crates/geode-shell/src/frame.rs \
+  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+            && *cached_versions == versions
+        {
+            return Rc::clone(cached);
+        }' \
+  '        if let Some((cached_versions, cached)) = self.readout_cache.borrow().as_ref()
+            && *cached_versions != versions
+        {
+            return Rc::clone(cached);
+        }' \
+  geode-shell \
+  readout_is_rebuilt_only_when_versions_change
+
 run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
   crates/geode-shell/src/theme.rs \
   '    let file_name = path
@@ -1459,19 +1491,32 @@ run_mutation "delegate: apply_snapshot invalidates the cache even without narrow
   '        self.cursor.clamp(self.shown.len(), plan.columns.len());
     }' \
   geode-blotter \
-  apply_snapshot_invalidates_the_cache_even_without_narrowing
+  apply_snapshot_invalidates_the_cache_and_refills_it
 
 run_mutation "delegate: invalidate_cells also clears the cached tree glyphs" \
   crates/geode-blotter/src/delegate.rs \
-  '    fn invalidate_cells(&mut self) {
-        self.cache.invalidate();
+  '        self.cache.invalidate();
         self.glyphs.clear();
+        if !w.is_empty() {' \
+  '        self.cache.invalidate();
+        if !w.is_empty() {' \
+  geode-blotter \
+  invalidate_cells_clears_stale_glyphs_when_shown_shrinks_past_the_old_window
+
+run_mutation "delegate: invalidate_cells refills the window it had" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.glyphs.clear();
+        if !w.is_empty() {
+            let end = w.end.min(self.shown.len());
+            if w.start < end {
+                self.refill_window(w.start..end);
+            }
+        }
     }' \
-  '    fn invalidate_cells(&mut self) {
-        self.cache.invalidate();
+  '        self.glyphs.clear();
     }' \
   geode-blotter \
-  a_regroup_that_keeps_the_window_clears_the_cached_glyphs
+  a_regroup_that_keeps_the_window_refills_it_immediately
 
 run_mutation "delegate: any_determined reflects the whole cached window" \
   crates/geode-blotter/src/delegate.rs \
@@ -1554,10 +1599,13 @@ run_mutation "tile: the configured threshold is the one used" \
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \
-  '        let w = self.cache.window();
-        self.cache.invalidate();
-        self.refill_window(w);' \
-  '        self.cache.invalidate();' \
+  '        // same tree, and the window is only ever tens of rows.
+        self.invalidate_cells();
+        cx.notify();
+    }' \
+  '        // same tree, and the window is only ever tens of rows.
+        cx.notify();
+    }' \
   geode-blotter \
   move_column_refills_the_window_immediately
 

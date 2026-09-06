@@ -1673,7 +1673,8 @@ mod tests {
         let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
         assert_eq!(ours, geode_shell::defaults::BLOTTER_ACTIONS.to_vec());
         assert_eq!(
-            ACTIONS, geode_shell::defaults::BLOTTER_ACTION_DEFS,
+            ACTIONS,
+            geode_shell::defaults::BLOTTER_ACTION_DEFS,
             "titles must match too, not just ids — `ActionRegistry::register`'s \
              discarded `Err` on the shell's duplicate registration means the \
              shell's title, not the blotter's, is what actually reaches the palette"
