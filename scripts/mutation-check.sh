@@ -1238,6 +1238,14 @@ run_mutation "frame: a views/dimensions change reaches the frame and emits Confi
   geode-shell \
   a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_restart
 
+run_mutation "perf: reset drops the previous-render timestamp so the first sample after it is fresh" \
+  crates/geode-shell/src/shell/input.rs \
+  '            self.last_render_started = None;
+            cx.notify();' \
+  '            cx.notify();' \
+  geode-shell \
+  reset_drops_the_previous_render_timestamp_so_the_first_sample_after_it_is_fresh
+
 # ---- Phase 3c Task 0 (deferred 3b cleanups: M4, M8, M9, slot-rebuild DRY)
 
 run_mutation "hot_reload: rebuild_slots is the one place both ShellView::new and apply_reload build GroupingSlots (DRY)" \

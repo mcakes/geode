@@ -111,3 +111,72 @@ fn render_records_frame_samples_and_reset_clears_them(cx: &mut gpui::TestAppCont
         });
     });
 }
+
+/// Bug fix: `perf::reset` zeroes the histogram but used to leave
+/// `last_render_started` pointing at whatever render happened before the
+/// reset was dispatched (e.g. the frame painted before the user's
+/// reaction time in the palette). The render that the reset's own
+/// `cx.notify()` triggers — which in this test-support build's
+/// `flush_effects` (see `gpui::App::flush_effects`'s dirty-window sweep)
+/// happens synchronously inside the `dispatch` call below, same as
+/// `render_records_frame_samples_and_reset_clears_them`'s "notify flushes
+/// into its own automatic draw" — then measured that stale gap as the
+/// first sample of the freshly zeroed histogram. `last_render_started`
+/// must be cleared too, so that render records nothing and becomes the
+/// new baseline; only the render after that records a real interval.
+#[gpui::test]
+fn reset_drops_the_previous_render_timestamp_so_the_first_sample_after_it_is_fresh(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+
+    // A couple of ordinary frames first, so there is real history for
+    // `perf::reset` to need to disarm.
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    shell.update(&mut cx, |_, cx| cx.notify());
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    // A real gap standing in for the user's reaction time between that
+    // last frame and pressing Enter on `perf::reset` in the palette —
+    // the exact gap the bug recorded as the histogram's first sample.
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    // Dispatch the way every other action in this suite does. Its
+    // `cx.notify()` flushes into the automatic draw described above
+    // before this call returns, so the assertions right after it are
+    // already checking the render immediately following the reset —
+    // no separate explicit draw is needed (or wanted: one would just be
+    // a second, genuinely-fresh render on top of it).
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("perf::reset".to_string()), None, window, cx);
+        });
+    });
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.perf.count()),
+        0,
+        "the render immediately after perf::reset must not record a \
+         sample spanning back to before the reset"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.perf.max_micros()),
+        0,
+        "no stale sample means max stays zero too"
+    );
+
+    // A genuinely fresh interaction after that baseline-setting render
+    // does record normally.
+    shell.update(&mut cx, |_, cx| cx.notify());
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.perf.count()) >= 1,
+        "a real dirtied re-render after the reset should record a sample"
+    );
+}
