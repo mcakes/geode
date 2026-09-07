@@ -13,7 +13,7 @@ use gpui::{App, Context, Window};
 use crate::module::ModuleFactory as _;
 use crate::session;
 use crate::tiling::TileId;
-use geode_core::query::QueryOutcome;
+use geode_core::query::{QueryKey, QueryOutcome};
 
 use super::ShellView;
 
@@ -88,6 +88,39 @@ impl ShellView {
         for (_, dock) in ws.docks().iter() {
             if dock.visible() {
                 out.extend(dock.tree().tiles());
+            }
+        }
+    }
+
+    /// The `QueryKey`s of every tile in the active workspace that has an
+    /// occupant right now (Phase 4 §3.10) — what `ShellView::
+    /// on_frame_changed` opens a flip barrier over on a scope/grouping/
+    /// as-of change, so every tile that is actually going to requery
+    /// (rather than one still waiting on `ensure_occupants`, or one in a
+    /// workspace/dock nobody can see) is exactly what the barrier waits
+    /// on. `out` is cleared and refilled, same reason `fill_all_tiles`/
+    /// `fill_active_tiles` take an out-parameter — a flip opens on a user
+    /// mutation, not every render, but there's no reason to allocate
+    /// fresh every time either (the caller passes its own scratch `Vec`).
+    pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
+        out.clear();
+        let ws = self.services.workspaces.active();
+        out.extend(
+            ws.tree()
+                .tiles()
+                .into_iter()
+                .filter(|id| self.occupants.contains_key(id))
+                .map(|id| QueryKey(id.0)),
+        );
+        for (_, dock) in ws.docks().iter() {
+            if dock.visible() {
+                out.extend(
+                    dock.tree()
+                        .tiles()
+                        .into_iter()
+                        .filter(|id| self.occupants.contains_key(id))
+                        .map(|id| QueryKey(id.0)),
+                );
             }
         }
     }

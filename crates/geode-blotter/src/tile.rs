@@ -14,6 +14,7 @@ use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::{Scope, parse_expr};
+use geode_core::snapshot::Snapshot;
 use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
 use geode_shell::actions::ActionId;
@@ -30,6 +31,7 @@ use gpui_component::table::{DataTable, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, h_flex, v_flex};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// After this long without a result the header shows an in-flight glyph
@@ -101,6 +103,20 @@ pub struct BlotterTile {
     visible: bool,
     pub error: Option<String>,
     find: Option<FindState>,
+    /// An outcome that arrived while the frame's flip barrier (Phase 4
+    /// §3.10) still wants this tile's key — held here, not applied, until
+    /// `promote` (driven by `flip` bumping in `on_frame_changed`, or by
+    /// this tile's own `deliver` when its arrival happened to be the one
+    /// that emptied the barrier) puts it through `apply` exactly like an
+    /// un-barriered outcome would have been. `None` once promoted, and
+    /// also `None` the whole time for an outcome that never had to wait
+    /// (no barrier open, or the barrier's versions don't match).
+    staged: Option<(Arc<Snapshot>, Vec<String>)>,
+    /// `versions().flip` as of the last promotion (Phase 4 §3.10) — this
+    /// tile's own half of the bump, the same shape as `acted` above but
+    /// for "have I applied what this flip released" rather than "what did
+    /// I last query for".
+    last_flip: u64,
 }
 
 impl BlotterTile {
@@ -216,6 +232,8 @@ impl BlotterTile {
             visible: false,
             error: None,
             find: None,
+            staged: None,
+            last_flip: 0,
         }
     }
 
@@ -273,7 +291,11 @@ impl BlotterTile {
         }
     }
 
-    /// Which counters this tile follows (§4.1).
+    /// Which counters this tile follows (§4.1). Deliberately does not
+    /// compare `now.flip`/`acted.flip` (Phase 4 §3.10): `flip` never means
+    /// "requery" — it means "a staged snapshot this tile already has may
+    /// now be promoted", which `on_frame_changed` checks on its own before
+    /// ever reaching this method.
     fn follows_changed(&self, now: FrameVersions) -> bool {
         let Some(acted) = self.acted else {
             return true;
@@ -286,14 +308,67 @@ impl BlotterTile {
     }
 
     fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
+        // Phase 4 §3.10: a flip released (or this tile never had to wait
+        // and `staged` is empty, a no-op) — promote whatever is staged
+        // regardless of visibility, so a tile hidden between staging and
+        // the flip is never left showing stale data once it comes back.
+        let flip = self.frame.read(cx).versions().flip;
+        if flip != self.last_flip {
+            self.last_flip = flip;
+            self.promote(cx);
+        }
         if !self.visible {
             return;
         }
         let now = self.frame.read(cx).versions();
         if self.follows_changed(now) {
             self.requery(cx);
+        } else {
+            // A pinned tile under a grouping change, or an unscoped tile
+            // under a scope change, does not requery — but it still sits
+            // in an open barrier's key set (§3.10, `ShellView::
+            // visible_tile_keys` does not know which tiles will follow).
+            // Left unanswered, it would hold every other tile open until
+            // `FLIP_DEADLINE`, for no reason: it has nothing new coming.
+            let key = QueryKey(self.tile.0);
+            if self.frame.read(cx).barrier_wants(key, now) {
+                self.frame.update(cx, |f, cx| {
+                    if f.arrived(key, now) {
+                        cx.notify();
+                    }
+                });
+            }
         }
         cx.notify();
+    }
+
+    /// Apply a staged snapshot, if any (Phase 4 §3.10) — `deliver` when
+    /// its own arrival didn't empty the barrier, or `on_frame_changed`
+    /// once `flip` shows it did. A no-op when nothing is staged, so
+    /// calling it on every `flip` bump costs nothing for a tile that
+    /// never had to wait.
+    fn promote(&mut self, cx: &mut Context<Self>) {
+        if let Some((snapshot, grouping)) = self.staged.take() {
+            self.apply(snapshot, grouping, cx);
+        }
+    }
+
+    /// Put a snapshot through the table exactly as an un-barriered
+    /// `deliver` always has: `apply_snapshot`, refresh, re-clamp the
+    /// cursor to the (possibly reshaped) row set, and record when this
+    /// landed. Never reorders or re-reads `snapshot` — it applies exactly
+    /// what the query pool handed back, at the grouping it was queried
+    /// under.
+    fn apply(&mut self, snapshot: Arc<Snapshot>, grouping: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(view) = self.view() {
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().apply_snapshot(snapshot, &view, &grouping);
+                t.refresh(cx);
+                let row = t.delegate().cursor.row;
+                t.set_selected_row(row, cx);
+            });
+        }
+        self.delivered_at = Some(Instant::now());
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
@@ -359,21 +434,47 @@ impl BlotterTile {
         let micros = outcome.submitted.elapsed().as_micros() as u64;
         self.frame
             .update(cx, |f, _| f.requery.record_submit_to_snapshot(micros));
+        let key = QueryKey(self.tile.0);
+        let acted = self.acted.unwrap_or_default();
         match outcome.snapshot {
             Ok(snapshot) => {
                 self.error = None;
-                if let Some(view) = self.view() {
-                    let grouping = self.last_grouping.clone();
-                    self.table.update(cx, |t, cx| {
-                        t.delegate_mut().apply_snapshot(snapshot, &view, &grouping);
-                        t.refresh(cx);
-                        let row = t.delegate().cursor.row;
-                        t.set_selected_row(row, cx);
+                // Phase 4 §3.10: if a flip barrier is open and still
+                // wants this key, stage rather than apply — this tile
+                // must not paint the new scope/grouping/as-of before
+                // every other following tile is ready to as well.
+                let wants = self.frame.read(cx).barrier_wants(key, acted);
+                if wants {
+                    self.staged = Some((snapshot, self.last_grouping.clone()));
+                    // `arrived` may itself empty the barrier right here —
+                    // when it does, promote immediately rather than
+                    // waiting for the `flip` bump to reach this tile's
+                    // own `on_frame_changed` on a later notify pass.
+                    let released = self.frame.update(cx, |f, cx| {
+                        let r = f.arrived(key, acted);
+                        if r {
+                            cx.notify();
+                        }
+                        r
                     });
+                    if released {
+                        self.promote(cx);
+                    }
+                } else {
+                    self.apply(snapshot, self.last_grouping.clone(), cx);
                 }
-                self.delivered_at = Some(Instant::now());
             }
-            Err(e) => self.error = Some(e),
+            Err(e) => {
+                self.error = Some(e);
+                // A failed outcome still counts as arrival (§3.10): one
+                // broken tile must never hold every other tile open until
+                // the deadline.
+                self.frame.update(cx, |f, cx| {
+                    if f.arrived(key, acted) {
+                        cx.notify();
+                    }
+                });
+            }
         }
         cx.notify();
     }
@@ -1174,6 +1275,57 @@ mod tests {
         ))
     }
 
+    /// Same shape as [`snapshot`] (root; two depth-1 groups; one depth-2
+    /// child) but with different `lhu` labels — the flip barrier e2e test
+    /// (`two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_
+    /// barrier`) tells "still showing the old snapshot" from "promoted to
+    /// the new one" by comparing `shown_texts()` against this fixture's
+    /// labels rather than `snapshot()`'s.
+    fn snapshot2() -> Arc<Snapshot> {
+        let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: by_depth,
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![
+                        None,
+                        Some("M1".into()),
+                        Some("M2".into()),
+                        Some("M1".into()),
+                    ]),
+                ),
+                (
+                    meta("underlying_ref", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![None, None, None, Some("NDX".into())]),
+                ),
+                (
+                    meta("row_depth", vec![Attribution::Additive; 3]),
+                    TestColumn::I32(vec![0, 1, 1, 2]),
+                ),
+                (
+                    meta("delta01", vec![Attribution::Additive; 3]),
+                    TestColumn::F64(vec![Some(90.0), Some(50.0), Some(40.0), Some(50.0)]),
+                ),
+                (
+                    meta(
+                        "daily_trading_pnl",
+                        vec![
+                            Attribution::Additive,
+                            Attribution::Additive,
+                            Attribution::NonAttributable,
+                        ],
+                    ),
+                    TestColumn::F64(vec![Some(70.0), Some(70.0), Some(70.0), None]),
+                ),
+            ],
+            2,
+        ))
+    }
+
     struct Harness {
         tile: Entity<BlotterTile>,
         frame: Entity<Frame>,
@@ -1345,10 +1497,23 @@ mod tests {
         tag: u64,
         snapshot: Result<Arc<Snapshot>, String>,
     ) {
-        h.tile.update(cx, |t, cx| {
+        deliver_to(&h.tile, QueryKey(7), cx, tag, snapshot);
+    }
+
+    /// Same as [`deliver`], generalized over which tile and `QueryKey` —
+    /// the two-tile flip barrier test delivers to A and B by their own
+    /// keys rather than the single-tile `Harness`'s fixed `QueryKey(7)`.
+    fn deliver_to(
+        tile: &Entity<BlotterTile>,
+        key: QueryKey,
+        cx: &mut gpui::VisualTestContext,
+        tag: u64,
+        snapshot: Result<Arc<Snapshot>, String>,
+    ) {
+        tile.update(cx, |t, cx| {
             t.deliver(
                 QueryOutcome {
-                    key: QueryKey(7),
+                    key,
                     tag,
                     snapshot,
                     submitted: Instant::now() - Duration::from_millis(12),
@@ -1359,6 +1524,13 @@ mod tests {
         cx.update(|window, cx| {
             let _ = window.draw(cx);
         });
+    }
+
+    /// The tree text of every un-narrowed visible row (`shown_texts`,
+    /// `crate::delegate::BlotterDelegate`) — what the flip barrier e2e
+    /// test compares to tell `snapshot()`'s labels from `snapshot2()`'s.
+    fn shown_texts(tile: &Entity<BlotterTile>, cx: &gpui::VisualTestContext) -> Vec<String> {
+        tile.read_with(cx, |t, cx| t.table().read(cx).delegate().shown_texts())
     }
 
     #[gpui::test]
@@ -2057,6 +2229,169 @@ mod tests {
         assert!(
             cx.debug_bounds(selector).is_some(),
             "the cell's element actually painted"
+        );
+    }
+
+    /// Phase 4 §3.10, end to end at the tile level (shell-less: the
+    /// barrier is opened by hand here exactly the way `ShellView::
+    /// on_frame_changed` opens it in production — see `geode-shell`'s own
+    /// `shell/tests/flip.rs` for that half). Two tiles share one frame:
+    /// a scope change makes both requery, and while the barrier is open
+    /// tile A's own outcome is staged rather than painted — only once
+    /// tile B's outcome arrives too (emptying the barrier and bumping
+    /// `flip`) do both tiles show the new snapshot, in the same notify
+    /// pass. Repeated with B *failing* the second time: a failed outcome
+    /// still counts as arrival, so A promotes on schedule and B keeps its
+    /// last-good snapshot plus the error — one broken tile never holds
+    /// the rest open.
+    #[gpui::test]
+    fn two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        assert_eq!(pa0.key, QueryKey(7));
+        assert_eq!(pb0.key, QueryKey(8));
+
+        // Baseline: both tiles land on `snapshot()`'s labels, no barrier
+        // involved yet.
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let old_texts = vec!["".to_string(), "L1".into(), "L2".into()];
+        assert_eq!(shown_texts(&h.a, &vcx), old_texts);
+        assert_eq!(shown_texts(&h.b, &vcx), old_texts);
+
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+
+        // A scope change: both tiles requery on their own (the frame
+        // observer every `BlotterTile` sets up in `new`) before anything
+        // opens a barrier — exactly the order `ShellView::
+        // on_frame_changed` uses in production (requery, then open).
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("A".into()));
+            cx.notify();
+        });
+        let pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+
+        // A's outcome arrives first: staged, not painted — the barrier
+        // still wants B.
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa1.tag, Ok(snapshot2()));
+        assert_eq!(
+            shown_texts(&h.a, &vcx),
+            old_texts,
+            "A's own outcome landed but must wait for B"
+        );
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+
+        // B's outcome arrives: the barrier empties, `flip` bumps, and —
+        // after the notify pass that schedules — both tiles show the new
+        // snapshot in the same pass.
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        vcx.run_until_parked();
+        assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
+        let new_texts = vec!["".to_string(), "M1".into(), "M2".into()];
+        assert_eq!(shown_texts(&h.a, &vcx), new_texts, "A promoted");
+        assert_eq!(shown_texts(&h.b, &vcx), new_texts, "B applied directly");
+
+        // Repeat, with B failing this time.
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("B".into()));
+            cx.notify();
+        });
+        let pa2 = next_query(&h.requests);
+        let pb2 = next_query(&h.requests);
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa2.tag, Ok(snapshot()));
+        assert_eq!(shown_texts(&h.a, &vcx), new_texts, "still staged");
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+
+        deliver_to(
+            &h.b,
+            QueryKey(8),
+            &mut vcx,
+            pb2.tag,
+            Err("binder error".into()),
+        );
+        vcx.run_until_parked();
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "a failed outcome still counts as arrival"
+        );
+        assert_eq!(shown_texts(&h.a, &vcx), old_texts, "A promoted on schedule");
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            new_texts,
+            "B keeps its last-good snapshot"
+        );
+        let b_error = h.b.read_with(&vcx, |t, _| t.error.clone());
+        assert_eq!(b_error.as_deref(), Some("binder error"));
+    }
+
+    /// A pinned tile ignores a grouping-only change (§4.1: `follows_
+    /// changed` is false for it) — but it still sits in the barrier's key
+    /// set, and it must "arrive" on its own from `on_frame_changed`,
+    /// never from `deliver` (it submits no new query at all), or it would
+    /// hold its unpinned sibling's flip open until `FLIP_DEADLINE` for no
+    /// reason (§3.10). The grouping mutation and `open_flip` are set up
+    /// together, before the one `cx.notify()` that fans out to both
+    /// tiles — the real order `ShellView::on_frame_changed` guarantees in
+    /// production, since its own frame observer is registered (in
+    /// `ShellView::new`) before any tile occupant's.
+    #[gpui::test]
+    fn a_pinned_tile_arrives_from_on_frame_changed_without_requerying(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+
+        // Pin A to a fixed grouping.
+        h.a.update(&mut vcx, |t, cx| t.command("group lhu", cx).unwrap());
+        let pa_pin = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa_pin.tag, Ok(snapshot()));
+
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+        frame.update(&mut vcx, |f, cx| {
+            f.set_active_slot(Some(1));
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now());
+            cx.notify();
+        });
+
+        // Only B (unpinned) requeries; A ignores the grouping change.
+        let pb1 = next_query(&h.requests);
+        assert!(
+            h.requests.try_recv().is_err(),
+            "A is pinned — it never requeries"
+        );
+
+        let v = frame.read_with(&vcx, |f, _| f.versions());
+        assert!(
+            frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "still waiting on B"
+        );
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(7), v)),
+            "A already arrived on its own"
+        );
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_wants(QueryKey(8), v)));
+
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        assert!(
+            !frame.read_with(&vcx, |f, _| f.barrier_open()),
+            "B's own arrival was enough — A never had to be waited on"
         );
     }
 

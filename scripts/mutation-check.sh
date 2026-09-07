@@ -2049,6 +2049,50 @@ run_mutation "as-of: the stripe is painted only when historical" \
   '        let is_historical = true;' \
   geode-shell typing_a_time_and_enter_sets_as_of_and_paints_the_stripe_and_segment
 
+# ---- Phase 4a Task 8: the flip barrier (spec §3.10)
+
+run_mutation "flip: failure counts as arrival" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.frame.update(cx, |f, cx| {
+                    if f.arrived(key, acted) {
+                        cx.notify();
+                    }
+                });' \
+  '                let _ = (key, acted);' \
+  geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
+
+run_mutation "flip: a staged snapshot waits for the barrier" \
+  crates/geode-blotter/src/tile.rs \
+  '                if wants {' \
+  '                if false {' \
+  geode-blotter two_tiles_promote_in_the_same_pass_and_a_failure_releases_the_barrier
+
+run_mutation "flip: the deadline releases" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(b) if now.duration_since(b.opened) >= FLIP_DEADLINE => {
+                self.release();
+                true
+            }' \
+  '            Some(_) if false => {
+                self.release();
+                true
+            }' \
+  geode-shell the_deadline_releases_with_whatever_arrived
+
+run_mutation "flip: only scope/grouping/as-of open a barrier" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
+        {' \
+  '        if now_v != last
+        {' \
+  geode-shell a_data_bump_opens_no_barrier
+
+run_mutation "flip: a non-following tile still arrives on its own" \
+  crates/geode-blotter/src/tile.rs \
+  '            if self.frame.read(cx).barrier_wants(key, now) {' \
+  '            if false {' \
+  geode-blotter a_pinned_tile_arrives_from_on_frame_changed_without_requerying
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

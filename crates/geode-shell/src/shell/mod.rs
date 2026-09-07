@@ -33,6 +33,7 @@ pub use keys::convert_keystroke;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
@@ -44,7 +45,7 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
 use crate::fontsize::FontSize;
-use crate::frame::Frame;
+use crate::frame::{FLIP_DEADLINE, Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::module::{ModuleRoster, TileOccupant};
 use crate::palette::PaletteState;
@@ -492,6 +493,15 @@ pub struct ShellView {
     perf_overlay: bool,
     /// The shared frame (§4), created here so every occupant can hold it.
     frame: Entity<Frame>,
+    /// The frame's `(scope, grouping, as_of)` versions as of the last
+    /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
+    /// current ones there to decide whether to open a fresh flip barrier.
+    /// Seeded once in `new`, right after a restored session's scope/slot/
+    /// as-of are applied, so that restore is never itself mistaken for
+    /// "just changed" (which would open a barrier over whatever tiles
+    /// happen to exist yet at construction time, before any occupant
+    /// does).
+    last_flip_versions: FrameVersions,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
     occupants: HashMap<TileId, TileOccupant>,
@@ -507,6 +517,11 @@ pub struct ShellView {
     /// Same purpose as `scratch_all_tiles`, for the active-tiles half of
     /// the diff.
     scratch_active_tiles: HashSet<TileId>,
+    /// Scratch storage for `visible_tile_keys` (Phase 4 §3.10), same
+    /// reasoning as the two fields above — a flip only opens on a user
+    /// mutation of scope/grouping/as-of, nowhere near every render, but
+    /// there is no reason for it to allocate fresh every time either.
+    scratch_visible_keys: Vec<QueryKey>,
     /// Set by `apply_reload` when a reload's `sources`/`datasets` docs
     /// (§4.5) no longer match [`sources_baseline`](Self::sources_baseline)/
     /// [`datasets_baseline`](Self::datasets_baseline) — those need a
@@ -908,6 +923,11 @@ impl ShellView {
                 f.clear_history();
             });
         }
+        // Seeded from the just-built frame (see the field's own doc
+        // comment) so a restored session's scope/slot/as-of is never
+        // itself read as "just changed" by the first real
+        // `on_frame_changed`.
+        let last_flip_versions = frame.read(cx).versions();
 
         // M8: the docs the data engine actually starts with — see
         // `sources_baseline`'s field doc.
@@ -950,10 +970,12 @@ impl ShellView {
             last_render_started: None,
             perf_overlay: false,
             frame,
+            last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
+            scratch_visible_keys: Vec::new(),
             restart_required: None,
             sources_baseline,
             datasets_baseline,
@@ -1003,6 +1025,35 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Phase 4 §3.10: a scope/grouping/as-of change opens a flip
+        // barrier over every currently visible tile before anything
+        // requeries, so the tiles that follow it all swap to the new
+        // triple in one notify pass rather than painting one at a time
+        // as their own outcomes happen to land. `data`/`config` bumps
+        // never open one — every tile already requeries independently
+        // for those (§4.1), and there is no "everyone at once" to
+        // coordinate. `open_flip` itself bumps no version, so the notify
+        // it does not emit cannot re-enter this branch.
+        let now_v = frame.read(cx).versions();
+        let last = self.last_flip_versions;
+        if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
+        {
+            self.last_flip_versions = now_v;
+            let mut keys = std::mem::take(&mut self.scratch_visible_keys);
+            self.visible_tile_keys(&mut keys);
+            frame.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
+            self.scratch_visible_keys = keys;
+            let deadline_frame = frame.clone();
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor().timer(FLIP_DEADLINE).await;
+                deadline_frame.update(cx, |f, cx| {
+                    if f.sweep(Instant::now()) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
         {

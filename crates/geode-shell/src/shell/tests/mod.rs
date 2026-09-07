@@ -276,6 +276,7 @@ mod chrome_and_dialogs;
 mod commandline;
 mod dock;
 mod drag;
+mod flip;
 mod keybindings_dialog;
 mod occupants;
 mod palette;

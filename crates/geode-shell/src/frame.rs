@@ -14,14 +14,22 @@
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
 use geode_core::groupings::GroupingSlots;
-use geode_core::query::AsOf;
+use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 use toml_edit::{DocumentMut, value};
+
+/// How long [`Frame::open_flip`]'s barrier waits for every following
+/// tile's outcome before [`Frame::sweep`] releases it with whatever
+/// arrived (Phase 4 §3.10) — long enough that a normal requery clears it
+/// well before the deadline, short enough that one slow or dropped query
+/// never holds every other tile's paint for more than a blink.
+pub const FLIP_DEADLINE: Duration = Duration::from_millis(250);
 
 /// How many scope edits [`Frame::undo_scope`] can walk back through (spec
 /// §3.6). Bounded, not unlimited: an unbounded history is an unbounded
@@ -52,6 +60,35 @@ pub struct FrameVersions {
     pub as_of: u64,
     pub data: u64,
     pub config: u64,
+    /// Bumped only by the flip barrier's [`Frame::release`](Frame) once
+    /// every following tile's outcome for one `(scope, grouping, as_of)`
+    /// has arrived or the deadline passed (Phase 4 §3.10). Deliberately
+    /// NOT one of the counters `geode_blotter::tile::BlotterTile::
+    /// follows_changed` compares — a tile decides whether to *requery*
+    /// from the other five; `flip` only ever tells a tile that already
+    /// has a staged snapshot waiting when it is safe to *promote* it,
+    /// which `BlotterTile::on_frame_changed` checks separately.
+    pub flip: u64,
+}
+
+/// A barrier opened by [`Frame::open_flip`] (Phase 4 §3.10): every
+/// following tile's outcome for one `(scope, grouping, as_of)` triple
+/// must arrive — or fail, or [`FLIP_DEADLINE`] must pass — before any of
+/// them promotes its staged snapshot, so a scope/grouping/as-of change
+/// never leaves two tiles showing two different scopes for even one
+/// frame. A later mutation while this is still open (`open_flip` called
+/// again) simply replaces it outright — nothing "double-releases" the
+/// old one, and a stale outcome for the old versions can no longer
+/// satisfy the new barrier (`matches` compares against the CURRENT
+/// barrier's own versions, not whatever was true when the outcome was
+/// submitted).
+#[derive(Debug)]
+struct FlipBarrier {
+    scope: u64,
+    grouping: u64,
+    as_of: u64,
+    awaiting: HashSet<QueryKey>,
+    opened: Instant,
 }
 
 #[derive(Debug)]
@@ -107,6 +144,10 @@ pub struct Frame {
     /// an owned clone so a cache hit costs a refcount bump, not a fresh
     /// allocation.
     bar_cache: RefCell<Option<(FrameVersions, Rc<ScopeBarModel>)>>,
+    /// The open flip barrier (Phase 4 §3.10), if any — see
+    /// [`FlipBarrier`]'s own doc comment. `None` when no scope/grouping/
+    /// as-of mutation has a barrier waiting on it right now.
+    barrier: Option<FlipBarrier>,
 }
 
 impl Frame {
@@ -128,6 +169,7 @@ impl Frame {
             user_dir,
             pending_persist: None,
             bar_cache: RefCell::new(None),
+            barrier: None,
         }
     }
 
@@ -462,7 +504,12 @@ impl Frame {
     /// nothing changed since the last one returns the exact same `Rc` — a
     /// refcount bump, no fresh allocation — rather than rebuilding.
     pub fn bar_model(&self) -> Rc<ScopeBarModel> {
-        let versions = self.versions();
+        // `flip` alone never changes what the bar shows — keyed out here
+        // (rather than relying on it happening to already match) so a
+        // flip costs a refcount bump like any other unrelated notify,
+        // not a rebuild.
+        let mut versions = self.versions();
+        versions.flip = 0;
         if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
         {
@@ -471,6 +518,91 @@ impl Frame {
         let built = Rc::new(scopebar::build_model(self, chrono::Local::now()));
         *self.bar_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
         built
+    }
+
+    /// Open a barrier for the current `(scope, grouping, as_of)` versions
+    /// over `keys` (Phase 4 §3.10) — `ShellView::on_frame_changed` calls
+    /// this right after it sees one of those three counters move, with
+    /// every visible tile's key ([`visible_tile_keys`](crate::shell::
+    /// ShellView)). Bumps no version itself, so the notify this does not
+    /// emit cannot re-enter whatever branch called it. An empty `keys`
+    /// (no visible tile has an occupant yet) closes any barrier outright
+    /// rather than opening one nothing could ever satisfy.
+    pub fn open_flip(&mut self, keys: impl IntoIterator<Item = QueryKey>, now: Instant) {
+        let awaiting: HashSet<QueryKey> = keys.into_iter().collect();
+        if awaiting.is_empty() {
+            self.barrier = None;
+            return;
+        }
+        self.barrier = Some(FlipBarrier {
+            scope: self.versions.scope,
+            grouping: self.versions.grouping,
+            as_of: self.versions.as_of,
+            awaiting,
+            opened: now,
+        });
+    }
+
+    fn matches(b: &FlipBarrier, v: FrameVersions) -> bool {
+        b.scope == v.scope && b.grouping == v.grouping && b.as_of == v.as_of
+    }
+
+    /// Whether an open barrier is waiting for `key` at `versions` —
+    /// `false` once nothing is open, once `key` already arrived, or once
+    /// a later mutation replaced the barrier with one over different
+    /// versions (a stale outcome from before the replacement must not
+    /// satisfy it).
+    pub fn barrier_wants(&self, key: QueryKey, versions: FrameVersions) -> bool {
+        self.barrier
+            .as_ref()
+            .is_some_and(|b| Self::matches(b, versions) && b.awaiting.contains(&key))
+    }
+
+    /// `key`'s outcome for `versions` arrived — a failed outcome counts
+    /// too (`geode-blotter`'s `deliver`: one broken tile must never hold
+    /// the rest open). `true` exactly when this arrival emptied the
+    /// barrier, which also bumps `flip` via [`release`](Self::release);
+    /// the caller uses the return value to promote its own staged
+    /// snapshot right away rather than waiting for its own
+    /// `on_frame_changed` to see the bump.
+    pub fn arrived(&mut self, key: QueryKey, versions: FrameVersions) -> bool {
+        let Some(b) = self.barrier.as_mut() else {
+            return false;
+        };
+        if !Self::matches(b, versions) {
+            return false;
+        }
+        b.awaiting.remove(&key);
+        if b.awaiting.is_empty() {
+            self.release();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Past [`FLIP_DEADLINE`], release whatever arrived so far rather
+    /// than waiting forever on a tile that never answers (a query the
+    /// pool dropped, a tile torn down mid-flight). `true` when this call
+    /// released it; `false` before the deadline or once nothing is open
+    /// — a spurious extra call changes nothing.
+    pub fn sweep(&mut self, now: Instant) -> bool {
+        match &self.barrier {
+            Some(b) if now.duration_since(b.opened) >= FLIP_DEADLINE => {
+                self.release();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub fn barrier_open(&self) -> bool {
+        self.barrier.is_some()
+    }
+
+    fn release(&mut self) {
+        self.barrier = None;
+        self.versions.flip += 1;
     }
 }
 
@@ -880,5 +1012,85 @@ mod tests {
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(saved["keep"], book_scope("BK000"));
         assert_eq!(saved["mine"], book_scope("BK002"));
+    }
+
+    // --- Phase 4a §3.10: the flip barrier -------------------------------
+
+    #[test]
+    fn a_barrier_releases_when_every_key_arrives_and_bumps_flip_once() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let v = f.versions();
+        let t0 = Instant::now();
+        f.open_flip([QueryKey(1), QueryKey(2)], t0);
+        assert!(f.barrier_open());
+        assert!(f.barrier_wants(QueryKey(1), v));
+        assert!(!f.barrier_wants(QueryKey(3), v));
+        let mut stale = v;
+        stale.scope -= 1;
+        assert!(!f.barrier_wants(QueryKey(1), stale));
+        assert!(!f.arrived(QueryKey(1), v));
+        assert_eq!(f.versions().flip, v.flip);
+        assert!(f.arrived(QueryKey(2), v));
+        assert_eq!(f.versions().flip, v.flip + 1);
+        assert!(!f.barrier_open());
+        assert!(!f.arrived(QueryKey(2), v), "nothing open");
+    }
+
+    #[test]
+    fn the_deadline_releases_with_whatever_arrived() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let v = f.versions();
+        let t0 = Instant::now();
+        f.open_flip([QueryKey(1), QueryKey(2)], t0);
+        assert!(!f.sweep(t0 + Duration::from_millis(100)));
+        assert!(f.sweep(t0 + FLIP_DEADLINE + Duration::from_millis(1)));
+        assert_eq!(f.versions().flip, v.flip + 1);
+        assert!(!f.barrier_open());
+    }
+
+    #[test]
+    fn a_new_mutation_while_open_replaces_the_barrier() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.open_flip([QueryKey(1)], Instant::now());
+        let v_old = f.versions();
+        f.set_scope(book_scope("B"));
+        let v_new = f.versions();
+        f.open_flip([QueryKey(1), QueryKey(2)], Instant::now());
+        assert!(!f.barrier_wants(QueryKey(1), v_old));
+        assert!(f.barrier_wants(QueryKey(2), v_new));
+    }
+
+    #[test]
+    fn data_and_config_bumps_do_not_open_a_barrier_and_do_not_match_one() {
+        // `open_flip` is never called for a `data`/`config`-only change
+        // (that's `ShellView::on_frame_changed`'s job, tested in
+        // `shell/tests/flip.rs`); this is the pure half — a barrier
+        // opened over one `(scope, grouping, as_of)` triple must not be
+        // satisfiable by a `versions` that only differs in `data` or
+        // `config`, since those two fields play no part in `matches`.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let v = f.versions();
+        f.open_flip([QueryKey(1)], Instant::now());
+        let mut only_data_changed = v;
+        only_data_changed.data += 1;
+        assert!(
+            f.barrier_wants(QueryKey(1), only_data_changed),
+            "scope/grouping/as_of still match — data is not part of the barrier's key"
+        );
+        let mut only_config_changed = v;
+        only_config_changed.config += 1;
+        assert!(f.barrier_wants(QueryKey(1), only_config_changed));
+        // But nothing opens a barrier by itself just because `data`/
+        // `config` moved — that's the shell's decision, not the frame's.
+        let mut f2 = Frame::new(slots(), SavedScopes::new(), None);
+        f2.note_published(Publish {
+            dataset: "risk".into(),
+            batch: "EOD".into(),
+            books: 1,
+            at: chrono::Utc::now(),
+        });
+        assert!(!f2.barrier_open());
     }
 }
