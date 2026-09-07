@@ -287,6 +287,18 @@ run_mutation "as-of: relation filters the live side too, not just the archive" \
   '"(select * from {} where {p} union all select * from {})"' \
   geode-data an_as_of_query_reads_only_the_archive_even_through_a_semi_join
 
+# Review round 1 finding (Minor-2): the two entries above only ever drop
+# the *live* side's filter. Dropping the *archive* side's is a behaviour
+# this fix newly created (the archive side used to be filtered by the
+# caller) and nothing above catches it — the only other guard,
+# an_archive_era_relation_filters_both_sides, is a string assertion, not
+# a value.
+run_mutation "as-of: relation filters the archive side too" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '"(select * from {} where {p} union all select * from {} where {p})"' \
+  '"(select * from {} union all select * from {} where {p})"' \
+  geode-data a_null_book_partition_is_not_dropped_from_history
+
 run_mutation "as-of: probe era" \
   crates/geode-data/src/query/scope_sql.rs \
   'era.relation(&ds.name, probe),' \

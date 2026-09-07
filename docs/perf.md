@@ -742,8 +742,14 @@ hundreds of thousands. Not pursued.
 `existing_enum_types` and the dictionary matches once per
 `compile_view` instead of once per `compile_scope` call (final-review
 minor M3; ~4 resolves per requery today); (2) the as-of baseline —
-read only the tables whose generations the as-of resolves to, rather
-than always unioning archive and live; (3) the schema, per desk.
+attempted 2026-09-07 and rejected as racy (see "Phase 4a: the as-of
+baseline — the generation predicate" below): reading only the tables
+whose generations the as-of resolves to is exactly the static
+side-drop that section's point 4 rules out, since compile and
+execution run on separate connections and a publish landing between
+them can move a generation to a side a side-dropping relation would
+never look at again. What remains of this lever is the resolve's own
+cost — see that section's open lever (a); (3) the schema, per desk.
 
 ### Phase 4a: the as-of baseline — the generation predicate
 
@@ -803,6 +809,29 @@ What the probe established, each point load-bearing for the design:
    `the_predicate_selects_a_null_book_partition_from_either_side`.
 6. A dynamic side-drop (an in-statement subquery deciding emptiness)
    is not skipped by DuckDB: 37 ms vs 24. Only the static range does it.
+
+**Point 3's pruning is fixture-conditional, and the probe's own
+fixture sits at the favourable end.** How much the range prunes
+depends on how tight `[lo, hi]` is: the probe's archive holds three
+superseded generations per partition, all on the same refresh
+cadence, so `lo..hi` spans a handful of ids and zonemaps skip almost
+everything else. A real desk has books refreshing on independent
+schedules (§4.5) — one book last published Tuesday, another an hour
+ago — which widens `[lo, hi]` toward the whole archive and the range's
+pruning degenerates toward a no-op; the tuple semi-join alone then
+carries the cost. The probe's own tuple-only reading (finding 2) is
+that floor: `zzz` went 121 → 179 ms with no scan-level filter at all.
+The "mixed" row above (28 ms) does not settle the wide-spread case —
+it was measured with the same tight id spread as every other row in
+the table.
+
+The headless probe itself is not in this repo: a throwaway patch to
+`benches/query.rs` (the demo schema and `tree` view pulled in via
+`include_str!`, an archive built by four passes of `load_file` with
+each pass's sentinel shifted 24 hours to force three superseded
+generations per partition), run locally and discarded — the table
+above is transcribed from its output, not reproducible from a
+committed harness.
 
 **This crate's own bench** (`crates/geode-data/benches/query.rs`,
 `service_with_history`'s fixture: one archived generation per
