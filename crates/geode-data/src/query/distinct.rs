@@ -38,7 +38,8 @@ pub fn compile_distinct(
             continue;
         };
         let era = era_for(conn, &ds.name, ds, &params.as_of)?;
-        let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;
+        let scope =
+            compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;
         let derived = dims.get(&params.column);
         let value_expr = match derived {
             None => format!("\"{base}\"::varchar"),

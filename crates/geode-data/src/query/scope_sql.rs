@@ -300,7 +300,11 @@ pub struct DictionaryCache {
 impl DictionaryCache {
     /// `existing_enum_types(conn, dataset)`, cached for the life of this
     /// `DictionaryCache`.
-    pub fn enum_types(&mut self, conn: &Connection, dataset: &str) -> Result<&[String], StoreError> {
+    pub fn enum_types(
+        &mut self,
+        conn: &Connection,
+        dataset: &str,
+    ) -> Result<&[String], StoreError> {
         if !self.enum_types.contains_key(dataset) {
             let v = crate::store::ddl::existing_enum_types(conn, dataset)?;
             self.lookups += 1;
@@ -1750,6 +1754,136 @@ grain = "position"
                 "select count(*) from risk_instrument_live where \"book\" ilike ? escape '\\'",
                 duckdb::params![pattern], |r| r.get(0)).unwrap();
             prop_assert_eq!(via_dict, row_scan);
+        }
+    }
+
+    // ---- DictionaryCache (dictionary resolves once per statement) ----
+
+    #[test]
+    fn a_cache_resolves_each_dictionary_once_per_statement() {
+        // `enum_fixture` declares exactly one categorical textual column
+        // (`book`), so one statement's text block should cost exactly
+        // two catalog round-trips: `existing_enum_types` once, and
+        // `dictionary_matches` once for `book`.
+        let (store, ds) = enum_fixture();
+        let scope = Scope {
+            text: Some("bk00".into()),
+            ..Scope::default()
+        };
+        let mut cache = DictionaryCache::default();
+        compile_scope_cached(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.lookups, 2,
+            "one enum_types lookup plus one dictionary match for the fixture's one \
+             categorical textual column"
+        );
+        let after_first = cache.lookups;
+
+        // A second grain of the *same statement*, same cache: must not
+        // pay for either lookup again.
+        compile_scope_cached(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Position,
+            &dims(),
+            Era::live(),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.lookups, after_first,
+            "a second grain of the same statement must reuse the cache, not re-resolve"
+        );
+    }
+
+    #[test]
+    fn a_cache_keys_matches_by_pattern_not_type_alone() {
+        // `enum_fixture` seeds `BK_01` (a literal underscore) alongside
+        // `BK000..BK019`. `like_pattern` escapes the underscore in the
+        // needle, so "bk_0" matches only `BK_01` — one dictionary value —
+        // while "zzz" matches nothing. A cache keyed on the ENUM type
+        // alone would answer the second compile with the first needle's
+        // cached match instead of resolving `zzz` fresh.
+        let (store, ds) = enum_fixture();
+        let mut cache = DictionaryCache::default();
+
+        let first = Scope {
+            text: Some("bk_0".into()),
+            ..Scope::default()
+        };
+        let sql1 = compile_scope_cached(
+            store.writer(),
+            &first,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+            &mut cache,
+        )
+        .unwrap();
+        assert!(
+            count(store.writer(), &ds, &sql1) > 0,
+            "the first needle must find BK_01"
+        );
+
+        let second = Scope {
+            text: Some("zzz".into()),
+            ..Scope::default()
+        };
+        let sql2 = compile_scope_cached(
+            store.writer(),
+            &second,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            sql2.predicate, "false",
+            "a cache keyed on the type alone would reuse 'bk_0's matches for 'zzz': {}",
+            sql2.predicate
+        );
+        assert!(
+            !sql2
+                .params
+                .iter()
+                .any(|p| matches!(p, Value::Text(t) if t.contains("BK_01"))),
+            "the second compile's params must not carry the first needle's bound matches: {:?}",
+            sql2.params
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn compile_scope_and_compile_scope_cached_agree(needle in "[a-zA-Z0-9%_\\\\]{0,6}") {
+            // The read path's opinions are law: a caller-supplied cache
+            // must be invisible to the property test's contract. Both
+            // entry points, on a fresh cache, must compile the identical
+            // statement.
+            let (store, ds) = enum_fixture();
+            let scope = Scope { text: Some(needle.clone()), ..Scope::default() };
+            let via_wrapper = compile_scope(
+                store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live(),
+            ).unwrap();
+            let mut cache = DictionaryCache::default();
+            let via_cached = compile_scope_cached(
+                store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live(), &mut cache,
+            ).unwrap();
+            prop_assert_eq!(via_wrapper.predicate, via_cached.predicate);
+            prop_assert_eq!(via_wrapper.params, via_cached.params);
+            prop_assert_eq!(via_wrapper.semantics, via_cached.semantics);
         }
     }
 }
