@@ -153,7 +153,18 @@ pub fn parse(line: &str) -> Result<Command, String> {
 
 #[derive(Debug, Clone, Default)]
 pub struct Vocabulary {
+    /// What `sort` can rank: the view's own column plan (the tree column
+    /// plus its declared measures) — what is actually displayed, not the
+    /// dataset's full dimension set.
     pub columns: Vec<String>,
+    /// Every column the tile's dataset carries as a dimension at any
+    /// grain it has, plus every derived dimension (Phase 4a §3.2, §6.8)
+    /// — distinct from `columns` since a dimension the view does not
+    /// display (e.g. `book`, `currency`) is still a legal `group`,
+    /// `scope drop`, `scope` or `filter` target. `group`/`scope drop`
+    /// complete from this alone; `scope`/`filter` complete from this
+    /// union `columns` (an expression can also name a measure).
+    pub dimensions: Vec<String>,
     pub views: Vec<String>,
     /// Saved-scope names (Phase 4a §3.9), for `scope load`'s completion.
     pub scopes: Vec<String>,
@@ -187,29 +198,39 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
         }
         ["sort", _] => vec!["desc".into()],
         ["group"] => {
-            let mut v = vocab.columns.clone();
+            let mut v = vocab.dimensions.clone();
             v.push("save".into());
             v.push("slot".into());
             v
         }
         ["group", "slot"] | ["group", "save"] => (1..=9).map(|n| n.to_string()).collect(),
-        ["group", ..] => vocab.columns.clone(),
+        ["group", ..] => vocab.dimensions.clone(),
         ["scope"] => {
-            let mut v = vocab.columns.clone();
+            let mut v = vocab.dimensions.clone();
+            v.extend(vocab.columns.clone());
             v.extend(["clear", "drop", "load", "redo", "save", "text", "undo"].map(String::from));
             v
         }
-        ["scope", "drop"] => vocab.columns.clone(),
+        ["scope", "drop"] => vocab.dimensions.clone(),
         ["scope", "load"] => vocab.scopes.clone(),
         ["scope", "text", ..] => Vec::new(),
-        ["scope", ..] => vocab.columns.clone(),
+        ["scope", ..] => {
+            let mut v = vocab.dimensions.clone();
+            v.extend(vocab.columns.clone());
+            v
+        }
         ["filter"] => {
-            let mut v = vocab.columns.clone();
+            let mut v = vocab.dimensions.clone();
+            v.extend(vocab.columns.clone());
             v.extend(["clear", "text"].map(String::from));
             v
         }
         ["filter", "text", ..] => Vec::new(),
-        ["filter", ..] => vocab.columns.clone(),
+        ["filter", ..] => {
+            let mut v = vocab.dimensions.clone();
+            v.extend(vocab.columns.clone());
+            v
+        }
         ["asof"] => vec!["undo".into()],
         ["view"] => vocab.views.clone(),
         _ => Vec::new(),
@@ -231,6 +252,7 @@ mod tests {
     fn vocab() -> Vocabulary {
         Vocabulary {
             columns: vec!["book".into(), "lhu".into(), "delta01".into()],
+            dimensions: vec!["book".into(), "lhu".into()],
             views: vec!["tree".into(), "wide".into()],
             scopes: vec![],
         }
@@ -351,6 +373,7 @@ mod tests {
     fn completions_offer_dimensions_after_drop_and_scope_names_after_load() {
         let vocab = Vocabulary {
             columns: vec!["book".into()],
+            dimensions: vec!["book".into()],
             views: vec![],
             scopes: vec!["mine".into()],
         };
@@ -380,9 +403,10 @@ mod tests {
         assert_eq!(names("sort delta01 "), vec!["desc"]);
         assert_eq!(
             names("group "),
-            vec!["book", "delta01", "lhu", "save", "slot"]
+            vec!["book", "lhu", "save", "slot"],
+            "group completes dimensions (book, lhu), never the delta01 measure"
         );
-        assert_eq!(names("group lhu,"), vec!["book", "delta01", "lhu"]);
+        assert_eq!(names("group lhu,"), vec!["book", "lhu"]);
         assert_eq!(
             names("group slot "),
             (1..=9).map(|n| n.to_string()).collect::<Vec<_>>()
@@ -417,6 +441,7 @@ mod tests {
     fn completions_clamp_a_cursor_inside_a_multibyte_char() {
         let v = Vocabulary {
             columns: vec!["délta".into()],
+            dimensions: vec![],
             views: vec![],
             scopes: vec![],
         };
@@ -425,5 +450,41 @@ mod tests {
         // inside the character, not on a char boundary.
         let cursor = line.find('é').unwrap() + 1;
         assert_eq!(completions(line, cursor, &v), vec!["clear", "délta"]);
+    }
+
+    /// Regression: before this fix, `group`/`scope drop`/`scope`/`filter`
+    /// all completed from `Vocabulary::columns` alone — the view's own
+    /// column plan (what's *displayed*), so a dimension the view does
+    /// not show (`book`, `currency`) never appeared after `:group `,
+    /// `:scope drop ` or `:filter `. `sort` is unaffected: it still
+    /// ranks only what's actually a column in the view.
+    ///
+    /// `group`'s expected vector includes `save`/`slot` — its own
+    /// existing keyword completions, untouched by this fix (only the
+    /// column source changed from `columns` to `dimensions`).
+    #[test]
+    fn group_and_drop_complete_dimensions_not_measures() {
+        let vocab = Vocabulary {
+            columns: vec!["npv".into(), "delta01".into()],
+            dimensions: vec!["book".into(), "currency".into()],
+            views: vec![],
+            scopes: vec![],
+        };
+        assert_eq!(
+            completions("group ", 6, &vocab),
+            vec!["book", "currency", "save", "slot"]
+        );
+        assert_eq!(
+            completions("scope drop ", 11, &vocab),
+            vec!["book", "currency"]
+        );
+        assert_eq!(
+            completions("sort ", 5, &vocab),
+            vec!["clear", "delta01", "npv"]
+        );
+        assert_eq!(
+            completions("filter ", 7, &vocab),
+            vec!["book", "clear", "currency", "delta01", "npv", "text"]
+        );
     }
 }

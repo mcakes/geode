@@ -1691,6 +1691,17 @@ run_mutation "delegate: move_column refills the window it already had" \
   geode-blotter \
   move_column_refills_the_window_immediately
 
+run_mutation "tile: completions offer dataset dimensions, not just displayed columns" \
+  crates/geode-blotter/src/tile.rs \
+  '                        ds.columns
+                            .iter()
+                            .filter(|c| names.contains(c.name.as_str()))
+                            .map(|c| c.name.clone())
+                            .collect()' \
+  '                        Vec::new()' \
+  geode-blotter \
+  completions_offer_dataset_dimensions_not_just_displayed_columns
+
 # ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
 
 run_mutation "bridge: dropped_events counted on a refused try_send" \

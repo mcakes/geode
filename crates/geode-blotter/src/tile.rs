@@ -919,6 +919,40 @@ impl BlotterTile {
                     .map(|v| v.columns.iter().map(|c| c.name().to_string()).collect())
             })
             .unwrap_or_default();
+        // Every column the tile's dataset carries as a dimension at any
+        // grain it has (Phase 4a: a dimension can now name the grain
+        // that carries it, so this can no longer be read off the column
+        // plan/view above, which only ever lists what's *displayed*),
+        // plus every derived dimension — `columns` is what `sort` can
+        // rank; `dimensions` is what `group`/`scope drop`/`scope`/
+        // `filter` complete from (`core::commands::completions`).
+        let mut dimensions: Vec<String> = match self.view() {
+            Some(v) => {
+                let schema = self.schema.borrow();
+                match schema.dataset(&v.dataset) {
+                    Some(ds) => {
+                        let mut names: std::collections::HashSet<&str> =
+                            std::collections::HashSet::new();
+                        for g in ds.grains() {
+                            names.extend(ds.dimensions_at(g));
+                        }
+                        ds.columns
+                            .iter()
+                            .filter(|c| names.contains(c.name.as_str()))
+                            .map(|c| c.name.clone())
+                            .collect()
+                    }
+                    None => Vec::new(),
+                }
+            }
+            None => Vec::new(),
+        };
+        let mut seen: std::collections::HashSet<String> = dimensions.iter().cloned().collect();
+        for d in self.dims.borrow().all() {
+            if seen.insert(d.name.clone()) {
+                dimensions.push(d.name.clone());
+            }
+        }
         let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
         let scopes = self.frame.read(cx).saved_scopes().keys().cloned().collect();
         completions(
@@ -926,6 +960,7 @@ impl BlotterTile {
             cursor,
             &Vocabulary {
                 columns,
+                dimensions,
                 views,
                 scopes,
             },
@@ -2736,6 +2771,37 @@ mod tests {
             vec!["".to_string(), "N1".into(), "N2".into()],
             "the real, fresher payload paints once it actually arrives"
         );
+    }
+
+    /// Regression: `BlotterTile::completions` used to build its
+    /// `Vocabulary` from the column plan/view alone (what's
+    /// *displayed*), so `:group `/`:scope drop `/`:filter ` never
+    /// offered a dimension the current view does not show —
+    /// `model_code` here (`schema()`'s carried dimension, `grain =
+    /// "instrument"`) is exactly that shape. `delta01`/`daily_trading_
+    /// pnl` are measures and must never appear for `group`.
+    #[gpui::test]
+    fn completions_offer_dataset_dimensions_not_just_displayed_columns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, vcx) = open(cx);
+        let group = h
+            .tile
+            .read_with(&vcx, |t, cx| t.completions("group ", 6, cx));
+        assert!(group.contains(&"book".to_string()));
+        assert!(
+            group.contains(&"model_code".to_string()),
+            "a carried dimension the current view does not display: {group:?}"
+        );
+        assert!(
+            !group.contains(&"delta01".to_string()),
+            "a measure must not complete `group`: {group:?}"
+        );
+        let drop = h
+            .tile
+            .read_with(&vcx, |t, cx| t.completions("scope drop ", 11, cx));
+        assert!(drop.contains(&"model_code".to_string()));
+        assert!(!drop.contains(&"daily_trading_pnl".to_string()));
     }
 
     /// The shell cannot depend on `geode-blotter` (layering: shell never
