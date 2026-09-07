@@ -106,14 +106,15 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 ),
             }
         }
-        "filter" => match rest.split_once(char::is_whitespace) {
-            None if rest == "clear" => Ok(Command::FilterClear),
-            None if rest.is_empty() => {
-                Err("filter needs an expression, `text …` or `clear`".into())
+        "filter" => {
+            let mut words = rest.splitn(2, char::is_whitespace);
+            match (words.next(), words.next().map(str::trim)) {
+                (Some("clear"), None) => Ok(Command::FilterClear),
+                (Some("text"), second) => Ok(Command::FilterText(second.unwrap_or("").to_string())),
+                (Some(""), _) => Err("filter needs an expression, `text …` or `clear`".into()),
+                _ => Ok(Command::FilterExpr(rest.to_string())),
             }
-            Some(("text", words)) => Ok(Command::FilterText(words.trim().to_string())),
-            _ => Ok(Command::FilterExpr(rest.to_string())),
-        },
+        }
         "asof" => match rest {
             "" => Err("asof needs a time: HH:MM, HH:MM:SS or RFC 3339, or `undo`".into()),
             "undo" => Ok(Command::AsOfUndo),
@@ -316,6 +317,14 @@ mod tests {
         );
         assert_eq!(parse("filter clear").unwrap(), Command::FilterClear);
         assert!(parse("filter").unwrap_err().contains("filter"));
+        assert_eq!(
+            parse("filter text").unwrap(),
+            Command::FilterText(String::new())
+        );
+        assert_eq!(
+            parse("filter text   ").unwrap(),
+            Command::FilterText(String::new())
+        );
     }
 
     #[test]
