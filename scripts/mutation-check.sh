@@ -1858,6 +1858,16 @@ run_mutation "distinct: as-of reads the archive era" \
   '        let era = era_for(conn, &ds.name, ds, &geode_core::query::AsOf::Live)?;' \
   geode-data distinct_under_as_of_reads_the_archive_era
 
+# D2 (final fix wave, T2 deferred): a derived dimension's own branch of
+# `compile_distinct` had no test — `derived_case(d)` mutated to the base
+# column's own varchar cast (what `None` already does) would silently
+# return `book`'s source values instead of `desk`'s derived labels.
+run_mutation "distinct: a derived dimension groups by its own labels, not the source column" \
+  crates/geode-data/src/query/distinct.rs \
+  '            Some(d) => crate::query::compile::derived_case(d),' \
+  '            Some(_d) => format!("\"{base}\"::varchar"),' \
+  geode-data compile_distinct_over_a_derived_dimension_groups_by_its_labels
+
 # The brief's own suggested replacement — mutating the match arm's
 # pattern and struct-literal head in one string — does not compile: it
 # leaves `column: String::new()` and the later shorthand `column,` field

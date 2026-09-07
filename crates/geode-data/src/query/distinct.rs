@@ -255,6 +255,23 @@ grain = "instrument"
         f
     }
 
+    /// `two_dataset_fixture` with a `[dimensions]` doc mapping `book` to
+    /// a derived `desk` dimension (Phase 4a §3.4's `compile_distinct`
+    /// derived-dimension branch): BK000 -> NORTH, BK001 -> SOUTH.
+    fn two_dataset_fixture_with_desk_dims() -> Fixture {
+        let mut f = two_dataset_fixture();
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[desk]\nfrom = \"book\"\n[desk.values]\nNORTH = [\"BK000\"]\nSOUTH = [\"BK001\"]\n",
+            )
+            .unwrap()],
+        );
+        f.dims = DerivedDimensions::from_doc(&doc).0;
+        f
+    }
+
     fn book_scope(book: &str) -> Scope {
         Scope {
             dimensions: vec![DimensionSelection {
@@ -319,6 +336,64 @@ grain = "instrument"
         assert!(
             rows.iter().any(|(v, _)| v == "GBP"),
             "the older generation's value: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|(v, _)| v == "USD"),
+            "the live generation must not leak into an as-of read: {rows:?}"
+        );
+    }
+
+    /// D2 (final fix wave, T2 deferred): `DistinctParams.column` naming a
+    /// derived dimension must take `compile_distinct`'s `derived_case`
+    /// branch — the values returned are the derived labels (`NORTH`/
+    /// `SOUTH`), with counts summed across every source value each label
+    /// covers, not the source `book` values themselves. Compared against
+    /// the same fixture's own `book` query rather than hand-computed
+    /// counts, so this doesn't also have to pin `compile_distinct`'s
+    /// per-dataset grain selection (which `book`, carried at every
+    /// grain, is subject to regardless of whether it's requested
+    /// directly or through a derived dimension): whatever `book` itself
+    /// returns, `desk` must return the same total, just relabeled.
+    #[test]
+    fn compile_distinct_over_a_derived_dimension_groups_by_its_labels() {
+        let f = two_dataset_fixture_with_desk_dims();
+        let base = DistinctParams {
+            key: QueryKey(1),
+            tag: 1,
+            column: "book".into(),
+            scope: Scope::default(),
+            as_of: AsOf::Live,
+        };
+        let book_rows = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &base).unwrap());
+        let book_total: u64 = book_rows.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            book_rows
+                .iter()
+                .map(|(v, _)| v.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["BK000", "BK001"]),
+            "sanity: the fixture's own book values, unrelabeled: {book_rows:?}"
+        );
+
+        let desk_params = DistinctParams {
+            column: "desk".into(),
+            ..base
+        };
+        let desk_rows =
+            f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &desk_params).unwrap());
+        let desk_total: u64 = desk_rows.iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            desk_rows
+                .iter()
+                .map(|(v, _)| v.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["NORTH", "SOUTH"]),
+            "the derived dimension's own labels, not the source `book` values: {desk_rows:?}"
+        );
+        assert_eq!(
+            desk_total, book_total,
+            "the derived query must sum the same rows the base column's own query does, just \
+             relabeled — not drop or double-count any: book {book_rows:?} vs desk {desk_rows:?}"
         );
     }
 }
