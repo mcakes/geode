@@ -928,3 +928,79 @@ extra scan filter changes how DuckDB decorrelates the text filter's
 membership probes (two 840k-row inner hash joins appear in the
 profile) — a text-filter plan question, not a generation-predicate
 one.
+
+#### The range prefilter degenerates on a real archive — replaced by an IN-list
+
+Found on a display (2026-09-07, `cargo run --release -p geode-app --
+--demo 1000000`): a text-filter requery under as-of read 4823 ms. The
+demo database (`$TMPDIR/geode-demo/1000000-42/geode.duckdb`) had
+drifted, over an unrelated ingest defect (the ingest queue's own
+handoff), to 20.8 GiB and 3051 file generations of 17 source files
+that never changed — 27.7M archived position rows, 55M instrument,
+116M underlying, 66M pair (~265M rows total). The live generations
+resolved for an instant after every load were `[1, 2, 4, 7, 11, 17,
+27, 43, 68, 108, 172, 295, 491, 767, 1210, 1934, 3051]` — 17 ids
+spanning the whole 1..3051 id space.
+
+The section above's point 3 flagged exactly this: "how much the range
+prunes depends on how tight `[lo, hi]` is... a real desk has books
+refreshing on independent schedules... which widens `[lo, hi]` toward
+the whole archive." On this database that widening is total — `lo=1,
+hi=3051` covers every generation ever written, so the range term
+prunes nothing and the tuple semi-join alone carries the whole archive
+scan. Measured directly (`select count(*) from
+risk_snapshot_underlying_archive where …`, DuckDB's own `EXPLAIN`):
+
+| predicate | rows | time | plan |
+|---|---|---|---|
+| `gen_id between 1 and 3051` | 116,039,965 | scans all | no scan filter |
+| `gen_id in (1, 2, 4, …, 3051)` (17 ids) | 0 | 1.5 ms | `Filters: optional: gen_id IN (…)` |
+| OR chain of `gen_id = g` | 0 | 1.4 ms | pushed as scan filter |
+
+DuckDB pushes an IN-list of constants to the scan as an *optional*
+filter and prunes by zonemap per id, regardless of how spread the ids
+are — unlike the range, which only prunes when the ids happen to sit
+close together. `generation_predicate` now emits `gen_id in
+({ids})` (the distinct resolved ids, ascending) instead of the range,
+keeping the tuple semi-join unchanged.
+
+Headless, on the same 20.8 GiB/3051-generation database (demo schema,
+demo `tree` view, depth 2, `DataService`, before this change):
+
+| case | compile | exec | total |
+|---|---|---|---|
+| as-of, no text filter | 543 ms | 1075 ms | 1618 ms |
+| as-of, `zzz` (matches nothing) | 522 ms | 5281 ms | 5803 ms |
+
+(The display's 4823 ms end-to-end reading is the same order as the
+headless `zzz` total above; the two were not measured in the same
+process, so they are not expected to match exactly.) The exec half is
+what the IN-list fixes — it is the archive scan the range predicate
+had stopped pruning. The compile half is unaffected by this change and
+is the open lever (a) above (`resolve_generations` scanning ~265M rows
+for distinct generations) already flagged as remaining; it now has a
+measured datapoint at real scale: **543 ms at ~3000 generations**,
+against the 6 ms (one generation) and 15 ms (three generations)
+figures the probe measured earlier — confirming it scales with the
+size of the archive scanned, not just the row count of one query.
+
+**This crate's own bench** (`crates/geode-data/benches/query.rs`,
+`service_with_history`'s fixture — one archived generation per
+partition, ingested twice into a fresh 1M-row database, so only two
+generations are ever resolved; `cargo bench -p geode-data --bench
+query -- "1000000_rows.*depth_2_asof"`, criterion, 20 samples, same
+machine, before = the `gen_id between` form, after = this change):
+
+| Case | before (range) | after (IN-list) |
+|---|---|---|
+| `1000000_rows_text_none_depth_2_asof` | 14.707 ms | 14.422 ms (criterion: −2.6%) |
+| `1000000_rows_scoped_depth_2_asof` | 28.061 ms | 29.760 ms (criterion: +7.9%) |
+
+As expected, this does not move on the bench's own fixture: with only
+two resolved ids, a range and an IN-list prune identically (both cover
+the same tight `[lo, hi]`), so the swings above are sampling noise on
+a two-element predicate, not a real regression or win — the fixture
+simply cannot reproduce the fixture-dependence the display exposed.
+The IN-list's value is entirely in the case this bench does not model:
+an archive whose resolved ids are spread across the id space, where
+the range prunes nothing and the IN-list still does.

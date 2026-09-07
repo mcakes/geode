@@ -115,20 +115,26 @@ pub fn resolve_generations(
 /// right now, and dropping this term would make those ambiguous again —
 /// silently, and only for the history that predates the fix.
 ///
-/// The shape is a `gen_id` range plus a tuple semi-join, not the OR-chain
-/// this used to emit (docs/perf.md, "Phase 4a: the as-of baseline"). Three
-/// facts make that a straight win rather than a trade-off:
+/// The shape is a `gen_id` IN-list plus a tuple semi-join, not the OR-chain
+/// this used to emit (docs/perf.md, "Phase 4a: the as-of baseline"), and not
+/// the `gen_id` range that briefly replaced the OR-chain and was itself
+/// replaced here (docs/perf.md, "the range prefilter degenerates on a real
+/// archive"). The facts that make the IN-list a straight win:
 ///
-/// - The `gen_id` range is a plain scan filter DuckDB pushes
-///   to the table scan; zonemaps then skip whole row groups belonging to
-///   other generations, and skip an entire *side* of the union when it
-///   holds none of the resolved ids at all — a pure-archive era's live
-///   side, or a pure-live era's archive side. How much this prunes
-///   depends on how tight `[lo, hi]` is: partitions on very different
-///   refresh schedules widen the range toward the whole archive, and the
-///   pruning degenerates toward a no-op — the tuple semi-join alone then
-///   carries the cost (docs/perf.md's "Phase 4a: the as-of baseline"
-///   section records that floor).
+/// - `gen_id in (…)` is a plain scan filter DuckDB pushes to the table
+///   scan as an *optional* filter; zonemaps then skip whole row groups
+///   holding none of the listed ids — per id, not per range — and skip an
+///   entire *side* of the union when it holds none of them at all (a
+///   pure-archive era's live side, or a pure-live era's archive side). A
+///   range (`between lo and hi`) pruned the same way only when the
+///   resolved ids happened to sit close together; on a real desk, books
+///   refresh on independent schedules (§4.5) — one last published
+///   Tuesday, another an hour ago — so `[lo, hi]` widens toward the whole
+///   archive and the range prunes nothing at all. Measured on a 20.8 GiB
+///   demo database that had drifted to 3051 generations: a range spanning
+///   `1..3051` scanned all 116M archived rows of one grain; the IN-list of
+///   the same 17 resolved ids, on the same table, took 1.5 ms (docs/perf.md,
+///   "the range prefilter degenerates on a real archive").
 /// - The `in (select … from (values …))` tuple test is a hash lookup
 ///   evaluated once per row, replacing a per-row disjunction over up to
 ///   one term per resolved generation.
@@ -143,8 +149,14 @@ pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
         // an empty result, never the whole archive.
         return "false".to_string();
     }
-    let lo = generations.iter().map(|g| g.gen_id).min().unwrap();
-    let hi = generations.iter().map(|g| g.gen_id).max().unwrap();
+    let mut ids: Vec<i64> = generations.iter().map(|g| g.gen_id).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let id_list = ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     let rows = generations
         .iter()
         .map(|g| {
@@ -165,7 +177,7 @@ pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "(gen_id between {lo} and {hi} and \
+        "(gen_id in ({id_list}) and \
          (batch, book, gen_id, source_time) in (select (b, k, g, t) from (values {rows}) v(b, k, g, t)))"
     )
 }
@@ -430,10 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn the_predicate_names_a_gen_id_range_and_no_or_chain() {
+    fn the_predicate_names_a_gen_id_in_list_and_no_or_chain() {
         // Cheap and load-bearing: anchors the harness against a
-        // regression back to the per-generation OR chain, and against a
-        // range that does not actually match the resolved ids.
+        // regression back to the per-generation OR chain, and against an
+        // IN-list that does not actually name the resolved ids. A range
+        // (the form this replaced) degenerates on a real archive: books
+        // refresh independently, so `[lo, hi]` widens toward the whole
+        // archive and prunes nothing (docs/perf.md, "the range prefilter
+        // degenerates on a real archive").
         let (_d, store) = fixture();
         let gens = resolve_generations(
             store.writer(),
@@ -443,10 +459,11 @@ mod tests {
         .unwrap();
         let pred = generation_predicate(&gens);
         assert!(
-            pred.contains("gen_id between 1 and 3"),
-            "the range spans the resolved gen_ids (1 and 3): {pred}"
+            pred.contains("gen_id in (1, 3)"),
+            "the IN-list names exactly the resolved gen_ids (1 and 3): {pred}"
         );
         assert!(!pred.contains(" or "), "no per-generation OR chain: {pred}");
+        assert!(!pred.contains("between"), "no range term: {pred}");
     }
 
     #[test]

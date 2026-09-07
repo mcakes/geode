@@ -318,8 +318,11 @@ run_mutation "as-of: ENUM cast era guard" \
 
 run_mutation "as-of: generation range excludes the lowest resolved id" \
   crates/geode-data/src/query/as_of.rs \
-  'gen_id between {lo} and {hi}' \
-  'gen_id between {lo}+1 and {hi}' \
+  '    ids.sort_unstable();
+    ids.dedup();' \
+  '    ids.sort_unstable();
+    ids.dedup();
+    ids.remove(0);' \
   geode-data the_predicate_selects_exactly_the_resolved_generations
 
 run_mutation "as-of: tuple loses the source time" \
