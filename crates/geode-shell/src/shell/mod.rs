@@ -6,6 +6,7 @@
 //! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
+pub mod asof_view;
 mod commandline_ctl;
 pub mod commandline_view;
 pub mod dialog;
@@ -570,6 +571,12 @@ pub struct ShellView {
     /// `picker::sync_picker_scroll`'s doc comment for the call sites that
     /// drive it).
     picker_scroll: UniformListScrollHandle,
+    /// The open as-of dialog's own pure state (Phase 4a §3.6), or `None`
+    /// when closed/never opened — the `picker`/`keybindings`/`settings`
+    /// fields' own contract. Set fresh by [`asof_view::open`] each time
+    /// and cleared by [`close_modal`](Self::close_modal), same as the
+    /// other three dialogs.
+    as_of_dialog: Option<asof_view::AsOfState>,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -727,6 +734,13 @@ impl ShellView {
                 state.query = query;
                 state.selected = 0;
                 picker::sync_picker_scroll(view);
+            } else if let Some(state) = view.as_of_dialog.as_mut() {
+                // Unlike the three dialogs above, this field's raw text IS
+                // the value being edited (spec §3.6), not a filter over
+                // something else — re-resolve it and store the outcome
+                // (`resolved`/`error`) for `build` to show; see
+                // `asof_view::on_query_changed`'s own doc comment.
+                asof_view::on_query_changed(state, &query, chrono::Utc::now());
             }
             cx.notify();
         })
@@ -947,6 +961,7 @@ impl ShellView {
             pickable,
             picker: None,
             picker_scroll: UniformListScrollHandle::new(),
+            as_of_dialog: None,
         }
     }
 
@@ -959,16 +974,18 @@ impl ShellView {
     /// backdrop listeners, all go through this rather than setting
     /// `self.modal = None` directly.
     ///
-    /// Also clears all three dialogs' state (`keybindings`, `settings`,
-    /// and — since the dimension pickers, Phase 4a §3.3 — `picker`). That
-    /// is not tidiness: the shared `dialog_input` subscription routes by
-    /// "whichever state is `Some`", so a stale `settings` left behind by
-    /// an earlier open would swallow the *keybinding* dialog's queries.
+    /// Also clears all four dialogs' state (`keybindings`, `settings`,
+    /// the dimension picker — Phase 4a §3.3 — `picker`, and the as-of
+    /// dialog — Phase 4a §3.6 — `as_of_dialog`). That is not tidiness:
+    /// the shared `dialog_input` subscription routes by "whichever state
+    /// is `Some`", so a stale `settings` left behind by an earlier open
+    /// would swallow the *keybinding* dialog's queries.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.settings = None;
         self.keybindings = None;
         self.picker = None;
+        self.as_of_dialog = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }

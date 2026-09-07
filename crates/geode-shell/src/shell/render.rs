@@ -12,6 +12,8 @@ use gpui::{
 };
 use gpui_component::{ActiveTheme as _, Root, TITLE_BAR_HEIGHT, h_flex, v_flex};
 
+use geode_core::query::AsOf;
+
 use crate::fonts;
 use crate::palette;
 use crate::perf;
@@ -35,6 +37,10 @@ use super::{
 /// gpui-component's `ResizeHandle` shares the name "handle" across every
 /// handle the same way).
 const DIVIDER_GROUP: &str = "divider-strip";
+
+/// Height, in pixels, of the as-of warning stripe (Phase 4a §3.6) painted
+/// directly under the toolbar while the frame is historical.
+const AS_OF_STRIPE_HEIGHT: f32 = 3.0;
 
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -200,11 +206,26 @@ impl Render for ShellView {
         // of the existing bottom status bar (`status::HEIGHT`); the tile
         // area gets the viewport minus all three, and `Tree::layout` is
         // still called exactly once, over those shrunk bounds.
+        //
+        // Phase 4a §3.6/§4.5: while the frame is scoped to a past instant,
+        // a 3px warning stripe (`AS_OF_STRIPE_HEIGHT`) sits directly under
+        // the toolbar, spanning the window — the part of the historical
+        // indicator that survives a maximised tile hiding the toolbar's
+        // own AS OF badge and the status bar's own segment. Its height
+        // comes out of `content_height` here, the one place every other
+        // chrome element's height already does, so the tile area never
+        // overflows underneath it.
+        let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));
+        let stripe_height = if is_historical {
+            AS_OF_STRIPE_HEIGHT
+        } else {
+            0.0
+        };
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
         let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
         let content_height =
-            (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0);
+            (f32::from(viewport.height) - toolbar_height - stripe_height - status::HEIGHT).max(0.0);
 
         // One layout pass for the whole surface (dock-regions task,
         // generalized by dock-trees): the pure `tiling::dock_layout`
@@ -750,20 +771,24 @@ impl Render for ShellView {
         let active_index = self.services.workspaces.active_index();
         let non_empty = self.services.workspaces.non_empty_indices();
         let reload_message = self.last_reload.status_message();
+        // Computed once per frame (§4.4) rather than read field-by-field
+        // from inside `toolbar::toolbar` — the frame is an entity, and this
+        // is the one place `render` already has `cx` in hand to read it.
+        // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
+        // its `as_of` segment reads `bar_model.as_of`, the same formatted
+        // text the toolbar's own AS OF badge shows.
+        let bar_model = self.frame.read(cx).bar_model();
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
             reload_message.as_deref(),
             self.restart_required.as_deref(),
             self.data_status.as_deref(),
+            bar_model.as_of.as_deref(),
             self.services.theme.active_name(),
             cx,
         );
         let sidebar = sidebar::sidebar(active_index, &non_empty, cx);
-        // Computed once per frame (§4.4) rather than read field-by-field
-        // from inside `toolbar::toolbar` — the frame is an entity, and this
-        // is the one place `render` already has `cx` in hand to read it.
-        let bar_model = self.frame.read(cx).bar_model();
         // A chip's close glyph drops that dimension from the scope
         // (spec §3.1) — an undoable edit, same door as every other scope
         // mutation. Built here, not `cx.listener` (whose signature takes
@@ -891,6 +916,21 @@ impl Render for ShellView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(toolbar)
+            // The as-of warning stripe (Phase 4a §3.6/§4.5): 3px, spanning
+            // the window, directly under the toolbar — paints if and only
+            // if the frame's as-of is `At`, never otherwise (spec §4.5:
+            // nothing on screen may look live when it is not). Its height
+            // is already subtracted from `content_height` above, so `body`
+            // never overflows underneath it.
+            .when(is_historical, |el| {
+                el.child(
+                    div()
+                        .w_full()
+                        .h(px(AS_OF_STRIPE_HEIGHT))
+                        .bg(cx.theme().warning)
+                        .debug_selector(|| "as-of-stripe".to_string()),
+                )
+            })
             .child(body)
             .child(status_bar)
             // The divider drag catcher (drag-splitters task): while a drag

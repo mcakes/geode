@@ -1993,6 +1993,37 @@ run_mutation "toolbar: the chip body click never opens the picker" \
   '            let _ = (&chip_open_entity, &column, &window, &cx);' \
   geode-shell clicking_a_scope_chips_body_opens_the_picker_on_that_column
 
+# ---- Phase 4a Task 6: the as-of selector and the historical indicator
+# (spec §3.6, §3.11)
+
+run_mutation "as-of: a bad time never sets the frame" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '            Err(msg) => {
+                if let Some(state) = shell.as_of_dialog.as_mut() {
+                    state.error = Some(msg);
+                    state.resolved = None;
+                }
+                cx.notify();
+            }' \
+  '            Err(msg) => {
+                if let Some(state) = shell.as_of_dialog.as_mut() {
+                    state.error = Some(msg);
+                    state.resolved = None;
+                }
+                shell.frame.update(cx, |f, cx| {
+                    if f.set_as_of(AsOf::At(Utc::now())) {
+                        cx.notify();
+                    }
+                });
+            }' \
+  geode-shell a_bad_time_shows_inline_and_enter_does_nothing
+
+run_mutation "as-of: the stripe is painted only when historical" \
+  crates/geode-shell/src/shell/render.rs \
+  '        let is_historical = matches!(self.frame.read(cx).as_of(), AsOf::At(_));' \
+  '        let is_historical = true;' \
+  geode-shell typing_a_time_and_enter_sets_as_of_and_paints_the_stripe_and_segment
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

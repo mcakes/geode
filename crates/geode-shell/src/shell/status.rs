@@ -42,16 +42,31 @@ pub const HEIGHT: f32 = 26.0;
 /// same `warning` token the readout's AS OF badge uses), then the data
 /// status indicator when `data_status_message` is `Some` (Phase 3 §5.1:
 /// a source's degraded health, or events the app bridge's bounded
-/// channel had to refuse — same `warning` token, same reasoning); right —
-/// the active theme name in `muted_foreground`. All colors come from
-/// `cx.theme()`; no other input is read, so the same call always renders
-/// the same tree for the same arguments.
+/// channel had to refuse — same `warning` token, same reasoning), then
+/// the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
+/// is scoped to a past instant — an unmissable `AS OF {t} · :live to
+/// return` segment in the same warning tokens the toolbar's own AS OF
+/// badge uses, since spec §4.5 says nothing on screen may look live when
+/// it is not); right — the active theme name in `muted_foreground`. All
+/// colors come from `cx.theme()`; no other input is read, so the same
+/// call always renders the same tree for the same arguments.
+///
+/// Eight plain, independently-`Option`al inputs rather than a bundling
+/// struct (clippy's `too_many_arguments`, `-D warnings`-enforced):
+/// `render.rs`'s one call site already has each of these as its own
+/// separate local (`self.matcher.pending()`, `self.last_reload.
+/// status_message()`, ...) — wrapping them in a struct just to satisfy
+/// the lint would move that assembly cost into `render.rs` for no
+/// reader benefit, since this function's own body treats every field
+/// independently anyway.
+#[allow(clippy::too_many_arguments)]
 pub fn status_bar(
     pending: &[Keystroke],
     count: Option<u32>,
     reload_message: Option<&str>,
     restart_message: Option<&str>,
     data_status_message: Option<&str>,
+    as_of: Option<&str>,
     theme_name: &str,
     cx: &App,
 ) -> impl IntoElement {
@@ -95,6 +110,21 @@ pub fn status_bar(
                 .text_color(theme.warning)
                 .debug_selector(|| "data-status".to_string())
                 .child(message.to_string()),
+        );
+    }
+    if let Some(t) = as_of {
+        // The same warning-toned badge treatment the toolbar's own AS OF
+        // readout uses (`shell::toolbar`'s "scope-asof" child) — an
+        // unmissable second reminder in the one place a maximised tile
+        // cannot hide (spec §3.6/§4.5).
+        bar = bar.left(
+            div()
+                .bg(theme.warning.opacity(0.25))
+                .text_color(theme.warning_foreground)
+                .px_2()
+                .rounded(px(4.))
+                .debug_selector(|| "status-as-of".to_string())
+                .child(format!("AS OF {t} · :live to return")),
         );
     }
 

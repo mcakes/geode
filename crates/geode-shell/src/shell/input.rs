@@ -16,9 +16,10 @@ use crate::keymap::{KeyContext, MatchResult};
 use crate::tiling::apply_workspace_action;
 use crate::vimfind;
 use crate::{fontsize, theme};
+use geode_core::query::AsOf;
 
 use super::keys::convert_keystroke;
-use super::{ShellView, keybindings_view, picker, settings_view};
+use super::{ShellView, asof_view, keybindings_view, picker, settings_view};
 
 impl ShellView {
     /// The active context stack for key resolution, outermost first:
@@ -222,6 +223,26 @@ impl ShellView {
             // user keymap. Opens the picker straight onto that column's
             // values stage.
             picker::open(self, Some(column.to_string()), window, cx);
+        } else if action.0 == "frame::as_of" {
+            // mod+t (spec §3.6): the as-of selector modal.
+            asof_view::open(self, window, cx);
+        } else if action.0 == "frame::live" {
+            // Palette-only (spec §3.6, same reasoning as `frame::
+            // scope_clear`): return to live, remembering the previous
+            // as-of for `frame::as_of_undo` to swap back to.
+            self.frame.update(cx, |f, cx| {
+                if f.set_as_of(AsOf::Live) {
+                    cx.notify();
+                }
+            });
+        } else if action.0 == "frame::as_of_undo" {
+            // Palette-only: swap back to the previous as-of — a toggle,
+            // not a stack (see `Frame::undo_as_of`).
+            self.frame.update(cx, |f, cx| {
+                if f.undo_as_of() {
+                    cx.notify();
+                }
+            });
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`

@@ -271,6 +271,7 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
     })
 }
 
+mod asof;
 mod chrome_and_dialogs;
 mod commandline;
 mod dock;

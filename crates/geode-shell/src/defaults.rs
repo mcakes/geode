@@ -126,6 +126,7 @@ context = "workspace"
 "mod+shift+z" = "frame::scope_redo"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
+"mod+t" = "frame::as_of"
 
 [[bindings]]
 context = "tile"
@@ -432,6 +433,20 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         reg,
         "frame::focus_text",
         "Focus the scope text field",
+        "Frame",
+    );
+    // The as-of selector (Phase 4a §3.6): `mod+t` opens a modal to view
+    // data as of a past instant, with the frame's recent generation
+    // times as honest presets. `frame::live`/`frame::as_of_undo` are
+    // palette-only — occasional deliberate acts, not muscle memory worth
+    // a chord of their own, same reasoning as `frame::scope_clear`/
+    // `perf::reset` above.
+    action(reg, "frame::as_of", "Jump to a point in time", "Frame");
+    action(reg, "frame::live", "Return to live", "Frame");
+    action(
+        reg,
+        "frame::as_of_undo",
+        "Swap to the previous as of",
         "Frame",
     );
     // Profiler-feature actions (the `profiling` feature — gpui's own
