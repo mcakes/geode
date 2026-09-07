@@ -705,6 +705,70 @@ against the previous run agreed: −83.9% and −80.8% respectively. The
 call rather than caching it across calls (deliberately not done in this
 change) is still cheap enough that none of this margin is spent on it.
 
+#### Dictionary resolves once per statement
+
+`compile_scope` ran `existing_enum_types` once per call and
+`dictionary_matches` once per categorical textual column per call, and
+`compile_view` calls `compile_scope` once per measure grain plus once
+for the spine (when the spine fallback scan is reached at all — see
+below) plus its own `existing_enum_types` for the interned-columns
+check: several tiny catalog round trips repeating the same answer on
+every keystroke. `DictionaryCache` (`crates/geode-data/src/query/
+scope_sql.rs`) resolves each fact once per statement instead —
+`compile_scope`'s own signature is unchanged (a thin wrapper over the
+new `compile_scope_cached`, cache-free callers pay for exactly one
+miss); `compile_view` and `compile_distinct` hold one cache across
+their internal calls.
+
+**This bench's schema is a smaller version of the demo's saving, not a
+copy of it.** It declares four categorical textual columns (`book`,
+`lhu`, `counterparty`, `underlying_ref`), and the `tree` view here
+spans three measure grains (Underlying, Instrument, Position) — not
+the two originally assumed going into this change. The spine fallback
+scan is **not** a call site for this view: verified by hand (a
+temporary print of `missing` in `compile_view_with_cache`, run through
+the actual bench schema at every depth this suite exercises), the bench
+`tree` view's grouping — `["lhu", "underlying_ref", "position_ref"]`
+(`benches/query.rs:128`) — comes back fully carried at depths 1, 2 and
+3, so `missing` is empty every time and `compile_scope_cached`'s spine
+branch never runs. Call sites are therefore exactly the three measure
+grains plus the interned-columns check: 3 × (1 + 4) + 1 = 16 catalog
+queries without the cache, 1 + 4 = 5 with it. Smaller than the demo
+view's 33 → 8 (Phase 4a's design doc: 4 × (1 + 7) + 1 = 33, cached to
+1 + 7 = 8) because this schema carries fewer categorical columns and
+one fewer call site — the same shape at smaller scale, not a
+like-for-like reproduction of that figure.
+
+1M rows, `cargo bench -p geode-data --bench query -- 1000000_rows_text`,
+criterion, 20 samples, before = base commit `07d5051`, after = this
+change, same machine:
+
+| Case | before | after |
+|---|---|---|
+| `1000000_rows_text_broad_unscoped` | 90.099 ms | 89.160 ms (noise) |
+| `1000000_rows_text_broad_depth_2` | 11.003 ms | **9.9469 ms** (−9.5%) |
+| `1000000_rows_text_broad_with_books` | 46.633 ms | **45.687 ms** (−2.0%) |
+| `1000000_rows_text_narrow_unscoped` | 22.621 ms | **21.597 ms** (−4.9%) |
+| `1000000_rows_text_narrow_depth_2` | 7.9846 ms | **6.9121 ms** (−13.4%) |
+| `1000000_rows_text_narrow_with_books` | 7.6853 ms | **6.6369 ms** (−13.8%) |
+| `1000000_rows_text_none_unscoped` | 3.6895 ms | **2.5877 ms** (−29.9%) |
+| `1000000_rows_text_none_depth_2` | 3.6285 ms | **2.5109 ms** (−30.8%) |
+| `1000000_rows_text_none_with_books` | 3.8944 ms | **2.8188 ms** (−27.6%) |
+| `1000000_rows_text_none_keys_textual_depth_2` | 25.198 ms | 25.498 ms (noise) |
+| `1000000_rows_text_none_depth_2_asof` | 8.5486 ms | **7.8563 ms** (−8.1%) |
+
+Nothing regressed (criterion's own before/after comparison called
+every row above either "improved" or "within noise"); the `_none_`
+cases — a trader's first keystroke, and the §7.1 gate's own shape —
+improve the most (~30%) because they are the shape with the fewest
+rows actually scanned and the most of their total cost is compile-time
+catalog lookups rather than the scan itself. `_none_keys_textual_depth_2`
+is unaffected as expected: with the key columns also textual, that
+case is dominated by the row-scan `ILIKE` fallback the dictionary
+rewrite cannot remove, not by catalog lookups. `1000000_rows_text_
+none_depth_2` — the §7.1 gate — holds at 2.5109 ms, comfortably under
+the 50 ms contract.
+
 ### Phase 4a: the two key columns stay in the text filter — what that costs, and the idea that did not pay
 
 Decision (Matthew, 2026-09-07): `position_ref` and `instrument_ref` stay
@@ -864,67 +928,3 @@ extra scan filter changes how DuckDB decorrelates the text filter's
 membership probes (two 840k-row inner hash joins appear in the
 profile) — a text-filter plan question, not a generation-predicate
 one.
-
-#### Dictionary resolves once per statement
-
-`compile_scope` ran `existing_enum_types` once per call and
-`dictionary_matches` once per categorical textual column per call, and
-`compile_view` calls `compile_scope` once per measure grain plus once
-for the spine (when the spine fallback scan is reached at all — see
-below) plus its own `existing_enum_types` for the interned-columns
-check: several tiny catalog round trips repeating the same answer on
-every keystroke. `DictionaryCache` (`crates/geode-data/src/query/
-scope_sql.rs`) resolves each fact once per statement instead —
-`compile_scope`'s own signature is unchanged (a thin wrapper over the
-new `compile_scope_cached`, cache-free callers pay for exactly one
-miss); `compile_view` and `compile_distinct` hold one cache across
-their internal calls.
-
-**This bench's schema is a smaller version of the demo's saving, not a
-copy of it.** It declares four categorical textual columns (`book`,
-`lhu`, `counterparty`, `underlying_ref`), and the `tree` view here
-spans three measure grains (Underlying, Instrument, Position) — not
-the two originally assumed going into this change. Whether the spine's
-own fallback scan is a fourth call site depends on whether any
-grouping depth is left uncovered by those three grains' own carried
-columns; either way, at least one grain call always precedes it, so —
-verified by hand while building the harness entry for this exact
-question (see `scripts/mutation-check.sh`, "cache: compile_view's
-spine call uses the shared cache") — a spine-only cache bypass here
-would already be masked by that earlier grain-loop call, the same
-shape as the demo view's 33 → 8 saving, just with 4 columns and up to
-4 call sites instead of 7 and 5. The demo view's own reduction (Phase
-4a's design doc: 4 × (1 + 7) + 1 = 33 catalog queries → 1 + 7 = 8) is
-larger in absolute terms because it carries more categorical columns
-and more measure grains; this bench's win is the same shape at smaller
-scale.
-
-1M rows, `cargo bench -p geode-data --bench query -- 1000000_rows_text`,
-criterion, 20 samples, before = base commit `07d5051`, after = this
-change, same machine:
-
-| Case | before | after |
-|---|---|---|
-| `1000000_rows_text_broad_unscoped` | 90.099 ms | 89.160 ms (noise) |
-| `1000000_rows_text_broad_depth_2` | 11.003 ms | **9.9469 ms** (−9.5%) |
-| `1000000_rows_text_broad_with_books` | 46.633 ms | **45.687 ms** (−2.0%) |
-| `1000000_rows_text_narrow_unscoped` | 22.621 ms | **21.597 ms** (−4.9%) |
-| `1000000_rows_text_narrow_depth_2` | 7.9846 ms | **6.9121 ms** (−13.4%) |
-| `1000000_rows_text_narrow_with_books` | 7.6853 ms | **6.6369 ms** (−13.8%) |
-| `1000000_rows_text_none_unscoped` | 3.6895 ms | **2.5877 ms** (−29.9%) |
-| `1000000_rows_text_none_depth_2` | 3.6285 ms | **2.5109 ms** (−30.8%) |
-| `1000000_rows_text_none_with_books` | 3.8944 ms | **2.8188 ms** (−27.6%) |
-| `1000000_rows_text_none_keys_textual_depth_2` | 25.198 ms | 25.498 ms (noise) |
-| `1000000_rows_text_none_depth_2_asof` | 8.5486 ms | **7.8563 ms** (−8.1%) |
-
-Nothing regressed (criterion's own before/after comparison called
-every row above either "improved" or "within noise"); the `_none_`
-cases — a trader's first keystroke, and the §7.1 gate's own shape —
-improve the most (~30%) because they are the shape with the fewest
-rows actually scanned and the most of their total cost is compile-time
-catalog lookups rather than the scan itself. `_none_keys_textual_depth_2`
-is unaffected as expected: with the key columns also textual, that
-case is dominated by the row-scan `ILIKE` fallback the dictionary
-rewrite cannot remove, not by catalog lookups. `1000000_rows_text_
-none_depth_2` — the §7.1 gate — holds at 2.5109 ms, comfortably under
-the 50 ms contract.
