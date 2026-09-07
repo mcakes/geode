@@ -540,7 +540,7 @@ pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
                 file: None,
                 message: "app: keymap.mod = \"ctrl\" is not allowed — ctrl is reserved for the \
                           shipped literal bindings (ctrl+1..9, ctrl+0, ctrl+k, ctrl+/ …); \
-                          use \"alt\", \"cmd\" or \"super\""
+                          use \"alt\" or \"cmd\""
                     .into(),
             }],
         ),
