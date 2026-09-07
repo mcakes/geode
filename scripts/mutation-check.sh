@@ -1874,9 +1874,30 @@ run_mutation "text: the rewrite applies in every era, gated on the type alone" \
 
 run_mutation "text: the dictionary term keeps the escape clause" \
   crates/geode-data/src/query/scope_sql.rs \
-  "                     where v ilike ? escape '\\\\')" \
-  "                     where v ilike ?)" \
+  "t(v) where v ilike ? escape '\\\\'" \
+  "t(v) where v ilike ?" \
   geode-data dictionary_and_row_scan_agree_for_any_needle
+
+# Literal-list form (2026-09-07): the subquery form's OR of several
+# correlated `IN (select ... enum_range ...)` terms still cost DuckDB a
+# real planning-and-probing bill for a needle that matches nothing
+# (docs/perf.md, "literal-list form"). `compile_scope` now resolves
+# each categorical column's matches once at compile time and binds them
+# as a literal list; these two entries anchor the two ways that could
+# silently regress to "matches nothing selects everything" or "binds
+# the wrong thing".
+
+run_mutation "text: a needle matching no dictionary value collapses to false" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '            r.direct.push(("false".to_string(), Vec::new()));' \
+  '            {}' \
+  geode-data a_needle_matching_no_dictionary_value_compiles_to_false
+
+run_mutation "text: the literal list binds the matching values, not the pattern" \
+  crates/geode-data/src/query/scope_sql.rs \
+  'bound = Value::Text(matches.join(SELECTION_DELIMITER));' \
+  'bound = pattern.clone();' \
+  geode-data a_dictionary_match_binds_the_matching_values_not_the_pattern
 
 run_mutation "distinct: counts are taken under the given scope" \
   crates/geode-data/src/query/distinct.rs \

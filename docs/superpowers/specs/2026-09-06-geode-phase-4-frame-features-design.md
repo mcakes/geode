@@ -468,6 +468,53 @@ subquery form does not plan well, the fallback is to resolve the
 dictionary in Rust once per generation and bind the literal list; the
 plan carries both.
 
+**As built (2026-09-07), amended again: the literal-list form
+shipped.** A headless probe on the demo's own schema and `tree` view —
+wider than the bench's fixture (seven categorical textual columns
+across three measure grains, not four across two) — measured the
+subquery form's own gate case (depth 2, needle matching nothing) at
+105 ms live / 218 ms as-of with the demo's key columns textual, and
+78 ms / 169 ms without: the subquery form's open question (§11.1) is
+resolved against it. The cause is not row count — the needle matches
+nothing — but planning cost: an OR of several correlated `IN (select …
+enum_range …)` subqueries still has to be planned and probed by DuckDB
+even when every one of them is empty, and that cost recurs on every
+requery regardless of match count.
+
+The fallback the paragraph above named is what shipped:
+`compile_scope` (`crates/geode-data/src/query/scope_sql.rs`) now
+resolves each categorical column's matches once at compile time —
+the same `select v from unnest(enum_range(null::{ty})) t(v) where v
+ilike ? escape '\'` above, but run synchronously on the compile
+connection ahead of `submit`, not embedded in the query's own
+predicate — and binds the matching values as one delimiter-joined
+varchar split by `string_split` in SQL, the same shape a dimension
+selection already uses (spec §6.2): the statement text, and therefore
+the prepared plan, stays independent of match count. A column with no
+matches drops its term entirely instead of compiling to an
+always-false subquery; if every column drops (or the dataset declares
+no textual columns at all), the whole filter collapses to the literal
+`false` — the invariant this form has to hold by construction, since
+there is no longer a subquery for DuckDB itself to prove empty: a text
+filter that matches nothing must select nothing, never fall through to
+contributing no clause and silently widening the scope to everything.
+Non-categorical columns are unaffected — still a plain `ILIKE` row
+scan in every era.
+
+Measured on this crate's own bench fixture (`cargo bench -p geode-data
+--bench query -- text_none_depth_2`, 1M rows, before = the subquery
+form, after = the literal-list form; full table and the demo-schema
+probe numbers in `docs/perf.md`, "Phase 4a: the text filter,
+literal-list form"):
+
+| Case | subquery form | literal-list form |
+|---|---|---|
+| `1000000_rows_text_none_depth_2` | 32.276 ms | **5.2226 ms** |
+| `1000000_rows_text_none_depth_2_asof` | 80.798 ms | **15.448 ms** |
+
+The gate holds with far more headroom than either prior form left:
+5.2 ms live, 15.4 ms as-of, against the 50 ms contract.
+
 **Validation.** The dataset reader rejects `textual = true` on a column
 that the scope compiler cannot route as a dimension at any grain, with
 a diagnostic naming the column and the reason; the check uses the same

@@ -643,3 +643,64 @@ residual row scan the ENUM path cannot help, run once per measure grain
 underlying and the pair grain for `cross_gamma02`) where the bench's
 spans two. Whether a million-row key column belongs in the text filter
 at all is a desk decision, not an engineering one.
+
+### Phase 4a: the text filter, literal-list form (spec §3.5, as amended again)
+
+**Why**: a headless probe (2026-09-07) on the demo's own schema and
+`tree` view — not the bench's own schema above — measured the subquery
+form's floor for a needle that matches nothing, at 1M rows, two
+generations so the archive is populated, medians of five:
+
+| depth 2, needle `zzz` (matches nothing) | live | as-of |
+|---|---|---|
+| subquery form as shipped, keys textual | 105 ms | 218 ms |
+| subquery form, `position_ref`/`instrument_ref` not textual | 78 ms | 169 ms |
+| literal-list form, keys textual | 52 ms | 108 ms |
+| literal-list form, keys not textual | 8 ms | 19 ms |
+
+No-text baselines on the same view: live 12 ms, as-of 58 ms. The
+subquery form's OR of seven `IN (select ... enum_range ...)` terms —
+three measure grains, seven categorical textual columns on this schema
+— costs ~65 ms per requery before any row of the result is built,
+because DuckDB still has to plan and probe every correlated subquery
+even when every one of them is empty. The remaining cost with keys
+textual is the two key columns' per-row `ILIKE` over three grains —
+no dictionary can help a million-row key; that is a schema decision
+the user is making separately, same conclusion as the residual row
+above.
+
+**The change** (`crates/geode-data/src/query/scope_sql.rs`): for each
+textual column that is categorical and whose ENUM type exists,
+`compile_scope` now resolves the pattern's matches once at compile
+time — `select v from unnest(enum_range(null::{ty})) t(v) where v
+ilike ? escape '\'`, on the compile connection, synchronously, ahead
+of `submit` — and binds the matching values as one delimiter-joined
+varchar split by `string_split` in SQL, the same shape a dimension
+selection already uses, so the statement text (and prepared plan)
+stays independent of match count. A column with no matches drops its
+term entirely instead of compiling to an always-false subquery; if
+every column drops (or the dataset declares no textual columns at
+all), the whole filter collapses to a literal `false` — a text filter
+that matches nothing must select nothing, never everything.
+Non-categorical textual columns are unaffected: still a plain `ILIKE`
+row scan.
+
+**Re-run of the bench's own gate cases** (this crate's `risk_snapshot`
+fixture, four categorical routable textual columns, `cargo bench -p
+geode-data --bench query -- text_none_depth_2`, criterion, 20 samples,
+before = base commit `1a00920`, after = the literal-list form, same
+machine):
+
+| Case | before (subquery form) | after (literal-list form) |
+|---|---|---|
+| `1000000_rows_text_none_depth_2` | 32.276 ms | **5.2226 ms** |
+| `1000000_rows_text_none_depth_2_asof` | 80.798 ms | **15.448 ms** |
+
+**The gate — `1000000_rows_text_none_depth_2` under 50 ms — holds at
+5.2 ms**, and the as-of case at 15.4 ms holds with far more headroom
+than the subquery form's 80.8 ms did. Criterion's own comparison
+against the previous run agreed: −83.9% and −80.8% respectively. The
+100k-row cases moved the same direction (12.1 ms → 5.3 ms live, 33.9 ms
+→ 12.0 ms as-of). Resolving the dictionary once per `compile_scope`
+call rather than caching it across calls (deliberately not done in this
+change) is still cheap enough that none of this margin is spent on it.
