@@ -41,6 +41,20 @@ pub struct BlotterDelegate {
     /// Whether any painted cell carried the dagger, for the footer.
     pub any_determined: bool,
     pub semi_joined: Vec<String>,
+    /// The last window `refill_window` was actually asked to fill,
+    /// *not* `cache.window()`. `TableState` (`update_visible_range_if_need`,
+    /// pinned gpui-component checkout) only records a new visible range
+    /// when it has more than one row — a filter/narrow that shrinks the
+    /// table to 0 or 1 rows leaves `TableState`'s own recorded range
+    /// stale, so when the rows return to the same count as before, it
+    /// never fires `visible_rows_changed` again. `invalidate_cells` must
+    /// refill *this* field, not the (possibly shrunken) format cache's
+    /// own window, or the cache stays stuck at the shrunken size forever
+    /// — every cell outside it paints blank with nothing left to ever
+    /// refill it. `invalidate_cells` itself fills through the private
+    /// `fill_window`, not `refill_window`, so its own clamped refill
+    /// (after e.g. an empty snapshot) never shrinks this field.
+    requested_window: Range<usize>,
     /// The tree column's disclosure glyph for each *shown* row in
     /// `cache`'s current window, aligned index-for-index with it
     /// (`glyphs[i]` is `cache.window().start + i`) — resolved once per
@@ -72,6 +86,7 @@ impl BlotterDelegate {
             unplaced: 0,
             any_determined: false,
             semi_joined: Vec::new(),
+            requested_window: 0..0,
             glyphs: Vec::new(),
         }
     }
@@ -186,14 +201,32 @@ impl BlotterDelegate {
     /// cleared, which is correct (there's nothing there to paint).
     /// Every `self.cache.invalidate()` call site must go through this
     /// instead.
+    ///
+    /// Refills `requested_window`, not `self.cache.window()`: gpui-
+    /// component's `TableState::update_visible_range_if_need` stops
+    /// reporting a new visible range once it has length ≤ 1 (`if
+    /// visible_range.len() <= 1 { return; }`, the pinned gpui-component
+    /// checkout), so a filter/narrow that shrinks the table to 0 or 1
+    /// rows leaves the *cache's* window stuck at that shrunken size —
+    /// when the row count later returns to what `TableState` last
+    /// recorded, it sees no change and never fires `visible_rows_changed`
+    /// again, so a `cache.window()`-based refill here would have nothing
+    /// to widen back out from. `requested_window` is what the table last
+    /// actually asked to see (remembered by `refill_window`, the only
+    /// place that writes it), independent of how small the cache
+    /// happened to shrink to since. The fill below goes through the
+    /// private `fill_window`, not `refill_window` itself, so this
+    /// clamped refill can never shrink `requested_window` back down —
+    /// only a real `refill_window` call (`visible_rows_changed`,
+    /// `move_column`, or a test standing in for either) may do that.
     fn invalidate_cells(&mut self) {
-        let w = self.cache.window();
+        let w = self.requested_window.clone();
         self.cache.invalidate();
         self.glyphs.clear();
         if !w.is_empty() {
             let end = w.end.min(self.shown.len());
             if w.start < end {
-                self.refill_window(w.start..end);
+                self.fill_window(w.start..end);
             }
         }
     }
@@ -314,8 +347,24 @@ impl BlotterDelegate {
             && !snapshot.tree().has_children(row)
     }
 
-    /// Fill the cache for a window of *shown* rows.
+    /// Fill the cache for a window of *shown* rows, and remember it as
+    /// `requested_window` — the window the table actually asked to see,
+    /// which `invalidate_cells` falls back to refilling when `TableState`
+    /// itself won't call this again (see `requested_window`'s own doc
+    /// comment). This is the entry point `visible_rows_changed` and
+    /// `move_column` call; `invalidate_cells`'s own (possibly clamped)
+    /// refill goes through the private `fill_window` below instead, so
+    /// it never shrinks what's remembered here.
     pub fn refill_window(&mut self, window: Range<usize>) {
+        self.requested_window = window.clone();
+        self.fill_window(window);
+    }
+
+    /// Fill the cache for a window of *shown* rows, without recording it
+    /// as the requested window — used only by `invalidate_cells`'s own
+    /// (possibly clamped-down) refill, so that refill can never shrink
+    /// `requested_window` itself.
+    fn fill_window(&mut self, window: Range<usize>) {
         let (Some(snapshot), Some(plan)) = (&self.snapshot, &self.plan) else {
             return;
         };
@@ -635,6 +684,95 @@ mod tests {
     }
     fn grouping() -> Vec<String> {
         vec!["lhu".into(), "underlying_ref".into(), "position_ref".into()]
+    }
+
+    /// A single-level grouping (`["lhu"]`): the root plus `n - 1` direct
+    /// children, all visible with no explicit expand (`flatten`'s root is
+    /// always open, and a node's direct children are always shown —
+    /// `crate::core::flatten`'s own
+    /// `collapsed_shows_the_root_and_its_children_only_when_the_root_is_open`).
+    /// `n == 1` gives just the root: the "a filter emptied the table"
+    /// shape the C1-successor defect below reproduces.
+    fn snapshot_with_rows(n: usize) -> Arc<Snapshot> {
+        let mut lhu = vec![None];
+        let mut row_depth = vec![0i32];
+        let mut delta = vec![Some(0.0)];
+        for i in 0..n.saturating_sub(1) {
+            lhu.push(s(&format!("R{i}")));
+            row_depth.push(1);
+            delta.push(Some(i as f64));
+        }
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(lhu)),
+                (dim("row_depth"), TestColumn::I32(row_depth)),
+                (dim("delta01"), TestColumn::F64(delta)),
+            ],
+            1,
+        ))
+    }
+    fn flat_view() -> ViewSpec {
+        let text =
+            "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"delta01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        ViewSpec::from_doc(&doc).0.remove(0)
+    }
+    fn flat_grouping() -> Vec<String> {
+        vec!["lhu".into()]
+    }
+
+    /// Regression for the successor to C1: `TableState::
+    /// update_visible_range_if_need` (pinned gpui-component checkout)
+    /// only records a new visible range when it has more than one row,
+    /// so a snapshot that shrinks the table to 0 or 1 rows leaves
+    /// `TableState`'s own recorded range stale. When rows return to a
+    /// count `TableState` has already seen, it never fires
+    /// `visible_rows_changed` again — a refill keyed off the format
+    /// cache's own (possibly still-shrunken) window would then have no
+    /// path back to the full window ever again. `refill_window` here
+    /// stands in for what `visible_rows_changed` itself does (it records
+    /// `requested_window` on the way); the middle `apply_snapshot`
+    /// deliberately does not call it, matching `TableState` never firing
+    /// on the way back.
+    #[test]
+    fn a_window_shrunk_by_an_empty_snapshot_grows_back_when_rows_return() {
+        let mut d = BlotterDelegate::new();
+        let big = snapshot_with_rows(40);
+        d.apply_snapshot(big.clone(), &flat_view(), &flat_grouping());
+        d.refill_window(0..10);
+        assert!(d.cache.get(5, 0).is_some(), "sanity: row 5 is cached");
+        // The table shrinks to one row: `TableState` never records the
+        // new range (`len() <= 1`), so no `visible_rows_changed` follows
+        // — `requested_window` stays `0..10` throughout.
+        d.apply_snapshot(snapshot_with_rows(1), &flat_view(), &flat_grouping());
+        // Rows return. `TableState` sees the same range it last recorded
+        // and does not call `visible_rows_changed`. `invalidate_cells`
+        // must have refilled the last requested window on its own.
+        d.apply_snapshot(big, &flat_view(), &flat_grouping());
+        assert!(
+            d.cache.get(5, 0).is_some(),
+            "row 5 must be cached again without a visible_rows_changed"
+        );
+        assert!(d.cache.get(9, 0).is_some());
+    }
+
+    /// Same defect, reached through `/` narrowing rather than a shrunken
+    /// snapshot — `set_narrowed` goes through `invalidate_cells` exactly
+    /// the same way.
+    #[test]
+    fn a_window_shrunk_by_narrowing_to_one_row_grows_back_when_narrowing_clears() {
+        let mut d = BlotterDelegate::new();
+        let big = snapshot_with_rows(40);
+        d.apply_snapshot(big, &flat_view(), &flat_grouping());
+        d.refill_window(0..10);
+        assert!(d.cache.get(5, 0).is_some(), "sanity: row 5 is cached");
+        d.set_narrowed(Some(vec![0]));
+        d.set_narrowed(None);
+        assert!(
+            d.cache.get(5, 0).is_some(),
+            "row 5 must be cached again without a visible_rows_changed"
+        );
+        assert!(d.cache.get(9, 0).is_some());
     }
 
     #[test]

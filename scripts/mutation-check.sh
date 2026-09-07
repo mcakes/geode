@@ -1561,7 +1561,7 @@ run_mutation "delegate: invalidate_cells refills the window it had" \
         if !w.is_empty() {
             let end = w.end.min(self.shown.len());
             if w.start < end {
-                self.refill_window(w.start..end);
+                self.fill_window(w.start..end);
             }
         }
     }' \
@@ -1569,6 +1569,15 @@ run_mutation "delegate: invalidate_cells refills the window it had" \
     }' \
   geode-blotter \
   a_regroup_that_keeps_the_window_refills_it_immediately
+
+run_mutation "delegate: invalidate_cells refills the requested window, not the shrunken cache window" \
+  crates/geode-blotter/src/delegate.rs \
+  '    fn invalidate_cells(&mut self) {
+        let w = self.requested_window.clone();' \
+  '    fn invalidate_cells(&mut self) {
+        let w = self.cache.window();' \
+  geode-blotter \
+  a_window_shrunk_by_an_empty_snapshot_grows_back_when_rows_return
 
 run_mutation "delegate: any_determined reflects the whole cached window" \
   crates/geode-blotter/src/delegate.rs \
