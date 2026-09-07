@@ -284,23 +284,42 @@ fn dictionary_matches(
 /// just misses every lookup once — so [`compile_scope`] keeps working
 /// unchanged as a thin wrapper handing [`compile_scope_cached`] a
 /// throwaway `DictionaryCache::default()`.
+///
+/// **Never hold one across statements.** `refresh_enum` rebuilds every
+/// ENUM type on every publish, so a `DictionaryCache` parked on
+/// something longer-lived than a single compile — a `DataService`
+/// field, a pool worker, a `static` — would keep answering with
+/// whatever dictionary existed when it was first warmed. A book that
+/// arrived in the newest generation would be silently absent from a
+/// cached `matches` result, and a retired book would keep being bound
+/// as though it were still live: wrong data with no error. Construct
+/// one fresh per statement, as every call site in this crate does, and
+/// let it drop at the end of that call.
+///
+/// `pub(crate)`, not exported from `query/mod.rs`: nothing outside this
+/// crate compiles several grains of one statement, so nothing outside
+/// it needs to hold a cache across calls (`compile_scope`'s own
+/// unchanged public signature is the seam every other crate uses).
 #[derive(Default)]
-pub struct DictionaryCache {
+pub(crate) struct DictionaryCache {
     /// dataset name -> its existing ENUM type names.
     enum_types: HashMap<String, Vec<String>>,
-    /// (ENUM type, LIKE pattern) -> the dictionary values that matched.
-    /// Keyed on both, not the type alone — two needles narrowing to
-    /// different matches over the same column must not collide.
-    matches: HashMap<(String, String), Vec<String>>,
+    /// ENUM type -> LIKE pattern -> the dictionary values that matched.
+    /// Nested rather than a single `(type, pattern)`-keyed map so a hit
+    /// (`get(enum_type).and_then(|m| m.get(pattern))`) allocates nothing
+    /// — only a miss needs to own the two strings to insert them. Two
+    /// levels, not the type alone: two needles narrowing to different
+    /// matches over the same column must not collide.
+    matches: HashMap<String, HashMap<String, Vec<String>>>,
     /// Catalog round-trips actually made. Tests assert on it; the hot
     /// path never reads it.
-    pub lookups: usize,
+    pub(crate) lookups: usize,
 }
 
 impl DictionaryCache {
     /// `existing_enum_types(conn, dataset)`, cached for the life of this
     /// `DictionaryCache`.
-    pub fn enum_types(
+    pub(crate) fn enum_types(
         &mut self,
         conn: &Connection,
         dataset: &str,
@@ -318,19 +337,30 @@ impl DictionaryCache {
 
     /// `dictionary_matches(conn, enum_type, pattern)`, cached for the
     /// life of this `DictionaryCache`.
-    pub fn matches(
+    pub(crate) fn matches(
         &mut self,
         conn: &Connection,
         enum_type: &str,
         pattern: &str,
     ) -> Result<&[String], StoreError> {
-        let key = (enum_type.to_string(), pattern.to_string());
-        if !self.matches.contains_key(&key) {
+        if self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .is_none()
+        {
             let v = dictionary_matches(conn, enum_type, pattern)?;
             self.lookups += 1;
-            self.matches.insert(key.clone(), v);
+            self.matches
+                .entry(enum_type.to_string())
+                .or_default()
+                .insert(pattern.to_string(), v);
         }
-        Ok(self.matches.get(&key).expect("just inserted this key"))
+        Ok(self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .expect("just inserted this key"))
     }
 }
 
@@ -383,8 +413,9 @@ pub fn compile_scope(
 /// (ENUM type existence, dictionary matches) through a `DictionaryCache`
 /// the caller supplies — so a caller compiling several grains of one
 /// statement resolves each dataset's ENUM types and each (type, needle)
-/// pattern's matches once, not once per grain.
-pub fn compile_scope_cached(
+/// pattern's matches once, not once per grain. `pub(crate)`, like
+/// `DictionaryCache` itself — see its doc comment for why.
+pub(crate) fn compile_scope_cached(
     conn: &Connection,
     scope: &Scope,
     ds: &DatasetSpec,
@@ -1413,6 +1444,49 @@ grain = "position"
         (store, ds)
     }
 
+    /// Review round 1, Major 1: two categorical textual columns —
+    /// `book` and `counterparty` — whose dictionaries each hold exactly
+    /// one value matching the needle `"match"`, but a *different* value
+    /// each. Every other text-filter fixture in this file declares
+    /// exactly one categorical textual column, so a `DictionaryCache`
+    /// key that dropped the ENUM type and collapsed to the pattern
+    /// alone would have nothing to collide with and no test could see
+    /// it — the exact "fixture that cannot reach the defect" class
+    /// `CLAUDE.md` warns about.
+    fn two_categorical_columns_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
+        let mut ds = carried_dataset();
+        for c in ds.columns.iter_mut() {
+            if c.name == "book" || c.name == "counterparty" {
+                c.categorical = true;
+                c.textual = true;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        std::mem::forget(dir);
+        store.apply_schema(&ds).unwrap();
+        let conn = store.writer();
+        let insert = "insert into risk_instrument_live
+                     (book, lhu, position_ref, counterparty, instrument_ref,
+                      npv, currency, batch, source_file_id, gen_id, source_time)
+                 values (?, 'L', ?, ?, ?, 1.0, 'USD', 'b', 1, 1, now())";
+        conn.execute(insert, duckdb::params!["BKMATCH", "P0", "CP_OTHER", "I0"])
+            .unwrap();
+        conn.execute(insert, duckdb::params!["BK_OTHER", "P1", "CPMATCH", "I1"])
+            .unwrap();
+        for col in ["book", "counterparty"] {
+            crate::store::ddl::refresh_enum(
+                conn,
+                "risk",
+                col,
+                "risk_instrument_live",
+                "risk_instrument_archive",
+            )
+            .unwrap();
+        }
+        (store, ds)
+    }
+
     /// The as-of root-cause fixture (spec §3.5, as amended): `BK_OLD`
     /// exists ONLY in the archive — `enum_fixture`'s live table never
     /// carried it — so a dictionary built from live alone cannot hold
@@ -1865,13 +1939,69 @@ grain = "position"
         );
     }
 
+    #[test]
+    fn a_cache_keys_matches_by_type_not_pattern_alone() {
+        // Review round 1, Major 1 — the mirror of the test above: a key
+        // that collapsed to the pattern alone, dropping which column's
+        // ENUM type it names, would let `counterparty`'s lookup hit
+        // `book`'s already-cached entry for the same needle. Both
+        // columns' dictionaries contain exactly one match for "match" —
+        // `book`'s is `BKMATCH`, `counterparty`'s is `CPMATCH` — so a
+        // collision is visible as the two bound value lists becoming
+        // equal instead of staying distinct.
+        let (store, ds) = two_categorical_columns_fixture();
+        let scope = Scope {
+            text: Some("match".into()),
+            ..Scope::default()
+        };
+        let mut cache = DictionaryCache::default();
+        let sql = compile_scope_cached(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+            &mut cache,
+        )
+        .unwrap();
+        // One bound literal-list value per categorical textual column,
+        // in the schema's declared column order: `book`, then
+        // `counterparty` (`carried_dataset`'s TOML lists `book` first).
+        let bound: Vec<&str> = sql
+            .params
+            .iter()
+            .filter_map(|p| match p {
+                Value::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            bound.len(),
+            2,
+            "one bound value per categorical textual column: {bound:?}"
+        );
+        assert!(
+            bound[0].contains("BKMATCH"),
+            "book's term must bind book's own match: {bound:?}"
+        );
+        assert!(
+            bound[1].contains("CPMATCH"),
+            "counterparty's term must bind counterparty's own match, not book's: {bound:?}"
+        );
+        assert_ne!(
+            bound[0], bound[1],
+            "book's and counterparty's dictionary matches must not collide: {bound:?}"
+        );
+    }
+
     proptest! {
         #[test]
         fn compile_scope_and_compile_scope_cached_agree(needle in "[a-zA-Z0-9%_\\\\]{0,6}") {
             // The read path's opinions are law: a caller-supplied cache
             // must be invisible to the property test's contract. Both
-            // entry points, on a fresh cache, must compile the identical
-            // statement.
+            // entry points, on a fresh (cold) cache, must compile the
+            // identical statement.
             let (store, ds) = enum_fixture();
             let scope = Scope { text: Some(needle.clone()), ..Scope::default() };
             let via_wrapper = compile_scope(
@@ -1881,9 +2011,26 @@ grain = "position"
             let via_cached = compile_scope_cached(
                 store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live(), &mut cache,
             ).unwrap();
-            prop_assert_eq!(via_wrapper.predicate, via_cached.predicate);
-            prop_assert_eq!(via_wrapper.params, via_cached.params);
-            prop_assert_eq!(via_wrapper.semantics, via_cached.semantics);
+            prop_assert_eq!(via_wrapper.predicate.clone(), via_cached.predicate.clone());
+            prop_assert_eq!(via_wrapper.params.clone(), via_cached.params.clone());
+            prop_assert_eq!(via_wrapper.semantics.clone(), via_cached.semantics.clone());
+
+            // Review round 1, Major 2: the case above never exercises a
+            // *warm* cache -- both arms start cold, so it can only fail
+            // if the wrapper forwards a different argument list, not if
+            // a hit ever returned something other than what a miss
+            // would have. Compile the same statement again through the
+            // now-warm `cache` and require the identical result: this is
+            // the one place a `matches`/`enum_types` hit is actually
+            // exercised and checked against a real answer, rather than
+            // discarded (as `a_cache_resolves_each_dictionary_once_per_
+            // statement` does, asserting only on `cache.lookups`).
+            let via_warm_cache = compile_scope_cached(
+                store.writer(), &scope, &ds, Grain::Instrument, &dims(), Era::live(), &mut cache,
+            ).unwrap();
+            prop_assert_eq!(via_cached.predicate, via_warm_cache.predicate);
+            prop_assert_eq!(via_cached.params, via_warm_cache.params);
+            prop_assert_eq!(via_cached.semantics, via_warm_cache.semantics);
         }
     }
 }
