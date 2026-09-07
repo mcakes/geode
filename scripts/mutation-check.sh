@@ -1897,8 +1897,8 @@ run_mutation "text: refresh_enum reads live and archive, not live alone" \
 
 run_mutation "text: the rewrite applies in every era, gated on the type alone" \
   crates/geode-data/src/query/scope_sql.rs \
-  '        let enum_types = crate::store::ddl::existing_enum_types(conn, &ds.name)?;' \
-  '        let enum_types = if era.kind == TableKind::Live { crate::store::ddl::existing_enum_types(conn, &ds.name)? } else { Vec::new() };' \
+  '        let enum_types: Vec<String> = cache.enum_types(conn, &ds.name)?.to_vec();' \
+  '        let enum_types: Vec<String> = if era.kind == TableKind::Live { cache.enum_types(conn, &ds.name)?.to_vec() } else { Vec::new() };' \
   geode-data a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of
 
 run_mutation "text: the dictionary term keeps the escape clause" \
@@ -1928,10 +1928,47 @@ run_mutation "text: the literal list binds the matching values, not the pattern"
   'bound = pattern.clone();' \
   geode-data a_dictionary_match_binds_the_matching_values_not_the_pattern
 
+# DictionaryCache (dictionary resolves once per statement, 2026-09-07):
+# compile_scope re-ran existing_enum_types once per call and
+# dictionary_matches once per categorical textual column per call, and
+# compile_view called compile_scope once per measure grain plus once for
+# the spine plus its own existing_enum_types for the interned-columns
+# check -- 33 catalog round trips on the demo schema where 8 would do.
+# DictionaryCache (above dictionary_matches) resolves each once per
+# statement instead. The third entry below is anchored to
+# compile_view_with_no_measures_resolves_the_dictionary_once_via_the_spine,
+# not compile_view_over_two_grains_resolves_the_dictionary_once_per_statement
+# as first sketched: verified by hand, a measure-grain loop running
+# before the spine always pre-warms whatever the spine needs (the
+# resolution is dataset-wide, not grain-specific), so a spine-only
+# bypass is invisible to a lookups count taken after a statement with
+# any measure grain finishes -- only the no-measures shape, where the
+# spine is the sole (and first) consumer, catches it.
+
+run_mutation "cache: a resolved dictionary match is reused, not re-fetched" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '        if !self.matches.contains_key(&key) {' \
+  '        if true {' \
+  geode-data a_cache_resolves_each_dictionary_once_per_statement
+
+run_mutation "cache: matches are keyed by pattern, not the ENUM type alone" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '        let key = (enum_type.to_string(), pattern.to_string());' \
+  '        let key = (enum_type.to_string(), String::new());' \
+  geode-data a_cache_keys_matches_by_pattern_not_type_alone
+
+run_mutation "cache: compile_view's spine call uses the shared cache" \
+  crates/geode-data/src/query/compile.rs \
+  '        let spine_scope = compile_scope_cached(conn, scope, ds, spine_grain, dims, era, cache)?;' \
+  '        let spine_scope = crate::query::scope_sql::compile_scope(conn, scope, ds, spine_grain, dims, era)?;' \
+  geode-data compile_view_with_no_measures_resolves_the_dictionary_once_via_the_spine
+
 run_mutation "distinct: counts are taken under the given scope" \
   crates/geode-data/src/query/distinct.rs \
-  '        let scope = compile_scope(conn, &params.scope, ds, grain, dims, era.era())?;' \
-  '        let scope = compile_scope(conn, &geode_core::scope::Scope::default(), ds, grain, dims, era.era())?;' \
+  '        let scope =
+            compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;' \
+  '        let scope =
+            compile_scope_cached(conn, &geode_core::scope::Scope::default(), ds, grain, dims, era.era(), &mut cache)?;' \
   geode-data distinct_counts_values_under_the_given_scope_and_unions_datasets
 
 run_mutation "distinct: as-of reads the archive era" \
