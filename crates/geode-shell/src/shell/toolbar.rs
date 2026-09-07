@@ -57,6 +57,7 @@ pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
+    on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     cx: &App,
 ) -> impl IntoElement {
     let theme = cx.theme();
@@ -76,18 +77,28 @@ pub fn toolbar(
         // unavoidable and fine" — this is that one clone, shared).
         let column: Rc<str> = Rc::from(c.column.as_str());
         let on_close = on_chip_close.clone();
+        let on_open = on_chip_open.clone();
         let body_column = column.clone();
+        let open_column = column.clone();
         let close_column = column.clone();
         chips_row = chips_row.child(
             h_flex()
                 .items_center()
                 .gap_1()
-                .child(chip(c.summary.clone(), chip_fg, chip_bg, move || {
-                    format!("scope-chip-{body_column}")
-                }))
                 .child(
-                    // Chip body click is inert this task (Task 5 wires it
-                    // to the picker); only this close glyph acts.
+                    // The chip body opens the dimension picker on this
+                    // column (Phase 4a §3.3) — the close glyph below
+                    // stays a separate hit target so clicking it drops
+                    // the dimension instead of opening the picker.
+                    chip(c.summary.clone(), chip_fg, chip_bg, move || {
+                        format!("scope-chip-{body_column}")
+                    })
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                        on_open(&open_column, window, cx)
+                    }),
+                )
+                .child(
                     div()
                         .child(Icon::new(IconName::Close).text_color(chip_fg))
                         .debug_selector(move || format!("scope-chip-close-{close_column}"))

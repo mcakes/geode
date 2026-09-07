@@ -2035,6 +2035,32 @@ run_mutation "keymap: mod = ctrl is refused" \
   '        Some("ctrl-never") => (' \
   geode-shell mod_alias_ctrl_is_refused_with_an_error_and_the_default_stands
 
+# ---- Phase 4a Task 5: dimension pickers (spec §3.3-3.4)
+
+run_mutation "picker: the request omits the column's own selection" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    minus_own.dimensions.retain(|d| d.column != column);' \
+  '    let _ = &minus_own;' \
+  geode-shell the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_scope_change
+
+run_mutation "picker: a stale outcome is dropped" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if *column != outcome.column || outcome.tag != state.tag {' \
+  '        if *column != outcome.column || false {' \
+  geode-shell a_stale_distinct_outcome_is_dropped
+
+run_mutation "picker: an empty tick set drops the chip" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        if !self.ticked.is_empty() {' \
+  '        if true {' \
+  geode-shell apply_replaces_the_columns_selection_and_an_empty_tick_set_drops_it
+
+run_mutation "pickable: keys are not pickable" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        for column in dataset.categorical_columns() {' \
+  '        for column in dataset.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>() {' \
+  geode-shell pickable_columns_are_every_categorical_column_plus_derived_dimensions
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

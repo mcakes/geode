@@ -518,7 +518,11 @@ const WIDTH: f32 = 560.0;
 /// well within what a plain scrollable `div`
 /// handles without virtualization — see `ROW_HEIGHT` below for how this
 /// becomes a pixel height.
-const VISIBLE_ROWS: usize = 12;
+///
+/// `pub(crate)` since the dimension pickers (Phase 4a §3.3): `shell::
+/// picker`'s values list is a `uniform_list`, sized to this same rhythm
+/// rather than growing its own rows-visible constant.
+pub(crate) const VISIBLE_ROWS: usize = 12;
 
 /// Estimated row height in pixels (`px_2`/`py_1` padding plus one line of
 /// default-size text) — used only to size the scrollable viewport to
@@ -526,7 +530,9 @@ const VISIBLE_ROWS: usize = 12;
 /// be for a hand-rolled offset calculation, because scroll-follow here goes
 /// through `gpui::ScrollHandle::scroll_to_item`, which measures real
 /// per-row layout bounds rather than trusting this estimate.
-const ROW_HEIGHT: f32 = 28.0;
+///
+/// `pub(crate)` — see [`VISIBLE_ROWS`]'s own doc comment.
+pub(crate) const ROW_HEIGHT: f32 = 28.0;
 
 /// Render one row title with its [`fuzzy_match`]ed characters styled —
 /// `cx.theme().primary` plus a bold weight (plan constraint: no raw

@@ -17,6 +17,7 @@ pub mod keys;
 mod occupants;
 mod palette_ctl;
 pub mod perf_overlay;
+pub mod picker;
 #[cfg(feature = "profiling")]
 pub mod profiling_hook;
 mod render;
@@ -50,6 +51,9 @@ use crate::theme::ThemeService;
 use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
+use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::{DistinctOutcome, QueryKey};
+use geode_core::schema::{ColumnRole, SchemaSpec};
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
@@ -81,11 +85,22 @@ pub struct ShellServices {
     pub restored_frame: Option<crate::session::FrameRecord>,
 }
 
-/// What `ShellView` tells the rest of the app about a config reload (§4.5).
-/// The app bridge (`geode-app`, which alone may touch `geode-data`)
-/// subscribes to these to know when the views it feeds the data thread
-/// need re-sending, and when to tell the user a restart is needed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What `ShellView` tells the rest of the app about a config reload (§4.5)
+/// — plus, since the dimension pickers (Phase 4a §3.3/§3.4), the one thing
+/// it needs the app bridge to do FOR it, since `geode-shell` cannot depend
+/// on `geode-data` (CLAUDE.md): submit a `Request::Distinct`. The app
+/// bridge (`geode-app`, which alone may touch `geode-data`) subscribes to
+/// these to know when the views it feeds the data thread need re-sending,
+/// when to tell the user a restart is needed, and — for `DistinctRequested`
+/// — to call `DataHandle::distinct` and route the outcome back through
+/// [`ShellView::deliver_distinct`].
+///
+/// `PartialEq` only, not `Eq` — `DistinctParams` carries a `Scope`, whose
+/// own expression filter can hold a float literal (`Literal::Num(f64)`,
+/// `geode_core::scope::expr`) and so stops at `PartialEq` itself; every
+/// existing use of this derive (`events.contains(&ShellEvent::
+/// ConfigReloaded)`, `shell/tests/reload.rs`) only ever needed `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
@@ -96,9 +111,96 @@ pub enum ShellEvent {
     /// slot labels (pure presentation) are still replaced immediately;
     /// this event is only about what the data engine cannot pick up live.
     RestartRequired(String),
+    /// A dimension picker (`shell::picker`) needs distinct values for one
+    /// column, scoped by everything except that column's own selection
+    /// (spec §3.4) — the caller has already done that removal. The bridge
+    /// calls `handle.distinct(params)`; the result comes back as
+    /// `DataEvent::Distinct`, which the bridge routes to
+    /// [`ShellView::deliver_distinct`].
+    DistinctRequested(geode_core::query::DistinctParams),
 }
 
 impl EventEmitter<ShellEvent> for ShellView {}
+
+/// The coalescing key the dimension pickers submit their `Request::
+/// Distinct` under (spec §3.4). Reserved, not user-reachable: every real
+/// tile's query key comes from `TileId` (spec §2.4), which is a small
+/// sequential counter nowhere near `u64::MAX`, so this can never collide
+/// with a live tile. `ShellView::deliver` (the `QueryOutcome` route) never
+/// sees this key — a picker's own outcome arrives as `DataEvent::Distinct`
+/// instead and is routed to [`ShellView::deliver_distinct`], a separate
+/// method with its own stale-tag/stale-column guard.
+pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
+
+/// One column a dimension picker can open (spec §3.3): every categorical
+/// column of every dataset, plus every derived dimension. `role` is
+/// `"dimension"` for a real `ColumnRole::Dimension` column, `"attribute"`
+/// for any other categorical column (an attribute that opted in via
+/// `categorical = true`), and `"derived"` for a `[dimensions]` entry —
+/// see [`pickable_columns`]. `datasets` lists every dataset the column
+/// appears in (first-seen order, appended as more datasets carry it);
+/// empty for a derived dimension, which is desk config rather than a real
+/// dataset column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pickable {
+    pub column: String,
+    pub role: &'static str,
+    pub datasets: Vec<String>,
+}
+
+/// Every column a picker can open, in schema order: for each dataset (in
+/// the order `SchemaSpec::from_doc` parsed them), every
+/// `DatasetSpec::categorical_columns()` entry becomes (or, if a later
+/// dataset carries the same column name, extends) a [`Pickable`] —
+/// first-seen order, so a column carried by two datasets appears once,
+/// where it was first seen, with both datasets listed. Every derived
+/// dimension (`[dimensions]`, `DerivedDimensions::all()`) is appended
+/// after, role `"derived"`. A key column (`ColumnRole::Key`) is never
+/// categorical by default (`SchemaSpec`'s own test,
+/// `categorical_defaults_true_for_dimensions_and_false_otherwise...`), so
+/// it never reaches `categorical_columns()` and is never pickable.
+///
+/// Stored on `ShellView.pickable` at construction
+/// (`ShellView::new`) and rebuilt by `hot_reload::apply_reload` whenever
+/// `datasets` or `dimensions` changes (§4.5) — the same "changed" check
+/// `hot_reload::rebuild_slots`'s callers already make for those two docs.
+pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+
+    let mut out: Vec<Pickable> = Vec::new();
+    for dataset in &schema.datasets {
+        for column in dataset.categorical_columns() {
+            if let Some(p) = out.iter_mut().find(|p| p.column == column) {
+                p.datasets.push(dataset.name.clone());
+                continue;
+            }
+            let role = match dataset.column(column).map(|c| c.role) {
+                Some(ColumnRole::Dimension { .. }) => "dimension",
+                _ => "attribute",
+            };
+            out.push(Pickable {
+                column: column.to_string(),
+                role,
+                datasets: vec![dataset.name.clone()],
+            });
+        }
+    }
+    for dim in dims.all() {
+        out.push(Pickable {
+            column: dim.name.clone(),
+            role: "derived",
+            datasets: Vec::new(),
+        });
+    }
+    out
+}
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution
@@ -433,6 +535,28 @@ pub struct ShellView {
     /// [`set_data_status`](Self::set_data_status); this field is plain
     /// display state, same as `restart_required` two fields up.
     data_status: Option<String>,
+    /// Every column a dimension picker can open (Phase 4a §3.3),
+    /// [`pickable_columns`] over the current config — computed once at
+    /// construction and rebuilt by `hot_reload::apply_reload` whenever
+    /// `datasets`/`dimensions` changes, the same lifecycle
+    /// `sources_baseline`/`datasets_baseline` two fields up describe for a
+    /// config-derived cache. `defaults::register_pick_actions` is handed
+    /// this same list once at startup (`main.rs`, `test_services`) to
+    /// register one `frame::pick_<column>` action per entry — the action
+    /// registry itself never changes at runtime (module doc,
+    /// `keybindings_view`), so a column a later reload adds has no
+    /// palette-reachable action of its own; picking it still works via
+    /// `frame::pick`'s two-stage flow.
+    pickable: Vec<Pickable>,
+    /// The open dimension picker's own pure state (Phase 4a §3.3), or
+    /// `None` when closed/never opened — the `keybindings`/`settings`
+    /// fields' own contract, minus a sibling `gpui` scroll handle: the
+    /// values list is a `uniform_list` (self-virtualizing, no
+    /// `ScrollHandle` to track across frames the way `keybindings_scroll`/
+    /// `settings_scroll` do). Set fresh by [`picker::open`] each time and
+    /// cleared by [`close_modal`](Self::close_modal), same as the other
+    /// two dialogs.
+    picker: Option<picker::PickerState>,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -573,7 +697,7 @@ impl ShellView {
             }
             let query = input.read(cx).value().to_string();
             // Route to whichever dialog is actually open. `close_modal`
-            // clears both fields, so at most one is `Some` here — the
+            // clears all three fields, so at most one is `Some` here — the
             // routing cannot land in a stale state left over from an
             // earlier open.
             if let Some(state) = view.keybindings.as_mut() {
@@ -582,6 +706,13 @@ impl ShellView {
             } else if let Some(state) = view.settings.as_mut() {
                 state.set_query(query);
                 view.settings_scroll.scroll_to_item(0);
+            } else if let Some(state) = view.picker.as_mut() {
+                // No `set_query` method (unlike the two dialogs above) —
+                // `PickerState` has no other side effect to bundle with a
+                // query edit, so the two-line reset lives here rather than
+                // behind a one-line wrapper with a single caller.
+                state.query = query;
+                state.selected = 0;
             }
             cx.notify();
         })
@@ -754,6 +885,9 @@ impl ShellView {
         // `sources_baseline`'s field doc.
         let sources_baseline = services.config.layered_docs("sources").to_vec();
         let datasets_baseline = services.config.layered_docs("datasets").to_vec();
+        // The dimension pickers' column list (Phase 4a §3.3) — see
+        // `pickable`'s field doc.
+        let pickable = pickable_columns(&services.config);
 
         Self {
             services,
@@ -796,6 +930,8 @@ impl ShellView {
             sources_baseline,
             datasets_baseline,
             data_status: None,
+            pickable,
+            picker: None,
         }
     }
 
@@ -808,14 +944,16 @@ impl ShellView {
     /// backdrop listeners, all go through this rather than setting
     /// `self.modal = None` directly.
     ///
-    /// Also clears both dialogs' state. That is not tidiness: the shared
-    /// `dialog_input` subscription routes by "whichever state is `Some`",
-    /// so a stale `settings` left behind by an earlier open would
-    /// swallow the *keybinding* dialog's queries.
+    /// Also clears all three dialogs' state (`keybindings`, `settings`,
+    /// and — since the dimension pickers, Phase 4a §3.3 — `picker`). That
+    /// is not tidiness: the shared `dialog_input` subscription routes by
+    /// "whichever state is `Some`", so a stale `settings` left behind by
+    /// an earlier open would swallow the *keybinding* dialog's queries.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.settings = None;
         self.keybindings = None;
+        self.picker = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -917,6 +1055,32 @@ impl ShellView {
     /// The shared frame entity every occupant holds (§4).
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
+    }
+
+    /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by
+    /// the app bridge from the `ShellEvent::DistinctRequested` it submitted
+    /// on this same picker's behalf. Dropped — no picker mutation, no
+    /// notify — unless every one of these holds: a picker is open, its
+    /// stage is `Values` (a `Columns`-stage picker asked for nothing and
+    /// wants nothing), the outcome names that stage's own column (a picker
+    /// that moved on to a different column between request and reply), and
+    /// the outcome's tag matches the picker's *latest* `request_values`
+    /// call (`PickerState::tag`, bumped once per request) — an outcome
+    /// racing in from a superseded request (the user re-opened the same
+    /// column, or the query pool simply finished them out of order) is
+    /// exactly the stale result §7.3 says must never be rendered.
+    pub fn deliver_distinct(&mut self, outcome: DistinctOutcome, cx: &mut Context<Self>) {
+        let Some(state) = self.picker.as_mut() else {
+            return;
+        };
+        let picker::Stage::Values { column } = &state.stage else {
+            return;
+        };
+        if *column != outcome.column || outcome.tag != state.tag {
+            return;
+        }
+        state.values = Some(outcome.values);
+        cx.notify();
     }
 }
 

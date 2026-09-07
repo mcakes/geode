@@ -11,13 +11,15 @@ use std::rc::Rc;
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
-use geode_shell::defaults::{BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions};
+use geode_shell::defaults::{
+    BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
+};
 use geode_shell::fonts;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
 use geode_shell::session;
-use geode_shell::shell::{ShellServices, ShellView};
+use geode_shell::shell::{ShellServices, ShellView, pickable_columns};
 use geode_shell::theme;
 use geode_shell::tiling::{TileId, Workspaces};
 use geode_shell::vimfind::FindStyle;
@@ -256,6 +258,11 @@ fn build_shell_services(
 
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
+    // The dimension pickers' per-column actions (Phase 4a §3.3): from the
+    // loaded schema, right after the shell's own builtins and before the
+    // keymap builds — `register_pick_actions`' own doc comment has the
+    // full ordering rationale.
+    register_pick_actions(&mut registry, &pickable_columns(&config));
 
     // The default kind is read from `[app] modules.default`, "blotter"
     // when unset.

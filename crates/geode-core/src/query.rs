@@ -48,7 +48,13 @@ pub struct QueryOutcome {
 /// rows the frame's scope — with this column's own selection removed by
 /// the caller — would leave, across every dataset that carries the
 /// column.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` (not `Eq` — `Scope` itself stops at `PartialEq`, since a
+/// scope's expression can carry a float literal) so `ShellEvent::
+/// DistinctRequested(DistinctParams)` (`geode_shell::shell`) can still be
+/// compared in a test's recorded-events `Vec` the way every other
+/// `ShellEvent` variant already is.
+#[derive(Debug, Clone, PartialEq)]
 pub struct DistinctParams {
     pub key: QueryKey,
     pub tag: u64,

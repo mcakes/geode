@@ -18,7 +18,7 @@ use crate::vimfind;
 use crate::{fontsize, theme};
 
 use super::keys::convert_keystroke;
-use super::{ShellView, keybindings_view, settings_view};
+use super::{ShellView, keybindings_view, picker, settings_view};
 
 impl ShellView {
     /// The active context stack for key resolution, outermost first:
@@ -211,6 +211,17 @@ impl ShellView {
             // mod+/ (spec §3.11): focus the scope bar's live text field
             // from anywhere in the shell.
             self.focus_text_field(window, cx);
+        } else if action.0 == "frame::pick" {
+            // mod+p (spec §3.3): the two-stage dimension picker, opened on
+            // the column-choice stage.
+            picker::open(self, None, window, cx);
+        } else if let Some(column) = action.0.strip_prefix("frame::pick_") {
+            // A per-column `frame::pick_<column>` action
+            // (`defaults::register_pick_actions`) — unbound by default,
+            // palette-reachable as "Pick: <column>", or bindable by a
+            // user keymap. Opens the picker straight onto that column's
+            // values stage.
+            picker::open(self, Some(column.to_string()), window, cx);
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`

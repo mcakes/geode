@@ -125,6 +125,7 @@ context = "workspace"
 "mod+z" = "frame::scope_undo"
 "mod+shift+z" = "frame::scope_redo"
 "mod+/" = "frame::focus_text"
+"mod+p" = "frame::pick"
 
 [[bindings]]
 context = "tile"
@@ -415,6 +416,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::scope_undo", "Undo scope change", "Frame");
     action(reg, "frame::scope_redo", "Redo scope change", "Frame");
     action(reg, "frame::scope_clear", "Clear scope", "Frame");
+    // The dimension picker (Phase 4a §3.3), opened on the column-choice
+    // stage — `mod+p`. The per-column `frame::pick_<column>` actions
+    // (opening straight onto one column's values stage) are registered
+    // separately, from the loaded schema, by `register_pick_actions`
+    // below: this crate cannot register them here because there is no
+    // schema to enumerate at `register_builtin_actions`' own call site
+    // (before any config is loaded).
+    action(reg, "frame::pick", "Pick a dimension", "Frame");
     // The scope bar's live text field (Phase 4a §3.11): `mod+/` moves
     // focus into it from anywhere in the shell, the one keyboard route
     // in (typing itself, once focused, needs no action — the field's own
@@ -448,6 +457,27 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // unregistered — see `BLOTTER_ACTION_DEFS`'s doc comment.
     for (id, title) in BLOTTER_ACTION_DEFS {
         action(reg, id, title, "Blotter");
+    }
+}
+
+/// `frame::pick_<column>` for every pickable column (Phase 4a §3.3).
+/// Registered at startup from the loaded schema — `main.rs` calls this
+/// right after [`register_builtin_actions`] and before `build_keymap`,
+/// over `shell::pickable_columns(&config)` — so the palette lists `Pick:
+/// <column>` for each one and a keymap can bind e.g. `mod+b =
+/// "frame::pick_book"`. Unlike `register_builtin_actions`, the action ids
+/// this produces depend on config, so `test_services` (the shell crate's
+/// own test fixture) calls this too, over its (empty) config, so the
+/// startup-ordering path is exercised even when there is nothing to
+/// register — the loop below is simply a no-op then.
+pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::Pickable]) {
+    for c in columns {
+        action(
+            reg,
+            &format!("frame::pick_{}", c.column),
+            &format!("Pick: {}", c.column),
+            "Frame",
+        );
     }
 }
 

@@ -208,7 +208,46 @@ pub struct ShellModal {
 ///    — so calling `cx.propagate()` from our own action would simply hand
 ///    the keystroke on to `Search` right after.)
 ///
-/// 3. **`tab`**, scoped to `"GeodeCommandLine"` (Phase 3 §3.4). The
+/// 3. **`ctrl-a`**, scoped to `"GeodeModal > Input"` (Phase 4a §3.3, the
+///    dimension pickers) — a compound predicate, not the bare
+///    `"GeodeModal"` bullet 1 uses, for a reason worth spelling out: it
+///    was tried first, and it does not work. `KeyBindingContextPredicate::
+///    depth_of` (pinned checkout, `crates/gpui/src/keymap/context.rs`)
+///    resolves an `Identifier("GeodeModal")` predicate at the tree depth
+///    of the *panel* div that carries that context — an ANCESTOR of the
+///    focused `Input`, hence *shallower* than gpui-component's own
+///    `"Input"`-scoped `SelectAll`/`MoveHome` binding — and depth strictly
+///    outranks declaration order (`Keymap::bindings_for_input`'s own doc
+///    comment: "Precedence is defined by the depth in the tree ... in the
+///    case of multiple bindings at the same depth, the ones added later
+///    take precedence"), so a bare `"GeodeModal"` reclaim here is simply
+///    never reached: the deeper, unrelated `Input` binding always wins
+///    first, exactly backwards from bullet 1's `tab` case (there the
+///    competing `Root` binding sits ABOVE `"GeodeModal"`, so the deeper
+///    reclaim wins outright). `"GeodeModal > Input"` (gpui's `Descendant`
+///    predicate, `parent > child`) instead resolves at exactly the same
+///    depth as a bare `"Input"` predicate would (its own `child` half is
+///    still an `Identifier` evaluated against the *deepest* context, so
+///    `depth_of` finds the same maximal depth either way) while still
+///    only matching where a `GeodeModal` ancestor is actually present —
+///    turning `"Input"`'s own depth-tie into a same-depth declaration-
+///    order tie, which `init_reclaimed_keybindings` wins by running after
+///    `gpui_component::init` (same ordering bullet 2 already relies on).
+///    gpui-component binds `ctrl-a` in the `"Input"` context on every
+///    platform, just to two different actions — `SelectAll` off macOS,
+///    `MoveHome` (the emacs idiom) on it (same file as bullet 2's
+///    `ctrl-f`) — and the picker's values stage needs the key for its own
+///    "tick every value the filter currently shows"
+///    (`shell::picker::PickerState::tick_all_shown`). Scoped narrower than
+///    `ctrl-f`'s app-wide reclaim on purpose: unlike that dead-weight
+///    `Search` action, `ctrl-a` is a real, useful affordance in every
+///    OTHER focused `Input` in this app (the scope bar's text field, the
+///    command line, …), so reclaiming it everywhere would take away a
+///    working shortcut nobody asked to lose — the `Descendant` predicate
+///    is what lets this reclaim stay scoped to the picker's own modal
+///    surface without losing bullet 2's registration-order trick.
+///
+/// 4. **`tab`**, scoped to `"GeodeCommandLine"` (Phase 3 §3.4). The
 ///    per-tile command line's own input reuses gpui-component's `Input`
 ///    single-line, same as every other field here, so it hits the exact
 ///    same `Root`-swallows-`tab` problem bullet 1 fixes for modals — but
@@ -228,14 +267,21 @@ pub struct ShellModal {
 /// that could drift, and the only way
 /// `tab_and_shift_tab_step_the_selected_value` (`shell::tests`) actually
 /// proves the `tab` mechanism instead of merely assuming it holds in
-/// production. There is no equivalent test for `ctrl-f`: the behaviour it
-/// fixes only manifests on a non-macOS build with a real focused input,
-/// which this environment cannot exercise.
+/// production — `shell::tests::picker`'s own e2e test drives the picker's
+/// `tab` (toggle) AND `ctrl-a`/`ctrl-x` (tick-all/clear-all) through the
+/// identical real pipeline, so bullet 1's mechanism is proven twice over
+/// and bullet 3's is proven directly: since gpui-component binds `ctrl-a`
+/// to `MoveHome` even on macOS (bullet 3's own doc), this environment
+/// exercises a real collision, unlike `ctrl-f`'s below. There is no
+/// equivalent test for `ctrl-f`: the behaviour it fixes only manifests on
+/// a non-macOS build with a real focused input, which this environment
+/// cannot exercise.
 pub fn init_reclaimed_keybindings(cx: &mut App) {
     cx.bind_keys([
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModal")),
         gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModal")),
         gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
+        gpui::KeyBinding::new("ctrl-a", gpui::NoAction, Some("GeodeModal > Input")),
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
     ]);
 }

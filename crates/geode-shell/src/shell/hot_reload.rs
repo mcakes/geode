@@ -19,7 +19,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::schema::SchemaSpec;
 
-use super::{ShellEvent, ShellView, docs_equal};
+use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
 
 /// How often the background reload watcher polls the watched config
 /// directories' `*.toml` mtimes (brief: "~500ms"). File scanning and
@@ -183,6 +183,13 @@ impl ShellView {
                 changed("groupings") || changed("datasets") || changed("dimensions");
             let scopes_changed = changed("scopes") || changed("datasets") || changed("dimensions");
             let views_changed = changed("views") || changed("dimensions");
+            // The dimension pickers' column list (Phase 4a §3.3):
+            // `pickable_columns` depends on exactly `datasets` (categorical
+            // columns) and `dimensions` (derived dimensions) — the same
+            // pair `groupings_changed`/`scopes_changed` already check
+            // alongside their own doc, so this reuses `changed` rather than
+            // re-deriving the condition.
+            let pickable_changed = changed("datasets") || changed("dimensions");
             // M8 (3b final review): compared against the docs the running
             // data engine was actually built from
             // (`sources_baseline`/`datasets_baseline`), not against the
@@ -207,6 +214,10 @@ impl ShellView {
             // Cheap re-derive; `render` applies it only when it changed.
             self.font_size = FontSize::from_config(&self.services.config);
             self.find_style = FindStyle::from_config(&self.services.config);
+
+            if pickable_changed {
+                self.pickable = pickable_columns(&self.services.config);
+            }
 
             if theme_changed {
                 self.services

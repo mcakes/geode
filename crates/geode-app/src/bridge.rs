@@ -186,8 +186,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     cx.subscribe(&shell, {
         let handle = handle.clone();
         let factory = factory.clone();
-        move |shell, event: &ShellEvent, cx| {
-            if let ShellEvent::ConfigReloaded = event {
+        move |shell, event: &ShellEvent, cx| match event {
+            ShellEvent::ConfigReloaded => {
                 let config = shell.read(cx).config();
                 let Some(views_doc) = config.doc("views") else {
                     return;
@@ -211,6 +211,16 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 factory.set_stale_after(stale_after_from_config(config));
                 handle.replace_views(views, dims);
             }
+            // The dimension pickers (Phase 4a §3.3/§3.4): `geode-shell`
+            // cannot depend on `geode-data` (CLAUDE.md), so a picker's
+            // request leaves the shell as this event instead of a direct
+            // `DataHandle::distinct` call — this is the one place that
+            // call actually happens. The outcome comes back on the
+            // `DataEvent` drain loop below, routed to `deliver_distinct`.
+            ShellEvent::DistinctRequested(params) => {
+                handle.distinct(params.clone());
+            }
+            ShellEvent::RestartRequired(_) => {}
         }
     })
     .detach();
@@ -278,9 +288,14 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             eprintln!("[data] {d}");
                         }
                     }
-                    // The picker that asks for this (spec §3.4) is not
-                    // wired up yet — a later Phase 4a task consumes it.
-                    DataEvent::Distinct(_) => {}
+                    // The dimension picker's own outcome (spec §3.4),
+                    // paired with the `DistinctRequested` submission
+                    // above. `deliver_distinct` carries its own
+                    // stale-tag/stale-column/no-picker-open guard, so
+                    // nothing here needs to check the key or tag itself.
+                    DataEvent::Distinct(outcome) => {
+                        shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                    }
                 }
             });
             if handled.is_err() {

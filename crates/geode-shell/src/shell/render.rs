@@ -24,7 +24,7 @@ use super::drag::{
     DividerDrag, DividerDragTarget, StripSpec, TILE_DRAG_GHOST_OFFSET, TILE_DRAG_GHOST_SIZE,
 };
 use super::{
-    ShellView, commandline_view, dialog, perf_overlay, sidebar, status, toolbar, whichkey,
+    ShellView, commandline_view, dialog, perf_overlay, picker, sidebar, status, toolbar, whichkey,
 };
 
 /// gpui hover-group name shared by every divider strip (drag-splitters
@@ -779,7 +779,24 @@ impl Render for ShellView {
                 });
             });
         };
-        let toolbar = toolbar::toolbar(&self.filter_input, &bar_model, on_chip_close, cx);
+        // The chip body opens the dimension picker on that column (Phase
+        // 4a §3.3) — `picker::open` needs `&mut ShellView`, so this reaches
+        // it the same way `on_chip_close` reaches `frame.update` above: a
+        // fresh `cx.entity()` handle, updated inside the closure.
+        let chip_open_entity = cx.entity();
+        let on_chip_open = move |column: &str, window: &mut Window, cx: &mut App| {
+            let column = column.to_string();
+            chip_open_entity.update(cx, |view, cx| {
+                picker::open(view, Some(column), window, cx);
+            });
+        };
+        let toolbar = toolbar::toolbar(
+            &self.filter_input,
+            &bar_model,
+            on_chip_close,
+            on_chip_open,
+            cx,
+        );
 
         let body = h_flex()
             .w_full()
