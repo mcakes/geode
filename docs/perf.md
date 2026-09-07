@@ -567,19 +567,39 @@ first place (`textual` on a column no grain can route is already a
 load-time error; a key column that *can* be routed but has a
 one-per-row vocabulary is a schema choice, not a bug).
 
-**Not yet measured on a display: the per-keystroke painted frame.**
+**The per-keystroke painted frame, measured on a display (2026-09-07).**
 Everything above is the query-path benchmark (submit→snapshot on the
-pool, no gpui). The end-to-end reading — what a trader's keystroke
-actually costs, submit to painted frame — needs the same live-window
-measurement the "Phase 3: the painted frame" section above records,
-and this sandbox has no compositor to take it, so the recipe is
-recorded here as a template, same precedent as that section: run
-`cargo run --release -p geode-app -- --demo 1000000`, open the scope
-bar's text field (`mod+/`), reset the perf overlay's counters
-(`perf::reset`, palette-only), type five characters of a needle that
-matches nothing (e.g. `zzz`), and read the overlay's **requery** row
-(submit→snapshot + snapshot→paint) after each keystroke settles,
-recording the p50 and p95 across the five. That is the reading spec
-§1.2's "typing in the scope bar narrows every blotter as you type, one
-requery per keystroke, ... inside the §7.1 budget" needs on a display,
-and it belongs in this section once taken.
+pool, no gpui). The end-to-end reading was taken by hand on
+`a7fa6a1`: `cargo run --release -p geode-app -- --demo 1000000`, the
+scope bar's text field (`mod+/`), `perf::reset`, a needle matching
+nothing (`zzz`) typed one character at a time, the overlay's
+**requery** row read after the last keystroke settled:
+
+| Reading | submit→snapshot | snapshot→paint |
+|---|---|---|
+| `zzz` typed into the bar, demo `tree` view, 1M rows | **78 ms** | 3.5 ms |
+
+**That misses the §7.1 <50 ms budget on the query half.** The paint
+half is well inside it, so the miss is in DuckDB, not gpui. Three
+things separate this from the bench's 33.4 ms
+(`zzz`, depth 2, keys textual — the row this schema shape maps to):
+
+1. The demo schema marks `position_ref` and `instrument_ref` textual.
+   Both are keys, so their `ILIKE` is the residual row scan the bench
+   isolates at +13 ms; on the demo's four-grain `tree` view (position,
+   underlying and pair measures — `cross_gamma02` is pair grain) that
+   scan runs once per measure grain, not once.
+2. The demo `tree` view spans three measure grains where the bench's
+   spans two; each is one aggregate subquery per requery.
+3. A typed sequence queues: keystroke *n+1* is submitted while *n* is
+   still running, and the overlay's submit→snapshot includes the wait
+   (the pool interrupts the superseded query but the new one still
+   waits for the worker). A single keystroke after a pause is the
+   per-query cost; the reading above is the typed-burst cost.
+
+Not yet separated: the same reading for one keystroke after a pause
+(isolates 3), and with `textual` removed from the two key columns in
+`examples/demo-config/datasets.toml` (isolates 1). The honest lever, if
+1 dominates, is a schema decision: a text search over a million-row
+key column is exactly what the ENUM path cannot make cheap, and the
+desk decides whether `position_ref` belongs in the text filter at all.
