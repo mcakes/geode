@@ -400,6 +400,33 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
     assert_eq!(binding.keystrokes[1].mods, Modifiers::NONE);
 }
 
+/// Fix round 1, Finding 2: `dialog::init_reclaimed_keybindings`'s `ctrl-a`
+/// reclaim is scoped to `"GeodeModal > Input"` — every Geode modal's
+/// `Input`, not just the picker's own (that reclaim's doc comment used to
+/// overclaim the opposite). This dialog's shared filter is exactly such
+/// an `Input`, so `ctrl-a` here must be swallowed (never reaching
+/// gpui-component's own `SelectAll`/`MoveHome` binding, which would
+/// otherwise select-all-then-overtype or jump the caret home) while the
+/// filter keeps accepting ordinary typed text around it.
+#[gpui::test]
+fn ctrl_a_is_reclaimed_inside_the_filter_but_typing_still_works(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_input("foo");
+    cx.simulate_keystrokes("ctrl-a");
+    cx.simulate_input("bar");
+
+    let query = shell.read_with(&cx, |shell, _| {
+        shell.keybindings.as_ref().unwrap().query.clone()
+    });
+    assert_eq!(
+        query, "foobar",
+        "ctrl-a must be inert (NoAction) here, not gpui-component's own \
+         SelectAll (which would have made 'bar' replace 'foo') or MoveHome \
+         (which would have inserted it before 'foo') — either would leave \
+         something other than 'foobar'"
+    );
+}
+
 /// A real mouse click selects a different row (`debug_bounds` gives the
 /// row's real painted coordinates, same technique
 /// `mouse_down_on_a_tile_focuses_it` and the settings-panel click tests

@@ -1679,137 +1679,41 @@ run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted d
   geode-app \
   the_demo_layer_is_complete_and_points_sources_at_the_directory
 
-# Fix round 1, Finding 1: every branch of the drain loop, not just
-# `Query`, must reach the shell through `window.update` and end the task
-# the first time the window is gone. This entry restores the pre-fix
-# shape — only `Query` routes through `window.update`; the dropped-events
-# status update, `Published`, and `Health` go back to a bare `cx.update`
-# on a standalone `Entity<ShellView>` clone the task keeps alive forever
-# — so a `Health` event sent after the window closes no longer ends the
-# task, which is exactly what the covering test sends and checks for.
+# Fix round 1, Finding 4 (harness ANCHOR-MISSING): the anchor above used
+# to span the drain loop's ENTIRE match arm-by-arm, which is why it kept
+# going stale — Task 2 added the `Distinct` arm, Task 3 changed
+# `Published`, Task 5 replaced the inert `Distinct` arm with a real one,
+# and each touch broke this entry even though none of them touched the
+# behaviour it claims to guard. Re-anchored on the smallest fragment that
+# still reproduces the pre-fix bug for one arm without naming the match
+# at all: capture a SECOND, standalone `Entity<ShellView>` clone
+# (`shell_direct`, taken once at `attach` time, independent of the
+# window — the doc comment two lines up explains why that matters: an
+# entity update through it succeeds forever, window or no) and route
+# just the `Health` arm through it via a bare `cx.update`, short-
+# circuiting with `continue` BEFORE the shared `window.update` call ever
+# runs for that event. `Health` (not `Diagnostics`) is picked because
+# it's what the covering test below already sends after closing the
+# window, and neither arm is one a later Phase 4a task is expected to
+# touch the way `Distinct`/`Published` were.
 run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
   crates/geode-app/src/bridge.rs \
-  '            let handled = window.update(cx, |root, window, cx| {
-                let Ok(shell) = root.view().clone().downcast::<ShellView>() else {
-                    return;
-                };
-                if now_dropped != last_dropped {
-                    shell.update(cx, |s, cx| {
-                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
-                    });
-                }
-                match event {
-                    DataEvent::Query(outcome) => {
-                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
-                    }
-                    DataEvent::Published {
-                        dataset,
-                        batch,
-                        gen_id,
-                        books,
-                    } => {
-                        eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
-                        let frame = shell.read(cx).frame().clone();
-                        // The event carries no timestamp of its own; the
-                        // arrival instant is what a "recent publishes"
-                        // preset needs (Phase 4a §3.12).
-                        let publish = geode_shell::frame::Publish {
-                            dataset,
-                            batch,
-                            books: books.len(),
-                            at: chrono::Utc::now(),
-                        };
-                        frame.update(cx, |f, cx| {
-                            f.note_published(publish);
-                            cx.notify();
-                        });
-                    }
-                    DataEvent::Health {
-                        source,
-                        worst,
-                        detail,
-                    } => {
-                        eprintln!("[data] health {source}: {} — {detail}", worst.label());
-                        shell.update(cx, |s, cx| {
-                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
-                        });
-                    }
-                    DataEvent::Diagnostics(diags) => {
-                        for d in diags {
-                            eprintln!("[data] {d}");
-                        }
-                    }
-                    // The picker that asks for this (spec §3.4) is not
-                    // wired up yet — a later Phase 4a task consumes it.
-                    DataEvent::Distinct(_) => {}
-                }
-            });
-            if handled.is_err() {
-                return; // the window is gone
-            }
-            last_dropped = now_dropped;' \
-  '            if now_dropped != last_dropped {
+  '    cx.spawn(async move |cx: &mut AsyncApp| {
+        let mut last_dropped = 0u64;
+        while let Ok(event) = rx.recv().await {
+            let now_dropped = dropped.load(Ordering::Relaxed);' \
+  '    let shell_direct = shell.clone();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let mut last_dropped = 0u64;
+        while let Ok(event) = rx.recv().await {
+            let now_dropped = dropped.load(Ordering::Relaxed);
+            if let DataEvent::Health { source, worst, detail } = &event {
+                eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                shell_direct.update(cx, |s, cx| {
+                    s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                });
                 last_dropped = now_dropped;
-                cx.update(|cx| {
-                    shell.update(cx, |s, cx| {
-                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
-                    });
-                });
-            }
-            let outcome = match event {
-                DataEvent::Query(outcome) => Some(outcome),
-                DataEvent::Published {
-                    dataset,
-                    batch,
-                    gen_id,
-                    books,
-                } => {
-                    eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
-                    cx.update(|cx| {
-                        let frame = shell.read(cx).frame().clone();
-                        let publish = geode_shell::frame::Publish {
-                            dataset,
-                            batch,
-                            books: books.len(),
-                            at: chrono::Utc::now(),
-                        };
-                        frame.update(cx, |f, cx| {
-                            f.note_published(publish);
-                            cx.notify();
-                        });
-                    });
-                    None
-                }
-                DataEvent::Health {
-                    source,
-                    worst,
-                    detail,
-                } => {
-                    eprintln!("[data] health {source}: {} — {detail}", worst.label());
-                    cx.update(|cx| {
-                        shell.update(cx, |s, cx| {
-                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
-                        });
-                    });
-                    None
-                }
-                DataEvent::Diagnostics(diags) => {
-                    for d in diags {
-                        eprintln!("[data] {d}");
-                    }
-                    None
-                }
-                DataEvent::Distinct(_) => None,
-            };
-            if let Some(outcome) = outcome {
-                let delivered = window.update(cx, |root, window, cx| {
-                    if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                        shell.update(cx, |s, cx| s.deliver(outcome, window, cx));
-                    }
-                });
-                if delivered.is_err() {
-                    return; // the window is gone
-                }
+                continue;
             }' \
   geode-app \
   the_drain_task_ends_on_the_first_event_after_the_window_closes
@@ -2060,6 +1964,34 @@ run_mutation "pickable: keys are not pickable" \
   '        for column in dataset.categorical_columns() {' \
   '        for column in dataset.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>() {' \
   geode-shell pickable_columns_are_every_categorical_column_plus_derived_dimensions
+
+# Fix round 1, Finding 1: the values `uniform_list` must scroll to follow
+# `selected` past `palette::VISIBLE_ROWS`, or keyboard navigation goes
+# blind — the highlight leaves the viewport with only its index having
+# changed. Drop the actual `scroll_to_item` call `sync_picker_scroll`
+# makes (keeping `picker.selected`/`ScrollStrategy` referenced so the
+# mutant still compiles) and the covering test's `debug_bounds` on the
+# now off-screen (and, since `uniform_list` truly virtualizes, likely
+# unpainted) row 20 must fail.
+run_mutation "picker: the values list never scrolls to follow the selection" \
+  crates/geode-shell/src/shell/picker.rs \
+  '            shell
+                .picker_scroll
+                .scroll_to_item(picker.selected, ScrollStrategy::Nearest);' \
+  '            let _ = (&shell.picker_scroll, picker.selected, ScrollStrategy::Nearest);' \
+  geode-shell keyboard_navigation_past_visible_rows_scrolls_the_selection_into_view
+
+# Fix round 1, Finding 3: a scope chip's body click had no test — only
+# the close glyph's `on_chip_close` was e2e-covered. Drop the actual
+# `picker::open` call `on_chip_open`'s closure makes; the covering test's
+# real mouse click on `scope-chip-book` must then fail to open the modal.
+run_mutation "toolbar: the chip body click never opens the picker" \
+  crates/geode-shell/src/shell/render.rs \
+  '            chip_open_entity.update(cx, |view, cx| {
+                picker::open(view, Some(column), window, cx);
+            });' \
+  '            let _ = (&chip_open_entity, &column, &window, &cx);' \
+  geode-shell clicking_a_scope_chips_body_opens_the_picker_on_that_column
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

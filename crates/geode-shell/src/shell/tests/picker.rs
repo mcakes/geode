@@ -190,6 +190,76 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
 }
 
+/// Fix round 1, Finding 3: the scope chip's body click (`toolbar::
+/// on_chip_open`, wired in `render.rs`) had no test proving it actually
+/// opens the picker — only the close glyph's `on_chip_close` was
+/// e2e-covered. A real mouse click on `debug_bounds("scope-chip-book")`'s
+/// centre must land the picker on `Stage::Values { column: "book" }` and
+/// submit a real `DistinctRequested` for it, the same proof the keyed
+/// `frame::pick_book` action gets in the test above.
+#[gpui::test]
+fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    vcx.update(|_, cx| {
+        let requested = requested.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            if let ShellEvent::DistinctRequested(p) = e {
+                requested.borrow_mut().push(p.clone());
+            }
+        })
+        .detach();
+    });
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK000".into()],
+            }],
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+
+    let chip_bounds = vcx
+        .debug_bounds("scope-chip-book")
+        .expect("the book chip's body should have painted");
+    let center = gpui::point(
+        chip_bounds.origin.x + chip_bounds.size.width / 2.0,
+        chip_bounds.origin.y + chip_bounds.size.height / 2.0,
+    );
+    vcx.simulate_mouse_down(center, MouseButton::Left, gpui::Modifiers::none());
+    vcx.run_until_parked();
+
+    assert!(
+        shell.read_with(&vcx, |s, _| s.modal.is_some()),
+        "clicking the chip body should have opened the picker modal"
+    );
+    let stage = shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone()));
+    assert_eq!(
+        stage,
+        Some(crate::shell::picker::Stage::Values {
+            column: "book".to_string()
+        }),
+        "the picker should have opened straight onto the clicked chip's column"
+    );
+
+    let req = requested
+        .borrow()
+        .last()
+        .cloned()
+        .expect("a distinct request for book");
+    assert_eq!(req.column, "book");
+}
+
 #[gpui::test]
 fn a_stale_distinct_outcome_is_dropped(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services_with_pickable());
@@ -321,5 +391,74 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         books,
         vec!["BK000".to_string()],
         "the original scope is untouched"
+    );
+}
+
+/// Fix round 1, Finding 1: keyboard navigation past `palette::
+/// VISIBLE_ROWS` (12) must scroll the values `uniform_list`'s viewport
+/// to follow `selected` (`ShellView::picker_scroll`, driven by
+/// `picker::sync_picker_scroll`) — the same "prove the viewport actually
+/// followed, not just that an index changed" standard `palette`'s own
+/// `arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_
+/// view` test holds itself to, copied here for the picker's `uniform_
+/// list` (a different gpui scroll-follow type — see that module's doc
+/// comment — but the same observable contract).
+#[gpui::test]
+fn keyboard_navigation_past_visible_rows_scrolls_the_selection_into_view(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+
+    // 40 values — well past `VISIBLE_ROWS` (12) — so 20 `down`s below
+    // both leave the old screenful and land on a row `uniform_list`
+    // itself would never have painted without scroll-follow.
+    let values: Vec<(String, u64)> = (0..40).map(|i| (format!("BK{i:03}"), i as u64)).collect();
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag: 1,
+                column: "book".into(),
+                values: Ok(values),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    let downs = vec!["down"; 20].join(" ");
+    vcx.simulate_keystrokes(&downs);
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().selected),
+        20,
+        "20 real 'down' keystrokes should advance the selection to row 20"
+    );
+
+    vcx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+
+    let list_bounds = vcx
+        .debug_bounds("picker-values-list")
+        .expect("the values list container should have painted");
+    // Unlike the palette's plain scrollable `div` (every row always laid
+    // out), `uniform_list` is genuinely virtualizing: row 20 only paints
+    // at all once the viewport has scrolled to include it, so a missing
+    // `debug_bounds` here is itself proof scroll-follow didn't happen —
+    // not just "off-screen but present", as the palette's own version of
+    // this test gets to assume.
+    let row_bounds = vcx
+        .debug_bounds("picker-value-BK020")
+        .expect("row 20 (BK020) should have painted once scroll-follow brought it into view");
+    assert!(
+        list_bounds.intersects(&row_bounds),
+        "row 20 {row_bounds:?} should be scrolled into the visible list \
+         viewport {list_bounds:?} after the selection moved onto it, not \
+         left above/below it with only its index having changed"
     );
 }

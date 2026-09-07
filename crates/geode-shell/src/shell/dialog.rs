@@ -238,14 +238,27 @@ pub struct ShellModal {
 ///    `MoveHome` (the emacs idiom) on it (same file as bullet 2's
 ///    `ctrl-f`) — and the picker's values stage needs the key for its own
 ///    "tick every value the filter currently shows"
-///    (`shell::picker::PickerState::tick_all_shown`). Scoped narrower than
-///    `ctrl-f`'s app-wide reclaim on purpose: unlike that dead-weight
-///    `Search` action, `ctrl-a` is a real, useful affordance in every
-///    OTHER focused `Input` in this app (the scope bar's text field, the
-///    command line, …), so reclaiming it everywhere would take away a
-///    working shortcut nobody asked to lose — the `Descendant` predicate
-///    is what lets this reclaim stay scoped to the picker's own modal
-///    surface without losing bullet 2's registration-order trick.
+///    (`shell::picker::PickerState::tick_all_shown`).
+///
+///    What this actually reclaims: `"GeodeModal"` is [`render_modal`]'s
+///    OWN key context, present on every Geode modal's panel — not a
+///    context private to the picker — so this binding reaches `ctrl-a`
+///    inside every dialog's `Input` while a Geode modal is open: the
+///    keybinding dialog's and settings dialog's shared filter field
+///    (`dialog_input`, `filter_row`) lose native select-all/move-home
+///    exactly as much as the picker's own filter and values stage do.
+///    That is accepted, not a gap: select-all in a one-line filter box
+///    (the only `Input` any of these three dialogs render) is a workflow
+///    nobody uses on a single line short enough to see whole, so trading
+///    it away everywhere a Geode modal is open, in exchange for the
+///    picker's real "tick every value" affordance, costs nothing real —
+///    unlike bullet 2's app-wide `ctrl-f` reclaim, still scoped no wider
+///    than it needs to be: outside a Geode modal (the scope bar's text
+///    field, the command line, …), `ctrl-a` keeps working natively, since
+///    `"GeodeModal"` is absent from the context stack there. The
+///    `Descendant` predicate's job is purely the depth fix above — making
+///    the reclaim reach `ctrl-a` at all — not narrowing which modal it
+///    reaches inside.
 ///
 /// 4. **`tab`**, scoped to `"GeodeCommandLine"` (Phase 3 §3.4). The
 ///    per-tile command line's own input reuses gpui-component's `Input`

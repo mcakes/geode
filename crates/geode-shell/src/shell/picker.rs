@@ -27,9 +27,13 @@
 //! [`PickerState`] — `stage`, `selected`, `query`, `values`, `ticked`,
 //! `tag` — is pure (no `gpui`), stored on `ShellView` as `picker:
 //! Option<PickerState>`, exactly like `palette`/`keybindings`/`settings`.
-//! Unlike those three, it has no sibling `gpui::ScrollHandle`: the values
-//! list is a `uniform_list` (self-virtualizing; see [`build_values`]),
-//! which needs none.
+//! Its sibling scroll handle (`ShellView::picker_scroll`) is a
+//! `gpui::UniformListScrollHandle`, not the plain `gpui::ScrollHandle` the
+//! other three use: the `Values` stage's list is a `uniform_list`
+//! (self-virtualizing — see [`build_values`]), and `uniform_list` only
+//! tracks scroll-follow through its own handle type. See
+//! [`sync_picker_scroll`] for the call sites that keep it following
+//! `selected`.
 //!
 //! [`open`] is the only entry point (`frame::pick`/`frame::pick_<column>`,
 //! a chip body click) and the only place a `PickerState` is constructed —
@@ -44,7 +48,10 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Hsla, Window, div, px, uniform_list};
+use gpui::{
+    AnyElement, App, Context, Entity, Hsla, ScrollStrategy, UniformListScrollHandle, Window, div,
+    px, uniform_list,
+};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use geode_core::query::DistinctParams;
@@ -240,6 +247,7 @@ pub fn open(
         ticked: BTreeSet::new(),
         tag: 0,
     });
+    sync_picker_scroll(view);
     if let Some(Stage::Values { column }) = view.picker.as_ref().map(|p| p.stage.clone()) {
         request_values(view, &column, cx);
     }
@@ -321,11 +329,39 @@ fn commit_column(
         };
         p.selected = 0;
     }
+    sync_picker_scroll(shell);
     shell.dialog_input.update(cx, |input, cx| {
         input.set_value("", window, cx);
     });
     request_values(shell, &column, cx);
     cx.notify();
+}
+
+/// Scroll the picker's `Values`-stage `uniform_list` so the currently
+/// selected row stays visible (fix round 1, Finding 1) —
+/// `UniformListScrollHandle::scroll_to_item` with `ScrollStrategy::
+/// Nearest`, gpui's own idiom for a `uniform_list` (the div-based
+/// `ScrollHandle::scroll_to_item` every other list here uses doesn't
+/// apply — see the module doc). Called from every path that can change
+/// `self.picker`'s `selected` field while `Stage::Values` is showing:
+/// [`handle_values_key`]'s up/down/ctrl+p/ctrl+n arm, a value row's mouse
+/// click (`build_values`'s `on_mouse_down`, which sets `selected` before
+/// toggling), [`commit_column`] (which resets `selected` to 0 on the
+/// fresh `Values` stage it just switched to), and the shared dialog
+/// filter's `InputEvent::Change` subscription (`ShellView::new`, `shell/
+/// mod.rs`), which resets `selected` to 0 on every query edit exactly
+/// like `keybindings_scroll`/`settings_scroll` do for their own dialogs.
+/// A no-op on `Stage::Columns` (that stage's row list is a plain,
+/// unvirtualized `v_flex` — nothing to scroll) or while no picker is
+/// open.
+pub(super) fn sync_picker_scroll(shell: &ShellView) {
+    if let Some(picker) = shell.picker.as_ref()
+        && let Stage::Values { .. } = &picker.stage
+    {
+        shell
+            .picker_scroll
+            .scroll_to_item(picker.selected, ScrollStrategy::Nearest);
+    }
 }
 
 /// `up`/`down`/`ctrl+p`/`ctrl+n` as a signed step, or `None` for anything
@@ -418,6 +454,7 @@ fn handle_values_key(
         if let Some(p) = shell.picker.as_mut() {
             p.move_selection(delta, len);
         }
+        sync_picker_scroll(shell);
         cx.notify();
         return true;
     }
@@ -535,6 +572,7 @@ fn build_values(
     primary: Hsla,
     muted: Hsla,
     selection: Hsla,
+    scroll_handle: &UniformListScrollHandle,
 ) -> AnyElement {
     match &picker.values {
         None => empty_row("loading…", muted),
@@ -593,6 +631,7 @@ fn build_values(
                                         p.selected = i;
                                         p.toggle_selected();
                                     }
+                                    sync_picker_scroll(shell);
                                     cx.notify();
                                 });
                             })
@@ -603,7 +642,9 @@ fn build_values(
             .h(px(
                 (count.min(palette::VISIBLE_ROWS) as f32) * palette::ROW_HEIGHT
             ))
-            .w(px(WIDTH));
+            .w(px(WIDTH))
+            .track_scroll(scroll_handle)
+            .debug_selector(|| "picker-values-list".to_string());
             list.into_any_element()
         }
     }
@@ -629,7 +670,14 @@ fn build(
     let filter = dialog::filter_row(&shell.dialog_input, None, cx);
     let body = match &picker.stage {
         Stage::Columns => build_columns(shell, picker, entity, primary, muted, selection),
-        Stage::Values { .. } => build_values(picker, entity, primary, muted, selection),
+        Stage::Values { .. } => build_values(
+            picker,
+            entity,
+            primary,
+            muted,
+            selection,
+            &shell.picker_scroll,
+        ),
     };
 
     v_flex()

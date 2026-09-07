@@ -34,7 +34,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use gpui::prelude::*;
-use gpui::{Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle, Window};
+use gpui::{
+    Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle,
+    UniformListScrollHandle, Window,
+};
 use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::ActionRegistry;
@@ -550,13 +553,23 @@ pub struct ShellView {
     pickable: Vec<Pickable>,
     /// The open dimension picker's own pure state (Phase 4a §3.3), or
     /// `None` when closed/never opened — the `keybindings`/`settings`
-    /// fields' own contract, minus a sibling `gpui` scroll handle: the
-    /// values list is a `uniform_list` (self-virtualizing, no
-    /// `ScrollHandle` to track across frames the way `keybindings_scroll`/
-    /// `settings_scroll` do). Set fresh by [`picker::open`] each time and
+    /// fields' own contract. Set fresh by [`picker::open`] each time and
     /// cleared by [`close_modal`](Self::close_modal), same as the other
     /// two dialogs.
     picker: Option<picker::PickerState>,
+    /// Scroll state for the picker's `Values`-stage `uniform_list` (fix
+    /// round 1, Finding 1) — the `keybindings_scroll`/`settings_scroll`/
+    /// `palette_scroll` split, one gpui type over: `uniform_list` is
+    /// self-virtualizing (it never lays out an off-screen row), but that
+    /// buys nothing for scroll-FOLLOW — nothing scrolls the viewport when
+    /// `selected` moves without this handle, so keyboard navigation past
+    /// [`palette::VISIBLE_ROWS`] would leave the highlight off-screen with
+    /// only its index having changed. `gpui::UniformListScrollHandle`, not
+    /// the plain `gpui::ScrollHandle` the other three use: `uniform_list`
+    /// only tracks scroll through its own handle type (see
+    /// `picker::sync_picker_scroll`'s doc comment for the call sites that
+    /// drive it).
+    picker_scroll: UniformListScrollHandle,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -713,6 +726,7 @@ impl ShellView {
                 // behind a one-line wrapper with a single caller.
                 state.query = query;
                 state.selected = 0;
+                picker::sync_picker_scroll(view);
             }
             cx.notify();
         })
@@ -932,6 +946,7 @@ impl ShellView {
             data_status: None,
             pickable,
             picker: None,
+            picker_scroll: UniformListScrollHandle::new(),
         }
     }
 
