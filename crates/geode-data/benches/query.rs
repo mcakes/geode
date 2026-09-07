@@ -255,6 +255,102 @@ fn reopen(
     .unwrap()
 }
 
+/// Ingest `rows` rows twice into a fresh database — the same source, a
+/// second time with every sentinel's `as_of` pushed an hour later — so
+/// every partition's first generation is superseded and moves to the
+/// archive (spec §4.3), and a query `AsOf::At` a moment between the two
+/// reads the archive era for real instead of an empty one. Returns the
+/// service plus `between`, an instant strictly after the first
+/// generation's latest sentinel and strictly before the second's.
+fn service_with_history(
+    rows: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    DataService,
+    std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    usize,
+    chrono::DateTime<chrono::Utc>,
+) {
+    let db = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let schema = schema();
+    let ds = schema.dataset("risk_snapshot").unwrap().clone();
+
+    let store = Store::open(db.path().join("geode.duckdb")).unwrap();
+    store.apply_schema(&ds).unwrap();
+    Catalog::new(store.writer()).ensure_tables().unwrap();
+
+    let batch = generate(&GeneratorConfig {
+        rows,
+        seed: 42,
+        business_dates: 1,
+    });
+    let emitted = emit_directory(&batch, &EmitOptions::new(src.path())).unwrap();
+    let ready: Vec<_> = emitted
+        .files
+        .iter()
+        .filter(|f| f.sentinel_path.is_some())
+        .collect();
+
+    let mut loaded = 0;
+    let mut latest_first_gen = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+    for file in &ready {
+        let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let sentinel = parse_sentinel(&text).unwrap();
+        latest_first_gen = latest_first_gen.max(sentinel.as_of);
+        let stem = file.csv_path.file_stem().unwrap().to_string_lossy();
+        let batch_id = stem.split('_').skip(2).collect::<Vec<_>>().join("_");
+        if let Ok(out) = load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &file.csv_path,
+                sentinel: &sentinel,
+                batch: &batch_id,
+            },
+        ) {
+            loaded += out.rows;
+        }
+    }
+    let between = latest_first_gen + chrono::Duration::minutes(30);
+
+    // A corrected republish of the same content: same rows, an hour
+    // later, so live is replaced and the first generation files to the
+    // archive (the pattern `load.rs`'s tests use for a second publish).
+    for file in &ready {
+        let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let mut sentinel = parse_sentinel(&text).unwrap();
+        sentinel.as_of += chrono::Duration::hours(1);
+        let stem = file.csv_path.file_stem().unwrap().to_string_lossy();
+        let batch_id = stem.split('_').skip(2).collect::<Vec<_>>().join("_");
+        load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &file.csv_path,
+                sentinel: &sentinel,
+                batch: &batch_id,
+            },
+        )
+        .unwrap();
+    }
+    drop(store);
+
+    let (service, rx) = DataService::open_channel(DataServiceConfig {
+        db_path: db.path().join("geode.duckdb"),
+        schema,
+        views: views(),
+        dimensions: DerivedDimensions::default(),
+        query_workers: 4,
+        sources: Vec::new(),
+    })
+    .unwrap();
+    (db, src, service, rx, loaded, between)
+}
+
 /// Submit and block until the snapshot arrives — the end-to-end path the
 /// §7.1 budget is written against, minus the paint.
 fn requery(
@@ -264,6 +360,18 @@ fn requery(
     scope: &Scope,
     max_depth: usize,
 ) -> usize {
+    requery_at(svc, rx, view, scope, max_depth, AsOf::Live)
+}
+
+/// `requery`, under a given era.
+fn requery_at(
+    svc: &DataService,
+    rx: &std::sync::mpsc::Receiver<geode_data::DataEvent>,
+    view: &str,
+    scope: &Scope,
+    max_depth: usize,
+    as_of: AsOf,
+) -> usize {
     svc.query(&QueryParams {
         key: QueryKey(1),
         tag: 0,
@@ -271,7 +379,7 @@ fn requery(
         view: view.to_string(),
         grouping: None,
         scope: scope.clone(),
-        as_of: AsOf::Live,
+        as_of,
         max_depth,
     })
     .unwrap();
@@ -412,6 +520,34 @@ fn bench_requery(c: &mut Criterion) {
                 format!("{rows}_rows_text_{label}_keys_textual_depth_2"),
                 |b| b.iter(|| black_box(requery(&svc, &rx, "tree", &text_only, 2))),
             );
+        }
+        svc.shutdown();
+
+        // The as-of case: same zero-match, depth-2 shape, but scoped to an
+        // instant that reads `archive union all live` (spec §3.5 as
+        // amended). A real archive, not an empty one — the fixture
+        // ingests the source twice so every partition has a superseded
+        // generation to read.
+        let (_db3, _src3, svc, rx, loaded3, between) = service_with_history(rows);
+        assert!(loaded3 > 0, "history fixture ingested nothing");
+        {
+            let (label, needle) = ("none", "zzz");
+            let text_only = Scope {
+                text: Some(needle.to_string()),
+                ..Scope::default()
+            };
+            group.bench_function(format!("{rows}_rows_text_{label}_depth_2_asof"), |b| {
+                b.iter(|| {
+                    black_box(requery_at(
+                        &svc,
+                        &rx,
+                        "tree",
+                        &text_only,
+                        2,
+                        AsOf::At(between),
+                    ))
+                })
+            });
         }
         svc.shutdown();
     }
