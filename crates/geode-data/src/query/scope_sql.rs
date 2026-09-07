@@ -206,6 +206,33 @@ fn like_pattern(text: &str) -> String {
     out
 }
 
+/// The values of ENUM type `enum_type` matching `pattern` (already
+/// produced by [`like_pattern`]), resolved once on `conn` at compile
+/// time (spec §3.5, the literal-list form).
+///
+/// This is a small query — a dictionary is hundreds of values, not a
+/// million rows — run synchronously on the compile connection, which is
+/// safe because `compile_scope` already runs on the service thread
+/// ahead of `submit`, not on a pool worker mid-query.
+fn dictionary_matches(
+    conn: &Connection,
+    enum_type: &str,
+    pattern: &str,
+) -> Result<Vec<String>, StoreError> {
+    let sql = format!(
+        "select v from unnest(enum_range(null::{enum_type})) t(v) where v ilike ? escape '\\'"
+    );
+    let err = |source| StoreError::Sql {
+        statement: sql.clone(),
+        source,
+    };
+    let mut stmt = conn.prepare(&sql).map_err(err)?;
+    let rows = stmt
+        .query_map(duckdb::params![pattern], |r| r.get::<_, String>(0))
+        .map_err(err)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
 /// Top-level `and` terms, each routed on its own so a scope mixing
 /// grains — `underlying_ref = 'SPX' and strike > 100` — compiles.
 fn conjuncts(expr: &Expr) -> Vec<&Expr> {
@@ -331,7 +358,10 @@ pub fn compile_scope(
         place(&mut r, ds, dims, grain, &[sel.column.as_str()], clause)?;
     }
 
-    // 2. Text filter: OR of ILIKE over declared textual columns.
+    // 2. Text filter: OR of a literal-list `IN` over each categorical
+    // textual column's matching dictionary values, plus a plain `ILIKE`
+    // over any textual column that is not categorical (spec §3.5, the
+    // literal-list form).
     //
     // Each column is routed on its own, because the OR cannot be split:
     // a textual column this grain does not carry becomes its own
@@ -339,28 +369,56 @@ pub fn compile_scope(
     // clause. Leaving such columns out — the earlier choice — silently
     // applied the filter to the fine-grained measures and not to the
     // coarse ones on the same row, and marked nothing (spec §6.3).
+    //
+    // The literal-list form replaced a subquery form
+    // (`"col" in (select v from unnest(enum_range(...)) t(v) where v
+    // ilike ? escape '\')`) that still cost DuckDB a real per-requery
+    // planning-and-probing bill even for a needle that matches nothing:
+    // an OR of several such correlated subqueries measured ~65ms on a
+    // wide demo schema at 1M rows before any row of the result was ever
+    // touched (`docs/perf.md`, "literal-list form"). Resolving each
+    // column's matches once here, on the compile connection
+    // (`compile_scope` already runs on the service thread ahead of
+    // `submit`, so this synchronous query is safe), turns that into a
+    // handful of `?`-bound values known before the statement is ever
+    // planned: a column with no matches drops its term entirely instead
+    // of compiling to an always-false subquery, and the matching values
+    // are bound the same way a dimension selection is — one
+    // delimiter-joined varchar split by `string_split` in SQL — so the
+    // statement text (and therefore the prepared plan) stays independent
+    // of match count and cacheable regardless of how many values match.
+    //
+    // If every column's dictionary drops the needle — or the dataset
+    // declares no textual columns at all — the OR would otherwise become
+    // empty and contribute no clause, silently widening the scope to
+    // "everything" instead of "nothing": rule enforced below by pushing
+    // a literal `false` clause when no term survives.
     if let Some(text) = &scope.text {
-        let pattern = Value::Text(like_pattern(text));
-        // Dictionary terms (spec §3.5, as amended): a categorical column
-        // is ENUM-typed, so the pattern is evaluated over the type's
-        // values and the row test becomes an `in`, which DuckDB runs on
-        // the codes. This applies in every era — `refresh_enum` builds
-        // the type from live *and* archive (`crate::store::ddl`), so an
-        // archived row can never hold a value the type lacks — gated only
-        // on the type existing: before the first load it does not, and
-        // naming it would fail the statement.
+        let pattern_text = like_pattern(text);
+        let pattern = Value::Text(pattern_text.clone());
+        // Type existence is the only gate (spec §3.5, as amended): it
+        // holds in every era, because `refresh_enum` builds the type
+        // from live *and* archive (`crate::store::ddl`), so an archived
+        // row can never hold a value the type lacks.
         let enum_types = crate::store::ddl::existing_enum_types(conn, &ds.name)?;
         let mut terms: Vec<String> = Vec::new();
         let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
             let name = col.name.as_str();
             let ty = crate::store::ddl::enum_type_name(&ds.name, name);
+            let bound;
             let test = if col.categorical && enum_types.contains(&ty) {
-                format!(
-                    "\"{name}\" in (select v from unnest(enum_range(null::{ty})) t(v) \
-                     where v ilike ? escape '\\')"
-                )
+                let matches = dictionary_matches(conn, &ty, &pattern_text)?;
+                if matches.is_empty() {
+                    // No dictionary value meets the needle: this column
+                    // contributes nothing, rather than an always-false
+                    // subquery DuckDB would still have to plan.
+                    continue;
+                }
+                bound = Value::Text(matches.join(SELECTION_DELIMITER));
+                format!("\"{name}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))")
             } else {
+                bound = pattern.clone();
                 format!("\"{name}\" ilike ? escape '\\'")
             };
             match route(ds, dims, grain, &[name])? {
@@ -372,9 +430,14 @@ pub fn compile_scope(
                     terms.push(membership(ds, grain, probe, era, &test));
                 }
             }
-            term_params.push(pattern.clone());
+            term_params.push(bound);
         }
-        if !terms.is_empty() {
+        if terms.is_empty() {
+            // Every column dropped, or there were none to begin with: a
+            // text filter that matches nothing must select nothing,
+            // never fall through to contributing no clause at all.
+            r.direct.push(("false".to_string(), Vec::new()));
+        } else {
             r.direct
                 .push((format!("({})", terms.join(" or ")), term_params));
         }
@@ -1220,13 +1283,13 @@ grain = "position"
         )
         .unwrap();
         assert!(
-            sql.predicate.contains("enum_range(null::risk_book_enum)"),
-            "{}",
+            sql.predicate.contains("string_split"),
+            "the matches are bound as a literal list, not a subquery: {}",
             sql.predicate
         );
         assert!(
-            sql.predicate.contains("ilike ?"),
-            "the pattern is still bound: {}",
+            !sql.predicate.contains("enum_range"),
+            "the dictionary is resolved at compile time, not embedded in the predicate: {}",
             sql.predicate
         );
         // And it selects the same rows as the row scan would.
@@ -1241,6 +1304,145 @@ grain = "position"
             .unwrap();
         assert_eq!(via_dict, row_scan);
         assert!(via_dict > 0);
+    }
+
+    #[test]
+    fn a_needle_matching_no_dictionary_value_compiles_to_false() {
+        // `enum_fixture` marks only `book` textual, and it is categorical
+        // — so a needle none of BK000..BK019, BK_01, BK%02, BK\03 can
+        // meet drops the only term there is, and the whole filter must
+        // collapse to `false` rather than silently falling through to
+        // "no clause", which would select every row instead of none.
+        let (store, ds) = enum_fixture();
+        let scope = Scope {
+            text: Some("zzz".into()),
+            ..Scope::default()
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert_eq!(
+            sql.predicate, "false",
+            "a needle matching no dictionary value must select nothing: {}",
+            sql.predicate
+        );
+        assert!(sql.params.is_empty());
+        assert_eq!(count(store.writer(), &ds, &sql), 0);
+    }
+
+    #[test]
+    fn a_dictionary_match_binds_the_matching_values_not_the_pattern() {
+        // `like_pattern` escapes `_`, so `bk_0` only meets `BK_01` —
+        // none of BK000..BK019 (no literal underscore), BK%02 or BK\03.
+        let (store, ds) = enum_fixture();
+        let scope = Scope {
+            text: Some("bk_0".into()),
+            ..Scope::default()
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(sql.predicate.contains("string_split"), "{}", sql.predicate);
+        assert_eq!(
+            sql.params,
+            vec![Value::Text("BK_01".to_string())],
+            "the bound value must be the matching dictionary entries, not the raw \
+             pattern: {:?}",
+            sql.params
+        );
+        let via_dict = count(store.writer(), &ds, &sql);
+        let row_scan: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from risk_instrument_live where \"book\" ilike ? escape '\\'",
+                duckdb::params![like_pattern("bk_0")],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(via_dict, row_scan);
+        assert_eq!(via_dict, 1);
+    }
+
+    /// `enum_fixture`'s dataset plus a plain textual key (`position_ref`,
+    /// never categorical): the mixed case a desk actually has, where one
+    /// row's key text is findable by a needle no dictionary value meets.
+    fn enum_and_textual_key_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
+        let mut ds = carried_dataset();
+        for c in ds.columns.iter_mut() {
+            if c.name == "book" {
+                c.categorical = true;
+                c.textual = true;
+            }
+            if c.name == "position_ref" {
+                c.textual = true;
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        std::mem::forget(dir);
+        store.apply_schema(&ds).unwrap();
+        let conn = store.writer();
+        let insert = "insert into risk_instrument_live
+                     (book, lhu, position_ref, counterparty, instrument_ref,
+                      npv, currency, batch, source_file_id, gen_id, source_time)
+                 values (?, 'L', ?, 'C', ?, 1.0, 'USD', 'b', 1, 1, now())";
+        for i in 0..20 {
+            conn.execute(
+                insert,
+                duckdb::params![format!("BK{i:03}"), format!("P{i}"), format!("I{i}")],
+            )
+            .unwrap();
+        }
+        conn.execute(insert, duckdb::params!["BK000", "PZZZFINDME", "IZZZ"])
+            .unwrap();
+        crate::store::ddl::refresh_enum(
+            conn,
+            "risk",
+            "book",
+            "risk_instrument_live",
+            "risk_instrument_archive",
+        )
+        .unwrap();
+        (store, ds)
+    }
+
+    #[test]
+    fn a_needle_missing_from_the_dictionary_still_matches_a_plain_textual_key() {
+        // `book`'s dictionary drops "zzzfindme" — no BK### value meets
+        // it — but `position_ref`'s `ILIKE` term is not categorical, so
+        // it survives the drop and still finds the one row.
+        let (store, ds) = enum_and_textual_key_fixture();
+        let scope = Scope {
+            text: Some("zzzfindme".into()),
+            ..Scope::default()
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert_ne!(
+            sql.predicate, "false",
+            "the key's ILIKE term must survive the dictionary's drop: {}",
+            sql.predicate
+        );
+        assert_eq!(count(store.writer(), &ds, &sql), 1);
     }
 
     #[test]
@@ -1269,7 +1471,11 @@ grain = "position"
             Era::live(),
         )
         .unwrap();
-        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+        assert!(
+            !sql.predicate.contains("string_split"),
+            "the dropped type must fall back to the row scan, not the dictionary: {}",
+            sql.predicate
+        );
         let archive = Era {
             kind: TableKind::Archive,
             generations: Some("true"),
@@ -1283,7 +1489,11 @@ grain = "position"
             archive,
         )
         .unwrap();
-        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+        assert!(
+            !sql.predicate.contains("string_split"),
+            "the dropped type must fall back to the row scan, not the dictionary: {}",
+            sql.predicate
+        );
     }
 
     #[test]
@@ -1312,7 +1522,7 @@ grain = "position"
         )
         .unwrap();
         assert!(
-            sql.predicate.contains("enum_range(null::risk_book_enum)"),
+            sql.predicate.contains("string_split"),
             "the archive era must take the dictionary path too: {}",
             sql.predicate
         );
