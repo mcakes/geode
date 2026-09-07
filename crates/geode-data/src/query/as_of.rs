@@ -119,7 +119,7 @@ pub fn resolve_generations(
 /// this used to emit (docs/perf.md, "Phase 4a: the as-of baseline"). Three
 /// facts make that a straight win rather than a trade-off:
 ///
-/// - `gen_id between {lo} and {hi}` is a plain scan filter DuckDB pushes
+/// - The `gen_id` range is a plain scan filter DuckDB pushes
 ///   to the table scan; zonemaps then skip whole row groups belonging to
 ///   other generations, and skip an entire *side* of the union when it
 ///   holds none of the resolved ids at all — a pure-archive era's live
