@@ -2124,6 +2124,25 @@ run_mutation "flip: a fresh requery clears whatever was staged before it" \
   '' \
   geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
+# ---- Final fix wave (whole-branch review, 2026-09-06): F1 -------------
+
+# F1: `HH:MM`/`HH:MM:SS` used to resolve on UTC's date
+# (`now.date_naive().and_time(t).and_utc()`); they now resolve on the
+# LOCAL date and map to UTC (one clock throughout — the modal's presets,
+# preview, the scope bar and the status segment all already showed
+# local time). The pinned test computes its own expectation independent
+# of `parse_as_of` so it catches a regression to the old UTC-resolving
+# behaviour on any machine whose local zone differs from UTC.
+run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
+  crates/geode-core/src/query.rs \
+  '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
+        return resolve_local(today_local, t, text);
+    }' \
+  '    if let Ok(t) = NaiveTime::parse_from_str(text, "%H:%M") {
+        return Ok(now.date_naive().and_time(t).and_utc());
+    }' \
+  geode-core as_of_resolves_on_the_local_date_not_utcs
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

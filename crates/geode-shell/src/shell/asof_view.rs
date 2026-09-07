@@ -405,12 +405,19 @@ mod tests {
     #[test]
     fn resolve_input_delegates_to_parse_as_of_for_a_clock_time() {
         let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
-        assert_eq!(
-            resolve_input("14:05", now),
-            Ok(AsOf::At(
-                Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 0).unwrap()
-            ))
-        );
+        // F1 (final fix wave): `HH:MM` resolves on the LOCAL date (spec
+        // §3.6, "one clock throughout") — computed independently of
+        // `resolve_input`/`parse_as_of` so this holds on any machine's
+        // zone, the same pattern `geode_core::query`'s own pinning test
+        // uses.
+        let today_local = now.with_timezone(&Local).date_naive();
+        let expected = Local
+            .from_local_datetime(
+                &today_local.and_time(chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap()),
+            )
+            .unwrap()
+            .to_utc();
+        assert_eq!(resolve_input("14:05", now), Ok(AsOf::At(expected)));
     }
 
     #[test]
@@ -446,10 +453,16 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
         let mut state = AsOfState::default();
         on_query_changed(&mut state, "14:05", now);
-        assert_eq!(
-            state.resolved,
-            Some(Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 0).unwrap())
-        );
+        // F1 (final fix wave): local date, not UTC's — see the sibling
+        // test's comment above.
+        let today_local = now.with_timezone(&Local).date_naive();
+        let expected = Local
+            .from_local_datetime(
+                &today_local.and_time(chrono::NaiveTime::from_hms_opt(14, 5, 0).unwrap()),
+            )
+            .unwrap()
+            .to_utc();
+        assert_eq!(state.resolved, Some(expected));
         assert!(state.error.is_none());
 
         on_query_changed(&mut state, "not a time", now);
