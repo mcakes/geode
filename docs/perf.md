@@ -744,3 +744,94 @@ hundreds of thousands. Not pursued.
 minor M3; ~4 resolves per requery today); (2) the as-of baseline —
 read only the tables whose generations the as-of resolves to, rather
 than always unioning archive and live; (3) the schema, per desk.
+
+### Phase 4a: the as-of baseline — the generation predicate
+
+Found on a display: every requery under an as-of cost 50–70 ms before
+any text filter was typed; live cost 12 ms. A headless probe (demo
+schema, demo `tree` view, 1M rows, depth 2, an archive holding three
+superseded generations per partition, medians of nine, ms end to end
+through `DataService`, 2026-09-07) traced the cost to the
+per-generation OR chain `generation_predicate` used to emit, and
+established that a `gen_id` range plus a tuple semi-join, pushed into
+both sides of the era relation, removes it without the race a static
+side-drop would introduce:
+
+| era | scope | today: `archive union all live` + OR chain | **this change** | static side-drop (racy, rejected) | live |
+|---|---|---|---|---|---|
+| pure archive | none | 68 | **27** | 26 | 12 |
+| pure archive | text `zzz` | 121 | **68** | 68 | 38 |
+| pure archive | text `spx` | 199 | **154** | 153 | 70 |
+| mixed (one partition live) | none | 63 | **28** | 27 | |
+| mixed | `zzz` | 119 | **68** | 65 | |
+| mixed | `spx` | 199 | **153** | 155 | |
+| pure live | none | 55 | **40** | 38 | |
+| pure live | `zzz` | 100 | **79** | 77 | |
+| pure live | `spx` | 178 | **166** | 163 | |
+
+What the probe established, each point load-bearing for the design:
+
+1. The OR chain is the cost: with no predicate at all the same union
+   reads in 24 ms; the seventeen-disjunct OR evaluated per row over
+   both tables costs ~30–40 ms. Reordering the disjuncts' terms
+   (integer compares first) changes nothing.
+2. A tuple semi-join alone is a hash lookup (27 ms no-text), but it
+   runs *after* the text scan, so a text filter under as-of still
+   scans every archived generation without a scan-level filter: `zzz`
+   went 121 → 179 ms with the semi-join alone.
+3. `gen_id between <lowest resolved> and <highest resolved>` is a
+   plain scan filter DuckDB pushes to the table scan; zonemaps then
+   skip whole row groups of other generations, and skip the whole
+   *side* when it holds none of the resolved ids (a pure-archive
+   era's live side, a pure-live era's archive side). With it, the
+   race-free "read both sides" form matches a static side-drop within
+   noise in every cell above.
+4. Dropping a side statically is **racy** and is rejected: `publish_file`
+   is one transaction *per grain*, and compile (the resolve, on the
+   service connection) and execution (a pool worker's connection) are
+   separate statements. A publish landing between them moves a
+   generation from live to archive at some grains and not others; a
+   relation that read only the table the resolve saw would silently
+   miss that partition for one frame. Reading both sides is what makes
+   today's design correct under concurrent publish, and point 3 makes
+   it free.
+5. DuckDB's struct comparison treats NULL fields as equal (`select (1,
+   NULL::varchar) in (select (1, NULL::varchar))` → true; `(1, 'x') in
+   (select (1, NULL))` → false; verified on the pinned duckdb), so the
+   plain tuple handles the NULL-book partition exactly with no
+   `coalesce` sentinel — pinned by `as_of.rs`'s
+   `the_predicate_selects_a_null_book_partition_from_either_side`.
+6. A dynamic side-drop (an in-statement subquery deciding emptiness)
+   is not skipped by DuckDB: 37 ms vs 24. Only the static range does it.
+
+**This crate's own bench** (`crates/geode-data/benches/query.rs`,
+`service_with_history`'s fixture: one archived generation per
+partition, not three, ingested twice into a fresh 1M-row database;
+`cargo bench -p geode-data --bench query --`, criterion, 20 samples,
+before = base commit `bcc09af`, after = the fix above, same machine):
+
+| Case | before | after |
+|---|---|---|
+| `1000000_rows_text_none_depth_2_asof` | 16.135 ms | **13.813 ms** (−14.9%) |
+| `1000000_rows_scoped_depth_2_asof` | 36.538 ms | **26.544 ms** (−26.9%) |
+
+Both hold the §7.1 <50 ms contract with room to spare; the smaller
+absolute win than the headless probe's is the fixture, not the fix —
+one superseded generation per partition here against three there, so
+the OR chain this removes was shorter to begin with.
+
+Two open levers, neither pursued here:
+
+(a) **The resolve itself.** `resolve_generations` runs `select
+distinct batch, book, gen_id, source_time` over every grain's archive
+and live table, which the probe measured at 6 ms of compile on a
+one-generation archive and 15 ms on a three-generation one — it scales
+with the archive. Belongs in a small generations table maintained
+inside the publish and sweep transactions, not scanned fresh per
+compile.
+
+(b) **The `spx` text case stays ~150 ms under as-of** because the
+extra scan filter changes how DuckDB decorrelates the text filter's
+membership probes (two 840k-row inner hash joins appear in the
+profile) — a text-filter plan question, not a generation-predicate
+one.

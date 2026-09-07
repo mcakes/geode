@@ -553,6 +553,16 @@ return`. §4.5 says nothing on screen may look live when it is not; the
 stripe is the part that survives a maximised tile hiding the bar's
 detail.
 
+**As built (2026-09-07, the as-of baseline fix):** the generation
+predicate every as-of query applies is a `gen_id` range plus a tuple
+semi-join, pushed into both sides of the era relation (archive and
+live), not the per-generation OR chain this originally emitted. Both
+sides are always read because `publish_file` is one transaction per
+grain while the resolve and the query execution run on separate
+connections, so a relation that trusted only the side the resolve saw
+could silently miss a partition moved mid-publish. Numbers in
+`docs/perf.md`'s "Phase 4a: the as-of baseline" section.
+
 ### 3.7 The tile layer: `:filter`
 
 The blotter's `:` vocabulary gains
