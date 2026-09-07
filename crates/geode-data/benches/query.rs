@@ -549,6 +549,22 @@ fn bench_requery(c: &mut Criterion) {
                 })
             });
         }
+        // The plain scoped depth-2 shape — no text filter at all — under
+        // the same as-of instant. This isolates the generation
+        // predicate's own cost from the text filter's dictionary rewrite,
+        // which the `_text_*_asof` cases above already cover.
+        group.bench_function(format!("{rows}_rows_scoped_depth_2_asof"), |b| {
+            b.iter(|| {
+                black_box(requery_at(
+                    &svc,
+                    &rx,
+                    "tree",
+                    &book_scope(),
+                    2,
+                    AsOf::At(between),
+                ))
+            })
+        });
         svc.shutdown();
     }
     group.finish();
