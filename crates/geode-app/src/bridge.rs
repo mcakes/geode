@@ -6,6 +6,7 @@
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, Diagnostic};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::query::DistinctOutcome;
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 use geode_data::source::SourceSpec;
@@ -234,8 +235,23 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // `DataHandle::distinct` call — this is the one place that
             // call actually happens. The outcome comes back on the
             // `DataEvent` drain loop below, routed to `deliver_distinct`.
+            // A refused request (`false`: the query pool's queue is full
+            // or the service thread is gone) gets no reply from that
+            // drain loop — nothing else would ever arrive to move the
+            // picker off `loading…` — so a synthetic error outcome is
+            // delivered right here instead, echoing the request's own
+            // key/tag/column exactly as a real reply would.
             ShellEvent::DistinctRequested(params) => {
-                handle.distinct(params.clone());
+                let queued = handle.distinct(params.clone());
+                if !queued {
+                    let outcome = DistinctOutcome {
+                        key: params.key,
+                        tag: params.tag,
+                        column: params.column.clone(),
+                        values: Err("the data service is busy or gone — try again".into()),
+                    };
+                    shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                }
             }
             ShellEvent::RestartRequired(_) => {}
         }
@@ -343,7 +359,35 @@ mod tests {
     /// from here: it is `pub(super)` inside that crate's test module),
     /// built from public items only.
     fn test_shell_services() -> ShellServices {
-        let config = Config::load(&ConfigSources::default());
+        test_shell_services_with_config(Config::load(&ConfigSources::default()))
+    }
+
+    /// A trimmed `datasets` doc making `book` pickable (categorical
+    /// dimension) — same shape as `geode-shell::shell::tests::picker`'s
+    /// own `DATASETS_DOC`, reproduced here since that module is private
+    /// to its crate.
+    const PICKABLE_DATASETS_DOC: &str = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+"#;
+
+    /// `test_shell_services()` with `book` pickable, for the picker test
+    /// below — `picker::open` only reaches the `Values` stage (and so
+    /// only emits `DistinctRequested`) for a column `ShellView.pickable`
+    /// actually names.
+    fn test_shell_services_with_pickable_book() -> ShellServices {
+        test_shell_services_with_config(Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("datasets", PICKABLE_DATASETS_DOC).unwrap()],
+            desk: None,
+            user: None,
+        }))
+    }
+
+    fn test_shell_services_with_config(config: Config) -> ShellServices {
         let mut registry = ActionRegistry::default();
         register_builtin_actions(&mut registry);
         let mod_alias = default_mod();
@@ -366,12 +410,14 @@ mod tests {
         }
     }
 
-    fn open_test_window(cx: &mut gpui::TestAppContext) -> WindowHandle<Root> {
+    fn open_test_window(
+        cx: &mut gpui::TestAppContext,
+        services: ShellServices,
+    ) -> WindowHandle<Root> {
         cx.update(gpui_component::init);
         cx.update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view =
-                    cx.new(|cx| ShellView::new(test_shell_services(), None, None, window, cx));
+                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -401,7 +447,7 @@ mod tests {
     fn the_drain_task_ends_on_the_first_event_after_the_window_closes(
         cx: &mut gpui::TestAppContext,
     ) {
-        let window = open_test_window(cx);
+        let window = open_test_window(cx, test_shell_services());
 
         let (handle, _rx) = DataHandle::for_tests();
         let factory = Rc::new(BlotterFactory::new(
@@ -454,6 +500,64 @@ mod tests {
             Arc::strong_count(&dropped),
             alive - 1,
             "the drain task released its clone of `dropped` once the window was gone"
+        );
+    }
+
+    /// F3 (final fix wave, whole-branch review): `DataHandle::distinct`
+    /// discarding its `bool` used to leave the picker on "loading…"
+    /// forever once the request was refused, since nothing else would
+    /// ever reply. `DataHandle::shutdown` drops the request sender, so
+    /// every later `distinct` call refuses (`Inner::send` sees `None`)
+    /// without needing a real service thread to exercise the refusal.
+    #[gpui::test]
+    fn a_refused_distinct_request_errors_the_picker(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services_with_pickable_book());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        handle.shutdown();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|window, cx| {
+            shell.update(cx, |view, cx| {
+                geode_shell::shell::picker::open(view, Some("book".into()), window, cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        let values = shell.read_with(&vcx, |s, _| {
+            s.picker()
+                .expect("the picker is still open — nothing here closes it")
+                .values
+                .clone()
+        });
+        assert_eq!(
+            values,
+            Some(Err(
+                "the data service is busy or gone — try again".to_string()
+            )),
+            "a refused request must error the picker, not leave it loading forever"
         );
     }
 

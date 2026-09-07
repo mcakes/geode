@@ -51,3 +51,7 @@ tempfile = "3.27.0"
 # `test-support` turned on.
 gpui = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
+# `ShellView::picker()` (test-support-only accessor, `geode-shell::shell`)
+# — the bridge's own picker test needs to see a picker's `values` land
+# without a `dispatch` call of its own to drive from.
+geode-shell = { path = "../geode-shell", features = ["test-support"] }

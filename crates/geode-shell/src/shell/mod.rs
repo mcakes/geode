@@ -1162,6 +1162,16 @@ impl ShellView {
         &self.frame
     }
 
+    /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —
+    /// cross-crate test reach only, the same door `module::recording`
+    /// opens for `geode-blotter`'s tests: `geode-app`'s bridge tests need
+    /// to see a picker's `values` land (or fail to) without a `dispatch`
+    /// call of their own to drive from (`dispatch` is `pub(super)`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn picker(&self) -> Option<&picker::PickerState> {
+        self.picker.as_ref()
+    }
+
     /// Deliver a `DataEvent::Distinct` outcome (spec §3.4), routed here by
     /// the app bridge from the `ShellEvent::DistinctRequested` it submitted
     /// on this same picker's behalf. Dropped — no picker mutation, no

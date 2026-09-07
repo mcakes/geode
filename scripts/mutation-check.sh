@@ -2124,7 +2124,7 @@ run_mutation "flip: a fresh requery clears whatever was staged before it" \
   '' \
   geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
-# ---- Final fix wave (whole-branch review, 2026-09-06): F1 -------------
+# ---- Final fix wave (whole-branch review, 2026-09-06): F1, F3 ---------
 
 # F1: `HH:MM`/`HH:MM:SS` used to resolve on UTC's date
 # (`now.date_naive().and_time(t).and_utc()`); they now resolve on the
@@ -2142,6 +2142,16 @@ run_mutation "as-of: HH:MM resolves on the trader's local date, not UTC's" \
         return Ok(now.date_naive().and_time(t).and_utc());
     }' \
   geode-core as_of_resolves_on_the_local_date_not_utcs
+
+# F3: `DataHandle::distinct`'s refusal (`false`: the queue is full or the
+# service thread is gone) used to be discarded — nothing else would ever
+# reply, so a refused picker request stayed on "loading…" forever. A
+# synthetic error outcome is now delivered right at the refusal site.
+run_mutation "bridge: a refused distinct request errors the picker instead of leaving it loading forever" \
+  crates/geode-app/src/bridge.rs \
+  '                if !queued {' \
+  '                if false {' \
+  geode-app a_refused_distinct_request_errors_the_picker
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
