@@ -278,7 +278,10 @@ fn build(
                 .text_sm()
                 .text_color(muted)
                 .debug_selector(|| "as-of-resolved".to_string())
-                .child(format!("→ {}", t.format("%Y-%m-%d %H:%M:%S UTC"))),
+                .child(format!(
+                    "→ {}",
+                    t.with_timezone(&Local).format("%Y-%m-%d %H:%M:%S %Z")
+                )),
         );
     }
     if let Some(err) = &state.error {

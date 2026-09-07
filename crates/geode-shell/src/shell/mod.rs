@@ -717,7 +717,7 @@ impl ShellView {
             }
             let query = input.read(cx).value().to_string();
             // Route to whichever dialog is actually open. `close_modal`
-            // clears all three fields, so at most one is `Some` here — the
+            // clears all four fields, so at most one is `Some` here — the
             // routing cannot land in a stale state left over from an
             // earlier open.
             if let Some(state) = view.keybindings.as_mut() {
