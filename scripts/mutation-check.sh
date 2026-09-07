@@ -1630,8 +1630,10 @@ run_mutation "tile: the depth bound is requested, not everything" \
 
 run_mutation "tile: a query error keeps the last snapshot" \
   crates/geode-blotter/src/tile.rs \
-  '            Err(e) => self.error = Some(e),' \
-  '            Err(e) => { self.error = Some(e); self.table.update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new()); }' \
+  '                self.error = Some(e);' \
+  '                self.error = Some(e);
+                self.table
+                    .update(cx, |t, _| *t.delegate_mut() = BlotterDelegate::new());' \
   geode-blotter \
   a_stale_outcome_is_dropped_an_error_keeps_the_last_snapshot_and_timing_is_recorded
 
@@ -2092,6 +2094,34 @@ run_mutation "flip: a non-following tile still arrives on its own" \
   '            if self.frame.read(cx).barrier_wants(key, now) {' \
   '            if false {' \
   geode-blotter a_pinned_tile_arrives_from_on_frame_changed_without_requerying
+
+# ---- Fix round 1, Finding 1: a staged snapshot needs its own version
+# identity (crates/geode-blotter/src/tile.rs's `staged`/`promote`/
+# `requery`) — a second scope/grouping/as-of mutation within the same
+# 250ms window must never let a `flip` bump promote a snapshot staged
+# for the wrong (older) versions. Both entries are filtered to the one
+# test with all three race shapes (Part 1: both fixes independently
+# sufficient; Part 2: only `promote`'s version check defends a pinned
+# tile that never requeries; Part 3: only `requery`'s clear defends a
+# data-only bump the barrier's own versions never move for) — verified
+# by hand that each mutation is actually caught by this test (not just
+# by the harness's own bug-reproduction run), console output in
+# task-8-report.md's "Fix round 1" section.
+
+run_mutation "flip: promote only applies a staged snapshot for the versions it was staged under" \
+  crates/geode-blotter/src/tile.rs \
+  '        if versions.scope == now.scope
+            && versions.grouping == now.grouping
+            && versions.as_of == now.as_of' \
+  '        if true' \
+  geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
+
+run_mutation "flip: a fresh requery clears whatever was staged before it" \
+  crates/geode-blotter/src/tile.rs \
+  '        self.staged = None;
+' \
+  '' \
+  geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

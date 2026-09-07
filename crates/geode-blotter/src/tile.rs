@@ -111,7 +111,18 @@ pub struct BlotterTile {
     /// un-barriered outcome would have been. `None` once promoted, and
     /// also `None` the whole time for an outcome that never had to wait
     /// (no barrier open, or the barrier's versions don't match).
-    staged: Option<(Arc<Snapshot>, Vec<String>)>,
+    ///
+    /// Stamped with the `acted` versions it was delivered for (fix round
+    /// 1, Finding 1): a second scope/grouping/as-of mutation within the
+    /// same 250ms window replaces the barrier before this tile's own
+    /// fresh requery (for the newer versions) lands, so a `flip` bump
+    /// from the *newer* barrier releasing must not promote a snapshot
+    /// staged for the *older* one — `promote` checks the stamp against
+    /// the frame's current versions and drops a stale entry rather than
+    /// painting it. `requery` also clears this at its own top: a fresh
+    /// query always supersedes whatever was staged before it, whether or
+    /// not this particular check would have caught it.
+    staged: Option<(Arc<Snapshot>, Vec<String>, FrameVersions)>,
     /// `versions().flip` as of the last promotion (Phase 4 §3.10) — this
     /// tile's own half of the bump, the same shape as `acted` above but
     /// for "have I applied what this flip released" rather than "what did
@@ -347,8 +358,27 @@ impl BlotterTile {
     /// once `flip` shows it did. A no-op when nothing is staged, so
     /// calling it on every `flip` bump costs nothing for a tile that
     /// never had to wait.
+    ///
+    /// Fix round 1, Finding 1: a staged snapshot is only ever valid for
+    /// the `(scope, grouping, as_of)` triple it was staged under. A
+    /// second mutation within the same barrier window replaces it with
+    /// one over newer versions before this tile's own fresh requery for
+    /// those newer versions lands — when that happens, the `flip` bump
+    /// that eventually releases the newer barrier must not promote a
+    /// snapshot staged for the older one. Dropping it here keeps
+    /// whatever is already on screen (last-good); the tile's own
+    /// `requery` for the newer versions (already in flight by the time
+    /// this runs — `follows_changed` fires in the same `on_frame_changed`
+    /// pass) will paint the real answer when it lands.
     fn promote(&mut self, cx: &mut Context<Self>) {
-        if let Some((snapshot, grouping)) = self.staged.take() {
+        let Some((snapshot, grouping, versions)) = self.staged.take() else {
+            return;
+        };
+        let now = self.frame.read(cx).versions();
+        if versions.scope == now.scope
+            && versions.grouping == now.grouping
+            && versions.as_of == now.as_of
+        {
             self.apply(snapshot, grouping, cx);
         }
     }
@@ -372,6 +402,11 @@ impl BlotterTile {
     }
 
     fn requery(&mut self, cx: &mut Context<Self>) {
+        // Fix round 1, Finding 1: a fresh query always supersedes
+        // whatever was staged before it, whether or not it was already
+        // stale for the barrier `promote`'s own version check would
+        // otherwise have caught it against.
+        self.staged = None;
         let Some(view) = self.view() else {
             self.error = Some(format!("view '{}' is not configured", self.view_name));
             cx.notify();
@@ -445,7 +480,7 @@ impl BlotterTile {
                 // every other following tile is ready to as well.
                 let wants = self.frame.read(cx).barrier_wants(key, acted);
                 if wants {
-                    self.staged = Some((snapshot, self.last_grouping.clone()));
+                    self.staged = Some((snapshot, self.last_grouping.clone(), acted));
                     // `arrived` may itself empty the barrier right here —
                     // when it does, promote immediately rather than
                     // waiting for the `flip` bump to reach this tile's
@@ -1187,7 +1222,7 @@ mod tests {
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
     use geode_data::{DataHandle, Request};
     use geode_shell::actions::ActionId;
-    use geode_shell::frame::Frame;
+    use geode_shell::frame::{FLIP_DEADLINE, Frame, Publish};
     use geode_shell::module::FindEvent;
     use geode_shell::tiling::TileId;
     use geode_shell::vimfind::FindStyle;
@@ -1320,6 +1355,56 @@ mod tests {
                         ],
                     ),
                     TestColumn::F64(vec![Some(70.0), Some(70.0), Some(70.0), None]),
+                ),
+            ],
+            2,
+        ))
+    }
+
+    /// A third distinct payload (fix round 1, Finding 1's regression
+    /// test): the stale-staged-snapshot race needs three tellable-apart
+    /// generations — the pre-V1 baseline (`snapshot()`), the stale V1
+    /// payload that must never paint (`snapshot2()`), and the real V2
+    /// payload that must (this one).
+    fn snapshot3() -> Arc<Snapshot> {
+        let meta = |n: &str, by_depth: Vec<Attribution>| ColumnMeta {
+            name: n.into(),
+            attribution_by_depth: by_depth,
+            scope_semantics: ScopeSemantics::Direct,
+        };
+        Arc::new(Snapshot::for_tests(
+            vec![
+                (
+                    meta("lhu", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![
+                        None,
+                        Some("N1".into()),
+                        Some("N2".into()),
+                        Some("N1".into()),
+                    ]),
+                ),
+                (
+                    meta("underlying_ref", vec![Attribution::Additive; 3]),
+                    TestColumn::Dict(vec![None, None, None, Some("RTY".into())]),
+                ),
+                (
+                    meta("row_depth", vec![Attribution::Additive; 3]),
+                    TestColumn::I32(vec![0, 1, 1, 2]),
+                ),
+                (
+                    meta("delta01", vec![Attribution::Additive; 3]),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0), Some(5.0)]),
+                ),
+                (
+                    meta(
+                        "daily_trading_pnl",
+                        vec![
+                            Attribution::Additive,
+                            Attribution::Additive,
+                            Attribution::NonAttributable,
+                        ],
+                    ),
+                    TestColumn::F64(vec![Some(7.0), Some(7.0), Some(7.0), None]),
                 ),
             ],
             2,
@@ -2392,6 +2477,260 @@ mod tests {
         assert!(
             !frame.read_with(&vcx, |f, _| f.barrier_open()),
             "B's own arrival was enough — A never had to be waited on"
+        );
+    }
+
+    /// Fix round 1, Finding 1: `staged` carried no version identity and
+    /// survived `requery`. Trace reproduced here — tile B stages a
+    /// snapshot for V1 while the barrier still awaits A; a second
+    /// mutation lands within the 250ms window before A ever answers V1;
+    /// `open_flip` replaces the barrier for V2; B's `on_frame_changed`
+    /// sees `follows_changed(V2)` and requeries (bumping `tag`, setting
+    /// `acted = V2`) while the stale V1 snapshot was still sitting in
+    /// `staged`; the V2 barrier releases on the deadline before B's own
+    /// V2 query lands; `flip` bumps and B's `on_frame_changed` must NOT
+    /// promote the stale V1 payload under that bump.
+    ///
+    /// Three independent scenarios, because the fix's two halves are not
+    /// redundant with each other and no single race tells them apart on
+    /// its own (checked by hand, mutating each half separately against
+    /// only the others — see the fix-round report for both console
+    /// outputs): Part 1 (both tiles unpinned, a second *scope* change)
+    /// is caught by either half alone — `requery`'s clear runs before
+    /// the flip bumps, and `promote`'s version check would also reject
+    /// the scope mismatch if it didn't. Part 2 pins B to a fixed
+    /// grouping, so a *grouping-only* second mutation never makes B
+    /// requery at all (`requery`'s clear never runs) — only `promote`'s
+    /// version check stands between the stale V1 payload and the
+    /// screen. Part 3 is the reverse: a `data`-only bump (which never
+    /// opens or replaces a barrier, but `follows_changed` always
+    /// compares `data`) forces B to requery while the *original* V1
+    /// barrier — whose scope/grouping/as_of the data bump never
+    /// touches — is still what releases on the deadline; `promote`'s
+    /// version check alone would not catch this (it deliberately
+    /// ignores `data`/`config`, same as `Frame::matches`), so only
+    /// `requery`'s clear does.
+    #[gpui::test]
+    fn a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let pa0 = next_query(&h.requests);
+        let pb0 = next_query(&h.requests);
+        deliver_to(&h.a, QueryKey(7), &mut vcx, pa0.tag, Ok(snapshot()));
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb0.tag, Ok(snapshot()));
+        let baseline = shown_texts(&h.b, &vcx);
+
+        let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
+
+        // V1: a scope change opens a barrier over both keys.
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("V1".into()));
+            cx.notify();
+        });
+        let pa1 = next_query(&h.requests);
+        let pb1 = next_query(&h.requests);
+        let _ = pa1; // A's V1 query is left outstanding — never delivered.
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+
+        // B's V1 outcome arrives first and stages — the barrier still
+        // wants A.
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb1.tag, Ok(snapshot2()));
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            baseline,
+            "V1 is staged, not painted"
+        );
+        assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+
+        // V2 lands within the same window, before A ever answers V1 —
+        // both tiles follow scope, so both requery again (A's own
+        // now-doubly-stale V1 query is superseded the same way any
+        // repeated scope edit supersedes an in-flight one — that part
+        // isn't new here); `open_flip` replaces the barrier.
+        frame.update(&mut vcx, |f, cx| {
+            f.set_text(Some("V2".into()));
+            cx.notify();
+        });
+        let pa2 = next_query(&h.requests);
+        let pb2 = next_query(&h.requests);
+        let _ = pa2;
+        frame.update(&mut vcx, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+
+        // Nothing else ever arrives for the V2 barrier — the deadline
+        // releases it, bumping `flip`.
+        frame.update(&mut vcx, |f, cx| {
+            assert!(f.sweep(Instant::now() + FLIP_DEADLINE + Duration::from_millis(1)));
+            cx.notify();
+        });
+
+        // B must still show its pre-V1 rows — never the stale V1
+        // payload — and its real V2 query is still outstanding.
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            baseline,
+            "the stale V1 snapshot must never paint under the V2 flip"
+        );
+        assert!(
+            h.requests.try_recv().is_err(),
+            "the deadline releasing does not itself submit a query"
+        );
+
+        // B's real V2 outcome finally lands and paints.
+        deliver_to(&h.b, QueryKey(8), &mut vcx, pb2.tag, Ok(snapshot3()));
+        assert_eq!(
+            shown_texts(&h.b, &vcx),
+            vec!["".to_string(), "N1".into(), "N2".into()],
+            "the real V2 payload paints once it actually arrives"
+        );
+
+        // Part 2: B pinned to a fixed grouping — a grouping-only second
+        // mutation never makes it requery, so only `promote`'s own
+        // version check (not `requery`'s clear) can stop the stale V1
+        // payload from painting.
+        let (h2, mut vcx2) = open_two(cx);
+        h2.a.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        h2.b.update(&mut vcx2, |t, cx| t.set_visible(true, cx));
+        let qa0 = next_query(&h2.requests);
+        let qb0 = next_query(&h2.requests);
+        deliver_to(&h2.a, QueryKey(7), &mut vcx2, qa0.tag, Ok(snapshot()));
+        deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb0.tag, Ok(snapshot()));
+        let baseline2 = shown_texts(&h2.b, &vcx2);
+
+        h2.b.update(&mut vcx2, |t, cx| t.command("group lhu", cx).unwrap());
+        let qb_pin = next_query(&h2.requests);
+        deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb_pin.tag, Ok(snapshot()));
+
+        let frame2 = h2.a.read_with(&vcx2, |t, _| t.frame.clone());
+
+        // V1: a scope change — pinned-to-grouping B still follows scope,
+        // so it requeries and, once the barrier opens over it, stages.
+        frame2.update(&mut vcx2, |f, cx| {
+            f.set_text(Some("V1".into()));
+            cx.notify();
+        });
+        let qa1 = next_query(&h2.requests);
+        let qb1 = next_query(&h2.requests);
+        let _ = qa1; // A's V1 query is left outstanding — never delivered.
+        frame2.update(&mut vcx2, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+        deliver_to(&h2.b, QueryKey(8), &mut vcx2, qb1.tag, Ok(snapshot2()));
+        assert_eq!(
+            shown_texts(&h2.b, &vcx2),
+            baseline2,
+            "V1 is staged, not painted"
+        );
+        assert!(frame2.read_with(&vcx2, |f, _| f.barrier_open()));
+
+        // V2: a grouping-only change. B is pinned — it never requeries,
+        // so `requery`'s clear never runs for it here. The mutation and a
+        // fresh barrier over B's key alone are set up together, before
+        // the one notify — B's own "does not follow" branch
+        // (`a_pinned_tile_arrives_from_on_frame_changed_without_
+        // requerying`'s own mechanism) answers it immediately, which,
+        // since it is the barrier's only key, releases it and bumps
+        // `flip` on the very next notify pass.
+        frame2.update(&mut vcx2, |f, cx| {
+            f.set_active_slot(Some(1));
+            f.open_flip([QueryKey(8)], Instant::now());
+            cx.notify();
+        });
+        vcx2.run_until_parked();
+
+        // A (unpinned) follows the grouping change too — drain its own
+        // fresh query, which has nothing to do with B's half of this
+        // scenario.
+        let qa2 = next_query(&h2.requests);
+        assert_eq!(qa2.key, QueryKey(7));
+        assert!(
+            h2.requests.try_recv().is_err(),
+            "B is pinned — a grouping-only change never requeries it"
+        );
+
+        assert_eq!(
+            shown_texts(&h2.b, &vcx2),
+            baseline2,
+            "the stale V1 payload must never paint under the grouping-only flip"
+        );
+
+        // Part 3: a data-only bump forces B to requery while V1 is
+        // staged (`follows_changed` always compares `data`), but the
+        // *original* V1 barrier — whose scope/grouping/as_of the data
+        // bump never touches — is what eventually releases on the
+        // deadline. Only `requery`'s own clear stops the stale
+        // (pre-data-bump) V1 snapshot from painting here.
+        let (h3, mut vcx3) = open_two(cx);
+        h3.a.update(&mut vcx3, |t, cx| t.set_visible(true, cx));
+        h3.b.update(&mut vcx3, |t, cx| t.set_visible(true, cx));
+        let ra0 = next_query(&h3.requests);
+        let rb0 = next_query(&h3.requests);
+        deliver_to(&h3.a, QueryKey(7), &mut vcx3, ra0.tag, Ok(snapshot()));
+        deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb0.tag, Ok(snapshot()));
+        let baseline3 = shown_texts(&h3.b, &vcx3);
+
+        let frame3 = h3.a.read_with(&vcx3, |t, _| t.frame.clone());
+
+        // V1: a scope change opens a barrier over both keys.
+        frame3.update(&mut vcx3, |f, cx| {
+            f.set_text(Some("V1".into()));
+            cx.notify();
+        });
+        let ra1 = next_query(&h3.requests);
+        let rb1 = next_query(&h3.requests);
+        let _ = ra1; // A's V1 query is left outstanding — the barrier
+        // never releases on its own arrival in this scenario.
+        frame3.update(&mut vcx3, |f, _| {
+            f.open_flip([QueryKey(7), QueryKey(8)], Instant::now())
+        });
+        deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb1.tag, Ok(snapshot2()));
+        assert_eq!(
+            shown_texts(&h3.b, &vcx3),
+            baseline3,
+            "V1 is staged, not painted"
+        );
+        assert!(frame3.read_with(&vcx3, |f, _| f.barrier_open()));
+
+        // A data bump: never opens or replaces the barrier, but B still
+        // requeries because `follows_changed` always compares `data`.
+        frame3.update(&mut vcx3, |f, cx| {
+            f.note_published(Publish {
+                dataset: "risk".into(),
+                batch: "EOD".into(),
+                books: 1,
+                at: chrono::Utc::now(),
+            });
+            cx.notify();
+        });
+        let ra_data = next_query(&h3.requests);
+        let rb_data = next_query(&h3.requests);
+        let _ = ra_data;
+
+        // The original V1 barrier releases on the deadline — its own
+        // scope/grouping/as_of were never touched by the data bump.
+        frame3.update(&mut vcx3, |f, cx| {
+            assert!(f.sweep(Instant::now() + FLIP_DEADLINE + Duration::from_millis(1)));
+            cx.notify();
+        });
+        assert_eq!(
+            shown_texts(&h3.b, &vcx3),
+            baseline3,
+            "the stale (pre-data-bump) V1 payload must never paint just \
+             because scope/grouping/as_of still match — a fresher query \
+             is already in flight for the data bump"
+        );
+
+        deliver_to(&h3.b, QueryKey(8), &mut vcx3, rb_data.tag, Ok(snapshot3()));
+        assert_eq!(
+            shown_texts(&h3.b, &vcx3),
+            vec!["".to_string(), "N1".into(), "N2".into()],
+            "the real, fresher payload paints once it actually arrives"
         );
     }
 
