@@ -13,13 +13,14 @@ use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
+    register_scope_actions,
 };
 use geode_shell::fonts;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
 use geode_shell::session;
-use geode_shell::shell::{ShellServices, ShellView, pickable_columns};
+use geode_shell::shell::{ShellServices, ShellView, pickable_columns, saved_scopes};
 use geode_shell::theme;
 use geode_shell::tiling::{TileId, Workspaces};
 use geode_shell::vimfind::FindStyle;
@@ -263,6 +264,10 @@ fn build_shell_services(
     // keymap builds — `register_pick_actions`' own doc comment has the
     // full ordering rationale.
     register_pick_actions(&mut registry, &pickable_columns(&config));
+    // One `scope::<name>` action per saved scope (Phase 4a §3.11), same
+    // ordering rationale as `register_pick_actions` just above — a scope
+    // added by a live reload is not registered until restart (spec §1.3).
+    register_scope_actions(&mut registry, &saved_scopes(&config));
 
     // The default kind is read from `[app] modules.default`, "blotter"
     // when unset.

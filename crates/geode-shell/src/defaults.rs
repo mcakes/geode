@@ -496,6 +496,27 @@ pub fn register_pick_actions(reg: &mut ActionRegistry, columns: &[crate::shell::
     }
 }
 
+/// `scope::<name>` for every saved scope (spec §3.11), category "Scope",
+/// unbound by default — the same shape as [`register_pick_actions`],
+/// registered right beside it: `main.rs` calls this after it, over
+/// `shell::saved_scopes(&config)`, so the palette lists one entry per
+/// saved scope and a keymap can bind e.g. `mod+shift+e =
+/// "scope::eu"`. Like `register_pick_actions`, the action ids this
+/// produces depend on config — a scope added by a live reload is not
+/// registered until restart (spec §1.3) — so `test_services` calls this
+/// too, over its (empty) saved scopes, exercising the startup-ordering
+/// path even when there is nothing to register.
+pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scopes::SavedScopes) {
+    for name in saved.keys() {
+        action(
+            reg,
+            &format!("scope::{name}"),
+            &format!("Scope: {name}"),
+            "Scope",
+        );
+    }
+}
+
 /// The default primary modifier (spec §3.1: Alt, remappable).
 pub fn default_mod() -> Modifiers {
     Modifiers::ALT

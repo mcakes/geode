@@ -207,6 +207,34 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
     out
 }
 
+/// Every saved scope, keyed by name (spec §3.9/§3.11) — `defaults::
+/// register_scope_actions`'s `scope::<name>` companion to
+/// [`pickable_columns`]'s own `register_pick_actions`, and read the same
+/// way: `[scopes]` validated against the `datasets`/`dimensions` docs a
+/// scope's own columns must resolve against.
+///
+/// This reproduces `hot_reload::rebuild_saved_scopes`'s load (that
+/// function is `pub(super)` — internal reload housekeeping, out of
+/// `main.rs`'s reach across the crate boundary) rather than exposing it
+/// directly, the same "compute it again, once here before the frame
+/// exists for action registration, once inside `ShellView::new` for the
+/// frame itself" shape [`pickable_columns`] already has two independent
+/// callers of.
+pub fn saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    config
+        .doc("scopes")
+        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims).0)
+        .unwrap_or_default()
+}
+
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution
 /// here goes through the shell's own layered, sequence-aware [`Matcher`]

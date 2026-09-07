@@ -223,6 +223,19 @@ impl ShellView {
             // user keymap. Opens the picker straight onto that column's
             // values stage.
             picker::open(self, Some(column.to_string()), window, cx);
+        } else if let Some(name) = action.0.strip_prefix("scope::") {
+            // A per-scope `scope::<name>` action (`defaults::
+            // register_scope_actions`, spec §3.11) — unbound by default,
+            // palette-reachable as "Scope: <name>", or bindable by a user
+            // keymap. Loads the named saved scope, undoable like any
+            // other scope change (`Frame::load_scope` goes through
+            // `set_scope`) — same pattern as the palette's own
+            // `PaletteItem::Scope` handler (`palette_ctl.rs`).
+            self.frame.update(cx, |f, cx| {
+                if let Ok(true) = f.load_scope(name) {
+                    cx.notify();
+                }
+            });
         } else if action.0 == "frame::as_of" {
             // mod+t (spec §3.6): the as-of selector modal.
             asof_view::open(self, window, cx);

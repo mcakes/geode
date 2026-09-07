@@ -7,6 +7,7 @@ use super::*;
 use crate::actions::ActionId;
 use crate::defaults::{
     BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_pick_actions,
+    register_scope_actions,
 };
 use crate::keymap::build_keymap;
 use crate::tiling::{DockSide, Rect};
@@ -29,6 +30,13 @@ pub(super) fn test_services() -> ShellServices {
     // columns` then returns empty and the loop is a no-op, but the path
     // itself still runs on every test built from this fixture.
     register_pick_actions(&mut registry, &crate::shell::pickable_columns(&config));
+    // Same reasoning as `register_pick_actions` just above, for the
+    // `scope::<name>` actions (Phase 4a §3.11) — exercised here even
+    // though this config has no `[scopes]` doc, so `crate::shell::
+    // saved_scopes` returns empty and the loop is a no-op, but the
+    // startup-ordering path itself still runs on every test built from
+    // this fixture.
+    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config));
     let mod_alias = default_mod();
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);

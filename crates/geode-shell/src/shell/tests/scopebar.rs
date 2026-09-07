@@ -256,3 +256,71 @@ fn a_text_set_elsewhere_shows_in_the_field_and_a_chip_close_drops_the_dimension(
     assert!(frame.read_with(&vcx, |f, _| f.scope().dimensions.is_empty()));
     assert!(vcx.debug_bounds("scope-chip-close-book").is_none());
 }
+
+/// A `[scopes]` doc with one entry, "eu" — no `[datasets]` doc at all,
+/// so `saved_scopes_from_doc`'s own per-dataset validation (`schema.
+/// datasets.iter().map(...).min_by_key(...).unwrap_or_default()`) sees
+/// zero datasets and accepts every scope trivially; a bare `text` scope
+/// needs nothing else to load.
+const SCOPES_DOC: &str = "[eu]\ntext = \"eu\"\n";
+
+/// `test_services()` with a real `scopes` doc (so `scope::eu` is a real,
+/// dispatchable action id) and `register_scope_actions` run over it — the
+/// two-step registration `main.rs` itself does (`register_pick_actions`
+/// then `register_scope_actions`), reproduced here rather than through
+/// `test_services()` (whose whole point is an *empty* config — see that
+/// function's own comment on why it still calls `register_scope_actions`
+/// anyway, over nothing).
+fn services_with_saved_scope() -> ShellServices {
+    let config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("scopes", SCOPES_DOC).unwrap()],
+        ..ConfigSources::default()
+    });
+    let mut registry = ActionRegistry::default();
+    register_builtin_actions(&mut registry);
+    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config));
+    let mod_alias = default_mod();
+    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    let (theme, warnings) = crate::theme::load_bundled();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    ShellServices {
+        config,
+        registry,
+        keymap,
+        mod_alias,
+        workspaces: Workspaces::new(),
+        theme,
+        session_path: None,
+        roster: crate::module::ModuleRoster::default(),
+        restored_tiles: crate::session::TileRecords::new(),
+        restored_frame: None,
+    }
+}
+
+/// F4 (final fix wave, whole-branch review): spec §3.11's `scope::<name>`
+/// action per saved scope, built the same way `frame::pick_<column>` is
+/// (`defaults::register_scope_actions`, dispatched in `input.rs` by
+/// stripping the `scope::` prefix).
+#[gpui::test]
+fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_saved_scope());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+
+    vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.dispatch(&ActionId("scope::eu".into()), None, window, cx);
+        });
+    });
+
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("eu"),
+        "dispatching scope::eu must load the saved scope"
+    );
+}

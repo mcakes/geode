@@ -136,6 +136,11 @@ and every behaviour above has a mutation entry.
 - Re-registering `frame::pick_<column>` actions on a live `datasets`
   reload. A `datasets` change is already restart-required (P3 §4.5);
   the pick actions follow the same rule.
+- Re-registering `scope::<name>` actions (§3.11) on a live `scopes`
+  reload, for the same reason: a scope saved or edited after startup is
+  reachable from the palette and `:scope load <name>` right away, but
+  gets no `scope::<name>` action — and so no keymap binding — until
+  restart.
 - Any change to how tiles are created or split. `docs/modules.md` is a
   draft roster for later phases and does not bear on this one.
 - A picker doc. Every categorical column is pickable; the only
@@ -626,7 +631,11 @@ exactly as bound above. `frame::live`, `frame::as_of_undo` and
 `frame::scope_clear` ship unbound as the table says — every registered
 action is a palette entry regardless of binding, so all three are
 palette-only until a keymap layer binds them; that is the intended
-route, not a gap. `keymap.mod = "ctrl"` is invalid config (Task 4b): it
+route, not a gap. `scope::<name>` is registered the same way
+`frame::pick_<column>` is (`defaults::register_scope_actions`, called
+from `main.rs` right after `register_pick_actions`), one per saved
+scope, unbound, category "Scope" — see §1.3 for the live-reload
+exception it shares with the pick actions. `keymap.mod = "ctrl"` is invalid config (Task 4b): it
 is refused with an error diagnostic at load and reload and the alias
 falls back to the default, because the shipped literal `ctrl+…`
 bindings (`ctrl+1..9` workspace switching, `ctrl+0`, `ctrl+k`,
