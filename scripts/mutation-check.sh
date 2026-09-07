@@ -277,13 +277,15 @@ run_mutation "as-of: multi-grain generation resolution" \
 
 run_mutation "as-of: current generation read from live" \
   crates/geode-data/src/query/scope_sql.rs \
-  '"(select * from {} union all select * from {})"' \
-  '"(select * from {} union all select * from {} where false)"'
+  '"(select * from {} where {p} union all select * from {} where {p})"' \
+  '"(select * from {} where {p} union all select * from {} where {p} and false)"' \
+  geode-data as_of_after_the_current_generation_reads_the_current_generation
 
-run_mutation "as-of: probe generation predicate" \
+run_mutation "as-of: relation filters the live side too, not just the archive" \
   crates/geode-data/src/query/scope_sql.rs \
-  'if let Some(generations) = era.generations {' \
-  'if let Some(generations) = None::<&str> {'
+  '"(select * from {} where {p} union all select * from {} where {p})"' \
+  '"(select * from {} where {p} union all select * from {})"' \
+  geode-data an_as_of_query_reads_only_the_archive_even_through_a_semi_join
 
 run_mutation "as-of: probe era" \
   crates/geode-data/src/query/scope_sql.rs \
@@ -295,15 +297,30 @@ run_mutation "as-of: ENUM cast era guard" \
   'if era.kind != TableKind::Live {' \
   'if false {'
 
-run_mutation "as-of: NULL book predicate" \
-  crates/geode-data/src/query/as_of.rs \
-  'None => "book is null".to_string(),' \
-  'None => "book = %".to_string(),'
+# The generation predicate used to be a per-generation OR chain; it is
+# now a gen_id range plus a tuple semi-join, pushed into both sides of
+# the era relation (Phase 4a's as-of baseline fix, docs/perf.md). The
+# two entries this replaced ("as-of: NULL book predicate", "as-of:
+# predicate names the source time") anchored the OR-chain form and no
+# longer match live code.
 
-run_mutation "as-of: predicate names the source time" \
+run_mutation "as-of: generation range excludes the lowest resolved id" \
   crates/geode-data/src/query/as_of.rs \
-  "and source_time = '{}'::timestamptz)" \
-  "and '{}' is not null)"
+  'gen_id between {lo} and {hi}' \
+  'gen_id between {lo}+1 and {hi}' \
+  geode-data the_predicate_selects_exactly_the_resolved_generations
+
+run_mutation "as-of: tuple loses the source time" \
+  crates/geode-data/src/query/as_of.rs \
+  '(batch, book, gen_id, source_time) in (select (b, k, g, t)' \
+  '(batch, book, gen_id) in (select (b, k, g)' \
+  geode-data the_predicate_names_the_source_time_so_a_reused_gen_id_selects_one_generation
+
+run_mutation "as-of: NULL book dropped from the values tuple" \
+  crates/geode-data/src/query/as_of.rs \
+  'None => "NULL::varchar".to_string(),' \
+  'None => "'\'\''".to_string(),' \
+  geode-data the_predicate_selects_a_null_book_partition_from_either_side
 
 run_mutation "as-of: source-time tie breaks on gen_id" \
   crates/geode-data/src/query/as_of.rs \
