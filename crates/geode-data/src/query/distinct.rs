@@ -40,11 +40,11 @@ pub fn compile_distinct(
         };
         selects.push(format!(
             "select {value_expr} as value, count(*) as n from {} where {} group by 1",
+            // `era.relation` already applies the generation predicate to
+            // both sides it reads (Phase 4a's as-of baseline fix); the
+            // scope predicate alone is left for the caller to apply.
             era.era().relation(&ds.name, grain),
-            match era.era().generations {
-                Some(g) => format!("({}) and ({g})", scope.predicate),
-                None => scope.predicate.clone(),
-            }
+            scope.predicate,
         ));
         all_params.extend(scope.params);
     }

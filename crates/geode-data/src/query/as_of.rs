@@ -115,35 +115,54 @@ pub fn resolve_generations(
 /// right now, and dropping this term would make those ambiguous again —
 /// silently, and only for the history that predates the fix.
 ///
-/// The cost is real but small: statement text grows with partition count,
-/// which is on the deferred list as a plan-caching concern. Correctness on
-/// existing data outranks it.
+/// The shape is a `gen_id` range plus a tuple semi-join, not the OR-chain
+/// this used to emit (docs/perf.md, "Phase 4a: the as-of baseline"). Three
+/// facts make that a straight win rather than a trade-off:
+///
+/// - `gen_id between {lo} and {hi}` is a plain scan filter DuckDB pushes
+///   to the table scan; zonemaps then skip whole row groups belonging to
+///   other generations, and skip an entire *side* of the union when it
+///   holds none of the resolved ids at all — a pure-archive era's live
+///   side, or a pure-live era's archive side.
+/// - The `in (select … from (values …))` tuple test is a hash lookup
+///   evaluated once per row, replacing a per-row disjunction over up to
+///   one term per resolved generation.
+/// - DuckDB's row-value (struct) comparison treats NULL fields as equal
+///   (`select (1, NULL::varchar) in (select (1, NULL::varchar))` is
+///   `true`), so a NULL book needs no `coalesce` sentinel: `NULL::varchar`
+///   in the `values` row matches a NULL `book` column exactly, which is
+///   the bookless partition's whole correctness requirement.
 pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
     if generations.is_empty() {
         // Selecting nothing, not everything: a time before all history is
         // an empty result, never the whole archive.
         return "false".to_string();
     }
-    generations
+    let lo = generations.iter().map(|g| g.gen_id).min().unwrap();
+    let hi = generations.iter().map(|g| g.gen_id).max().unwrap();
+    let rows = generations
         .iter()
         .map(|g| {
-            let (batch, book, generation) = (&g.batch, &g.book, g.gen_id);
-            // `book = '…'` cannot match a NULL book, so a partition with
-            // no book would be silently excluded from every historical
-            // answer while appearing in the live one.
-            let book_term = match book {
-                Some(b) => format!("book = '{}'", b.replace('\'', "''")),
-                None => "book is null".to_string(),
+            // A NULL book is `NULL::varchar`, typed so the column has a
+            // type even when every generation's book is NULL — never a
+            // sentinel string, which `book = '…'` could not match anyway.
+            let book = match &g.book {
+                Some(b) => format!("'{}'", b.replace('\'', "''")),
+                None => "NULL::varchar".to_string(),
             };
             format!(
-                "(batch = '{}' and {book_term} and gen_id = {generation} \
-                 and source_time = '{}'::timestamptz)",
-                batch.replace('\'', "''"),
+                "('{}', {book}, {}::bigint, '{}'::timestamptz)",
+                g.batch.replace('\'', "''"),
+                g.gen_id,
                 g.source_time.to_rfc3339(),
             )
         })
         .collect::<Vec<_>>()
-        .join(" or ")
+        .join(", ");
+    format!(
+        "gen_id between {lo} and {hi} and \
+         (batch, book, gen_id, source_time) in (select (b, k, g, t) from (values {rows}) v(b, k, g, t))"
+    )
 }
 
 #[cfg(test)]
@@ -403,6 +422,91 @@ mod tests {
             )
             .unwrap();
         assert_eq!(total, 4.0, "BK000's 07:00 row plus BK001's, not the 14:00");
+    }
+
+    #[test]
+    fn the_predicate_names_a_gen_id_range_and_no_or_chain() {
+        // Cheap and load-bearing: anchors the harness against a
+        // regression back to the per-generation OR chain, and against a
+        // range that does not actually match the resolved ids.
+        let (_d, store) = fixture();
+        let gens = resolve_generations(
+            store.writer(),
+            &["risk_snapshot_position_archive".to_string()],
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        let pred = generation_predicate(&gens);
+        assert!(
+            pred.contains("gen_id between 1 and 3"),
+            "the range spans the resolved gen_ids (1 and 3): {pred}"
+        );
+        assert!(!pred.contains(" or "), "no per-generation OR chain: {pred}");
+    }
+
+    #[test]
+    fn the_predicate_selects_a_null_book_partition_from_either_side() {
+        // A NULL-book generation in the archive, and a *different*, newer
+        // generation of the same bookless partition in live. Resolving at
+        // an instant before the live generation's source time must pick
+        // the archived one — and the predicate, applied to exactly the
+        // relation `Era::relation` builds (archive union all live, each
+        // side filtered), must select the archived row's value and not
+        // live's. `book = '…'` cannot match a NULL book; DuckDB's row-value
+        // (struct) comparison treats NULL fields as equal, so the tuple
+        // form needs no `coalesce` sentinel (spec §4.4, §6.5).
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table bookless_position_archive(
+                     batch varchar, book varchar, gen_id bigint, pnl double,
+                     source_time timestamp with time zone);
+                 create table bookless_position_live(
+                     batch varchar, book varchar, gen_id bigint, pnl double,
+                     source_time timestamp with time zone);
+                 insert into bookless_position_archive values
+                   ('b', NULL, 1, 100, '2026-08-30T07:00:00Z');
+                 insert into bookless_position_live values
+                   ('b', NULL, 2, 999, '2026-08-30T14:00:00Z');",
+            )
+            .unwrap();
+        let gens = resolve_generations(
+            store.writer(),
+            &[
+                "bookless_position_archive".to_string(),
+                "bookless_position_live".to_string(),
+            ],
+            ts("2026-08-30T10:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(gens.len(), 1, "one partition, one resolved generation");
+        assert_eq!(
+            gens[0].book, None,
+            "the bookless partition must resolve, not be filtered out"
+        );
+        assert_eq!(
+            gens[0].gen_id, 1,
+            "the 07:00 archived generation, not 14:00 live"
+        );
+
+        let pred = generation_predicate(&gens);
+        let relation = crate::query::scope_sql::Era {
+            kind: crate::store::ddl::TableKind::Archive,
+            generations: Some(&pred),
+        }
+        .relation("bookless", geode_core::schema::Grain::Position);
+        let total: f64 = store
+            .writer()
+            .query_row(&format!("select sum(pnl) from {relation}"), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            total, 100.0,
+            "the archived NULL-book row's value, not live's 999"
+        );
     }
 
     #[test]

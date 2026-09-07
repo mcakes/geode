@@ -44,6 +44,19 @@ pub struct ScopeSql {
 /// them (spec §6.5). Passed down so the semi-join probe reads the same
 /// era as its caller — a probe left on live inside an as-of query mixes
 /// today's data into a historical answer, and does it silently.
+///
+/// `generations` is the per-side predicate `relation` applies to *both*
+/// the archive and the live table, not a filter callers apply themselves
+/// afterward — every other site that used to `and` it onto its own
+/// predicate has been deleted (Phase 4a's as-of baseline fix). Both sides
+/// are always read, filtered independently, because `publish_file` is one
+/// transaction *per grain* while compile (the resolve) and execution run
+/// on separate connections: a publish landing between them can move a
+/// generation from live to archive at one grain and not another, so a
+/// relation that trusted which side the resolve saw would silently miss
+/// that partition for one frame. A `gen_id` range in the predicate makes
+/// reading both sides free rather than a cost: DuckDB's zonemaps skip an
+/// entire side that holds none of the resolved ids (docs/perf.md).
 #[derive(Clone, Copy)]
 pub struct Era<'a> {
     pub kind: TableKind,
@@ -67,17 +80,21 @@ impl Era<'_> {
     /// this morning — has to find it there. Reading the archive alone
     /// answers such a query with the partition's *previous* generation, or
     /// with nothing at all for a partition published only once, and says
-    /// nothing either way. The generation predicate is what keeps the two
-    /// sides from both contributing; live carries `gen_id` and
-    /// `source_time` precisely so it can be filtered the same way (§4.2).
+    /// nothing either way. The generation predicate — applied to *both*
+    /// sides here, not by the caller — is what keeps the two sides from
+    /// both contributing; live carries `gen_id` and `source_time`
+    /// precisely so it can be filtered the same way (§4.2).
     pub fn relation(&self, dataset: &str, grain: Grain) -> String {
         match self.kind {
             TableKind::Live => table_name(dataset, grain, TableKind::Live),
-            TableKind::Archive => format!(
-                "(select * from {} union all select * from {})",
-                table_name(dataset, grain, TableKind::Archive),
-                table_name(dataset, grain, TableKind::Live)
-            ),
+            TableKind::Archive => {
+                let p = self.generations.unwrap_or("true");
+                format!(
+                    "(select * from {} where {p} union all select * from {} where {p})",
+                    table_name(dataset, grain, TableKind::Archive),
+                    table_name(dataset, grain, TableKind::Live)
+                )
+            }
         }
     }
 }
@@ -170,19 +187,18 @@ fn is_membership(grain: Grain, probe: Grain) -> bool {
 /// carrying a coarse measure of NULL — visibly inconsistent rather than
 /// merely absent.
 ///
-/// The probe reads the same era as its caller. Reading live from inside
-/// an as-of query mixes today's data into a historical answer — and does
-/// it silently, because the numbers still look like numbers (spec §6.5).
+/// The probe reads the same era as its caller — via `era.relation`, which
+/// applies the generation predicate to both sides itself (Phase 4a's as-of
+/// baseline fix). Reading live from inside an as-of query mixes today's
+/// data into a historical answer — and does it silently, because the
+/// numbers still look like numbers (spec §6.5).
 fn membership(ds: &DatasetSpec, grain: Grain, probe: Grain, era: Era<'_>, inner: &str) -> String {
     let join = shared_keys(grain, probe)
         .iter()
         .map(|k| format!("probe.\"{k}\" is not distinct from base.\"{k}\""))
         .collect::<Vec<_>>()
         .join(" and ");
-    let mut terms = vec![join, inner.to_string()];
-    if let Some(generations) = era.generations {
-        terms.push(format!("({generations})"));
-    }
+    let terms = [join, inner.to_string()];
     format!(
         "exists (select 1 from {} probe where {})",
         era.relation(&ds.name, probe),
@@ -746,6 +762,34 @@ grain = "position"
         assert_eq!(sql.predicate, "true");
         assert!(sql.params.is_empty());
         assert_eq!(sql.semantics, ScopeSemantics::Direct);
+    }
+
+    #[test]
+    fn an_archive_era_relation_filters_both_sides() {
+        // Phase 4a's as-of baseline fix: the generation predicate is
+        // applied inside `relation` itself, to both the archive and live
+        // tables it reads — not by the caller afterward. Both sides are
+        // always read because publish is per grain and the resolve is a
+        // separate statement (see `Era`'s doc comment), so both must be
+        // filtered or one of them leaks an unresolved generation.
+        let era = Era {
+            kind: TableKind::Archive,
+            generations: Some("gen_id = 7"),
+        };
+        let sql = era.relation("risk", Grain::Underlying);
+        assert_eq!(
+            sql.matches("gen_id = 7").count(),
+            2,
+            "the predicate must appear once per side: {sql}"
+        );
+        assert!(
+            sql.contains("risk_underlying_archive where gen_id = 7"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("risk_underlying_live where gen_id = 7"),
+            "{sql}"
+        );
     }
 
     #[test]

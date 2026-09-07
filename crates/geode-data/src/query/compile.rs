@@ -376,10 +376,6 @@ pub fn compile_view(
     // fallback scan, the scope's membership probes and the cross-dataset
     // joins must all read the same relations.
     let era = resolved.era();
-    let and_gen = |p: &str| match era.generations {
-        Some(g) => format!("({p}) and ({g})"),
-        None => p.to_string(),
-    };
 
     // The spine is the set of `(grouping tuple, depth)` rows the tree has,
     // and it is assembled from the aggregates rather than scanned from one
@@ -503,7 +499,7 @@ pub fn compile_view(
                 &era.relation(&view.dataset, grain),
                 &derived_for(ds, &own, dims, grain),
             ),
-            pred = and_gen(&grain_scope.predicate),
+            pred = &grain_scope.predicate,
         ));
         // The grain subquery's params follow the previous CTE's, in CTE
         // order.
@@ -624,7 +620,7 @@ pub fn compile_view(
                 &era.relation(&view.dataset, spine_grain),
                 &derived_for(ds, materialized, dims, spine_grain),
             ),
-            pred = and_gen(&spine_scope.predicate),
+            pred = &spine_scope.predicate,
             sets = sets.join(", "),
         ));
         params.extend(spine_scope.params);
@@ -799,8 +795,12 @@ pub fn compile_view(
         joins.push(format!(
             "left join (select {projection} from {relation} where {pred} group by {keys}) {alias} on {on}",
             projection = projection.join(", "),
+            // `joined_era.relation` already applies `joined_gen` to both
+            // the archive and live tables it reads (Phase 4a's as-of
+            // baseline fix) — reapplying it here would run the tuple
+            // semi-join twice per relation use.
             relation = joined_era.relation(&join.dataset, joined_grain),
-            pred = joined_gen.as_deref().unwrap_or("true"),
+            pred = "true",
             keys = join
                 .on
                 .iter()
