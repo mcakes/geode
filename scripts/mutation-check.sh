@@ -1975,10 +1975,10 @@ run_mutation "pickable: keys are not pickable" \
 # unpainted) row 20 must fail.
 run_mutation "picker: the values list never scrolls to follow the selection" \
   crates/geode-shell/src/shell/picker.rs \
-  '            shell
-                .picker_scroll
-                .scroll_to_item(picker.selected, ScrollStrategy::Nearest);' \
-  '            let _ = (&shell.picker_scroll, picker.selected, ScrollStrategy::Nearest);' \
+  '        shell
+            .picker_scroll
+            .scroll_to_item(picker.selected, ScrollStrategy::Nearest);' \
+  '        let _ = (&shell.picker_scroll, picker.selected, ScrollStrategy::Nearest);' \
   geode-shell keyboard_navigation_past_visible_rows_scrolls_the_selection_into_view
 
 # Fix round 1, Finding 3: a scope chip's body click had no test — only
