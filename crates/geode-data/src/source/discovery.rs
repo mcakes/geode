@@ -7,6 +7,8 @@
 use crate::source::sentinel::{Sentinel, parse_sentinel};
 use crate::store::Catalog;
 use crate::store::StoreError;
+use crate::store::catalog::FileGeneration;
+use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -189,12 +191,22 @@ fn classify(
 
     // Change detection: (size, source time) against what we last loaded.
     if let Some(prev) = catalog.lookup_by_path(csv_path)?
-        && prev.size == meta.len()
-        && prev.source_time == sentinel.as_of
+        && is_unchanged(&prev, meta.len(), sentinel.as_of)
     {
         return Ok(CandidateState::Unchanged);
     }
     Ok(CandidateState::Ready(sentinel))
+}
+
+/// True when `prev` — the catalog's latest recorded generation for a path —
+/// already reflects this file's current (size, source time): the same
+/// file, not reloaded since. Shared between `classify`'s own change
+/// detection and the ingest runner's pop-time re-check
+/// (`ingest::runner::run`), so a duplicate queued item is harmless even if
+/// one slips past `IngestHandle::submit`'s dedupe — both call sites apply
+/// exactly the same rule.
+pub(crate) fn is_unchanged(prev: &FileGeneration, size: u64, source_time: DateTime<Utc>) -> bool {
+    prev.size == size && prev.source_time == source_time
 }
 
 #[cfg(test)]
@@ -428,5 +440,41 @@ mod tests {
         let (_sd, st) = store();
         let cat = crate::store::Catalog::new(st.writer());
         assert_eq!(discover(&s, &cat, SystemTime::now()).unwrap().len(), 2);
+    }
+
+    fn generation_at(size: u64, source_time: DateTime<Utc>) -> FileGeneration {
+        FileGeneration {
+            file_id: 0,
+            dataset: "risk_snapshot".into(),
+            batch: "BK000".into(),
+            path: "/src/risk_2026-08-30_BK000.csv".into(),
+            size,
+            mtime: Utc::now(),
+            source_time,
+            gen_id: 1,
+            loaded_at: Utc::now(),
+            row_count: 1,
+            books: vec![Some("BK000".to_string())],
+            archived_only: false,
+            health: crate::health::Health::Ok,
+        }
+    }
+
+    #[test]
+    fn is_unchanged_true_only_when_size_and_source_time_both_match() {
+        // Shared between `classify`'s change detection and the runner's
+        // pop-time re-check (both must apply exactly the same rule, or a
+        // duplicate that slips past one sees a different answer from the
+        // other).
+        let prev = generation_at(10, ts("2026-08-30T07:00:00Z"));
+        assert!(is_unchanged(&prev, 10, ts("2026-08-30T07:00:00Z")));
+        assert!(
+            !is_unchanged(&prev, 11, ts("2026-08-30T07:00:00Z")),
+            "a different size is a change"
+        );
+        assert!(
+            !is_unchanged(&prev, 10, ts("2026-08-30T08:00:00Z")),
+            "a different source time is a change"
+        );
     }
 }

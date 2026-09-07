@@ -23,9 +23,12 @@
 use crate::health::Health;
 use crate::ingest::load::{LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
+use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
-use crate::store::Store;
+use crate::store::{Catalog, Store};
+use chrono::{DateTime, Utc};
 use geode_core::schema::SchemaSpec;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -59,6 +62,13 @@ pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 struct Queue {
     items: Vec<WorkItem>,
     shutdown: bool,
+    /// The file the runner has popped and is loading (or is about to skip
+    /// as stale) right now, if any. Set when an item is popped, cleared
+    /// once that item's outcome — `Published`, `Failed`, or a silent
+    /// stale-skip — has been reported. Kept for the whole load, not just
+    /// before it starts, so `submit`'s dedupe still sees it as spoken for
+    /// the entire time a poll could otherwise re-add it.
+    in_flight: Option<(PathBuf, DateTime<Utc>)>,
 }
 
 pub struct IngestHandle {
@@ -96,17 +106,50 @@ impl IngestRunner {
 
 impl IngestHandle {
     /// Add work. Items are merged into the queue and the whole queue is
-    /// re-sorted, so a current file preempts pending backfill.
-    pub fn submit(&self, plan: WorkPlan) {
+    /// re-sorted, so a current file preempts pending backfill. Returns how
+    /// many of `plan`'s items were actually enqueued, for tests: the
+    /// runner's own pop-time re-check (below) independently guarantees a
+    /// duplicate is never *loaded* twice regardless of what this dedupe
+    /// does, so a test that only observes `IngestEvent`s cannot isolate
+    /// this method's own contribution from that backstop.
+    ///
+    /// An incoming item is dropped if an item naming the same
+    /// `(csv_path, source_time)` is already queued or is the item the
+    /// runner is loading right now (`Queue::in_flight`). Discovery polls
+    /// on its own clock and re-reports every file the catalog does not yet
+    /// reflect — including one this queue already holds, or one the runner
+    /// is in the middle of loading, whose catalog record is written only
+    /// at the end of the load. Without this, a poll shorter than a load
+    /// re-adds a copy of every not-yet-published file every time it runs:
+    /// the production symptom was 3051 generations of 17 files that never
+    /// changed, even though (as the doc above notes) the pop-time re-check
+    /// alone would already have kept every one of those copies from
+    /// actually reloading — what this dedupe adds on top is bounding how
+    /// large the queue, and how many wasted pop-time catalog lookups, a
+    /// quiet poll interval can pile up.
+    pub fn submit(&self, plan: WorkPlan) -> usize {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        q.items.extend(plan.items);
+        let mut enqueued = 0;
+        for item in plan.items {
+            let key = (item.candidate.csv_path.clone(), item.source_time);
+            let already_queued = q.in_flight.as_ref() == Some(&key)
+                || q.items.iter().any(|existing| {
+                    (&existing.candidate.csv_path, existing.source_time) == (&key.0, key.1)
+                });
+            if already_queued {
+                continue;
+            }
+            q.items.push(item);
+            enqueued += 1;
+        }
         q.items.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
                 .then(b.source_time.cmp(&a.source_time))
         });
         cvar.notify_all();
+        enqueued
     }
 
     pub fn shutdown(&self) {
@@ -128,6 +171,17 @@ impl Drop for IngestHandle {
     }
 }
 
+/// Clears `Queue::in_flight`, unconditionally. Called once an item's
+/// outcome — published, failed, or silently skipped as stale — has been
+/// decided, never before: `submit`'s dedupe must see this file as spoken
+/// for the whole time it could still be re-added by a poll, which is the
+/// entire load, not just the moment before it starts.
+fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
+    let (lock, _cvar) = queue;
+    let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+    q.in_flight = None;
+}
+
 fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, sink: IngestSink) {
     // PlanComplete is announced once per drain, on the transition from
     // working to idle — not on every wakeup. An idle runner would otherwise
@@ -144,7 +198,9 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 }
                 if !q.items.is_empty() {
                     announced_idle = false;
-                    break q.items.remove(0);
+                    let it = q.items.remove(0);
+                    q.in_flight = Some((it.candidate.csv_path.clone(), it.source_time));
+                    break it;
                 }
                 if !announced_idle {
                     announced_idle = true;
@@ -159,14 +215,30 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
             }
         };
 
+        // Pop-time re-check, the other half of the dedupe: the queue can
+        // still hold a copy of a file that finished loading — under a
+        // different, no-longer-in-flight copy — while this one waited.
+        // `submit`'s dedupe (above) catches the common case; this catches
+        // what slips past it (spec §5.7: not a failure, so no event).
+        let stale = match Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path) {
+            Ok(Some(prev)) => is_unchanged(&prev, item.candidate.size, item.source_time),
+            _ => false,
+        };
+        if stale {
+            clear_in_flight(&queue);
+            continue;
+        }
+
         // The dataset is resolved per item (Phase 3 §2.5). An undeclared
         // one is this item's failure, named, and the runner carries on.
         let Some(dataset) = schema.dataset(&item.dataset) else {
-            if !sink(IngestEvent::Failed {
+            let failed = sink(IngestEvent::Failed {
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '{}' is not declared", item.dataset),
-            }) {
+            });
+            clear_in_flight(&queue);
+            if !failed {
                 return;
             }
             continue;
@@ -218,7 +290,11 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 reason: "ingest task panicked".into(),
             },
         };
-        if !sink(event) {
+        let delivered = sink(event);
+        // Cleared only now: while the load ran, `in_flight` kept a
+        // duplicate submitted mid-load harmless.
+        clear_in_flight(&queue);
+        if !delivered {
             return; // receiver gone: nothing left to report to
         }
     }
@@ -327,15 +403,21 @@ mod tests {
         let (_db, _src, store, ds, mut plan) = harness();
         assert!(plan.items.len() >= 3, "need several items to observe order");
 
-        // Force everything to Backfill, then submit one current item.
+        // Force everything to Backfill, then pull one item *out* to
+        // resubmit separately at LatestRisk priority — a poll finding this
+        // file newly current. It must be removed from `plan` first: this
+        // test used to clone it in place instead, submitting the same
+        // (csv_path, source_time) twice at different priorities and
+        // expecting *two* Published events for it. That is the ladder
+        // defect A fixed (submit's own dedupe now drops the second copy),
+        // so `expected` would then wait forever on a publish that no
+        // longer comes. Removing it first keeps this test about
+        // preemption, not a second covert case of the dedupe.
         for item in &mut plan.items {
             item.priority = Priority::Backfill;
         }
-        let current = {
-            let mut c = plan.items[plan.items.len() - 1].clone();
-            c.priority = Priority::LatestRisk;
-            c
-        };
+        let mut current = plan.items.remove(plan.items.len() - 1);
+        current.priority = Priority::LatestRisk;
         let expected = plan.items.len() + 1;
 
         let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
@@ -455,5 +537,121 @@ mod tests {
             "the good item still loads: {events:?}"
         );
         handle.shutdown();
+    }
+
+    #[test]
+    fn submit_drops_an_item_already_queued_for_the_same_file_and_source_time() {
+        // `submit` used to `extend` the queue unconditionally: two plans
+        // naming the same (path, source_time) queued the file twice. This
+        // is the common case the production ladder came from — a poll
+        // re-adding a file that is already waiting to load.
+        //
+        // The assertion has to be on `submit`'s own return value, not on
+        // the eventual `IngestEvent` stream: the runner's pop-time
+        // re-check (a separate defence) independently guarantees a
+        // duplicate is never *loaded* twice regardless of what `submit`
+        // does, so "exactly one Published" is true even with this
+        // dedupe disabled — it would not isolate this method's own
+        // contribution from that backstop.
+        let (_db, _src, store, ds, plan) = harness();
+        let item = plan.items[0].clone();
+
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        let first = handle.submit(WorkPlan {
+            items: vec![item.clone()],
+        });
+        let second = handle.submit(WorkPlan { items: vec![item] });
+        assert_eq!(
+            (first, second),
+            (1, 0),
+            "the second submit names a (path, source_time) the first already \
+             queued and must enqueue nothing"
+        );
+
+        // `drain` waits for exactly the one terminal event this single
+        // enqueued item can produce — no dependence on `PlanComplete`
+        // timing, which can legitimately fire once before either `submit`
+        // call above even runs (the runner thread finding an empty queue
+        // at the moment it starts), and once for real after; a helper that
+        // stopped on the first one would race that window.
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        let published = events
+            .iter()
+            .filter(|e| matches!(e, IngestEvent::Published { .. }))
+            .count();
+        assert_eq!(
+            published, 1,
+            "and, end to end, the file loads exactly once: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time() {
+        // The other half of the fix: even a duplicate that slips past
+        // `submit`'s dedupe (e.g. it was already popped and in flight when
+        // the duplicate arrived) must be harmless once the file it names
+        // has actually finished loading. Load one file directly, bypassing
+        // the runner, then submit it alongside a second, genuinely unloaded
+        // file — the runner must publish nothing for the first and still
+        // load the second.
+        //
+        // The second file is what makes this deterministic rather than
+        // racing `PlanComplete` (which fires once before the stale item is
+        // even popped, and gives no event at all for a silent stale skip):
+        // giving the stale item strictly higher priority guarantees the
+        // single-threaded runner pops and dispenses with it *before* the
+        // fresh one, so waiting for the fresh item's own Published event
+        // is proof enough that the stale item was already handled.
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need two distinct files");
+        let mut stale = plan.items[0].clone();
+        let mut fresh = plan.items[1].clone();
+        assert_ne!(
+            stale.batch, fresh.batch,
+            "fixture must offer distinct files"
+        );
+        stale.priority = Priority::LatestRisk;
+        fresh.priority = Priority::Backfill;
+
+        let CandidateState::Ready(sentinel) = &stale.candidate.state else {
+            panic!("fixture item must be ready: {stale:?}");
+        };
+        load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: &stale.dataset,
+                csv_path: &stale.candidate.csv_path,
+                sentinel,
+                batch: &stale.batch,
+            },
+        )
+        .unwrap();
+
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan {
+            items: vec![stale.clone(), fresh.clone()],
+        });
+
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events.iter().any(
+                |e| matches!(e, IngestEvent::Published { batch, .. } if *batch == fresh.batch)
+            ),
+            "the fresh file must still load: {events:?}"
+        );
+        assert!(
+            events.iter().all(|e| !matches!(
+                e,
+                IngestEvent::Published { batch, .. } | IngestEvent::Failed { batch, .. }
+                    if *batch == stale.batch
+            )),
+            "a file already loaded before this item was popped must not \
+             reload: {events:?}"
+        );
     }
 }

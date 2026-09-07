@@ -576,6 +576,34 @@ run_mutation "ingest: the publish event names the partitions written" \
   'books: loaded.partitions.clone(),' \
   'books: Vec::new(),'
 
+# ---- the ingest queue dedupe (2026-09-07 display: 3051 generations of 17
+# files that never changed — the ingest queue appended every poll's plan
+# without deduplicating, and the runner reloaded every queued copy)
+
+run_mutation "ingest: submit drops an item already queued for the same file" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            if already_queued {
+                continue;
+            }' \
+  '            if false {
+                continue;
+            }' \
+  geode-data \
+  submit_drops_an_item_already_queued_for_the_same_file_and_source_time
+
+run_mutation "ingest: the runner re-checks change detection at pop time" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if stale {
+            clear_in_flight(&queue);
+            continue;
+        }' \
+  '        if false {
+            clear_in_flight(&queue);
+            continue;
+        }' \
+  geode-data \
+  a_queued_item_whose_file_was_loaded_meanwhile_is_skipped_at_pop_time
+
 run_mutation "ingest: an archived-only load is recorded as such" \
   crates/geode-data/src/ingest/load.rs \
   '    let archived_only = !published.is_empty()' \

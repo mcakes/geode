@@ -356,4 +356,104 @@ mod tests {
         sched.shutdown();
         sched.shutdown();
     }
+
+    /// The production symptom (2026-09-07 display): 3051 generations of 17
+    /// files that never changed, loaded over an hour of 2s polls. `submit`
+    /// never deduplicates, and `discover` only knows the catalog — not what
+    /// is already queued or being loaded right now — so every poll shorter
+    /// than a load re-adds a copy of every file not yet published. This
+    /// reproduces the ladder at a scale a unit test can afford: a 20ms
+    /// poll against files that each take longer than that to load.
+    #[test]
+    fn a_poll_shorter_than_a_load_does_not_reload_files_already_queued() {
+        let (_db, dir, ingest, ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(20), Duration::from_secs(3600));
+
+        // The shared `harness()` above drops its own fixture's source
+        // directory before returning (its tests want to start empty), so a
+        // second, independent fixture supplies the ready files this test
+        // copies into `dir`.
+        let (_db2, _src2, _store2, _ds2, emitted) = crate::ingest::load::tests_support::fixture();
+        let ready_files: Vec<&geode_demo_data::EmittedFile> = emitted
+            .files
+            .iter()
+            .filter(|f| f.sentinel_path.is_some())
+            .collect();
+        assert!(
+            ready_files.len() >= 3,
+            "need several ready files to observe the ladder: {}",
+            ready_files.len()
+        );
+        for f in &emitted.files {
+            std::fs::copy(
+                &f.csv_path,
+                dir.path().join(f.csv_path.file_name().unwrap()),
+            )
+            .unwrap();
+            if let Some(sp) = &f.sentinel_path {
+                std::fs::copy(sp, dir.path().join(sp.file_name().unwrap())).unwrap();
+            }
+        }
+
+        // A second reader on the same database, cloned before `conn` moves
+        // into the scheduler, for the honest check below.
+        let query_conn = conn.try_clone().unwrap();
+        let (sink, _sched_rx) = events_sink();
+        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+
+        // Bounded generously rather than tightly: this fixture has 15 real
+        // files to load (real DuckDB I/O, one publish transaction each),
+        // and under `cargo test --workspace`'s full parallel load that
+        // legitimately took longer than a tighter 10s bound allowed,
+        // failing a run that was simply still working, not stuck. A
+        // regression reproduces at a wholly different scale — the RED run
+        // against the unfixed code still hadn't gone idle after 10s with
+        // 45 *duplicate* publishes and climbing (the display's own case
+        // took an hour) — so this bound stays tight enough to fail fast on
+        // an actual defect while giving legitimate contention real room.
+        let mut published = 0;
+        let mut idle = false;
+        let deadline = std::time::Instant::now() + Duration::from_secs(45);
+        while std::time::Instant::now() < deadline {
+            match ingest_rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(IngestEvent::Published { .. }) => published += 1,
+                Ok(IngestEvent::PlanComplete) if published >= 1 => {
+                    idle = true;
+                    break;
+                }
+                Ok(IngestEvent::Failed { reason, .. }) => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        sched.shutdown();
+        ingest.shutdown();
+        assert!(
+            idle,
+            "the runner never went idle within 45s ({published} published so far)"
+        );
+
+        assert_eq!(
+            published,
+            ready_files.len(),
+            "every ready file must publish exactly once, not once per \
+             intervening poll"
+        );
+
+        // The honest check: a `Published` count can match by accident if a
+        // file were both reloaded and something else under-counted. What
+        // must actually be true is that the catalog holds exactly one
+        // generation per path.
+        let mut stmt = query_conn
+            .prepare("select path, count(*) from file_generations group by path")
+            .unwrap();
+        let counts: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(counts.len(), ready_files.len(), "{counts:?}");
+        for (path, c) in &counts {
+            assert_eq!(*c, 1, "{path} has {c} generations, expected exactly one");
+        }
+    }
 }
