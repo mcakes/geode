@@ -23,14 +23,12 @@ fn book_scope(book: &str) -> Scope {
 /// "ctrl"` is refused as invalid config), so this helper feeds the raw
 /// `Modifiers` value straight to `build_keymap`, the same way
 /// `defaults.rs`'s own `resolve` test helper exercises the matcher
-/// directly. `config`'s `[keymap] mod = "ctrl"` text is unused by this
-/// helper (kept only as documentation of intent) — it is never run
-/// through `mod_alias_from_config`.
-fn test_services_with_ctrl_mod() -> ShellServices {
-    let config = Config::load(&ConfigSources {
-        builtin: vec![LayerDoc::builtin("app", "[keymap]\nmod = \"ctrl\"\n").unwrap()],
-        ..ConfigSources::default()
-    });
+/// directly. The config carries no `[keymap] mod` doc at all (an earlier
+/// version of this helper loaded one, redundantly, since it was never
+/// run through `mod_alias_from_config`) — an empty config proves the
+/// point just as well.
+fn test_services_with_ctrl_alias() -> ShellServices {
+    let config = Config::load(&ConfigSources::default());
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     let mod_alias = Modifiers::CTRL;
@@ -55,7 +53,7 @@ fn test_services_with_ctrl_mod() -> ShellServices {
 
 #[gpui::test]
 fn ctrl_z_and_ctrl_shift_z_undo_and_redo_the_scope(cx: &mut gpui::TestAppContext) {
-    let (window, mut cx) = open_shell(cx, test_services_with_ctrl_mod());
+    let (window, mut cx) = open_shell(cx, test_services_with_ctrl_alias());
     let shell = shell_of(&window, &mut cx);
 
     let a = book_scope("A");
@@ -87,7 +85,7 @@ fn typing_in_the_field_sets_the_frame_text_per_keystroke_and_enter_blurs(
     cx: &mut gpui::TestAppContext,
 ) {
     // `test_services()` builds its keymap with `default_mod()` (spec
-    // §3.1: Alt) — `test_services_with_ctrl_mod` above exists precisely
+    // §3.1: Alt) — `test_services_with_ctrl_alias` above exists precisely
     // because that default is Alt, not Ctrl, so `mod+/` resolves to
     // `alt+/` here.
     let (window, mut vcx) = open_shell(cx, test_services());
