@@ -3,7 +3,7 @@
 //! carrying the column, under the same era routing every query uses.
 
 use crate::query::compile::{CompiledColumn, CompiledQuery, era_for};
-use crate::query::scope_sql::compile_scope;
+use crate::query::scope_sql::{DictionaryCache, compile_scope_cached};
 use crate::store::StoreError;
 use duckdb::Connection;
 use duckdb::types::Value;
@@ -21,6 +21,12 @@ pub fn compile_distinct(
     let base = dims.base_column(&params.column);
     let mut selects: Vec<String> = Vec::new();
     let mut all_params: Vec<Value> = Vec::new();
+    // One cache across every dataset's grain: a dataset appearing once
+    // in `schema.datasets` still gets one resolve of its ENUM types and
+    // its dictionary matches, not once per dataset iteration repeated by
+    // some other caller — and it costs nothing extra when, as here,
+    // every iteration is a different dataset anyway.
+    let mut cache = DictionaryCache::default();
     for ds in &schema.datasets {
         // The coarsest grain carrying the column: the smallest table
         // that sees every value.
@@ -32,7 +38,7 @@ pub fn compile_distinct(
             continue;
         };
         let era = era_for(conn, &ds.name, ds, &params.as_of)?;
-        let scope = compile_scope(conn, &params.scope, ds, grain, dims, era.era())?;
+        let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;
         let derived = dims.get(&params.column);
         let value_expr = match derived {
             None => format!("\"{base}\"::varchar"),

@@ -6,7 +6,7 @@
 //! requery budget; emitting one puts expand and collapse on the 8ms frame
 //! budget instead, because every level is already in the snapshot.
 
-use crate::query::scope_sql::{Era, compile_scope};
+use crate::query::scope_sql::{DictionaryCache, Era, compile_scope_cached};
 use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
 use duckdb::Connection;
@@ -350,6 +350,36 @@ pub fn compile_view(
     // than what is expanded, so a single-step expand needs no requery.
     max_depth: usize,
 ) -> Result<CompiledQuery, StoreError> {
+    compile_view_with_cache(
+        conn,
+        view,
+        schema,
+        scope,
+        dims,
+        as_of,
+        max_depth,
+        &mut DictionaryCache::default(),
+    )
+}
+
+/// [`compile_view`], but resolving the text filter's catalog facts
+/// through a `DictionaryCache` the caller supplies, so the ENUM types of
+/// `view.dataset` and each (type, needle) pattern's matches are resolved
+/// once per statement rather than once per measure grain plus once for
+/// the spine plus once for the interned-columns check. `pub(crate)`
+/// rather than exported: `compile_view`'s own signature is the public
+/// contract, unchanged; this exists so a test can pass its own cache and
+/// assert on `DictionaryCache::lookups`.
+pub(crate) fn compile_view_with_cache(
+    conn: &Connection,
+    view: &ViewSpec,
+    schema: &SchemaSpec,
+    scope: &Scope,
+    dims: &DerivedDimensions,
+    as_of: &crate::query::as_of::AsOf,
+    max_depth: usize,
+    cache: &mut DictionaryCache,
+) -> Result<CompiledQuery, StoreError> {
     let ds = schema
         .dataset(&view.dataset)
         .ok_or_else(|| compile_error(view, format!("unknown dataset '{}'", view.dataset)))?;
@@ -410,7 +440,7 @@ pub fn compile_view(
     // One aggregate subquery per measure grain the view touches.
     for grain in view.measure_grains(schema) {
         let alias = format!("agg_{}", grain.table());
-        let grain_scope = compile_scope(conn, scope, ds, grain, dims, era)?;
+        let grain_scope = compile_scope_cached(conn, scope, ds, grain, dims, era, cache)?;
 
         // Only the grouping columns this grain carries, and only within
         // the materialized depth — selecting a key the spine no longer
@@ -602,7 +632,7 @@ pub fn compile_view(
                 ),
             )
         })?;
-        let spine_scope = compile_scope(conn, scope, ds, spine_grain, dims, era)?;
+        let spine_scope = compile_scope_cached(conn, scope, ds, spine_grain, dims, era, cache)?;
         // `grouping()` may only name columns some set groups by, and its
         // width would then change with the bound — so the scan emits an
         // explicit depth instead of a bitmask. Under prefix sets a level
@@ -644,7 +674,7 @@ pub fn compile_view(
     let interned: Vec<&str> = if era.kind != TableKind::Live {
         Vec::new()
     } else {
-        let existing = crate::store::ddl::existing_enum_types(conn, &view.dataset)?;
+        let existing = cache.enum_types(conn, &view.dataset)?.to_vec();
         crate::store::ddl::categorical_columns(ds)
             .into_iter()
             .filter(|c| existing.contains(&crate::store::ddl::enum_type_name(&view.dataset, c)))

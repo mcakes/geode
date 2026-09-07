@@ -8,7 +8,7 @@ pub mod scope_sql;
 // defects at sites that had reached for `TableKind::Live` instead — the
 // single most repeated defect class in phase 2b. Leaving it reachable only
 // via `scope_sql` made the wrong thing the convenient one.
-pub use scope_sql::{Era, ScopeSql, compile_scope};
+pub use scope_sql::{DictionaryCache, Era, ScopeSql, compile_scope, compile_scope_cached};
 pub mod compile;
 
 pub use compile::{CompiledColumn, CompiledQuery, compile_view};

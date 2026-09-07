@@ -26,6 +26,7 @@ use geode_core::attribution::ScopeSemantics;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::{DatasetSpec, Grain};
 use geode_core::scope::{CompareOp, Expr, Literal, Scope};
+use std::collections::HashMap;
 
 /// Values are joined with this before binding and split back in SQL. A
 /// control character no dimension value can contain.
@@ -248,7 +249,14 @@ fn like_pattern(text: &str) -> String {
 /// This is a small query — a dictionary is hundreds of values, not a
 /// million rows — run synchronously on the compile connection, which is
 /// safe because `compile_scope` already runs on the service thread
-/// ahead of `submit`, not on a pool worker mid-query.
+/// ahead of `submit`, not on a pool worker mid-query. Reached through
+/// [`DictionaryCache`], which resolves it (and [`existing_enum_types`])
+/// once per (type, pattern) — respectively per dataset — per statement,
+/// not once per grain: `compile_view` calls `compile_scope` once per
+/// measure grain plus once for the spine, and without the cache every
+/// one of those repeated the same catalog round-trips.
+///
+/// [`existing_enum_types`]: crate::store::ddl::existing_enum_types
 fn dictionary_matches(
     conn: &Connection,
     enum_type: &str,
@@ -268,6 +276,60 @@ fn dictionary_matches(
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
+/// Catalog facts the text filter needs, resolved once per statement
+/// rather than once per grain (`compile_view` calls `compile_scope`
+/// once per measure grain plus once for the spine).
+///
+/// A fresh, empty cache is exactly as correct as no cache at all — it
+/// just misses every lookup once — so [`compile_scope`] keeps working
+/// unchanged as a thin wrapper handing [`compile_scope_cached`] a
+/// throwaway `DictionaryCache::default()`.
+#[derive(Default)]
+pub struct DictionaryCache {
+    /// dataset name -> its existing ENUM type names.
+    enum_types: HashMap<String, Vec<String>>,
+    /// (ENUM type, LIKE pattern) -> the dictionary values that matched.
+    /// Keyed on both, not the type alone — two needles narrowing to
+    /// different matches over the same column must not collide.
+    matches: HashMap<(String, String), Vec<String>>,
+    /// Catalog round-trips actually made. Tests assert on it; the hot
+    /// path never reads it.
+    pub lookups: usize,
+}
+
+impl DictionaryCache {
+    /// `existing_enum_types(conn, dataset)`, cached for the life of this
+    /// `DictionaryCache`.
+    pub fn enum_types(&mut self, conn: &Connection, dataset: &str) -> Result<&[String], StoreError> {
+        if !self.enum_types.contains_key(dataset) {
+            let v = crate::store::ddl::existing_enum_types(conn, dataset)?;
+            self.lookups += 1;
+            self.enum_types.insert(dataset.to_string(), v);
+        }
+        Ok(self
+            .enum_types
+            .get(dataset)
+            .expect("just inserted this key"))
+    }
+
+    /// `dictionary_matches(conn, enum_type, pattern)`, cached for the
+    /// life of this `DictionaryCache`.
+    pub fn matches(
+        &mut self,
+        conn: &Connection,
+        enum_type: &str,
+        pattern: &str,
+    ) -> Result<&[String], StoreError> {
+        let key = (enum_type.to_string(), pattern.to_string());
+        if !self.matches.contains_key(&key) {
+            let v = dictionary_matches(conn, enum_type, pattern)?;
+            self.lookups += 1;
+            self.matches.insert(key.clone(), v);
+        }
+        Ok(self.matches.get(&key).expect("just inserted this key"))
+    }
+}
+
 /// Top-level `and` terms, each routed on its own so a scope mixing
 /// grains — `underlying_ref = 'SPX' and strike > 100` — compiles.
 fn conjuncts(expr: &Expr) -> Vec<&Expr> {
@@ -282,6 +344,15 @@ fn conjuncts(expr: &Expr) -> Vec<&Expr> {
 }
 
 /// Compile the scope for the rows of `grain`, under `era`.
+///
+/// A thin wrapper over [`compile_scope_cached`] with a throwaway,
+/// call-local cache: every one of the twenty-odd existing callers keeps
+/// this exact signature, and a cache that lives no longer than one call
+/// is exactly as correct as no cache — it just costs one miss instead of
+/// none. A caller compiling several grains of the same statement (that
+/// is: `compile_view`, `compile_distinct`) should hold its own
+/// `DictionaryCache` across those calls instead, via
+/// `compile_scope_cached`.
 pub fn compile_scope(
     // Used by the text filter (spec §3.5): whether a categorical column's
     // ENUM type exists is a catalog lookup, not something the scope's own
@@ -292,6 +363,31 @@ pub fn compile_scope(
     grain: Grain,
     dims: &DerivedDimensions,
     era: Era<'_>,
+) -> Result<ScopeSql, StoreError> {
+    compile_scope_cached(
+        conn,
+        scope,
+        ds,
+        grain,
+        dims,
+        era,
+        &mut DictionaryCache::default(),
+    )
+}
+
+/// [`compile_scope`], but resolving the text filter's catalog facts
+/// (ENUM type existence, dictionary matches) through a `DictionaryCache`
+/// the caller supplies — so a caller compiling several grains of one
+/// statement resolves each dataset's ENUM types and each (type, needle)
+/// pattern's matches once, not once per grain.
+pub fn compile_scope_cached(
+    conn: &Connection,
+    scope: &Scope,
+    ds: &DatasetSpec,
+    grain: Grain,
+    dims: &DerivedDimensions,
+    era: Era<'_>,
+    cache: &mut DictionaryCache,
 ) -> Result<ScopeSql, StoreError> {
     let nothing = || ScopeSql {
         predicate: "false".to_string(),
@@ -435,7 +531,13 @@ pub fn compile_scope(
         // holds in every era, because `refresh_enum` builds the type
         // from live *and* archive (`crate::store::ddl`), so an archived
         // row can never hold a value the type lacks.
-        let enum_types = crate::store::ddl::existing_enum_types(conn, &ds.name)?;
+        //
+        // Cloned into an owned `Vec` rather than held as the cache's own
+        // borrow: `cache.matches` below also needs `&mut cache` inside
+        // this same loop, and a borrow of `enum_types` alive across every
+        // iteration would conflict with it. The list is short (a
+        // dataset's categorical textual columns), so the clone is cheap.
+        let enum_types: Vec<String> = cache.enum_types(conn, &ds.name)?.to_vec();
         let mut terms: Vec<String> = Vec::new();
         let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
@@ -443,7 +545,7 @@ pub fn compile_scope(
             let ty = crate::store::ddl::enum_type_name(&ds.name, name);
             let bound;
             let test = if col.categorical && enum_types.contains(&ty) {
-                let matches = dictionary_matches(conn, &ty, &pattern_text)?;
+                let matches = cache.matches(conn, &ty, &pattern_text)?;
                 if matches.is_empty() {
                     // No dictionary value meets the needle: this column
                     // contributes nothing, rather than an always-false
