@@ -1945,17 +1945,110 @@ run_mutation "text: the literal list binds the matching values, not the pattern"
 # any measure grain finishes -- only the no-measures shape, where the
 # spine is the sole (and first) consumer, catches it.
 
+# Review round 1, Minor 4: `matches` is nested (`HashMap<String /*type*/,
+# HashMap<String /*pattern*/, Vec<String>>>`) rather than a single
+# `(type, pattern)`-keyed map, so a hit allocates nothing (only a miss
+# needs to own the two strings it inserts). The three entries below are
+# re-anchored against that shape; the mutations and the tests they name
+# are unchanged in intent from before the nesting.
+
 run_mutation "cache: a resolved dictionary match is reused, not re-fetched" \
   crates/geode-data/src/query/scope_sql.rs \
-  '        if !self.matches.contains_key(&key) {' \
+  '        if self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .is_none()
+        {' \
   '        if true {' \
   geode-data a_cache_resolves_each_dictionary_once_per_statement
 
 run_mutation "cache: matches are keyed by pattern, not the ENUM type alone" \
   crates/geode-data/src/query/scope_sql.rs \
-  '        let key = (enum_type.to_string(), pattern.to_string());' \
-  '        let key = (enum_type.to_string(), String::new());' \
+  '        if self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .is_none()
+        {
+            let v = dictionary_matches(conn, enum_type, pattern)?;
+            self.lookups += 1;
+            self.matches
+                .entry(enum_type.to_string())
+                .or_default()
+                .insert(pattern.to_string(), v);
+        }
+        Ok(self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .expect("just inserted this key"))' \
+  '        if self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(""))
+            .is_none()
+        {
+            let v = dictionary_matches(conn, enum_type, pattern)?;
+            self.lookups += 1;
+            self.matches
+                .entry(enum_type.to_string())
+                .or_default()
+                .insert(String::new(), v);
+        }
+        Ok(self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(""))
+            .expect("just inserted this key"))' \
   geode-data a_cache_keys_matches_by_pattern_not_type_alone
+
+# Review round 1, Major 1: the mirror of the entry above — the ENUM-type
+# half of the key, not the pattern half. Every other text-filter fixture
+# declares exactly one categorical textual column, so a key collapsing
+# to the pattern alone (dropping which column's dictionary it names) had
+# nothing to collide with and no test could see it —
+# `two_categorical_columns_fixture` (book + counterparty, one dictionary
+# match each, to different values) exists so this mutation is reachable.
+run_mutation "cache: matches are keyed by the ENUM type, not the pattern alone" \
+  crates/geode-data/src/query/scope_sql.rs \
+  '        if self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .is_none()
+        {
+            let v = dictionary_matches(conn, enum_type, pattern)?;
+            self.lookups += 1;
+            self.matches
+                .entry(enum_type.to_string())
+                .or_default()
+                .insert(pattern.to_string(), v);
+        }
+        Ok(self
+            .matches
+            .get(enum_type)
+            .and_then(|m| m.get(pattern))
+            .expect("just inserted this key"))' \
+  '        if self
+            .matches
+            .get("")
+            .and_then(|m| m.get(pattern))
+            .is_none()
+        {
+            let v = dictionary_matches(conn, enum_type, pattern)?;
+            self.lookups += 1;
+            self.matches
+                .entry(String::new())
+                .or_default()
+                .insert(pattern.to_string(), v);
+        }
+        Ok(self
+            .matches
+            .get("")
+            .and_then(|m| m.get(pattern))
+            .expect("just inserted this key"))' \
+  geode-data a_cache_keys_matches_by_type_not_pattern_alone
 
 run_mutation "cache: compile_view's spine call uses the shared cache" \
   crates/geode-data/src/query/compile.rs \
@@ -1963,13 +2056,41 @@ run_mutation "cache: compile_view's spine call uses the shared cache" \
   '        let spine_scope = crate::query::scope_sql::compile_scope(conn, scope, ds, spine_grain, dims, era)?;' \
   geode-data compile_view_with_no_measures_resolves_the_dictionary_once_via_the_spine
 
+# Review round 1, Minor 2: the interned-columns check's own cache use had
+# no defence -- both compile_view.rs tests above already warm the cache
+# through some other site before this one runs, so this mutation
+# SURVIVED them (verified by hand: reverted to `existing_enum_types`
+# directly, both still passed). Only a view with no text scope at all
+# (so the text block never touches the cache) isolates it.
+run_mutation "cache: the interned-columns check uses the shared cache" \
+  crates/geode-data/src/query/compile.rs \
+  '        let existing = cache.enum_types(conn, &view.dataset)?.to_vec();' \
+  '        let existing = crate::store::ddl::existing_enum_types(conn, &view.dataset)?;' \
+  geode-data compile_view_with_no_text_scope_resolves_the_dictionary_once_via_the_interned_check
+
+# Re-anchored (review round 1): compile_distinct's body moved into
+# compile_distinct_with_cache (Minor 5, below), and `&mut cache` became
+# `cache` now that `cache` is itself the `&mut DictionaryCache`
+# parameter, which also shortened the line to fit on one.
 run_mutation "distinct: counts are taken under the given scope" \
   crates/geode-data/src/query/distinct.rs \
-  '        let scope =
-            compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;' \
-  '        let scope =
-            compile_scope_cached(conn, &geode_core::scope::Scope::default(), ds, grain, dims, era.era(), &mut cache)?;' \
+  '        let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), cache)?;' \
+  '        let scope = compile_scope_cached(conn, &geode_core::scope::Scope::default(), ds, grain, dims, era.era(), cache)?;' \
   geode-data distinct_counts_values_under_the_given_scope_and_unions_datasets
+
+# Review round 1, Minor 5: the same call site as the entry above, but
+# this one names the text-scope test, which is the only test exercising
+# two datasets' dictionary resolves through one cache in the same call
+# (two_dataset_fixture_with_textual_book). Bypassing the shared cache
+# here is fully observable, unlike compile_view's grain loop: every
+# dataset's ENUM type name is dataset-qualified, so there is no earlier
+# call in the same statement that could pre-warm what a later one needs
+# -- confirmed by hand, this mutation reads 0 instead of 4.
+run_mutation "cache: compile_distinct's per-dataset call uses the shared cache" \
+  crates/geode-data/src/query/distinct.rs \
+  '        let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), cache)?;' \
+  '        let scope = crate::query::scope_sql::compile_scope(conn, &params.scope, ds, grain, dims, era.era())?;' \
+  geode-data distinct_with_a_text_scope_over_two_datasets_resolves_each_dictionary_once
 
 run_mutation "distinct: as-of reads the archive era" \
   crates/geode-data/src/query/distinct.rs \
