@@ -438,12 +438,28 @@ Mechanically, the term for an ENUM column becomes
 
 with the same bound parameter, so the compiled statement's shape stays
 one prepared statement per view and parameter counts do not change.
-Under an as-of era the archived table carries plain `VARCHAR` (P2: as-of
-skips ENUM interning), so the term stays the row `ILIKE`; the rewrite is
-an era-aware branch in `scope_sql.rs`, chosen per column from the
-schema's `categorical` flag and the era. Non-categorical columns — keys,
-and any attribute or dimension that did not opt in — are plain strings
-in every era and keep the row scan.
+
+**As built (2026-09-07), amended from the paragraph above.** The
+archived table still carries plain `VARCHAR` (P2: as-of skips ENUM
+interning on the column itself), but the rewrite is no longer gated to
+the live era. It shipped that way first, on the reasoning that
+`refresh_enum` (`crates/geode-data/src/store/ddl.rs`) built the type
+from the live table's distinct values only, so an archived row could
+hold a value absent from the dictionary and the `IN` would silently drop
+it. That made every keystroke in the scope bar slow under an as-of era —
+the pre-rewrite floor, once per measure grain — because as-of routes to
+`archive union all live` (spec §6.5) and the gate sent every textual
+column down the row-scan branch regardless of whether it was
+categorical. The root cause was the gate, not the era: `refresh_enum`
+now reads live **and** archive (its call site is the same one, in
+`crates/geode-data/src/ingest/load.rs`'s interning loop, run right after
+each publish — which is also when the outgoing generation moves to the
+archive, spec §4.3 — so no row in either table can hold a value the type
+lacks), and the compiler's gate in `scope_sql.rs` checks only whether
+the type exists (`existing_enum_types`), not which era it is compiling
+for. A categorical column's `ILIKE` takes the dictionary path in every
+era; non-categorical columns — keys, and any attribute or dimension that
+did not opt in — are plain strings in every era and keep the row scan.
 
 The gate: the bench in §7 re-run after the rewrite, with the zero-match
 case over ENUM columns only inside 50 ms at 1M rows, and the residual

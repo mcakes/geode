@@ -238,9 +238,11 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
         )?);
     }
 
-    // 5. Rebuild the dimension ENUM types from what is now live, so the
-    // query path can cast to them and get dictionary-encoded columns
-    // (spec §3.6). Storage stays VARCHAR — see `refresh_enum` for why.
+    // 5. Rebuild the dimension ENUM types from what is now live and
+    // archived, so the query path can cast to them and get
+    // dictionary-encoded columns (spec §3.6), and the scope compiler's
+    // text-filter rewrite (spec §3.5) can apply under an as-of era too.
+    // Storage stays VARCHAR — see `refresh_enum` for why.
     for col in crate::store::ddl::categorical_columns(req.dataset) {
         // Refresh from the coarsest staged table carrying the column,
         // which is the smallest scan that sees every value. The third
@@ -262,6 +264,11 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
                 req.dataset_name,
                 *grain,
                 crate::store::ddl::TableKind::Live,
+            ),
+            &crate::store::ddl::table_name(
+                req.dataset_name,
+                *grain,
+                crate::store::ddl::TableKind::Archive,
             ),
         )?;
     }
@@ -1097,6 +1104,7 @@ source_name = "NPV"
             "risk_snapshot",
             "book",
             "risk_snapshot_position_live",
+            "risk_snapshot_position_archive",
         )
         .unwrap();
         f.store
@@ -1113,6 +1121,7 @@ source_name = "NPV"
             "risk_snapshot",
             "book",
             "risk_snapshot_position_live",
+            "risk_snapshot_position_archive",
         )
         .unwrap();
         assert_eq!(after, before + 1, "the new book joined the type");
@@ -1143,6 +1152,92 @@ source_name = "NPV"
         assert_eq!(
             archived, before,
             "the superseded generation must have moved to archive"
+        );
+    }
+
+    #[test]
+    fn a_value_dropped_from_a_republished_partition_still_shows_in_the_enum() {
+        // `book` is baked into the partition key (batch + book, spec
+        // §4.3), so a value there cannot leave live through a normal
+        // republish — a file that no longer carries a book simply never
+        // touches that book's partition, and the partition stays live at
+        // its old generation. A *non-key* categorical column, like
+        // `lhu`, genuinely can leave live: republishing the same
+        // partition (same batch, same books, so every one of its
+        // partitions is touched) with every row's `lhu` rewritten
+        // archives the old rows and replaces them, and live no longer
+        // carries the old value at all. That is exactly the case
+        // `refresh_enum`'s live-and-archive union exists for (spec
+        // §3.5): the old value must still be in the dictionary so an
+        // as-of text filter over it still takes the rewrite instead of
+        // falling back to a row scan.
+        let f = fixture();
+        let file = ready_file(&f);
+        load(&f, file);
+
+        let old_lhu: String = f
+            .store
+            .writer()
+            .query_row(
+                "select lhu from risk_snapshot_position_live limit 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let csv_text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let twin = file
+            .csv_path
+            .with_file_name("risk_20260830_lhu_dropped.csv");
+        std::fs::write(&twin, rewrite_column(&csv_text, "LHU", "LHU_NEW")).unwrap();
+        let sentinel_text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let mut sentinel = crate::source::parse_sentinel(&sentinel_text).unwrap();
+        // A newer source time: a corrected republish of the same batch,
+        // not a separate generation that leaves the old one live.
+        sentinel.as_of += chrono::Duration::hours(1);
+        let batch = super::tests_support::batch_of(&file.csv_path);
+        load_file(
+            &f.store,
+            &LoadRequest {
+                dataset: &f.ds,
+                dataset_name: "risk_snapshot",
+                csv_path: &twin,
+                sentinel: &sentinel,
+                batch: &batch,
+            },
+        )
+        .unwrap();
+
+        // Live no longer carries the old value...
+        let still_live: i64 = f
+            .store
+            .writer()
+            .query_row(
+                "select count(*) from risk_snapshot_position_live where lhu = ?",
+                duckdb::params![old_lhu],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            still_live, 0,
+            "the republish must have replaced every row carrying the old value"
+        );
+
+        // ...but the dictionary still does, because `refresh_enum` reads
+        // the archive the republish just filed the old rows into.
+        let dictionary: Vec<String> = {
+            let conn = f.store.writer();
+            let mut stmt = conn
+                .prepare("select v from unnest(enum_range(null::risk_snapshot_lhu_enum)) t(v)")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert!(
+            dictionary.contains(&old_lhu),
+            "the dropped value must still be in the dictionary: {dictionary:?}"
         );
     }
 

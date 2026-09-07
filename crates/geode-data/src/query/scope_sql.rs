@@ -341,16 +341,15 @@ pub fn compile_scope(
     // coarse ones on the same row, and marked nothing (spec §6.3).
     if let Some(text) = &scope.text {
         let pattern = Value::Text(like_pattern(text));
-        // Dictionary terms (spec §3.5): a categorical column is ENUM-typed
-        // in the live era, so the pattern is evaluated over the type's
+        // Dictionary terms (spec §3.5, as amended): a categorical column
+        // is ENUM-typed, so the pattern is evaluated over the type's
         // values and the row test becomes an `in`, which DuckDB runs on
-        // the codes. Only when the type exists: before the first load it
-        // does not, and naming it would fail the statement.
-        let enum_types = if era.kind == TableKind::Live {
-            crate::store::ddl::existing_enum_types(conn, &ds.name)?
-        } else {
-            Vec::new()
-        };
+        // the codes. This applies in every era — `refresh_enum` builds
+        // the type from live *and* archive (`crate::store::ddl`), so an
+        // archived row can never hold a value the type lacks — gated only
+        // on the type existing: before the first load it does not, and
+        // naming it would fail the statement.
+        let enum_types = crate::store::ddl::existing_enum_types(conn, &ds.name)?;
         let mut terms: Vec<String> = Vec::new();
         let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
@@ -1150,7 +1149,45 @@ grain = "position"
             )
             .unwrap();
         }
-        crate::store::ddl::refresh_enum(conn, "risk", "book", "risk_instrument_live").unwrap();
+        crate::store::ddl::refresh_enum(
+            conn,
+            "risk",
+            "book",
+            "risk_instrument_live",
+            "risk_instrument_archive",
+        )
+        .unwrap();
+        (store, ds)
+    }
+
+    /// The as-of root-cause fixture (spec §3.5, as amended): `BK_OLD`
+    /// exists ONLY in the archive — `enum_fixture`'s live table never
+    /// carried it — so a dictionary built from live alone cannot hold
+    /// it. This is the exact case the era gate's original comment
+    /// worried about ("an archived row could hold a value absent from
+    /// the dictionary and the `IN` would silently drop it"); the fix is
+    /// `refresh_enum` reading live *and* archive, not leaving the
+    /// rewrite gated off.
+    fn archived_only_value_fixture() -> (crate::store::Store, geode_core::schema::DatasetSpec) {
+        let (store, ds) = enum_fixture();
+        let conn = store.writer();
+        conn.execute(
+            "insert into risk_instrument_archive
+                 (book, lhu, position_ref, counterparty, instrument_ref,
+                  npv, currency, batch, source_file_id, gen_id, source_time)
+             values ('BK_OLD', 'L', 'POLD', 'C', 'IOLD', 1.0, 'USD', 'b', 1, 1,
+                     TIMESTAMPTZ '2026-08-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        crate::store::ddl::refresh_enum(
+            conn,
+            "risk",
+            "book",
+            "risk_instrument_live",
+            "risk_instrument_archive",
+        )
+        .unwrap();
         (store, ds)
     }
 
@@ -1207,10 +1244,58 @@ grain = "position"
     }
 
     #[test]
-    fn the_rewrite_falls_back_to_the_row_scan_under_as_of_and_when_the_type_is_missing() {
+    fn the_rewrite_falls_back_to_the_row_scan_only_when_the_type_is_missing() {
+        // Type existence is the only gate now (root-cause fix, spec §3.5
+        // as amended) — not the era. Before the first load, or with the
+        // type explicitly dropped, neither era can name it, and both
+        // fall back; see
+        // `a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of`
+        // for the case where the type *does* exist under as-of.
         let (store, ds) = enum_fixture();
         let scope = Scope {
             text: Some("bk00".into()),
+            ..Scope::default()
+        };
+        store
+            .writer()
+            .execute_batch("drop type risk_book_enum")
+            .unwrap();
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            Era::live(),
+        )
+        .unwrap();
+        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+        let archive = Era {
+            kind: TableKind::Archive,
+            generations: Some("true"),
+        };
+        let sql = compile_scope(
+            store.writer(),
+            &scope,
+            &ds,
+            Grain::Instrument,
+            &dims(),
+            archive,
+        )
+        .unwrap();
+        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+    }
+
+    #[test]
+    fn a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of() {
+        // `BK_OLD` was never live — it exists only in the archive — the
+        // case the era gate's own comment worried about. Root cause
+        // fixed (spec §3.5 as amended): `refresh_enum` reads live and
+        // archive, so the type carries it, and the rewrite is no longer
+        // gated to the live era.
+        let (store, ds) = archived_only_value_fixture();
+        let scope = Scope {
+            text: Some("old".into()),
             ..Scope::default()
         };
         let archive = Era {
@@ -1226,22 +1311,35 @@ grain = "position"
             archive,
         )
         .unwrap();
-        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
-        // Drop the type: the live path must not name a type that is not there.
-        store
+        assert!(
+            sql.predicate.contains("enum_range(null::risk_book_enum)"),
+            "the archive era must take the dictionary path too: {}",
+            sql.predicate
+        );
+        // The read path's opinions are law: the dictionary term must
+        // select exactly what the row scan over the same relation would.
+        let relation = archive.relation(&ds.name, Grain::Instrument);
+        let via_dict: i64 = store
             .writer()
-            .execute_batch("drop type risk_book_enum")
+            .query_row(
+                &format!("select count(*) from {relation} where {}", sql.predicate),
+                duckdb::params_from_iter(sql.params.iter()),
+                |r| r.get(0),
+            )
             .unwrap();
-        let sql = compile_scope(
-            store.writer(),
-            &scope,
-            &ds,
-            Grain::Instrument,
-            &dims(),
-            Era::live(),
-        )
-        .unwrap();
-        assert!(!sql.predicate.contains("enum_range"), "{}", sql.predicate);
+        let row_scan: i64 = store
+            .writer()
+            .query_row(
+                &format!("select count(*) from {relation} where \"book\" ilike '%old%'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            via_dict, row_scan,
+            "the dictionary term must select exactly what the row scan does"
+        );
+        assert!(via_dict > 0, "the archived-only value must be found");
     }
 
     proptest! {

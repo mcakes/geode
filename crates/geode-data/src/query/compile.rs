@@ -1972,21 +1972,21 @@ kind = "measure"
                 TIMESTAMPTZ '2026-08-01 00:00:00Z');",
         )
         .unwrap();
-        // Build the ENUMs the way ingest does — from live only. Only for
-        // columns this grain's table actually has; `underlying2_ref`
-        // lives at the pair grain.
+        // Build the ENUMs deliberately incomplete — from live only, both
+        // arguments naming the live table — even though ingest itself no
+        // longer does this (`refresh_enum` now unions in the archive,
+        // spec §3.5): this fixture tests that the general read path does
+        // not *depend* on the dictionary being complete, a property
+        // that must hold independent of that fix. Only for columns this
+        // grain's table actually has; `underlying2_ref` lives at the pair
+        // grain.
         for col in
             crate::store::ddl::categorical_columns(schema().dataset("risk_snapshot").unwrap())
                 .into_iter()
                 .filter(|c| Grain::Underlying.key_columns().contains(c))
         {
-            crate::store::ddl::refresh_enum(
-                conn,
-                "risk_snapshot",
-                col,
-                &table_name("risk_snapshot", Grain::Underlying, TableKind::Live),
-            )
-            .unwrap();
+            let live = table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
+            crate::store::ddl::refresh_enum(conn, "risk_snapshot", col, &live, &live).unwrap();
         }
         (dir, store)
     }

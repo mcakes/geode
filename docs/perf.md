@@ -567,6 +567,50 @@ first place (`textual` on a column no grain can route is already a
 load-time error; a key column that *can* be routed but has a
 one-per-row vocabulary is a schema choice, not a bug).
 
+**The as-of root cause (2026-09-07): the dictionary rewrite was gated to
+the live era.** `refresh_enum` built the ENUM type from the live table's
+distinct values only, so an archived row could in principle hold a
+value the type lacked — and the scope compiler's text-filter rewrite
+(`crates/geode-data/src/query/scope_sql.rs`) refused to name the type at
+all once `era.kind != TableKind::Live`, falling back to the per-row
+`ILIKE` for every textual column. As-of reads `archive union all live`
+(spec §6.5), so this was the pre-rewrite floor above, over more than the
+live row count. The fix: `refresh_enum`
+(`crates/geode-data/src/store/ddl.rs`) now reads live **and** archive —
+it already runs right after each publish, which is also when the
+outgoing generation moves to the archive (spec §4.3), so no row in
+either table can hold a value the type lacks — and the compiler's gate
+checks only whether the type exists, not the era. New bench case,
+`{rows}_rows_text_none_depth_2_asof`: the source ingested twice (a
+second generation, republished an hour later) so a real archive exists,
+queried with `AsOf::At` a moment between the two generations. Measured
+2026-09-07, same machine as the tables above, `cargo bench -p geode-data
+--bench query -- text_none_depth_2_asof` (criterion, 20 samples):
+
+| Case | 100k rows | 1M rows |
+|---|---|---|
+| As-of, **before** this fix (base commit `f68f72b`, gate present) | 32.9 ms | 89.6 ms |
+| As-of, **after** this fix | 23.7 ms | 48.7-49.0 ms |
+
+**The gate — `1000000_rows_text_none_depth_2_asof` under 50 ms — holds,
+but with far less headroom than the live case's 20.6 ms**: two runs
+landed at 48.7 ms and 49.0 ms median, with the upper end of the
+confidence interval touching 49.9 ms on the second run. That margin is
+expected, not a regression risk introduced by the fix itself — the
+as-of relation is `archive union all live`, so even with the dictionary
+rewrite applied in both branches, the scan is over roughly twice the
+row count the live-only case reads, plus the `union all`'s own cost.
+Before this fix the as-of case was the same 63 ms floor as every other
+pre-rewrite reading, worse than double the live floor because it also
+paid for the row scan itself, not just more rows to decode; after, both
+the live and as-of cases pay only for the dictionary probe and the row
+count they each scan, which is why the ratio (89.6/48.7 ≈ 1.8×
+improvement) tracks the row-count ratio rather than closing to zero.
+Whether that headroom is comfortable enough for production data (wider
+generation history, more concurrent tiles) needs a display-measured
+reading the way §"the per-keystroke painted frame" below was for the
+live case — not done here.
+
 **The per-keystroke painted frame, measured on a display (2026-09-07).**
 Everything above is the query-path benchmark (submit→snapshot on the
 pool, no gpui). The end-to-end reading was taken by hand on

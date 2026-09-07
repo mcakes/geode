@@ -1854,11 +1854,23 @@ run_mutation "text: a categorical column matches the dictionary, not the rows" \
   '            let test = if false {' \
   geode-data a_text_filter_over_a_categorical_column_matches_the_dictionary_not_the_rows
 
-run_mutation "text: the rewrite is live-era only" \
+# Root cause of the as-of slowdown (2026-09-07 fix): the rewrite is now
+# gated on the type existing, not on the era, and the type is built to
+# cover every era by `refresh_enum` reading live *and* archive. These two
+# entries replace the old single "text: the rewrite is live-era only"
+# entry, whose name and anchor described the gate this fix removed.
+
+run_mutation "text: refresh_enum reads live and archive, not live alone" \
+  crates/geode-data/src/store/ddl.rs \
+  '             select distinct \"{column}\"::varchar from {archive_table}' \
+  '             select distinct \"{column}\"::varchar from {live_table}' \
+  geode-data a_value_dropped_from_a_republished_partition_still_shows_in_the_enum
+
+run_mutation "text: the rewrite applies in every era, gated on the type alone" \
   crates/geode-data/src/query/scope_sql.rs \
-  '        let enum_types = if era.kind == TableKind::Live {' \
-  '        let enum_types = if true {' \
-  geode-data the_rewrite_falls_back_to_the_row_scan_under_as_of_and_when_the_type_is_missing
+  '        let enum_types = crate::store::ddl::existing_enum_types(conn, &ds.name)?;' \
+  '        let enum_types = if era.kind == TableKind::Live { crate::store::ddl::existing_enum_types(conn, &ds.name)? } else { Vec::new() };' \
+  geode-data a_text_filter_over_a_categorical_column_selects_an_archived_only_value_under_as_of
 
 run_mutation "text: the dictionary term keeps the escape clause" \
   crates/geode-data/src/query/scope_sql.rs \

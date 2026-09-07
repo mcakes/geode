@@ -56,7 +56,8 @@ pub fn categorical_columns(ds: &DatasetSpec) -> Vec<&str> {
     ds.categorical_columns()
 }
 
-/// Rebuild a dimension's ENUM type from the values currently live.
+/// Rebuild a dimension's ENUM type from the values currently live **and**
+/// archived.
 ///
 /// **Storage stays `VARCHAR`; the ENUM is derived and used only for a
 /// query-time cast.** DuckDB 1.10505 has no `ALTER TYPE ... ADD VALUE`,
@@ -67,12 +68,22 @@ pub fn categorical_columns(ds: &DatasetSpec) -> Vec<&str> {
 /// `Dictionary(UInt8, Utf8)`) at the cost of one cheap rebuild per
 /// ingest, and no table ever moves.
 ///
+/// The dictionary covers every era because this runs after each publish,
+/// which is also when the outgoing generation moves to the archive
+/// (spec §4.3) — so no row in either table can hold a value the type
+/// lacks at the moment this returns. Retention only ever removes rows,
+/// never adds a value back, so a superset dictionary stays harmless to
+/// the scope compiler's `IN` (spec §3.5): reading both tables here is
+/// what lets the text filter's dictionary rewrite apply under an as-of
+/// era too, not just live.
+///
 /// Returns the number of distinct values the type now carries.
 pub fn refresh_enum(
     conn: &duckdb::Connection,
     dataset: &str,
     column: &str,
     live_table: &str,
+    archive_table: &str,
 ) -> Result<usize, crate::store::StoreError> {
     let name = enum_type_name(dataset, column);
     // Nothing references the type — columns are VARCHAR — so dropping is
@@ -81,6 +92,9 @@ pub fn refresh_enum(
         "drop type if exists {name};
          create type {name} as enum (
              select distinct \"{column}\"::varchar from {live_table}
+             where \"{column}\" is not null
+             union
+             select distinct \"{column}\"::varchar from {archive_table}
              where \"{column}\" is not null
          );"
     );
