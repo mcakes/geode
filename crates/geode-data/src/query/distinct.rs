@@ -18,15 +18,31 @@ pub fn compile_distinct(
     dims: &DerivedDimensions,
     params: &DistinctParams,
 ) -> Result<CompiledQuery, StoreError> {
+    compile_distinct_with_cache(conn, schema, dims, params, &mut DictionaryCache::default())
+}
+
+/// [`compile_distinct`], but resolving the text filter's catalog facts
+/// through a `DictionaryCache` the caller supplies. `pub(crate)` only —
+/// exists so a test can pass its own cache and read `DictionaryCache::
+/// lookups`; `compile_distinct`'s own signature is the public contract.
+pub(crate) fn compile_distinct_with_cache(
+    conn: &Connection,
+    schema: &SchemaSpec,
+    dims: &DerivedDimensions,
+    params: &DistinctParams,
+    cache: &mut DictionaryCache,
+) -> Result<CompiledQuery, StoreError> {
     let base = dims.base_column(&params.column);
     let mut selects: Vec<String> = Vec::new();
     let mut all_params: Vec<Value> = Vec::new();
-    // One cache across every dataset's grain: a dataset appearing once
-    // in `schema.datasets` still gets one resolve of its ENUM types and
-    // its dictionary matches, not once per dataset iteration repeated by
-    // some other caller — and it costs nothing extra when, as here,
-    // every iteration is a different dataset anyway.
-    let mut cache = DictionaryCache::default();
+    // One cache across the loop below, for the same reason
+    // `compile_view` holds one across its grains. It happens to save
+    // nothing *here*: `enum_type_name` is dataset-qualified
+    // ("{dataset}_{column}_enum"), so two different datasets never share
+    // a key and every iteration is a fresh miss. It costs nothing either
+    // — one `HashMap` lookup before each real query — so the call site
+    // stays uniform with `compile_view` rather than special-casing the
+    // one place a cache is not sharing anything.
     for ds in &schema.datasets {
         // The coarsest grain carrying the column: the smallest table
         // that sees every value.
@@ -38,8 +54,7 @@ pub fn compile_distinct(
             continue;
         };
         let era = era_for(conn, &ds.name, ds, &params.as_of)?;
-        let scope =
-            compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), &mut cache)?;
+        let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), cache)?;
         let derived = dims.get(&params.column);
         let value_expr = match derived {
             None => format!("\"{base}\"::varchar"),
@@ -243,6 +258,74 @@ grain = "instrument"
         f
     }
 
+    /// `schema()` with `book` also declared textual in both datasets
+    /// (categorical stays on by default for a dimension column).
+    fn schema_with_textual_book() -> SchemaSpec {
+        let mut s = schema();
+        for ds in s.datasets.iter_mut() {
+            if let Some(c) = ds.columns.iter_mut().find(|c| c.name == "book") {
+                c.textual = true;
+            }
+        }
+        s
+    }
+
+    /// Review round 1, Minor 5: `compile_distinct` is the only call site
+    /// where one `DictionaryCache` spans more than one dataset, and it
+    /// had no coverage of that shape with a text scope at all —
+    /// `two_dataset_fixture`'s schema declares no textual column, so the
+    /// text block never touched the cache in any existing `distinct`
+    /// test. Same data as `two_dataset_fixture`, but `book` is textual
+    /// (and its ENUM built) in both `risk` and `ref`.
+    fn two_dataset_fixture_with_textual_book() -> Fixture {
+        let schema = schema_with_textual_book();
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store.apply_schema(schema.dataset("risk").unwrap()).unwrap();
+        store.apply_schema(schema.dataset("ref").unwrap()).unwrap();
+        let f = Fixture {
+            _dir: dir,
+            store,
+            schema,
+            dims: DerivedDimensions::default(),
+            between: Utc::now(),
+        };
+        f.conn()
+            .execute_batch(
+                "insert into risk_instrument_live values
+                   ('BK000','L','P1','C','I1', 1.0, 'USD', 'b', 1, 1, now()),
+                   ('BK000','L','P2','C','I2', 1.0, 'USD', 'b', 1, 1, now()),
+                   ('BK000','L','P3','C','I3', 1.0, 'EUR', 'b', 1, 1, now()),
+                   ('BK000','L','P4','C','I4', 1.0, 'EUR', 'b', 1, 1, now()),
+                   ('BK001','L','P5','C','I5', 1.0, 'USD', 'b', 1, 1, now()),
+                   ('BK001','L','P6','C','I6', 1.0, 'JPY', 'b', 1, 1, now());
+                 insert into ref_instrument_live values
+                   ('BK000','L','P7','C','J1', 10.0, 'USD', 'b', 1, 1, now()),
+                   ('BK000','L','P8','C','J2', 10.0, 'USD', 'b', 1, 1, now()),
+                   ('BK000','L','P9','C','J3', 10.0, 'USD', 'b', 1, 1, now()),
+                   ('BK000','L','P10','C','J4', 10.0, 'EUR', 'b', 1, 1, now()),
+                   ('BK001','L','P11','C','J5', 10.0, 'GBP', 'b', 1, 1, now());",
+            )
+            .unwrap();
+        crate::store::ddl::refresh_enum(
+            f.conn(),
+            "risk",
+            "book",
+            "risk_instrument_live",
+            "risk_instrument_archive",
+        )
+        .unwrap();
+        crate::store::ddl::refresh_enum(
+            f.conn(),
+            "ref",
+            "book",
+            "ref_instrument_live",
+            "ref_instrument_archive",
+        )
+        .unwrap();
+        f
+    }
+
     /// `risk`'s BK000 partition has two generations: the archived one
     /// (2026-08-01, `currency = 'GBP'`) and the live, current one
     /// (2026-08-10, `currency = 'USD'`). `between` sits strictly after the
@@ -319,6 +402,57 @@ grain = "instrument"
         };
         let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &unscoped).unwrap());
         assert!(all.iter().map(|(_, n)| n).sum::<u64>() > 8);
+    }
+
+    #[test]
+    fn distinct_with_a_text_scope_over_two_datasets_resolves_each_dictionary_once() {
+        // Review round 1, Minor 5. Both `risk` and `ref` declare `book`
+        // textual, so this is the one place in the crate a
+        // `DictionaryCache` genuinely spans two datasets' own dictionary
+        // resolves in a single call (it saves nothing between them --
+        // `enum_type_name` is dataset-qualified -- but the shape was
+        // untested until now).
+        let f = two_dataset_fixture_with_textual_book();
+        let params = DistinctParams {
+            key: QueryKey(1),
+            tag: 1,
+            column: "currency".into(),
+            scope: Scope {
+                text: Some("bk000".into()),
+                ..Scope::default()
+            },
+            as_of: AsOf::Live,
+        };
+
+        // The cache must be invisible to the result: what `compile_
+        // distinct` actually runs (one shared, internally-created cache)
+        // must agree with an explicitly cache-mediated compile using a
+        // cache this test controls -- and both must land on the counts
+        // an un-cached compile would produce (the same BK000-only totals
+        // `distinct_counts_values_under_the_given_scope_and_unions_
+        // datasets` above gets from a dimension selection on "BK000",
+        // since the text needle "bk000" narrows to exactly that book).
+        let via_public = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &params).unwrap());
+        assert_eq!(
+            via_public,
+            vec![("EUR".to_string(), 3), ("USD".to_string(), 5)]
+        );
+
+        let mut cache = DictionaryCache::default();
+        let via_explicit_cache =
+            compile_distinct_with_cache(f.conn(), &f.schema, &f.dims, &params, &mut cache).unwrap();
+        assert_eq!(
+            f.run(&via_explicit_cache),
+            via_public,
+            "the cache must be invisible to the result"
+        );
+        assert_eq!(
+            cache.lookups, 4,
+            "one enum_types lookup plus one dictionary match per dataset -- 2 \
+             datasets, one categorical textual column each -- since the cache \
+             never shares a hit across datasets here (dataset-qualified ENUM \
+             type names), but must not cost more than that either"
+        );
     }
 
     #[test]
