@@ -4,7 +4,9 @@
 //! never sees it.
 
 use crate::tile::{ACTIONS, BlotterTile};
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::QueryOutcome;
+use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
@@ -59,6 +61,11 @@ impl TileContent for BlotterContent {
 pub struct BlotterFactory {
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
+    /// The schema and derived dimensions `:filter`/`:scope` validate
+    /// against (Phase 4a §3.7) — set alongside `views` and refreshed the
+    /// same way on `ConfigReloaded`.
+    schema: Rc<RefCell<SchemaSpec>>,
+    dims: Rc<RefCell<DerivedDimensions>>,
     find_style: Rc<Cell<FindStyle>>,
     stale_after: Rc<Cell<Duration>>,
 }
@@ -67,12 +74,16 @@ impl BlotterFactory {
     pub fn new(
         data: DataHandle,
         views: Vec<ViewSpec>,
+        schema: SchemaSpec,
+        dims: DerivedDimensions,
         find_style: FindStyle,
         stale_after: Duration,
     ) -> BlotterFactory {
         BlotterFactory {
             data,
             views: Rc::new(RefCell::new(views)),
+            schema: Rc::new(RefCell::new(schema)),
+            dims: Rc::new(RefCell::new(dims)),
             find_style: Rc::new(Cell::new(find_style)),
             stale_after: Rc::new(Cell::new(stale_after)),
         }
@@ -82,6 +93,18 @@ impl BlotterFactory {
     /// next requery, which the frame's config counter triggers.
     pub fn set_views(&self, views: Vec<ViewSpec>) {
         *self.views.borrow_mut() = views;
+    }
+
+    /// A reloaded `datasets` doc (Phase 4a §3.7): every open tile's next
+    /// `:filter`/`:scope` validates against the new schema, same sharing
+    /// as `set_views`.
+    pub fn set_schema(&self, schema: SchemaSpec) {
+        *self.schema.borrow_mut() = schema;
+    }
+
+    /// A reloaded `dimensions` doc, same sharing as `set_schema`.
+    pub fn set_dims(&self, dims: DerivedDimensions) {
+        *self.dims.borrow_mut() = dims;
     }
 
     pub fn set_find_style(&self, style: FindStyle) {
@@ -125,6 +148,8 @@ impl ModuleFactory for BlotterFactory {
                 frame,
                 self.data.clone(),
                 self.views.clone(),
+                self.schema.clone(),
+                self.dims.clone(),
                 self.find_style.clone(),
                 self.stale_after.clone(),
                 restored,
@@ -180,6 +205,8 @@ mod tests {
         let short = BlotterFactory::new(
             short_data,
             Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
             FindStyle::Vim,
             Duration::from_secs(1),
         );
@@ -193,6 +220,8 @@ mod tests {
         let default = BlotterFactory::new(
             default_data,
             Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
             FindStyle::Vim,
             crate::tile::DEFAULT_STALE_AFTER,
         );

@@ -34,12 +34,9 @@ pub struct DataSetup {
     /// for the service, carried alongside it too so a caller with a
     /// `DataSetup` in hand (rather than reaching into `config`) has it
     /// directly — mirrors `views` being both `config.views` and its own
-    /// field for the same reason. Nothing in this crate reads it back out
-    /// today (`start`/`attach` only need `views`), so it's honestly
-    /// unread here — not a live behaviour switch, same as `geode_shell::
-    /// shell::ShellView`'s own `find_style` field doc describes for a
-    /// comparable case.
-    #[allow(dead_code)]
+    /// field for the same reason. `start` now reads this too (Phase 4a
+    /// §3.7): the blotter factory validates `:filter`/`:scope` against
+    /// the same schema and dimensions the service itself runs on.
     pub dimensions: DerivedDimensions,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -152,10 +149,17 @@ pub fn start(
     let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
     let dropped = Arc::new(AtomicU64::new(0));
     let sink = make_sink(tx, dropped.clone());
+    // Cloned before the move into `DataService::spawn` below — the
+    // factory validates `:filter`/`:scope` against the same schema and
+    // dimensions the service itself was built from (spec §3.7).
+    let schema = setup.config.schema.clone();
+    let dimensions = setup.dimensions.clone();
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
         setup.views,
+        schema,
+        dimensions,
         find_style,
         stale_after,
     ));
@@ -209,6 +213,19 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 factory.set_views(views.clone());
                 factory.set_find_style(FindStyle::from_config(config));
                 factory.set_stale_after(stale_after_from_config(config));
+                // `:filter`/`:scope` validation (Phase 4a §3.7): the
+                // `datasets` doc is re-read here too — `ConfigReloaded`
+                // doesn't fire for a `datasets`-only edit (that instead
+                // sets `restart_required`, since the data engine itself
+                // needs a restart to pick up new source paths or column
+                // definitions), so this can only ever drift as far as a
+                // `views`/`dimensions` reload that happened to arrive
+                // alongside a stale `datasets` doc — the same bound
+                // `stale_after` above accepts.
+                if let Some(schema) = config.doc("datasets").map(|d| SchemaSpec::from_doc(d).0) {
+                    factory.set_schema(schema);
+                }
+                factory.set_dims(dims.clone());
                 handle.replace_views(views, dims);
             }
             // The dimension pickers (Phase 4a §3.3/§3.4): `geode-shell`
@@ -390,6 +407,8 @@ mod tests {
         let factory = Rc::new(BlotterFactory::new(
             handle.clone(),
             Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
             FindStyle::default(),
             Duration::from_secs(900),
         ));

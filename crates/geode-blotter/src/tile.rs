@@ -9,8 +9,10 @@ use crate::core::flatten::SortSpec;
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
 use crate::delegate::BlotterDelegate;
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
+use geode_core::schema::SchemaSpec;
 use geode_core::scope::{Scope, parse_expr};
 use geode_core::view::ViewSpec;
 use geode_data::{DataHandle, QueryParams};
@@ -75,6 +77,11 @@ pub struct BlotterTile {
     frame: Entity<Frame>,
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
+    /// The schema and derived dimensions `:filter` validates a tile's
+    /// scope against (Phase 4a §3.7) — shared with every other tile the
+    /// same way `views` is, refreshed on `ConfigReloaded`.
+    schema: Rc<RefCell<SchemaSpec>>,
+    dims: Rc<RefCell<DerivedDimensions>>,
     pub find_style: Rc<Cell<FindStyle>>,
     /// `[app] blotter.stale_after` (spec §6.5; 15m default, read by the
     /// app in Task 8) — carried in exactly like `find_style` so a config
@@ -103,6 +110,8 @@ impl BlotterTile {
         frame: Entity<Frame>,
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
+        schema: Rc<RefCell<SchemaSpec>>,
+        dims: Rc<RefCell<DerivedDimensions>>,
         find_style: Rc<Cell<FindStyle>>,
         stale_after: Rc<Cell<Duration>>,
         restored: Option<&toml::Table>,
@@ -132,6 +141,35 @@ impl BlotterTile {
         let unscoped = restored
             .and_then(|t| t.get("unscoped").and_then(|v| v.as_bool()))
             .unwrap_or(false);
+        // `filter.expr`/`filter.text` (Phase 4a §3.7): a restored
+        // expression that no longer parses (e.g. hand-edited, or a
+        // column since removed) drops the whole filter rather than
+        // half-applying it — logged here since a fresh tile has nowhere
+        // inline to report it (4b migrates this to real logging).
+        let tile_scope = restored
+            .and_then(|t| t.get("filter"))
+            .and_then(|v| v.as_table())
+            .and_then(|f| {
+                let mut scope = Scope::default();
+                if let Some(expr_str) = f.get("expr").and_then(|v| v.as_str()) {
+                    match parse_expr(expr_str) {
+                        Ok(expr) => scope.expression = Some(expr),
+                        Err(e) => {
+                            eprintln!(
+                                "[blotter] restored filter.expr '{expr_str}' failed to parse at column {}: {} — filter dropped",
+                                e.caret + 1,
+                                e.message
+                            );
+                            return None;
+                        }
+                    }
+                }
+                if let Some(text) = f.get("text").and_then(|v| v.as_str()) {
+                    scope.text = (!text.is_empty()).then(|| text.to_string());
+                }
+                Some(scope)
+            })
+            .unwrap_or_default();
 
         let table = cx.new(|cx| {
             TableState::new(BlotterDelegate::new(), window, cx)
@@ -161,13 +199,15 @@ impl BlotterTile {
             frame,
             data,
             views,
+            schema,
+            dims,
             find_style,
             stale_after,
             table,
             view_name,
             pin,
             unscoped,
-            tile_scope: Scope::default(),
+            tile_scope,
             acted: None,
             tag: 0,
             last_grouping: Vec::new(),
@@ -193,6 +233,29 @@ impl BlotterTile {
             .iter()
             .find(|v| v.name == self.view_name)
             .cloned()
+    }
+
+    /// `:filter` narrows the tile's own scope layer, so it must be valid
+    /// against this tile's dataset (spec §10.1) the same way the frame's
+    /// `:scope` is validated in the shell — an unknown column or a bad
+    /// operator on a derived dimension is a user error reported at the
+    /// caret/column, not a silent no-op or a compiler error surfaced far
+    /// downstream. `Ok(())` when the view or its dataset isn't resolvable
+    /// (nothing to validate against yet — `requery`'s own "view is not
+    /// configured" error already covers that case).
+    fn validate_tile_scope(&self, scope: &Scope) -> Result<(), String> {
+        let Some(view) = self.view() else {
+            return Ok(());
+        };
+        let schema = self.schema.borrow();
+        let Some(dataset) = schema.dataset(&view.dataset) else {
+            return Ok(());
+        };
+        let dims = self.dims.borrow();
+        match scope.validate(dataset, &dims).into_iter().next() {
+            Some(d) => Err(d.message),
+            None => Ok(()),
+        }
     }
 
     fn grouping(&self, frame: &Frame, view: &ViewSpec) -> Vec<String> {
@@ -541,6 +604,25 @@ impl BlotterTile {
                 self.unscoped = !self.unscoped;
                 self.requery(cx);
             }
+            Command::FilterExpr(text) => {
+                let expr = parse_expr(&text)
+                    .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))?;
+                let mut scope = self.tile_scope.clone();
+                scope.expression = Some(expr);
+                self.validate_tile_scope(&scope)?;
+                self.tile_scope = scope;
+                self.requery(cx);
+            }
+            Command::FilterText(words) => {
+                let mut scope = self.tile_scope.clone();
+                scope.text = (!words.trim().is_empty()).then_some(words);
+                self.tile_scope = scope;
+                self.requery(cx);
+            }
+            Command::FilterClear => {
+                self.tile_scope = Scope::default();
+                self.requery(cx);
+            }
             Command::ScopeExpr(text) => {
                 let expr = parse_expr(&text)
                     .map_err(|e| format!("{} at column {}", e.message, e.caret + 1))?;
@@ -578,6 +660,42 @@ impl BlotterTile {
                     return Err("nothing to undo".into());
                 }
             }
+            Command::ScopeRedo => {
+                let redone = self.frame.update(cx, |f, cx| {
+                    let r = f.redo_scope();
+                    cx.notify();
+                    r
+                });
+                if !redone {
+                    return Err("nothing to redo".into());
+                }
+            }
+            Command::ScopeDrop(d) => {
+                let dropped = self.frame.update(cx, |f, cx| {
+                    let r = f.drop_dimension(&d);
+                    if r {
+                        cx.notify();
+                    }
+                    r
+                });
+                if !dropped {
+                    return Err(format!("no selection on '{d}'"));
+                }
+            }
+            Command::ScopeSave(name) => {
+                self.frame.update(cx, |f, cx| {
+                    let r = f.save_scope(&name);
+                    cx.notify();
+                    r
+                })?;
+            }
+            Command::ScopeLoad(name) => {
+                self.frame.update(cx, |f, cx| {
+                    let r = f.load_scope(&name);
+                    cx.notify();
+                    r
+                })?;
+            }
             Command::AsOf(text) => {
                 let at = parse_as_of(&text, chrono::Utc::now())?;
                 self.frame.update(cx, |f, cx| {
@@ -585,6 +703,16 @@ impl BlotterTile {
                         cx.notify();
                     }
                 });
+            }
+            Command::AsOfUndo => {
+                let undone = self.frame.update(cx, |f, cx| {
+                    let r = f.undo_as_of();
+                    cx.notify();
+                    r
+                });
+                if !undone {
+                    return Err("no previous as-of".into());
+                }
             }
             Command::Live => {
                 self.frame.update(cx, |f, cx| {
@@ -659,7 +787,16 @@ impl BlotterTile {
             })
             .unwrap_or_default();
         let views = self.views.borrow().iter().map(|v| v.name.clone()).collect();
-        completions(line, cursor, &Vocabulary { columns, views })
+        let scopes = self.frame.read(cx).saved_scopes().keys().cloned().collect();
+        completions(
+            line,
+            cursor,
+            &Vocabulary {
+                columns,
+                views,
+                scopes,
+            },
+        )
     }
 
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
@@ -738,6 +875,16 @@ impl BlotterTile {
             }
         }
         t.insert("unscoped".into(), toml::Value::Boolean(self.unscoped));
+        if !self.tile_scope.is_empty() {
+            let mut filter = toml::Table::new();
+            if let Some(expr) = &self.tile_scope.expression {
+                filter.insert("expr".into(), toml::Value::String(expr.to_string()));
+            }
+            if let Some(text) = &self.tile_scope.text {
+                filter.insert("text".into(), toml::Value::String(text.clone()));
+            }
+            t.insert("filter".into(), toml::Value::Table(filter));
+        }
         t
     }
 
@@ -820,6 +967,17 @@ impl gpui::Render for BlotterTile {
                     .px_1()
                     .rounded(px(3.))
                     .child("unscoped"),
+            );
+        }
+        if !self.tile_scope.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)
+                    .bg(theme.warning.opacity(0.25))
+                    .px_1()
+                    .rounded(px(3.))
+                    .debug_selector(|| format!("blotter-filtered-{}", self.tile.0))
+                    .child("filtered"),
             );
         }
         if let Some(snapshot) = &snapshot {
@@ -942,6 +1100,27 @@ mod tests {
         ViewSpec::from_doc(&doc).0
     }
 
+    /// The `d` dataset `views()`'s "tree"/"wide" views point at —
+    /// `validate_tile_scope`'s target for the `:filter` tests below.
+    /// `model_code` is a carried dimension (`grain = "instrument"`) so a
+    /// `:filter model_code = 'EURP'` validates as a legitimate column,
+    /// same shape as `geode_core::scope::mod`'s own fixture dataset.
+    fn schema() -> SchemaSpec {
+        let text = "[d.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [d.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [d.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [d.columns.counterparty]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                     [d.columns.instrument_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+                     [d.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\ntextual = true\n\
+                     [d.columns.model_code]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"instrument\"\n\
+                     [d.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n\
+                     [d.columns.daily_trading_pnl]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"\n";
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema
+    }
+
     fn slots() -> GroupingSlots {
         let mut s = GroupingSlots::default();
         s.set(1, vec!["lhu".into()]);
@@ -1002,6 +1181,17 @@ mod tests {
     }
 
     fn open(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+        open_with(cx, None)
+    }
+
+    /// Same as [`open`], but a `restored` record (§3.7's `filter.expr`/
+    /// `filter.text` round trip) is threaded straight into `BlotterTile::
+    /// new`, exactly as `BlotterFactory::create` does for a session
+    /// restore.
+    fn open_with(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(crate::init);
         let (data, requests) = DataHandle::for_tests();
@@ -1016,9 +1206,11 @@ mod tests {
                                 frame.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
+                                Rc::new(RefCell::new(schema())),
+                                Rc::new(RefCell::new(DerivedDimensions::default())),
                                 Rc::new(Cell::new(FindStyle::Vim)),
                                 Rc::new(Cell::new(DEFAULT_STALE_AFTER)),
-                                None,
+                                restored,
                                 window,
                                 cx,
                             )
@@ -1044,6 +1236,87 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// Two tiles sharing one frame, one `DataHandle`/`Receiver<Request>`
+    /// pair (distinguished by `QueryKey`, exactly like production's one
+    /// shared handle across every tile) — for `:filter`'s "narrows only
+    /// this tile" tests.
+    struct TwoHarness {
+        a: Entity<BlotterTile>,
+        b: Entity<BlotterTile>,
+        requests: Receiver<Request>,
+    }
+
+    struct TwoHost {
+        a: Entity<BlotterTile>,
+        b: Entity<BlotterTile>,
+    }
+    impl gpui::Render for TwoHost {
+        fn render(&mut self, _w: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .child(self.a.clone())
+                .child(self.b.clone())
+        }
+    }
+
+    fn open_two(cx: &mut gpui::TestAppContext) -> (TwoHarness, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::init);
+        let (data, requests) = DataHandle::for_tests();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
+                    let views = Rc::new(RefCell::new(views()));
+                    let schema = Rc::new(RefCell::new(schema()));
+                    let dims = Rc::new(RefCell::new(DerivedDimensions::default()));
+                    cx.new(|cx| {
+                        let a = cx.new(|cx| {
+                            BlotterTile::new(
+                                TileId(7),
+                                frame.clone(),
+                                data.clone(),
+                                views.clone(),
+                                schema.clone(),
+                                dims.clone(),
+                                Rc::new(Cell::new(FindStyle::Vim)),
+                                Rc::new(Cell::new(DEFAULT_STALE_AFTER)),
+                                None,
+                                window,
+                                cx,
+                            )
+                        });
+                        let b = cx.new(|cx| {
+                            BlotterTile::new(
+                                TileId(8),
+                                frame.clone(),
+                                data.clone(),
+                                views.clone(),
+                                schema.clone(),
+                                dims.clone(),
+                                Rc::new(Cell::new(FindStyle::Vim)),
+                                Rc::new(Cell::new(DEFAULT_STALE_AFTER)),
+                                None,
+                                window,
+                                cx,
+                            )
+                        });
+                        TwoHost { a, b }
+                    })
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (a, b) = window
+            .root(&mut vcx)
+            .unwrap()
+            .read_with(&vcx, |h, _| (h.a.clone(), h.b.clone()));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (TwoHarness { a, b, requests }, vcx)
     }
 
     /// A root view for the test window that just paints the tile.
@@ -1366,6 +1639,133 @@ mod tests {
         let state = h.tile.read_with(&cx, |t, _| t.serialize());
         assert_eq!(state["view"].as_str(), Some("tree"));
         assert_eq!(state["unscoped"].as_bool(), Some(false));
+    }
+
+    /// `:filter` narrows through `tile_scope`, composed into the query's
+    /// scope by `effective_scope`'s tile argument — never by
+    /// post-filtering rows — so it must reach only the tile that set it.
+    /// Two tiles share one frame; `:filter` on A never touches the frame,
+    /// so B (which only observes the frame) never even wakes for it.
+    #[gpui::test]
+    fn filter_narrows_only_this_tile_marks_it_and_round_trips_the_session(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open_two(cx);
+        h.a.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        h.b.update(&mut vcx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests); // A's initial query
+        let _ = next_query(&h.requests); // B's initial query
+
+        h.a.update(&mut vcx, |t, cx| {
+            t.command("filter model_code = 'EURP'", cx).unwrap()
+        });
+        let p = next_query(&h.requests);
+        assert_eq!(p.key, QueryKey(7), "only tile A requeried");
+        assert_eq!(
+            p.scope.expression.as_ref().map(ToString::to_string),
+            Some("model_code = 'EURP'".to_string())
+        );
+        assert!(
+            h.requests.try_recv().is_err(),
+            "tile B's own scope is untouched by A's :filter, so it never requeries"
+        );
+
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            vcx.debug_bounds("blotter-filtered-7").is_some(),
+            "A's header carries the filtered pill"
+        );
+        assert!(
+            vcx.debug_bounds("blotter-filtered-8").is_none(),
+            "B carries no such pill"
+        );
+
+        let state = h.a.read_with(&vcx, |t, _| t.serialize());
+        assert_eq!(
+            state["filter"]["expr"].as_str(),
+            Some("model_code = 'EURP'")
+        );
+
+        // A new tile restored from that record has the same tile_scope.
+        let mut record = toml::Table::new();
+        record.insert("filter".into(), state["filter"].clone());
+        let (restored, restored_cx) = open_with(cx, Some(&record));
+        let restored_scope = restored
+            .tile
+            .read_with(&restored_cx, |t, _| t.tile_scope.clone());
+        let a_scope = h.a.read_with(&vcx, |t, _| t.tile_scope.clone());
+        assert_eq!(restored_scope, a_scope, "the round-tripped filter matches");
+
+        // `:filter clear` clears and the pill goes.
+        h.a.update(&mut vcx, |t, cx| t.command("filter clear", cx).unwrap());
+        let p2 = next_query(&h.requests);
+        assert_eq!(p2.key, QueryKey(7));
+        assert!(p2.scope.expression.is_none());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds("blotter-filtered-7").is_none());
+    }
+
+    /// `unscoped` drops the *frame's* layer, not the tile's own — a
+    /// `:filter` still narrows the tile after `:unscoped`, and none of
+    /// the frame's own dimension selections leak into the query's scope.
+    #[gpui::test]
+    fn an_unscoped_tile_still_applies_its_own_filter(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("unscoped", cx).unwrap());
+        let _ = next_query(&h.requests);
+
+        // Give the frame a scope too, to prove it's excluded once
+        // unscoped: an unscoped tile doesn't follow the frame's scope
+        // version, so this alone triggers no requery.
+        h.frame.update(&mut cx, |f, cx| {
+            let mut scope = f.scope().clone();
+            scope.text = Some("ignored".into());
+            if f.set_scope(scope) {
+                cx.notify();
+            }
+        });
+        assert!(
+            h.requests.recv_timeout(Duration::from_millis(200)).is_err(),
+            "unscoped: the frame's own scope change is not followed"
+        );
+
+        h.tile
+            .update(&mut cx, |t, cx| t.command("filter text x", cx).unwrap());
+        let p = next_query(&h.requests);
+        assert_eq!(p.scope.text.as_deref(), Some("x"));
+        assert!(
+            p.scope.dimensions.is_empty(),
+            "no frame dimensions leaked in"
+        );
+    }
+
+    /// A bad `:filter` expression is a user error at the point of entry
+    /// (spec §10.1), reported inline, never applied.
+    #[gpui::test]
+    fn filter_validates_against_the_tiles_dataset(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let _ = next_query(&h.requests);
+
+        let err = h
+            .tile
+            .update(&mut cx, |t, cx| t.command("filter nope = 1", cx))
+            .unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert!(
+            h.requests.try_recv().is_err(),
+            "no requery on a rejected filter"
+        );
+        let scope_after = h.tile.read_with(&cx, |t, _| t.tile_scope.clone());
+        assert!(scope_after.is_empty(), "tile_scope unchanged");
     }
 
     #[gpui::test]

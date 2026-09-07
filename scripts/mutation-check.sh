@@ -1455,6 +1455,12 @@ run_mutation "commands: a completions cursor mid-character is clamped to a bound
   geode-blotter \
   completions_clamp_a_cursor_inside_a_multibyte_char
 
+run_mutation "commands: scope drop needs a dimension" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                (Some("drop"), _) => Err("scope drop needs a dimension".into()),' \
+  '                (Some("drop"), _) => Ok(Command::ScopeDrop(String::new())),' \
+  geode-blotter new_scope_and_asof_forms_parse
+
 run_mutation "delegate: the cursor follows its node across a new snapshot" \
   crates/geode-blotter/src/delegate.rs \
   '            self.cursor.row = restore_by_path(&self.shown, snapshot, plan, &path, self.cursor.row);' \
@@ -1642,6 +1648,25 @@ run_mutation "tile: the configured threshold is the one used" \
   '                    > Duration::from_secs(15 * 60)' \
   geode-blotter \
   a_tiles_stale_threshold_is_the_factorys_configured_value
+
+run_mutation "blotter: :filter narrows only this tile" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.tile_scope = scope;
+                self.requery(cx);' \
+  '                self.requery(cx);' \
+  geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
+
+run_mutation "blotter: an unscoped tile keeps its own filter" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.tile_scope.clone()' \
+  '                Scope::default()' \
+  geode-blotter an_unscoped_tile_still_applies_its_own_filter
+
+run_mutation "blotter: filter validates against the dataset" \
+  crates/geode-blotter/src/tile.rs \
+  '                self.validate_tile_scope(&scope)?;' \
+  '                let _ = self.validate_tile_scope(&scope);' \
+  geode-blotter filter_validates_against_the_tiles_dataset
 
 run_mutation "delegate: move_column refills the window it already had" \
   crates/geode-blotter/src/delegate.rs \

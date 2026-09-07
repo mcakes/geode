@@ -13,15 +13,23 @@ pub enum Command {
     ScopeText(String),
     ScopeClear,
     ScopeUndo,
+    ScopeRedo,
+    ScopeDrop(String),
+    ScopeSave(String),
+    ScopeLoad(String),
+    FilterExpr(String),
+    FilterText(String),
+    FilterClear,
     AsOf(String),
+    AsOfUndo,
     Live,
     View(String),
     Sort { column: String, descending: bool },
     SortClear,
 }
 
-const COMMANDS: [&str; 8] = [
-    "asof", "group", "live", "scope", "sort", "unpin", "unscoped", "view",
+const COMMANDS: [&str; 9] = [
+    "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view",
 ];
 
 fn slot(arg: Option<&str>, what: &str) -> Result<u8, String> {
@@ -61,22 +69,56 @@ pub fn parse(line: &str) -> Result<Command, String> {
                 }
             }
         }
-        "scope" => match rest.split_once(char::is_whitespace) {
-            None if rest == "clear" => Ok(Command::ScopeClear),
-            None if rest == "undo" => Ok(Command::ScopeUndo),
-            None if rest.is_empty() => {
-                Err("scope needs an expression, `text …`, `clear` or `undo`".into())
-            }
-            Some(("text", words)) => Ok(Command::ScopeText(words.trim().to_string())),
-            _ => Ok(Command::ScopeExpr(rest.to_string())),
-        },
-        "asof" => {
+        "scope" => {
+            // `rest.splitn(2, ..).next()` returns `Some("")`, never `None`,
+            // when `rest` is empty (the same one-piece-for-no-match
+            // behaviour `str::split` has on `""`) — so the tuple match
+            // below can never itself reach its own `(None, _)` arm for a
+            // bare `scope`. Guarding here keeps that arm's error message
+            // reachable instead of silently falling through to
+            // `(Some(_), _) => Ok(Command::ScopeExpr(rest.to_string()))`
+            // with an empty expression.
             if rest.is_empty() {
-                Err("asof needs a time: HH:MM or RFC 3339".into())
-            } else {
-                Ok(Command::AsOf(rest.to_string()))
+                return Err(
+                    "scope needs an expression, `text …`, `clear`, `undo`, `redo`, \
+                     `drop <dim>`, `save <name>` or `load <name>`"
+                        .into(),
+                );
+            }
+            let mut words = rest.splitn(2, char::is_whitespace);
+            match (words.next(), words.next().map(str::trim)) {
+                (Some("clear"), None) => Ok(Command::ScopeClear),
+                (Some("undo"), None) => Ok(Command::ScopeUndo),
+                (Some("redo"), None) => Ok(Command::ScopeRedo),
+                (Some("drop"), Some(d)) if !d.is_empty() => Ok(Command::ScopeDrop(d.to_string())),
+                (Some("drop"), _) => Err("scope drop needs a dimension".into()),
+                (Some("save"), Some(n)) if !n.is_empty() => Ok(Command::ScopeSave(n.to_string())),
+                (Some("save"), _) => Err("scope save needs a name".into()),
+                (Some("load"), Some(n)) if !n.is_empty() => Ok(Command::ScopeLoad(n.to_string())),
+                (Some("load"), _) => Err("scope load needs a name".into()),
+                (Some("text"), Some(w)) => Ok(Command::ScopeText(w.to_string())),
+                (Some("text"), None) => Ok(Command::ScopeText(String::new())),
+                (Some(_), _) => Ok(Command::ScopeExpr(rest.to_string())),
+                (None, _) => Err(
+                    "scope needs an expression, `text …`, `clear`, `undo`, `redo`, \
+                     `drop <dim>`, `save <name>` or `load <name>`"
+                        .into(),
+                ),
             }
         }
+        "filter" => match rest.split_once(char::is_whitespace) {
+            None if rest == "clear" => Ok(Command::FilterClear),
+            None if rest.is_empty() => {
+                Err("filter needs an expression, `text …` or `clear`".into())
+            }
+            Some(("text", words)) => Ok(Command::FilterText(words.trim().to_string())),
+            _ => Ok(Command::FilterExpr(rest.to_string())),
+        },
+        "asof" => match rest {
+            "" => Err("asof needs a time: HH:MM, HH:MM:SS or RFC 3339, or `undo`".into()),
+            "undo" => Ok(Command::AsOfUndo),
+            t => Ok(Command::AsOf(t.to_string())),
+        },
         "view" => {
             if rest.is_empty() {
                 Err("view needs a name".into())
@@ -112,6 +154,8 @@ pub fn parse(line: &str) -> Result<Command, String> {
 pub struct Vocabulary {
     pub columns: Vec<String>,
     pub views: Vec<String>,
+    /// Saved-scope names (Phase 4a §3.9), for `scope load`'s completion.
+    pub scopes: Vec<String>,
 }
 
 /// The candidates for the word at `cursor`. Sorted, so the shell's
@@ -151,11 +195,21 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
         ["group", ..] => vocab.columns.clone(),
         ["scope"] => {
             let mut v = vocab.columns.clone();
-            v.extend(["clear", "text", "undo"].map(String::from));
+            v.extend(["clear", "drop", "load", "redo", "save", "text", "undo"].map(String::from));
             v
         }
+        ["scope", "drop"] => vocab.columns.clone(),
+        ["scope", "load"] => vocab.scopes.clone(),
         ["scope", "text", ..] => Vec::new(),
         ["scope", ..] => vocab.columns.clone(),
+        ["filter"] => {
+            let mut v = vocab.columns.clone();
+            v.extend(["clear", "text"].map(String::from));
+            v
+        }
+        ["filter", "text", ..] => Vec::new(),
+        ["filter", ..] => vocab.columns.clone(),
+        ["asof"] => vec!["undo".into()],
         ["view"] => vocab.views.clone(),
         _ => Vec::new(),
     };
@@ -177,6 +231,7 @@ mod tests {
         Vocabulary {
             columns: vec!["book".into(), "lhu".into(), "delta01".into()],
             views: vec!["tree".into(), "wide".into()],
+            scopes: vec![],
         }
     }
 
@@ -250,19 +305,65 @@ mod tests {
     }
 
     #[test]
+    fn filter_forms_parse() {
+        assert_eq!(
+            parse("filter npv > 0").unwrap(),
+            Command::FilterExpr("npv > 0".into())
+        );
+        assert_eq!(
+            parse("filter text spx").unwrap(),
+            Command::FilterText("spx".into())
+        );
+        assert_eq!(parse("filter clear").unwrap(), Command::FilterClear);
+        assert!(parse("filter").unwrap_err().contains("filter"));
+    }
+
+    #[test]
+    fn new_scope_and_asof_forms_parse() {
+        assert_eq!(
+            parse("scope drop book").unwrap(),
+            Command::ScopeDrop("book".into())
+        );
+        assert_eq!(parse("scope redo").unwrap(), Command::ScopeRedo);
+        assert_eq!(
+            parse("scope save mine").unwrap(),
+            Command::ScopeSave("mine".into())
+        );
+        assert_eq!(
+            parse("scope load mine").unwrap(),
+            Command::ScopeLoad("mine".into())
+        );
+        assert_eq!(parse("asof undo").unwrap(), Command::AsOfUndo);
+        assert!(parse("scope drop").unwrap_err().contains("dimension"));
+        assert!(parse("scope save").unwrap_err().contains("name"));
+    }
+
+    #[test]
+    fn completions_offer_dimensions_after_drop_and_scope_names_after_load() {
+        let vocab = Vocabulary {
+            columns: vec!["book".into()],
+            views: vec![],
+            scopes: vec!["mine".into()],
+        };
+        assert_eq!(completions("scope drop ", 11, &vocab), vec!["book"]);
+        assert_eq!(completions("scope load ", 11, &vocab), vec!["mine"]);
+        assert!(completions("", 0, &vocab).contains(&"filter".to_string()));
+    }
+
+    #[test]
     fn completions_follow_the_argument_position() {
         let v = vocab();
         let names = |line: &str| completions(line, line.len(), &v);
         assert_eq!(
             names(""),
             vec![
-                "asof", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
             ]
         );
         assert_eq!(
             names("so"),
             vec![
-                "asof", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
             ],
             "the shell ranks; the vocabulary is whole"
         );
@@ -283,19 +384,21 @@ mod tests {
         );
         assert_eq!(
             names("scope "),
-            vec!["book", "clear", "delta01", "lhu", "text", "undo"]
+            vec![
+                "book", "clear", "delta01", "drop", "lhu", "load", "redo", "save", "text", "undo"
+            ]
         );
         assert_eq!(
             names("scope book = 'x' and "),
             vec!["book", "delta01", "lhu"]
         );
         assert_eq!(names("view "), vec!["tree", "wide"]);
-        assert!(names("asof ").is_empty());
+        assert_eq!(names("asof "), vec!["undo"]);
         assert!(names("sort delta01 desc ").is_empty());
         assert_eq!(
             completions("sort delta01", 2, &v),
             vec![
-                "asof", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
+                "asof", "filter", "group", "live", "scope", "sort", "unpin", "unscoped", "view"
             ],
             "the cursor's word, not the last"
         );
@@ -306,6 +409,7 @@ mod tests {
         let v = Vocabulary {
             columns: vec!["délta".into()],
             views: vec![],
+            scopes: vec![],
         };
         let line = "sort dé";
         // `é` is two bytes; this cursor lands one byte past its start,
