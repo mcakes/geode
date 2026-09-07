@@ -370,6 +370,7 @@ pub fn compile_view(
 /// rather than exported: `compile_view`'s own signature is the public
 /// contract, unchanged; this exists so a test can pass its own cache and
 /// assert on `DictionaryCache::lookups`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compile_view_with_cache(
     conn: &Connection,
     view: &ViewSpec,
@@ -3561,5 +3562,103 @@ kind = "measure"
             .unwrap()
             .count();
         assert_eq!(n, 1);
+    }
+
+    /// `underlying_ref` made textual, with an ENUM type actually built —
+    /// shared setup for the two tests below.
+    fn schema_with_a_textual_dictionary(store: &crate::store::Store) -> SchemaSpec {
+        let mut s = schema();
+        s.datasets[0]
+            .columns
+            .iter_mut()
+            .find(|c| c.name == "underlying_ref")
+            .unwrap()
+            .textual = true;
+        let live = table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
+        crate::store::ddl::refresh_enum(
+            store.writer(),
+            "risk_snapshot",
+            "underlying_ref",
+            &live,
+            &live,
+        )
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn compile_view_over_two_grains_resolves_the_dictionary_once_per_statement() {
+        // `view()` has two measure grains (`delta01` at Underlying,
+        // `daily_trading_pnl` at Position); this dataset's grouping
+        // ["lhu", "underlying_ref", "position_ref"] happens to be fully
+        // covered by those two grains' own carried columns, so the spine
+        // fallback scan below is what actually exercises the *other*
+        // catalog consumer inside `compile_view_with_cache`.
+        let (_d, store) = fixture();
+        let s = schema_with_a_textual_dictionary(&store);
+
+        let scope = Scope {
+            text: Some("SPX".into()),
+            ..Scope::default()
+        };
+        let mut cache = DictionaryCache::default();
+        compile_view_with_cache(
+            store.writer(),
+            &view(),
+            &s,
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.lookups, 2,
+            "one enum_types lookup plus one dictionary match for the schema's one \
+             categorical textual column with an existing type -- not once per \
+             measure grain plus the interned-columns check"
+        );
+    }
+
+    #[test]
+    fn compile_view_with_no_measures_resolves_the_dictionary_once_via_the_spine() {
+        // With no measure columns (`a_view_with_no_measures_still_has_
+        // every_level`'s fixture), every level is scanned from the spine
+        // fallback alone, and the interned-columns check is the *only*
+        // other catalog consumer -- so this is the shape that actually
+        // exercises, and protects, the spine's own `compile_scope_cached`
+        // call. (A measure-grain call running first would always
+        // pre-warm whatever the spine needs, since the dictionary
+        // resolution is dataset-wide, not grain-specific -- making a
+        // spine-only bypass invisible to a count taken after the whole
+        // statement compiles, as `compile_view_over_two_grains_...`
+        // above cannot observe it either.)
+        let (_d, store) = fixture();
+        let s = schema_with_a_textual_dictionary(&store);
+        let mut v = view();
+        v.columns.clear();
+
+        let scope = Scope {
+            text: Some("SPX".into()),
+            ..Scope::default()
+        };
+        let mut cache = DictionaryCache::default();
+        compile_view_with_cache(
+            store.writer(),
+            &v,
+            &s,
+            &scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.lookups, 2,
+            "the spine's own compile_scope_cached call must resolve through the \
+             shared cache, not a throwaway one of its own"
+        );
     }
 }
