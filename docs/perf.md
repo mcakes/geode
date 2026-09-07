@@ -577,29 +577,25 @@ nothing (`zzz`) typed one character at a time, the overlay's
 
 | Reading | submit→snapshot | snapshot→paint |
 |---|---|---|
-| `zzz` typed into the bar, demo `tree` view, 1M rows | **78 ms** | 3.5 ms |
+| `zzz` typed into the bar, demo `tree` view, 1M rows, **one blotter** | **48 ms** | 3.7 ms |
+| same, **three blotters** open (every tile requeries per keystroke) | 78 ms | 3.5 ms |
 
-**That misses the §7.1 <50 ms budget on the query half.** The paint
-half is well inside it, so the miss is in DuckDB, not gpui. Three
-things separate this from the bench's 33.4 ms
-(`zzz`, depth 2, keys textual — the row this schema shape maps to):
+**One tile holds the §7.1 budget, by 2 ms.** The paint half is well
+inside it. With three tiles up each keystroke is three requeries, and
+they do not queue at the pool (`query_workers` is 4 in
+`geode-app::bridge`) — they run concurrently, and DuckDB parallelises
+each one across every core, so three 1M-row scans contend for the
+same threads and each takes longer. That is the cost of *N* tiles
+sharing one machine, not a defect in any one query; the contract is per
+requery, and a trader with three full-depth blotters over a million
+rows is asking for three of them at once.
 
-1. The demo schema marks `position_ref` and `instrument_ref` textual.
-   Both are keys, so their `ILIKE` is the residual row scan the bench
-   isolates at +13 ms; on the demo's four-grain `tree` view (position,
-   underlying and pair measures — `cross_gamma02` is pair grain) that
-   scan runs once per measure grain, not once.
-2. The demo `tree` view spans three measure grains where the bench's
-   spans two; each is one aggregate subquery per requery.
-3. A typed sequence queues: keystroke *n+1* is submitted while *n* is
-   still running, and the overlay's submit→snapshot includes the wait
-   (the pool interrupts the superseded query but the new one still
-   waits for the worker). A single keystroke after a pause is the
-   per-query cost; the reading above is the typed-burst cost.
-
-Not yet separated: the same reading for one keystroke after a pause
-(isolates 3), and with `textual` removed from the two key columns in
-`examples/demo-config/datasets.toml` (isolates 1). The honest lever, if
-1 dominates, is a schema decision: a text search over a million-row
-key column is exactly what the ENUM path cannot make cheap, and the
-desk decides whether `position_ref` belongs in the text filter at all.
+The 48 ms is 15 ms above the bench's 33.4 ms for this shape (`zzz`,
+depth 2, keys textual) for two reasons worth knowing, because they are
+the levers if the budget tightens: the demo schema marks `position_ref`
+and `instrument_ref` textual — both keys, so their `ILIKE` is the
+residual row scan the ENUM path cannot help, run once per measure grain
+— and the demo `tree` view spans three measure grains (position,
+underlying and the pair grain for `cross_gamma02`) where the bench's
+spans two. Whether a million-row key column belongs in the text filter
+at all is a desk decision, not an engineering one.
