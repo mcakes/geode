@@ -2108,12 +2108,13 @@ run_mutation "flip: a non-following tile still arrives on its own" \
 # by the harness's own bug-reproduction run), console output in
 # task-8-report.md's "Fix round 1" section.
 
+# Re-anchored (F5, final fix wave): `promote`'s inline three-field
+# compare now goes through `FrameVersions::same_flip_identity` (also
+# used by `Frame::matches`), so the mutation targets that call instead.
 run_mutation "flip: promote only applies a staged snapshot for the versions it was staged under" \
   crates/geode-blotter/src/tile.rs \
-  '        if versions.scope == now.scope
-            && versions.grouping == now.grouping
-            && versions.as_of == now.as_of' \
-  '        if true' \
+  '        if versions.same_flip_identity(now) {' \
+  '        if true {' \
   geode-blotter a_second_mutation_during_a_barrier_wait_clears_the_stale_staged_snapshot
 
 run_mutation "flip: a fresh requery clears whatever was staged before it" \

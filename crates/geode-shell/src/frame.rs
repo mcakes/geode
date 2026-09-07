@@ -71,6 +71,22 @@ pub struct FrameVersions {
     pub flip: u64,
 }
 
+impl FrameVersions {
+    /// Whether `self` and `other` share the same flip identity (Phase 4
+    /// §3.10) — `scope`, `grouping` and `as_of` only. `data`, `config`
+    /// and `flip` are deliberately excluded: a flip barrier is opened
+    /// over one `(scope, grouping, as_of)` triple, and neither a
+    /// data/config-only bump nor `flip`'s own release (via
+    /// [`Frame::release`]) is a change of identity for it. The sole
+    /// place a barrier or a staged snapshot decides "is this still the
+    /// versions I was opened/staged for" — [`Frame::matches`] and
+    /// `geode_blotter::tile::BlotterTile::promote`'s version check both
+    /// call this rather than comparing the three fields inline.
+    pub fn same_flip_identity(self, other: FrameVersions) -> bool {
+        self.scope == other.scope && self.grouping == other.grouping && self.as_of == other.as_of
+    }
+}
+
 /// A barrier opened by [`Frame::open_flip`] (Phase 4 §3.10): every
 /// following tile's outcome for one `(scope, grouping, as_of)` triple
 /// must arrive — or fail, or [`FLIP_DEADLINE`] must pass — before any of
@@ -84,9 +100,11 @@ pub struct FrameVersions {
 /// submitted).
 #[derive(Debug)]
 struct FlipBarrier {
-    scope: u64,
-    grouping: u64,
-    as_of: u64,
+    /// The versions this barrier was opened for — only `scope`,
+    /// `grouping` and `as_of` are ever compared (via
+    /// [`FrameVersions::same_flip_identity`]), so `data`/`config`/`flip`
+    /// riding along here are inert.
+    versions: FrameVersions,
     awaiting: HashSet<QueryKey>,
     opened: Instant,
 }
@@ -543,16 +561,14 @@ impl Frame {
             return;
         }
         self.barrier = Some(FlipBarrier {
-            scope: self.versions.scope,
-            grouping: self.versions.grouping,
-            as_of: self.versions.as_of,
+            versions: self.versions,
             awaiting,
             opened: now,
         });
     }
 
     fn matches(b: &FlipBarrier, v: FrameVersions) -> bool {
-        b.scope == v.scope && b.grouping == v.grouping && b.as_of == v.as_of
+        b.versions.same_flip_identity(v)
     }
 
     /// Whether an open barrier is waiting for `key` at `versions` —

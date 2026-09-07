@@ -375,10 +375,7 @@ impl BlotterTile {
             return;
         };
         let now = self.frame.read(cx).versions();
-        if versions.scope == now.scope
-            && versions.grouping == now.grouping
-            && versions.as_of == now.as_of
-        {
+        if versions.same_flip_identity(now) {
             self.apply(snapshot, grouping, cx);
         }
     }
