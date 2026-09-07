@@ -528,6 +528,14 @@ impl Frame {
     /// emit cannot re-enter whatever branch called it. An empty `keys`
     /// (no visible tile has an occupant yet) closes any barrier outright
     /// rather than opening one nothing could ever satisfy.
+    ///
+    /// A pinned or unscoped tile self-arrives from its own
+    /// `on_frame_changed` (never requerying) only if this already ran in
+    /// the same notify flush — which it does: `ShellView`'s own frame
+    /// observer is registered before any tile occupant's, and gpui calls
+    /// one entity's observers in registration order, so this call always
+    /// finishes before a single tile's `on_frame_changed` runs for the
+    /// same notify.
     pub fn open_flip(&mut self, keys: impl IntoIterator<Item = QueryKey>, now: Instant) {
         let awaiting: HashSet<QueryKey> = keys.into_iter().collect();
         if awaiting.is_empty() {

@@ -2351,10 +2351,17 @@ mod tests {
 
         let frame = h.a.read_with(&vcx, |t, _| t.frame.clone());
 
-        // A scope change: both tiles requery on their own (the frame
-        // observer every `BlotterTile` sets up in `new`) before anything
-        // opens a barrier — exactly the order `ShellView::
-        // on_frame_changed` uses in production (requery, then open).
+        // A scope change: this test drives the two steps directly, in
+        // whichever order reaches "both queries in flight, no barrier
+        // yet" — `set_text` + `notify` first (each tile's own frame
+        // observer, set up in `new`, submits its query), `open_flip`
+        // second. Production runs the OPPOSITE order within one notify
+        // pass: `ShellView::on_frame_changed`'s frame observer is
+        // registered (in `ShellView::new`) before any tile occupant's,
+        // so it always opens the barrier FIRST, and a tile's own
+        // `on_frame_changed`/requery follows in the same flush — see
+        // `a_pinned_tile_arrives_from_on_frame_changed_without_
+        // requerying` below, which drives that real order.
         frame.update(&mut vcx, |f, cx| {
             f.set_text(Some("A".into()));
             cx.notify();

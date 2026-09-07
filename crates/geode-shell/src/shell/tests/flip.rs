@@ -121,3 +121,50 @@ fn a_data_bump_opens_no_barrier(cx: &mut gpui::TestAppContext) {
     });
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
 }
+
+/// F2 (final fix wave): the observer-order invariant stated in
+/// `ShellView::new`'s `cx.observe_in` comment, `on_frame_changed`'s
+/// `open_flip` branch, and `Frame::open_flip`'s own doc — the shell's
+/// frame observer is registered before any occupant's, so `open_flip`
+/// always finishes before a single occupant's own `on_frame_changed`
+/// runs for the same notify. That is what lets a non-following tile
+/// self-arrive from its own `on_frame_changed` without ever requerying
+/// (`BlotterTile`'s `barrier_wants`/`arrived` branch, exercised end to
+/// end in `geode-blotter`'s
+/// `a_pinned_tile_arrives_from_on_frame_changed_without_requerying`).
+/// The recorder module here has no frame observer of its own (it cannot
+/// express pinning), so this proves the weaker, sufficient fact
+/// directly instead: after a scope change, the barrier is open
+/// immediately — `run_until_parked` settles with nothing delivered —
+/// so nothing an occupant's own observer could do (deliver, or
+/// self-arrive) races the barrier's opening.
+#[gpui::test]
+fn barrier_opens_before_any_occupant_could_deliver(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    frame.update(&mut vcx, |f, cx| {
+        if f.set_text(Some("spx".into())) {
+            cx.notify();
+        }
+    });
+    vcx.run_until_parked();
+
+    assert!(
+        frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "the barrier must already be open by the time anything settles"
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, crate::module::recording::Recorded::Delivered(..))),
+        "nothing has been delivered — the recorder submits no query, so an open barrier here \
+         cannot be explained by an occupant having already acted"
+    );
+}

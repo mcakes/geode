@@ -903,6 +903,17 @@ impl ShellView {
         // that can do the write). `observe_in` (not `observe`) because
         // Task 4's text-field reflection needs `&mut Window` to call
         // `InputState::set_value`.
+        //
+        // Registered here, before any tile occupant exists (occupants
+        // are built later, as tiles are hosted), this is the FIRST
+        // observer of `frame`'s notify — gpui fans a notify out to an
+        // entity's observers in registration order. `on_frame_changed`'s
+        // `open_flip` branch below relies on that: every occupant sees
+        // the barrier already open (or the flip barrier's key set
+        // finalised) before its own `on_frame_changed` runs in the same
+        // flush, which is what lets a non-following tile
+        // (`BlotterTile::on_frame_changed`'s `barrier_wants`/`arrived`
+        // branch) self-arrive without ever requerying.
         cx.observe_in(&frame, window, |view, frame, window, cx| {
             view.on_frame_changed(frame, window, cx)
         })
@@ -1034,6 +1045,17 @@ impl ShellView {
         // for those (§4.1), and there is no "everyone at once" to
         // coordinate. `open_flip` itself bumps no version, so the notify
         // it does not emit cannot re-enter this branch.
+        //
+        // "before anything requeries" holds because this observer is
+        // registered (in `new`, above) before any tile occupant's own —
+        // gpui calls one entity's observers in registration order, so
+        // `open_flip` below always finishes before a single tile's own
+        // `on_frame_changed` runs for the same notify. A non-following
+        // tile's self-arrival from its own `on_frame_changed`
+        // (`BlotterTile`'s `barrier_wants`/`arrived` branch) depends on
+        // the barrier already being open with the full key set by the
+        // time it checks — it never requeries, so nothing else would
+        // open one for it.
         let now_v = frame.read(cx).versions();
         let last = self.last_flip_versions;
         if now_v.scope != last.scope || now_v.grouping != last.grouping || now_v.as_of != last.as_of
