@@ -123,7 +123,12 @@ pub fn resolve_generations(
 ///   to the table scan; zonemaps then skip whole row groups belonging to
 ///   other generations, and skip an entire *side* of the union when it
 ///   holds none of the resolved ids at all — a pure-archive era's live
-///   side, or a pure-live era's archive side.
+///   side, or a pure-live era's archive side. How much this prunes
+///   depends on how tight `[lo, hi]` is: partitions on very different
+///   refresh schedules widen the range toward the whole archive, and the
+///   pruning degenerates toward a no-op — the tuple semi-join alone then
+///   carries the cost (docs/perf.md's "Phase 4a: the as-of baseline"
+///   section records that floor).
 /// - The `in (select … from (values …))` tuple test is a hash lookup
 ///   evaluated once per row, replacing a per-row disjunction over up to
 ///   one term per resolved generation.
@@ -160,8 +165,8 @@ pub fn generation_predicate(generations: &[ResolvedGeneration]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "gen_id between {lo} and {hi} and \
-         (batch, book, gen_id, source_time) in (select (b, k, g, t) from (values {rows}) v(b, k, g, t))"
+        "(gen_id between {lo} and {hi} and \
+         (batch, book, gen_id, source_time) in (select (b, k, g, t) from (values {rows}) v(b, k, g, t)))"
     )
 }
 
@@ -446,15 +451,25 @@ mod tests {
 
     #[test]
     fn the_predicate_selects_a_null_book_partition_from_either_side() {
-        // A NULL-book generation in the archive, and a *different*, newer
-        // generation of the same bookless partition in live. Resolving at
-        // an instant before the live generation's source time must pick
-        // the archived one — and the predicate, applied to exactly the
-        // relation `Era::relation` builds (archive union all live, each
-        // side filtered), must select the archived row's value and not
-        // live's. `book = '…'` cannot match a NULL book; DuckDB's row-value
-        // (struct) comparison treats NULL fields as equal, so the tuple
-        // form needs no `coalesce` sentinel (spec §4.4, §6.5).
+        // A NULL-book generation in the archive, and a *later* generation
+        // of the same bookless partition in live sharing the **same**
+        // `gen_id`. Resolving at an instant before the live generation's
+        // source time must pick the archived one — and the predicate,
+        // applied to exactly the relation `Era::relation` builds (archive
+        // union all live, each side filtered), must select the archived
+        // row's value and not live's.
+        //
+        // The shared `gen_id` is load-bearing, not incidental: with only
+        // one resolved generation, `lo == hi == 1`, and the range term
+        // `gen_id between 1 and 1` cannot tell the two rows apart — both
+        // carry `gen_id = 1`. Only the tuple's `source_time` column can,
+        // so this fixture makes the tuple do real work rather than
+        // merely riding along behind a range that already excludes live
+        // on its own (a distinct `gen_id` for live would let the range
+        // alone pass this test). `book = '…'` cannot match a NULL book;
+        // DuckDB's row-value (struct) comparison treats NULL fields as
+        // equal, so the tuple form needs no `coalesce` sentinel (spec
+        // §4.4, §6.5).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         store
@@ -469,7 +484,7 @@ mod tests {
                  insert into bookless_position_archive values
                    ('b', NULL, 1, 100, '2026-08-30T07:00:00Z');
                  insert into bookless_position_live values
-                   ('b', NULL, 2, 999, '2026-08-30T14:00:00Z');",
+                   ('b', NULL, 1, 999, '2026-08-30T14:00:00Z');",
             )
             .unwrap();
         let gens = resolve_generations(
@@ -487,7 +502,8 @@ mod tests {
             "the bookless partition must resolve, not be filtered out"
         );
         assert_eq!(
-            gens[0].gen_id, 1,
+            gens[0].source_time,
+            ts("2026-08-30T07:00:00Z"),
             "the 07:00 archived generation, not 14:00 live"
         );
 
@@ -505,7 +521,9 @@ mod tests {
             .unwrap();
         assert_eq!(
             total, 100.0,
-            "the archived NULL-book row's value, not live's 999"
+            "the archived NULL-book row's value, not live's 999 — the range \
+             alone (gen_id between 1 and 1) cannot exclude live's row, which \
+             shares gen_id 1; only the tuple's source_time term can"
         );
     }
 

@@ -45,18 +45,24 @@ pub struct ScopeSql {
 /// era as its caller — a probe left on live inside an as-of query mixes
 /// today's data into a historical answer, and does it silently.
 ///
-/// `generations` is the per-side predicate `relation` applies to *both*
-/// the archive and the live table, not a filter callers apply themselves
-/// afterward — every other site that used to `and` it onto its own
-/// predicate has been deleted (Phase 4a's as-of baseline fix). Both sides
-/// are always read, filtered independently, because `publish_file` is one
-/// transaction *per grain* while compile (the resolve) and execution run
-/// on separate connections: a publish landing between them can move a
-/// generation from live to archive at one grain and not another, so a
-/// relation that trusted which side the resolve saw would silently miss
-/// that partition for one frame. A `gen_id` range in the predicate makes
-/// reading both sides free rather than a cost: DuckDB's zonemaps skip an
-/// entire side that holds none of the resolved ids (docs/perf.md).
+/// `generations` is the predicate `relation` applies itself, not a filter
+/// callers apply afterward — every other site that used to `and` it onto
+/// its own predicate has been deleted (Phase 4a's as-of baseline fix), so
+/// `relation` is the sole applier **in every era**, `Live` included: a
+/// `Live` era carrying `Some(predicate)` is filtered exactly like an
+/// `Archive` era, even though no production path constructs one today
+/// (`Era::live()` and `era_for`'s `AsOf::Live` arm both leave it `None`).
+/// An arm that silently dropped a predicate it was handed would be a
+/// trapdoor for the next caller who builds a `Live` era with one — this
+/// type is `pub` with `pub` fields precisely so a future optimisation
+/// (reading only `live` when every resolved generation is current) can
+/// reach for it directly. Under `Archive`, both sides are always read,
+/// filtered independently, because `publish_file` is one transaction *per
+/// grain* while compile (the resolve) and execution run on separate
+/// connections: a publish landing between them can move a generation from
+/// live to archive at one grain and not another, so a relation that
+/// trusted which side the resolve saw would silently miss that partition
+/// for one frame.
 #[derive(Clone, Copy)]
 pub struct Era<'a> {
     pub kind: TableKind,
@@ -73,20 +79,33 @@ impl Era<'_> {
 
     /// The relation a query reads for one grain under this era.
     ///
-    /// Live reads the live table and nothing else. As-of reads the archive
-    /// **and** live: the generation a partition holds *now* is in live and
-    /// nowhere else, so a query as of any moment after that generation was
-    /// published — including "as of an hour ago" for a book that refreshed
-    /// this morning — has to find it there. Reading the archive alone
-    /// answers such a query with the partition's *previous* generation, or
-    /// with nothing at all for a partition published only once, and says
+    /// Live reads the live table and nothing else — filtered by
+    /// `generations` too, if the caller set it, exactly like the archive
+    /// side; today's callers never do (`Era::live()` and `era_for`'s
+    /// `AsOf::Live` arm both leave it `None`), but `relation` is the sole
+    /// applier of the predicate now that every caller-side application has
+    /// been deleted (Phase 4a's as-of baseline fix), so an era carrying a
+    /// predicate must never have it silently dropped by whichever arm
+    /// happens to run. As-of reads the archive **and** live: the
+    /// generation a partition holds *now* is in live and nowhere else, so
+    /// a query as of any moment after that generation was published —
+    /// including "as of an hour ago" for a book that refreshed this
+    /// morning — has to find it there. Reading the archive alone answers
+    /// such a query with the partition's *previous* generation, or with
+    /// nothing at all for a partition published only once, and says
     /// nothing either way. The generation predicate — applied to *both*
     /// sides here, not by the caller — is what keeps the two sides from
     /// both contributing; live carries `gen_id` and `source_time`
     /// precisely so it can be filtered the same way (§4.2).
     pub fn relation(&self, dataset: &str, grain: Grain) -> String {
         match self.kind {
-            TableKind::Live => table_name(dataset, grain, TableKind::Live),
+            TableKind::Live => match self.generations {
+                Some(p) => format!(
+                    "(select * from {} where {p})",
+                    table_name(dataset, grain, TableKind::Live)
+                ),
+                None => table_name(dataset, grain, TableKind::Live),
+            },
             TableKind::Archive => {
                 let p = self.generations.unwrap_or("true");
                 format!(
@@ -789,6 +808,27 @@ grain = "position"
         assert!(
             sql.contains("risk_underlying_live where gen_id = 7"),
             "{sql}"
+        );
+    }
+
+    #[test]
+    fn a_live_era_relation_honours_a_generation_predicate() {
+        // `relation` is the sole applier of the generation predicate in
+        // every era now that every caller-side application has been
+        // deleted (Phase 4a's as-of baseline fix) — including `Live`,
+        // which no production path hands a predicate today but which
+        // must not silently drop one it is given. A `Live` arm that
+        // ignored `generations` would be a trapdoor for the next
+        // optimisation that reads only `live` when every resolved
+        // generation is current.
+        let era = Era {
+            kind: TableKind::Live,
+            generations: Some("gen_id = 7"),
+        };
+        let sql = era.relation("risk", Grain::Underlying);
+        assert!(
+            sql.contains("risk_underlying_live where gen_id = 7"),
+            "a Live era carrying a predicate must be filtered by it: {sql}"
         );
     }
 

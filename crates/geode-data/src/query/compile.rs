@@ -793,14 +793,14 @@ pub fn compile_view(
             .collect::<Vec<_>>()
             .join(" and ");
         joins.push(format!(
-            "left join (select {projection} from {relation} where {pred} group by {keys}) {alias} on {on}",
+            "left join (select {projection} from {relation} group by {keys}) {alias} on {on}",
             projection = projection.join(", "),
             // `joined_era.relation` already applies `joined_gen` to both
             // the archive and live tables it reads (Phase 4a's as-of
-            // baseline fix) — reapplying it here would run the tuple
-            // semi-join twice per relation use.
+            // baseline fix) — a `where` clause here would reapply it and
+            // run the tuple semi-join twice per relation use, so there is
+            // none.
             relation = joined_era.relation(&join.dataset, joined_grain),
-            pred = "true",
             keys = join
                 .on
                 .iter()
