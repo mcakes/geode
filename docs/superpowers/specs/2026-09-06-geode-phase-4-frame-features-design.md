@@ -340,11 +340,16 @@ would otherwise do nothing in `--demo`.
    `enter` moves to stage two; `escape` closes.
 2. **Values.** The column's distinct values under the current era and
    the frame's scope *minus this dimension's own selection*, each with
-   its row count, fuzzy-filtered by the same field. `space` toggles the
-   highlighted value, `ctrl+a` selects every value the filter currently
-   shows, `ctrl+n` clears, `enter` applies, `escape` cancels. The list
-   opens with the current selection pre-ticked. Applying replaces the
-   dimension's selection; applying an empty selection drops the chip.
+   its row count, fuzzy-filtered by the same field. `tab` toggles the
+   highlighted value (as built: `space` is a printable character the
+   filter field must take), `ctrl+a` ticks every value the filter
+   currently shows, `ctrl+x` clears the ticked set (as built: `ctrl+n`
+   is already "down" on every list surface in the shell), `enter`
+   applies, `escape` cancels. `ctrl+a` is reclaimed from "select all
+   text" inside `GeodeModal` for this the same way `tab` already is
+   (`init_reclaimed_keybindings`). The list opens with the current
+   selection pre-ticked. Applying replaces the dimension's selection;
+   applying an empty selection drops the chip.
 
 The values list is a `VirtualList`: a real underlying dictionary runs to
 thousands of rows.
@@ -456,8 +461,9 @@ query time, which is the wrong place and the wrong severity.
 
 - The field accepts `HH:MM` and `HH:MM:SS` (today, local time, as
   `:asof` already does), RFC 3339, or `live`. A value that parses shows
-  the resolved UTC instant beside the field; one that does not shows
-  the error inline and `enter` does nothing.
+  the resolved instant beside the field in local time with its zone
+  abbreviation (as built: not UTC — one modal, one clock, the trader's);
+  one that does not shows the error inline and `enter` does nothing.
 - The list shows recent generation times across datasets, newest
   first, each as `14:05:12 · risk_snapshot / EOD · 3 books`. In 4a the
   frame keeps them itself: `note_published` gains the event's dataset,
@@ -486,7 +492,7 @@ The blotter's `:` vocabulary gains
 | Line | Effect |
 |---|---|
 | `:filter <expr>` | Set this tile's expression filter; parsed by `parse_expr`, validated against the tile's dataset; errors at the caret. |
-| `:filter text <words>` | Set this tile's text filter. |
+| `:filter text <words>` | Set this tile's text filter; bare `:filter text` (no words) clears it, matching `:scope text`. |
 | `:filter clear` | Clear both. |
 
 The tile's `Scope` is the `tile` argument `Frame::effective_scope`
@@ -614,6 +620,18 @@ delays the rest by less than a beat.
 
 All in the `shell` context, so they work with any tile focused and are
 unavailable while an input has focus, same as every shell chord.
+
+As built: `mod+/`, `mod+p`, `mod+t`, `mod+z` and `mod+shift+z` ship
+exactly as bound above. `frame::live`, `frame::as_of_undo` and
+`frame::scope_clear` ship unbound as the table says — every registered
+action is a palette entry regardless of binding, so all three are
+palette-only until a keymap layer binds them; that is the intended
+route, not a gap. `keymap.mod = "ctrl"` is invalid config (Task 4b): it
+is refused with an error diagnostic at load and reload and the alias
+falls back to the default, because the shipped literal `ctrl+…`
+bindings (`ctrl+1..9` workspace switching, `ctrl+0`, `ctrl+k`,
+`ctrl+/`, …) are fixed and `mod` exists precisely so the user-facing
+chords above can move without ever landing on one of them.
 
 The `:` vocabulary (P3 §4.3) gains `:scope drop <dimension>`, `:scope
 redo`, `:scope save <name>`, `:scope load <name>`, `:asof undo`, and

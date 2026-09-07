@@ -566,3 +566,20 @@ schema is expected to avoid by not marking a key column textual in the
 first place (`textual` on a column no grain can route is already a
 load-time error; a key column that *can* be routed but has a
 one-per-row vocabulary is a schema choice, not a bug).
+
+**Not yet measured on a display: the per-keystroke painted frame.**
+Everything above is the query-path benchmark (submit→snapshot on the
+pool, no gpui). The end-to-end reading — what a trader's keystroke
+actually costs, submit to painted frame — needs the same live-window
+measurement the "Phase 3: the painted frame" section above records,
+and this sandbox has no compositor to take it, so the recipe is
+recorded here as a template, same precedent as that section: run
+`cargo run --release -p geode-app -- --demo 1000000`, open the scope
+bar's text field (`mod+/`), reset the perf overlay's counters
+(`perf::reset`, palette-only), type five characters of a needle that
+matches nothing (e.g. `zzz`), and read the overlay's **requery** row
+(submit→snapshot + snapshot→paint) after each keystroke settles,
+recording the p50 and p95 across the five. That is the reading spec
+§1.2's "typing in the scope bar narrows every blotter as you type, one
+requery per keystroke, ... inside the §7.1 budget" needs on a display,
+and it belongs in this section once taken.
