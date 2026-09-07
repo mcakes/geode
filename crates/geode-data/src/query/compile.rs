@@ -3591,9 +3591,26 @@ kind = "measure"
         // `view()` has two measure grains (`delta01` at Underlying,
         // `daily_trading_pnl` at Position); this dataset's grouping
         // ["lhu", "underlying_ref", "position_ref"] happens to be fully
-        // covered by those two grains' own carried columns, so the spine
-        // fallback scan below is what actually exercises the *other*
-        // catalog consumer inside `compile_view_with_cache`.
+        // covered by those two grains' own carried columns, so `missing`
+        // is empty and the spine fallback scan's own `compile_scope_
+        // cached` call does not run at all for this fixture. The *other*
+        // catalog consumer this test actually exercises is the
+        // `interned` block, which still calls `cache.enum_types` after
+        // the grain loop.
+        //
+        // Review round 1, Minor 3: a post-hoc `cache.lookups` count like
+        // this one defends only the *first* site to touch the cache in
+        // a given run, whichever that happens to be -- not "every site".
+        // Because the dictionary resolution is dataset-wide, not
+        // grain-specific, the first measure grain here (Underlying)
+        // always pre-warms whatever the second grain (Position) or the
+        // interned block would otherwise need, so a bypass introduced at
+        // either of *those* two sites would leave `cache.lookups`
+        // unchanged and this test would still pass. See
+        // `compile_view_with_no_measures_resolves_the_dictionary_once_
+        // via_the_spine` below for the shape that actually isolates a
+        // single call site (there, the spine, because it is forced to be
+        // the *only* one).
         let (_d, store) = fixture();
         let s = schema_with_a_textual_dictionary(&store);
 
@@ -3659,6 +3676,42 @@ kind = "measure"
             cache.lookups, 2,
             "the spine's own compile_scope_cached call must resolve through the \
              shared cache, not a throwaway one of its own"
+        );
+    }
+
+    #[test]
+    fn compile_view_with_no_text_scope_resolves_the_dictionary_once_via_the_interned_check() {
+        // Review round 1, Minor 2: with no text scope at all, the text
+        // block inside `compile_scope_cached` never runs for either
+        // measure grain -- `scope.text` is `None`, so neither
+        // `cache.enum_types` nor `cache.matches` is reached there. The
+        // `interned` block (`compile.rs`, gated on `era.kind ==
+        // TableKind::Live`) is then the *only* consumer of the cache in
+        // the whole statement, so this is the one shape that isolates
+        // and protects that specific call site: reverting it to the
+        // free `existing_enum_types` function would leave `cache.
+        // lookups` at 0 instead of 1, since nothing else in this
+        // statement would ever touch the shared cache to make up the
+        // difference.
+        let (_d, store) = fixture();
+        let s = schema_with_a_textual_dictionary(&store);
+
+        let mut cache = DictionaryCache::default();
+        compile_view_with_cache(
+            store.writer(),
+            &view(),
+            &s,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+            &mut cache,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.lookups, 1,
+            "the interned-columns check's own cache.enum_types call is the only \
+             catalog consumer when there is no text scope"
         );
     }
 }
