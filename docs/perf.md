@@ -704,3 +704,43 @@ against the previous run agreed: −83.9% and −80.8% respectively. The
 → 12.0 ms as-of). Resolving the dictionary once per `compile_scope`
 call rather than caching it across calls (deliberately not done in this
 change) is still cheap enough that none of this margin is spent on it.
+
+### Phase 4a: the two key columns stay in the text filter — what that costs, and the idea that did not pay
+
+Decision (Matthew, 2026-09-07): `position_ref` and `instrument_ref` stay
+textual in the demo schema. With the literal-list form merged
+(`0314715`), the demo `tree` view at 1M rows, two generations, depth 2,
+headless, medians of five, reads:
+
+| needle | live | as-of | rows |
+|---|---|---|---|
+| `zzz` (matches nothing) | 53 ms | 105 ms | 1 |
+| `spx` (an underlying) | 65 ms | 179 ms | 129 |
+| `bk00` (ten books) | 45 ms | 105 ms | 441 |
+| `0015` (a position-ref fragment) | 57 ms | 110 ms | 129 |
+| `0` (matches nearly every key) | 67 ms | 158 ms | 705 |
+
+Every live number is the two keys' per-row `ILIKE` across the three
+measure grains, on top of a 12 ms no-text baseline; as-of adds its own
+~45 ms baseline (archive ∪ live plus the generation predicate) and
+scans the union.
+
+**Tried and rejected: treating a key as its own dictionary.** The idea:
+resolve a plain-string column's matches at compile time from the
+coarsest grain carrying it (`select distinct position_ref … ilike ?
+limit cap+1`), bind them as a list, drop the term when nothing matches,
+fall back to the row scan past a cap. Probed on the same view: compile
+went from 9 ms to 90–140 ms and every total got worse (live `zzz`
+54 → 94 ms, as-of `spx` 179 → 205 ms). A key's cardinality is close to
+the row count — there are as many position refs as positions — so
+"resolving the dictionary" is the same scan the row test does, and
+`compile_scope` runs once per grain plus the spine, so it ran four
+times. An ENUM works because its vocabulary is hundreds; a key's is
+hundreds of thousands. Not pursued.
+
+**Levers that remain, in order of expected return:** (1) resolve
+`existing_enum_types` and the dictionary matches once per
+`compile_view` instead of once per `compile_scope` call (final-review
+minor M3; ~4 resolves per requery today); (2) the as-of baseline —
+read only the tables whose generations the as-of resolves to, rather
+than always unioning archive and live; (3) the schema, per desk.
