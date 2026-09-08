@@ -744,8 +744,11 @@ folded into that section directly rather than repeated here.
   would not be the underlying one. Entering the stage clears the query
   instead, which is also what makes the escape ladder land on
   `PreviousStage`: with no query to clear, `escape` has nothing to spend
-  on `ClearQuery` first. `/` in the edit stage is claimed and says so (a
-  notice naming the key) rather than reading as dead.
+  on `ClearQuery` first. `/` in the edit stage is claimed rather than left
+  to fall through: it is bound to `NormalCommand::EnterFilter` and answers
+  with a notice explaining that this stage's rows are not filtered, so it
+  reads as a deliberate refusal rather than the dialog having stopped
+  responding.
 
 ### Unmet done-state items, named for Part 2
 
