@@ -192,29 +192,7 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
         .as_array_of_tables_mut()
         .expect("just ensured 'bindings' is an array of tables");
 
-    let match_ix = bindings
-        .iter()
-        .position(|entry| entry.get("context").and_then(Item::as_str) == rebind.context.as_deref());
-
-    let entry = match match_ix {
-        Some(ix) => bindings.get_mut(ix).expect("index came from position()"),
-        None => {
-            let mut new_entry = Table::new();
-            if let Some(ctx) = &rebind.context {
-                new_entry["context"] = value(ctx.as_str());
-            }
-            new_entry["keys"] = Item::Table(Table::new());
-            bindings.push(new_entry);
-            bindings.iter_mut().last().expect("just pushed an entry")
-        }
-    };
-
-    if !entry.get("keys").is_some_and(Item::is_table_like) {
-        entry["keys"] = Item::Table(Table::new());
-    }
-    let keys = entry["keys"]
-        .as_table_mut()
-        .expect("just ensured 'keys' is a table");
+    let keys = keys_table_for(bindings, rebind.context.as_deref());
 
     keys[rebind.new_key.as_str()] = value(rebind.action.as_str());
 
@@ -239,6 +217,38 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
 
     write_atomic(user_dir, &path, &doc.to_string())?;
     Ok(RebindOutcome { displacement })
+}
+
+/// Find the `[[bindings]]` entry whose `context` exactly matches `context`
+/// (`None` matching the no-`context` entry — see the module doc's
+/// "Semantics" section), creating one if none exists, and return that
+/// entry's `keys` table, creating it too if necessary. Shared by
+/// [`apply_rebind`] and `apply_unbind` — both only ever need to reach the
+/// same `keys` table before writing or removing one entry in it.
+fn keys_table_for<'a>(bindings: &'a mut ArrayOfTables, context: Option<&str>) -> &'a mut Table {
+    let match_ix = bindings
+        .iter()
+        .position(|entry| entry.get("context").and_then(Item::as_str) == context);
+
+    let entry = match match_ix {
+        Some(ix) => bindings.get_mut(ix).expect("index came from position()"),
+        None => {
+            let mut new_entry = Table::new();
+            if let Some(ctx) = context {
+                new_entry["context"] = value(ctx);
+            }
+            new_entry["keys"] = Item::Table(Table::new());
+            bindings.push(new_entry);
+            bindings.iter_mut().last().expect("just pushed an entry")
+        }
+    };
+
+    if !entry.get("keys").is_some_and(Item::is_table_like) {
+        entry["keys"] = Item::Table(Table::new());
+    }
+    entry["keys"]
+        .as_table_mut()
+        .expect("just ensured 'keys' is a table")
 }
 
 /// Process-global counter for [`apply_rebind`]'s temp filenames — same
