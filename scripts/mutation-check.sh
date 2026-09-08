@@ -4229,3 +4229,21 @@ run_mutation "occupants: pending_kind_for_new_tile is spent on the lowest TileId
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
+
+run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+    out.push(row(
+        format!(
+            "priority: {} · readiness: {}",
+            spec.priority, spec.readiness
+        ),
+        1,
+        Tone::Muted,
+    ));' \
+  '    out.push(row(
+        format!("path: {paths} · priority: {} · readiness: {}", spec.priority, spec.readiness),
+        1,
+        Tone::Muted,
+    ));' \
+  geode-diagnostics a_sources_spec_detail_is_split_into_short_rows

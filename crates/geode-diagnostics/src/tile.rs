@@ -684,11 +684,19 @@ impl gpui::Render for DiagnosticsTile {
                         Tone::Error => danger,
                         Tone::Marked => primary,
                     };
+                    // One line per slot, clipped: a `uniform_list` row has a
+                    // fixed height, so a row that wrapped would paint its
+                    // second line over the slot beneath it (seen on a display
+                    // 2026-09-08 with a long source path). The section
+                    // builders keep rows short; this is the backstop.
                     let mut cell = div()
                         .w_full()
                         .pl(px(8.0 + r.depth as f32 * 12.0))
                         .font_family(fonts::MONO)
                         .text_color(color)
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .child(r.text.clone());
                     if i == cursor {
                         cell = cell.bg(selection_bg);

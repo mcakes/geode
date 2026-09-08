@@ -142,10 +142,15 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
 
 fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::SourceState) {
     let Some(spec) = &state.spec else { return };
+    // Two short rows, never one long one: the tile's rows are fixed-height
+    // `uniform_list` slots that clip rather than wrap, and a demo source's
+    // glob alone runs past a tile's width. Seen on a display 2026-09-08 —
+    // the wrapped tail of this row painted over the poll row beneath it.
     let paths = spec.paths.join(", ");
+    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
     out.push(row(
         format!(
-            "path: {paths} · priority: {} · readiness: {}",
+            "priority: {} · readiness: {}",
             spec.priority, spec.readiness
         ),
         1,
@@ -576,6 +581,36 @@ mod tests {
         assert!(risk_text.contains("since"));
         assert!(risk_text.contains("last poll"));
         assert!(risk_text.contains("next poll"));
+    }
+
+    #[test]
+    fn a_sources_spec_detail_is_split_into_short_rows() {
+        // Seen on a display 2026-09-08: path, priority and readiness on one
+        // row wrapped inside the fixed-height list slot and painted over
+        // the poll row beneath. Each field group is its own row.
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "demo",
+            SourceSummary {
+                paths: vec!["/very/long/tmp/path/geode-demo/1000000-42/src/*.csv".into()],
+                priority: "LatestRisk".into(),
+                readiness: "Sentinel".into(),
+            },
+        );
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        let path_row = texts
+            .iter()
+            .find(|t| t.starts_with("path: "))
+            .expect("a path row");
+        assert!(
+            !path_row.contains("priority"),
+            "the path row carries only the path: {path_row}"
+        );
+        assert!(
+            texts.contains(&"priority: LatestRisk · readiness: Sentinel"),
+            "priority and readiness share one short row: {texts:?}"
+        );
     }
 
     #[test]
