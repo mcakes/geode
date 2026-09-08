@@ -588,14 +588,11 @@ run_mutation "ingest: the publish event names the partitions written" \
 
 run_mutation "ingest: submit drops an item already queued for the same file" \
   crates/geode-data/src/ingest/runner.rs \
-  '            if already_queued {
-                continue;
-            }' \
-  '            if false {
-                continue;
-            }' \
+  '            existing.priority = existing.priority.min(item.priority);
+            continue;' \
+  '            existing.priority = existing.priority.min(item.priority);' \
   geode-data \
-  submit_drops_an_item_already_queued_for_the_same_file_and_source_time
+  enqueue_drops_an_item_already_queued_for_the_same_file
 
 run_mutation "ingest: the runner re-checks change detection at pop time" \
   crates/geode-data/src/ingest/runner.rs \
