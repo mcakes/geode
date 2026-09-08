@@ -505,6 +505,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
 mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
+    use geode_core::query::{CatalogOutcome, CatalogSnapshot};
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
@@ -722,6 +723,93 @@ role = "key"
                 "the data service is busy or gone — try again".to_string()
             )),
             "a refused request must error the picker, not leave it loading forever"
+        );
+    }
+
+    /// Phase 4b §4.5: `attach`'s `cx.observe(&diagnostics, ..)` submits
+    /// one `Request::Catalog` per drained `pending_catalog_request`, each
+    /// with a fresh, higher tag. Two publishes while a diagnostics tile
+    /// is watching submit tags 1 then 2 — an outcome answering the
+    /// superseded tag 1 must be dropped (never applied to
+    /// `Diagnostics.catalog`), and one answering the latest tag 2 must
+    /// be applied. Exercises the real `attach`-installed observer and
+    /// drain loop end to end, not a unit of either in isolation.
+    #[gpui::test]
+    fn a_stale_catalog_outcome_is_dropped_and_the_latest_is_applied(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+        // Tag 1: watch, then publish once.
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            d.note_published("risk");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+        // Tag 2: a second publish supersedes it.
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.note_published("risk");
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        // The stale tag-1 outcome must not be applied.
+        tx.try_send(DataEvent::Catalog(CatalogOutcome {
+            key: DIAGNOSTICS_KEY,
+            tag: 1,
+            snapshot: Ok(CatalogSnapshot::default()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.clone()),
+            None,
+            "a stale (superseded) tag must not be applied"
+        );
+
+        // The fresh tag-2 outcome must be applied.
+        let fresh = CatalogSnapshot {
+            threads: 4,
+            ..CatalogSnapshot::default()
+        };
+        tx.try_send(DataEvent::Catalog(CatalogOutcome {
+            key: DIAGNOSTICS_KEY,
+            tag: 2,
+            snapshot: Ok(fresh.clone()),
+        }))
+        .unwrap();
+        vcx.run_until_parked();
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.catalog.clone()),
+            Some(fresh),
+            "the latest tag must be applied"
         );
     }
 
