@@ -4016,28 +4016,38 @@ run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
 
 run_mutation "service: an ingest failure is keyed by the source name, not the dataset" \
   crates/geode-data/src/service.rs \
-  '                    sink(DataEvent::Health {
-                        source,
-                        worst: reported,
-                        detail: format!("{batch}: {reason}"),
-                    })' \
-  '                    sink(DataEvent::Health {
-                        source: dataset.clone(),
-                        worst: reported,
-                        detail: format!("{batch}: {reason}"),
-                    })' \
+  '                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            }),' \
+  '                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: dataset.clone(),
+                                worst,
+                                detail,
+                            }),' \
   geode-data a_load_failure_reports_health_under_the_source_name_not_the_dataset_name
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                                let health_delivered = sink(DataEvent::Health {
+  '                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
                                     source: source.clone(),
                                     worst,
                                     detail,
-                                });
-                                delivered && health_delivered' \
-  '                                let _ = (worst, detail);
-                                delivered' \
+                                })
+                            }
+                            None => true,
+                        },' \
+  '                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                true
+                            }
+                            None => true,
+                        },' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
 run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved to DataService's shared HealthTracker)" \
@@ -4055,10 +4065,10 @@ run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved t
 run_mutation "service: HealthTracker.report returns Some unconditionally, never deduping" \
   crates/geode-data/src/service.rs \
   '        if combined == self.last_reported {
-            return None;
+            return emit(None);
         }' \
   '        if false {
-            return None;
+            return emit(None);
         }' \
   geode-data a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok
 
@@ -4081,13 +4091,13 @@ run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to t
 
 run_mutation "service: HealthTracker.report combines by taking the discovery lane instead of the worse of the two" \
   crates/geode-data/src/service.rs \
-  '        let combined = worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {' \
-  '        let combined = self.discovery.as_ref().or(load).map(|v| match &v.health {' \
+  '        worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {' \
+  '        self.discovery.as_ref().or(load).map(|v| match &v.health {' \
   geode-data a_degraded_load_survives_a_clean_discovery_poll
 
 run_mutation "service: the ingest sink never writes the load lane, so a publish never affects the tracker" \
   crates/geode-data/src/service.rs \
-  '                    health_tracker.report_load_and_emit(
+  '                    let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
                         health,
@@ -4095,26 +4105,19 @@ run_mutation "service: the ingest sink never writes the load lane, so a publish 
                         |reported| match reported {
                             Some((worst, detail)) => {
                                 log_health_event(&source, &worst, &detail);
-                                // Not `delivered && sink(...)`: `&&`
-                                // short-circuits, and skipping the send
-                                // while the tracker has already recorded
-                                // the state as reported would lose this
-                                // transition for good (it never
-                                // re-reports).
-                                let health_delivered = sink(DataEvent::Health {
+                                sink(DataEvent::Health {
                                     source: source.clone(),
                                     worst,
                                     detail,
-                                });
-                                delivered && health_delivered
+                                })
                             }
-                            None => delivered,
+                            None => true,
                         },
-                    )' \
-  '                    {
+                    );' \
+  '                    let health_delivered = {
                         let _ = (&source, &batch, &health, &reason, &sink);
-                        delivered
-                    }' \
+                        true
+                    };' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
 # ---- final review round 4: NEW-5 (severity rank, the deciding lane's detail)
@@ -4144,15 +4147,37 @@ run_mutation "service: an identical re-report restamps its slot, so the calling 
   geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
 
 # The anchor below occurs twice (one door each); run_mutation replaces the
-# first, which is the discovery door — enough to break the ordering the
-# named test pins.
+# first, which is the discovery door — enough to break the invariant the
+# named test pins. The mutation writes the updated `Lanes` back afterwards,
+# so it breaks ONLY the lock-holding, not the bookkeeping (a mutation that
+# also dropped the commit would be caught by half the module for reasons
+# that have nothing to do with its name).
 run_mutation "service: the discovery door emits after dropping the tracker lock, so two reporters can reorder" \
   crates/geode-data/src/service.rs \
-  '        emit(lanes.recombine())' \
-  '        let reported = lanes.recombine();
+  '        lanes.offer(emit)' \
+  '        let mut detached = lanes.clone();
         drop(sources);
-        emit(reported)' \
-  geode-data a_second_reporter_cannot_emit_between_a_decision_and_its_emission
+        let out = detached.offer(emit);
+        self.sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(source.to_string(), detached);
+        out' \
+  geode-data emit_runs_with_the_tracker_lock_held
+
+# ---- final review round 5: finding 2 (commit only what was delivered) ----
+
+run_mutation "service: a health transition is recorded as reported even when its event was refused" \
+  crates/geode-data/src/service.rs \
+  '        let delivered = emit(combined.clone());
+        if delivered {
+            self.last_reported = combined;
+        }
+        delivered' \
+  '        let delivered = emit(combined.clone());
+        self.last_reported = combined;
+        delivered' \
+  geode-data a_refused_health_event_is_offered_again_not_recorded_as_reported
 
 run_mutation "service: the load lane is keyed by source only, so any batch's clean publish clears every other" \
   crates/geode-data/src/service.rs \
