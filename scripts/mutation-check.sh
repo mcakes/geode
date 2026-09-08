@@ -2833,12 +2833,8 @@ run_mutation "the ring's push wraps to the next slot, not slot 0" \
 
 run_mutation "drain_since excludes the record at exactly since, not only older ones" \
   crates/geode-core/src/log/mod.rs \
-  '            if let Some(r) = &g.records[idx]
-                && r.seq > since
-            {' \
-  '            if let Some(r) = &g.records[idx]
-                && r.seq >= since
-            {' \
+  '                Some(r) if r.seq > since => out.push(r.clone()),' \
+  '                Some(r) if r.seq >= since => out.push(r.clone()),' \
   geode-core drain_since_returns_only_newer_records_oldest_first
 
 run_mutation "seq is assigned by the ring's push, not carried from the caller" \
