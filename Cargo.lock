@@ -2577,6 +2577,7 @@ dependencies = [
  "geode-core",
  "geode-data",
  "geode-demo-data",
+ "geode-diagnostics",
  "geode-shell",
  "gpui",
  "gpui-component",

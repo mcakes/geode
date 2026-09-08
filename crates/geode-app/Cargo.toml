@@ -28,6 +28,7 @@ geode-core.workspace = true
 # Phase 3c.
 geode-data = { path = "../geode-data" }
 geode-blotter = { path = "../geode-blotter" }
+geode-diagnostics = { path = "../geode-diagnostics" }
 geode-demo-data = { path = "../geode-demo-data" }
 # `DataEvent::Published` carries no timestamp of its own; the bridge
 # stamps the arrival instant onto the `Publish` record a "recent

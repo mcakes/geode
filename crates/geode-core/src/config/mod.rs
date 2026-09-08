@@ -150,7 +150,16 @@ pub struct ConfigSources {
 }
 
 /// The loaded, merged configuration plus everything needed to explain it.
-#[derive(Debug, Default)]
+///
+/// `Clone` (Phase 4b Task 5): `geode_diagnostics::DiagnosticsFactory`
+/// holds its own `Rc<RefCell<Config>>` for the config section's
+/// effective-config explainer, refreshed on every `ShellEvent::
+/// ConfigReloaded` from `ShellView::config()`'s `&Config` — the same
+/// clone-on-reload shape `BlotterFactory::set_views`/`set_schema` already
+/// use for their own `Vec`/`SchemaSpec` copies. Every field here is
+/// already `Clone` (`MergedDoc`, `LayerDoc`, `Diagnostic`), so this is a
+/// plain derive, not a new copy to design.
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     docs: BTreeMap<String, MergedDoc>,
     layered: BTreeMap<String, Vec<LayerDoc>>,

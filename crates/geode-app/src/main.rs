@@ -13,6 +13,7 @@ use std::sync::Arc;
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
+use geode_diagnostics::DiagnosticsFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
@@ -90,8 +91,9 @@ fn main() {
             // gpui focus for one frame after a click (Phase 3 §3.3) — see
             // `geode_blotter::init`'s own doc comment.
             geode_blotter::init(cx);
+            geode_diagnostics::init(cx);
 
-            let (mut services, desk, user, bridge) =
+            let (mut services, desk, user, bridge, diagnostics_factory) =
                 build_shell_services(demo_root.as_deref(), log_ring, log_control, cx);
             for warning in services.theme.apply_from_config(&services.config, cx) {
                 tracing::warn!(target: "geode::theme", "{warning}");
@@ -175,6 +177,34 @@ fn main() {
                 if let Some(bridge) = &bridge {
                     cx.update(|cx| bridge::attach(bridge, window, cx));
                 }
+
+                // The diagnostics factory's config refresh (Phase 4b Task
+                // 5): independent of the data bridge above — this module
+                // needs no `DataHandle`, so it subscribes for itself
+                // rather than piggybacking on `bridge::attach`, which does
+                // not run at all when no `[sources]`/`[datasets]` are
+                // configured. `ShellEvent::ConfigReloaded` fires on every
+                // reload that changed `views`/`dimensions` (`shell::
+                // hot_reload::apply_reload`); `set_config` gives the
+                // config section's explainer a fresh `Config` to walk the
+                // same way `BlotterFactory::set_views`/`set_schema` refresh
+                // theirs on the same event.
+                cx.update(|cx| {
+                    let shell = window
+                        .read(cx)
+                        .ok()
+                        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
+                        .expect("the window's root view is the shell");
+                    cx.subscribe(
+                        &shell,
+                        move |shell, event: &geode_shell::shell::ShellEvent, cx| {
+                            if matches!(event, geode_shell::shell::ShellEvent::ConfigReloaded) {
+                                diagnostics_factory.set_config(shell.read(cx).config().clone());
+                            }
+                        },
+                    )
+                    .detach();
+                });
             })
             .detach();
         });
@@ -293,6 +323,32 @@ impl ModuleFactory for BlotterFactoryHandle {
     }
 }
 
+/// Same shape as [`BlotterFactoryHandle`], for the diagnostics factory:
+/// `main`'s config-reload subscription (set up once a window exists, in
+/// the `cx.spawn` block below) also holds a clone, for `set_config`.
+struct DiagnosticsFactoryHandle(Rc<geode_diagnostics::DiagnosticsFactory>);
+
+impl ModuleFactory for DiagnosticsFactoryHandle {
+    fn kind(&self) -> &'static str {
+        self.0.kind()
+    }
+    fn register_actions(&self, registry: &mut ActionRegistry) {
+        self.0.register_actions(registry)
+    }
+    fn create(
+        &self,
+        tile: TileId,
+        restored: Option<&toml::Table>,
+        frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> TileOccupant {
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
+    }
+}
+
 /// Load config, register the shell's and modules' builtin actions,
 /// compile the keymap, and build the starting (empty, workspace 1)
 /// workspace state. Config and keymap diagnostics log at `geode::config`
@@ -327,6 +383,7 @@ fn build_shell_services(
     Option<PathBuf>,
     Option<PathBuf>,
     Option<bridge::Bridge>,
+    Rc<DiagnosticsFactory>,
 ) {
     let (desk, user) = config_dirs();
     let mut builtin = vec![
@@ -388,6 +445,19 @@ fn build_shell_services(
         .to_string();
     let mut roster = ModuleRoster::new(default_kind);
 
+    // The diagnostics module (Phase 4b Task 5, spec §4.6): registered
+    // unconditionally, unlike the blotter factory just below — it needs
+    // no data handle, so `mod+shift+d` opens a tile even with no
+    // `[sources]`/`[datasets]` configured at all. `diagnostics_factory` is
+    // returned to the caller so it can subscribe to `ShellEvent::
+    // ConfigReloaded` once a window (and so a `ShellView` to subscribe to)
+    // exists — `set_config` refreshes the config section's explainer the
+    // same way `BlotterFactory::set_views`/`set_schema` refresh theirs.
+    let diagnostics_factory = Rc::new(DiagnosticsFactory::new(log_ring.clone(), config.clone()));
+    roster.add(Box::new(DiagnosticsFactoryHandle(
+        diagnostics_factory.clone(),
+    )));
+
     // The data bridge (spec §5.1, §5.4): `None` when the config declares
     // no datasets/views, in which case the roster's only occupant is
     // whatever `default_kind` names with nothing behind it — a blotter
@@ -447,7 +517,7 @@ fn build_shell_services(
             levels: log_levels,
         }),
     };
-    (services, desk, user, bridge)
+    (services, desk, user, bridge, diagnostics_factory)
 }
 
 /// A config or keymap diagnostic (spec §10.1): logged at `geode::config`,
