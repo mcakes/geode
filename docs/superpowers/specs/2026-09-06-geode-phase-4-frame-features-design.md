@@ -943,8 +943,8 @@ rebuilds only on change. `Published`, `Health`, `Diagnostics`, and
 `Catalog` events all land here; `ShellView::set_data_status` is deleted
 and the status bar reads a summary from this entity instead.
 
-**As built (2026-09-08, Task 4; corrected in fix rounds 1–2, CRIT-1,
-MAJ-4/MAJ-5, NEW-1):** `Health` moved from `geode-data` to `geode-core`
+**As built (2026-09-08, Task 4; corrected in fix rounds 1–4, CRIT-1,
+MAJ-4/MAJ-5, NEW-1, NEW-4, NEW-5/NEW-6):** `Health` moved from `geode-data` to `geode-core`
 (`geode-data::health` is now a re-export) — the interface above has
 `geode_shell::diagnostics` naming `Health` directly, which would have
 put a `geode-data` dependency on `geode-shell` and broken "shell and
@@ -959,7 +959,17 @@ malformed on disk) and load (content-aware: did the last publish or
 load attempt succeed) — final review round 3, NEW-4: a single shared
 last-value map let a routine, content-blind clean poll silently clear a
 real, unfixed `Degraded`/`Failed` a publish had set, within about one
-poll interval and with nothing actually corrected. `config: Vec<Diagnostic>`
+poll interval and with nothing actually corrected. The load lane is
+keyed per BATCH and rolled up as the worst of them (round 4, NEW-6): a
+`Degraded` generation stays live and queryable, so one batch publishing
+cleanly says nothing about another's still-degraded rows, and only that
+batch's own next publish replaces its entry. "Worse" is an explicit
+severity rank, never `Health`'s derived `Ord` — which compares the
+`reason` string once two variants tie, so two simultaneous `Degraded`s
+were ordered by the alphabet and one was dropped — and an equal rank is
+decided by whichever slot changed most recently, with an identical
+re-report changing nothing so that repeated clean polls cannot flap it
+(round 4, NEW-5). `config: Vec<Diagnostic>`
 is not an unconditionally-appended log: `note_config` *replaces* the
 current batch wholesale and is a no-op when the new batch is
 byte-identical to the old one (MAJ-5) — an unchanged reload (e.g. the

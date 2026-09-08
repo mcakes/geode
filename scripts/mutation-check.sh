@@ -4030,20 +4030,14 @@ run_mutation "service: an ingest failure is keyed by the source name, not the da
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report_load(&source, health) {
-                        Some(reported) => {
-                            log_health_event(&source, &reported, &reason);
-                            delivered
-                                && sink(DataEvent::Health {
-                                    source,
-                                    worst: reported,
-                                    detail: format!("{batch}: {reason}"),
-                                })
-                        }
-                        None => delivered,
-                    }' \
-  '                    let _ = health_tracker.report_load(&source, health);
-                    delivered' \
+  '                            let health_delivered = sink(DataEvent::Health {
+                                source,
+                                worst,
+                                detail,
+                            });
+                            delivered && health_delivered' \
+  '                            let _ = (source, worst, detail);
+                            delivered' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
 run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved to DataService's shared HealthTracker)" \
@@ -4060,7 +4054,7 @@ run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved t
 
 run_mutation "service: HealthTracker.report returns Some unconditionally, never deduping" \
   crates/geode-data/src/service.rs \
-  '        if combined == lanes.last_reported {
+  '        if combined == self.last_reported {
             return None;
         }' \
   '        if false {
@@ -4070,48 +4064,73 @@ run_mutation "service: HealthTracker.report returns Some unconditionally, never 
 
 run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to the shared tracker" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report_load(&source, health) {
-                        Some(reported) => {
-                            log_health_event(&source, &reported, &reason);
-                            delivered
-                                && sink(DataEvent::Health {
-                                    source,
-                                    worst: reported,
-                                    detail: format!("{batch}: {reason}"),
-                                })
-                        }
-                        None => delivered,
-                    }' \
-  '                    if health == Health::Ok {
+  '                    let reason = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+                        _ => String::new(),
+                    };' \
+  '                    let reason = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+                        _ => String::new(),
+                    };
+                    if health == Health::Ok {
                         return delivered;
-                    }
-                    match health_tracker.report_load(&source, health) {
-                        Some(reported) => {
-                            log_health_event(&source, &reported, &reason);
-                            delivered
-                                && sink(DataEvent::Health {
-                                    source,
-                                    worst: reported,
-                                    detail: format!("{batch}: {reason}"),
-                                })
-                        }
-                        None => delivered,
                     }' \
-  geode-data a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish
+  geode-data a_clean_republish_of_the_same_batch_clears_its_degraded_health
 
 # ---- final review round 3: NEW-4 (two health lanes, combined as the worse) ----
 
 run_mutation "service: HealthTracker.report combines by taking the discovery lane instead of the worse of the two" \
   crates/geode-data/src/service.rs \
-  '            (Some(d), Some(l)) => Some(if l >= d { l.clone() } else { d.clone() }),' \
-  '            (Some(d), Some(_l)) => Some(d.clone()),' \
-  geode-data a_degraded_publish_survives_several_more_clean_discovery_polls
+  '        let combined = worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {' \
+  '        let combined = self.discovery.as_ref().or(load).map(|v| match &v.health {' \
+  geode-data a_degraded_load_survives_a_clean_discovery_poll
 
 run_mutation "service: the ingest sink never writes the load lane, so a publish never affects the tracker" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report_load(&source, health) {' \
-  '                    match { let _ = health; None } {' \
-  geode-data a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish
+  '                    match health_tracker.report_load(
+                        &source,
+                        &batch,
+                        health,
+                        format!("{batch}: {reason}"),
+                    ) {' \
+  '                    match {
+                        let _ = (&batch, health, &reason);
+                        None::<(Health, String)>
+                    } {' \
+  geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
+
+# ---- final review round 4: NEW-5 (severity rank, the deciding lane's detail)
+#      and NEW-6 (the load lane keyed per batch) ----
+
+run_mutation "service: lanes are compared by Health's derived Ord (reason TEXT) instead of severity rank" \
+  crates/geode-data/src/service.rs \
+  'fn displaces(candidate: &LaneValue, incumbent: &LaneValue) -> bool {
+    (severity_rank(&candidate.health), candidate.changed)
+        > (severity_rank(&incumbent.health), incumbent.changed)
+}' \
+  'fn displaces(candidate: &LaneValue, incumbent: &LaneValue) -> bool {
+    (candidate.health.clone(), candidate.changed) > (incumbent.health.clone(), incumbent.changed)
+}' \
+  geode-data a_second_degradation_at_the_same_rank_is_reported
+
+run_mutation "service: an identical re-report restamps its slot, so the calling lane wins every tie" \
+  crates/geode-data/src/service.rs \
+  'fn unchanged_stamp(slot: Option<&LaneValue>, health: &Health, detail: &str) -> Option<u64> {
+    slot.filter(|v| v.health == *health && v.detail == detail)
+        .map(|v| v.changed)
+}' \
+  'fn unchanged_stamp(slot: Option<&LaneValue>, health: &Health, detail: &str) -> Option<u64> {
+    let _ = (slot, health, detail);
+    None
+}' \
+  geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
+
+run_mutation "service: the load lane is keyed by source only, so any batch's clean publish clears every other" \
+  crates/geode-data/src/service.rs \
+  '        let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
+  '        let batch = "";
+        let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
+  geode-data a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing
 
 run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
   crates/geode-diagnostics/src/tile.rs \
