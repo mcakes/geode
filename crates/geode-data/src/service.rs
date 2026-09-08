@@ -228,13 +228,21 @@ impl DataService {
                     batch,
                     gen_id,
                     books,
+                    rows,
                     ..
-                } => sink(DataEvent::Published {
-                    dataset,
-                    batch,
-                    gen_id,
-                    books,
-                }),
+                } => {
+                    tracing::info!(
+                        target: "geode::ingest",
+                        "published {dataset}/{batch} gen {gen_id}: {} book(s), {rows} row(s)",
+                        books.len(),
+                    );
+                    sink(DataEvent::Published {
+                        dataset,
+                        batch,
+                        gen_id,
+                        books,
+                    })
+                }
                 IngestEvent::Failed {
                     dataset,
                     batch,
@@ -258,16 +266,22 @@ impl DataService {
         let scheduler_sink: SchedulerSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |e: SchedulerEvent| match e {
-                SchedulerEvent::Polled { .. } => true,
+                SchedulerEvent::Polled { source, ready } => {
+                    tracing::debug!(target: "geode::ingest", "polled {source}: {ready} ready");
+                    true
+                }
                 SchedulerEvent::Health {
                     source,
                     worst,
                     detail,
-                } => sink(DataEvent::Health {
-                    source,
-                    worst,
-                    detail,
-                }),
+                } => {
+                    tracing::info!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+                    sink(DataEvent::Health {
+                        source,
+                        worst,
+                        detail,
+                    })
+                }
             })
         };
         let scheduler = Scheduler::spawn(

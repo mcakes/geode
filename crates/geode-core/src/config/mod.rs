@@ -197,6 +197,27 @@ impl Config {
     }
 }
 
+/// Fixture builders for downstream crates' tests that need a real
+/// `Config` — not just a `MergedDoc` (`merge_docs`/`LayerDoc::builtin`,
+/// the pattern `geode-data`'s benches use) — but with no desk/user
+/// directory on disk.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::{Config, ConfigSources, LayerDoc};
+
+    /// A `Config` built from one builtin doc named `name`, parsed from
+    /// `text`. Builtin docs skip the `config_version` check (see
+    /// [`LayerDoc::builtin`]), so `text` need not carry one.
+    pub fn config_from(name: &str, text: &str) -> Config {
+        let doc = LayerDoc::builtin(name, text).expect("well-formed test TOML");
+        Config::load(&ConfigSources {
+            builtin: vec![doc],
+            desk: None,
+            user: None,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

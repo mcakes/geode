@@ -53,7 +53,7 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
         .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
         .unwrap_or_default();
     for d in &diags {
-        eprintln!("[groupings] {d}");
+        tracing::warn!(target: "geode::config", "{d}");
     }
     slots
 }
@@ -115,7 +115,7 @@ pub fn rebuild_saved_scopes(
         #[cfg(test)]
         SAVED_SCOPES_REPORT_CALLS.with(|c| c.set(c.get() + 1));
         for d in &diags {
-            eprintln!("[scopes] {d}");
+            tracing::warn!(target: "geode::config", "{d}");
         }
     }
     saved
@@ -189,7 +189,7 @@ impl ShellView {
             // `Diagnostic::message` — so there's no `Diagnostic` Display
             // impl to reuse here).
             for warning in warnings {
-                eprintln!("[reload] warning: {warning}");
+                tracing::warn!(target: "geode::config", "{warning}");
             }
 
             let theme_changed =

@@ -332,7 +332,7 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
-                    eprintln!("[theme] warning: {e}");
+                    tracing::warn!(target: "geode::theme", "{e}");
                 }
             })
             .detach();
@@ -351,7 +351,7 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
-                    eprintln!("[fontsize] warning: {e}");
+                    tracing::warn!(target: "geode::config", "{e}");
                 }
             })
             .detach();
@@ -370,7 +370,7 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
-                    eprintln!("[findstyle] warning: {e}");
+                    tracing::warn!(target: "geode::config", "{e}");
                 }
             })
             .detach();

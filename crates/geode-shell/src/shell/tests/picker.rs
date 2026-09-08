@@ -61,6 +61,7 @@ fn services_with_pickable() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
     }
 }
 

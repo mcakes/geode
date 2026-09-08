@@ -18,6 +18,18 @@ publish = false
 geode-core = { path = "crates/geode-core" }
 geode-shell = { path = "crates/geode-shell" }
 
+# Phase 4b: the tracing foundation (`geode_core::log`). Versions pinned to
+# what gpui already resolves `tracing`/`tracing-subscriber` to in
+# Cargo.lock, so this adds no second copy of either. `tracing-appender` is
+# new to the lock — the daily rolling file layer in `geode-app::main`.
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = [
+    "std",
+    "fmt",
+    "registry",
+] }
+tracing-appender = "0.2"
+
 # gpui-component's own Cargo.toml depends on `gpui`/`gpui_platform` via an
 # unpinned git reference (no rev). Cargo keys a git dependency's identity on
 # URL + reference, so if we pinned a `rev` here, cargo would treat our copy

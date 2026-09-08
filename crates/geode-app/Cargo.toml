@@ -37,6 +37,12 @@ chrono = "0.4.42"
 # awaited on the foreground executor so the drain task wakes on arrival
 # rather than polling.
 async-channel = "2.5"
+# Phase 4b Task 2: the tracing foundation, installed first thing in
+# `main.rs` — stderr, ring and daily-file layers, `LogLevels` reload.
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# The daily rolling log file layer (`tracing_appender::rolling::daily`).
+tracing-appender.workspace = true
 # The roster's restored-tile state is opaque `toml::Table` (the module
 # hosting contract, geode-shell::module) — `BlotterFactoryHandle::create`
 # forwards it verbatim.

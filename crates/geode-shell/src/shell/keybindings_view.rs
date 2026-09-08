@@ -618,8 +618,9 @@ fn spawn_rebind(
     cx: &mut Context<ShellView>,
 ) {
     let Some(user_dir) = user_dir else {
-        eprintln!(
-            "[keybindings] warning: no writable user config dir; the new binding for {} was not saved",
+        tracing::warn!(
+            target: "geode::config",
+            "no writable user config dir; the new binding for {} was not saved",
             row.action
         );
         return;
@@ -638,16 +639,18 @@ fn spawn_rebind(
         .spawn(async move {
             match apply_rebind(&user_dir, &rebind) {
                 Ok(outcome) if outcome.displacement == Displacement::OldKeyNotFound => {
-                    eprintln!(
-                        "[keybindings] warning: the previous binding for {} was not found \
-                         where expected while saving the new one — it may still be \
-                         reachable from wherever it actually lives",
+                    tracing::warn!(
+                        target: "geode::config",
+                        "the previous binding for {} was not found where expected while \
+                         saving the new one — it may still be reachable from wherever it \
+                         actually lives",
                         rebind.action
                     );
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!(
-                    "[keybindings] warning: failed to save the new binding for {}: {e}",
+                Err(e) => tracing::warn!(
+                    target: "geode::config",
+                    "failed to save the new binding for {}: {e}",
                     rebind.action
                 ),
             }

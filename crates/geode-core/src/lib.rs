@@ -5,6 +5,7 @@ pub mod attribution;
 pub mod config;
 pub mod dimensions;
 pub mod groupings;
+pub mod log;
 pub mod query;
 pub mod schema;
 pub mod scope;

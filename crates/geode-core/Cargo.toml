@@ -44,6 +44,10 @@ chrono = "0.4.42"
 # rather than `toml`, matching every other read-modify-write config writer
 # in this codebase (see `geode-shell`'s own `toml_edit` dependency comment).
 toml_edit = "0.25.13"
+# `geode_core::log`: the ring's `Record`/`Level` and the `RingLayer`
+# subscriber layer that feeds it.
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

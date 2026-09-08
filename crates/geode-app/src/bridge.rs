@@ -145,7 +145,7 @@ pub fn start(
     _cx: &mut App,
 ) -> Bridge {
     for d in &setup.diagnostics {
-        eprintln!("[data] {d}");
+        tracing::warn!(target: "geode::query", "{d}");
     }
     let (tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
     let dropped = Arc::new(AtomicU64::new(0));
@@ -290,7 +290,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         gen_id,
                         books,
                     } => {
-                        eprintln!("[data] published {dataset}/{batch} gen {gen_id}");
+                        tracing::info!(target: "geode::ingest", "published {dataset}/{batch} gen {gen_id}");
                         let frame = shell.read(cx).frame().clone();
                         // The event carries no timestamp of its own; the
                         // arrival instant is what a "recent publishes"
@@ -311,14 +311,23 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         worst,
                         detail,
                     } => {
-                        eprintln!("[data] health {source}: {} — {detail}", worst.label());
+                        // Failed is the one health outcome that has actually
+                        // lost data (the last good generation stays live, but
+                        // this file's own load did not happen) — everything
+                        // else (pending, degraded, ...) is expected traffic
+                        // for a source that hasn't landed yet.
+                        if matches!(worst, geode_data::health::Health::Failed { .. }) {
+                            tracing::error!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+                        } else {
+                            tracing::warn!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+                        }
                         shell.update(cx, |s, cx| {
                             s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
                         });
                     }
                     DataEvent::Diagnostics(diags) => {
                         for d in diags {
-                            eprintln!("[data] {d}");
+                            tracing::warn!(target: "geode::query", "{d}");
                         }
                     }
                     // The dimension picker's own outcome (spec §3.4),
@@ -407,6 +416,7 @@ role = "key"
             roster: ModuleRoster::default(),
             restored_tiles: TileRecords::new(),
             restored_frame: None,
+            log: None,
         }
     }
 

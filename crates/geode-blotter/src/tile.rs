@@ -184,8 +184,8 @@ impl BlotterTile {
         // `filter.expr`/`filter.text` (Phase 4a §3.7): a restored
         // expression that no longer parses (e.g. hand-edited, or a
         // column since removed) drops the whole filter rather than
-        // half-applying it — logged here since a fresh tile has nowhere
-        // inline to report it (4b migrates this to real logging).
+        // half-applying it — logged (`geode::shell`, warn) since a fresh
+        // tile has nowhere inline to report it.
         let tile_scope = restored
             .and_then(|t| t.get("filter"))
             .and_then(|v| v.as_table())
@@ -195,8 +195,9 @@ impl BlotterTile {
                     match parse_expr(expr_str) {
                         Ok(expr) => scope.expression = Some(expr),
                         Err(e) => {
-                            eprintln!(
-                                "[blotter] restored filter.expr '{expr_str}' failed to parse at column {}: {} — filter dropped",
+                            tracing::warn!(
+                                target: "geode::shell",
+                                "restored filter.expr '{expr_str}' failed to parse at column {}: {} — filter dropped",
                                 e.caret + 1,
                                 e.message
                             );

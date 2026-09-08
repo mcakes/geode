@@ -48,6 +48,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
     }
 }
 
@@ -286,6 +287,7 @@ fn services_with_saved_scope() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
     }
 }
 

@@ -33,6 +33,10 @@ toml_edit = "0.25.13"
 # date today" check (`chrono::Local::now()`), and the scope bar's as-of
 # formatting are all runtime code now, not just `#[cfg(test)]` fixtures.
 chrono = "0.4.42"
+# Every migrated `eprintln!` site (Phase 4b Task 2) emits through this
+# instead — `geode_core::log::LevelControl`/`Ring` own the subscriber
+# machinery itself, so this crate only ever needs the emitting macros.
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

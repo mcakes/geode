@@ -3,13 +3,16 @@
 //! `geode_shell::shell::ShellView` — the keyboard-driven shell root.
 
 mod bridge;
+mod crash;
 mod demo;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
+use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
@@ -20,7 +23,7 @@ use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
 use geode_shell::module::{ModuleFactory, ModuleRoster, TileOccupant};
 use geode_shell::session;
-use geode_shell::shell::{ShellServices, ShellView, pickable_columns, saved_scopes};
+use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
 use geode_shell::theme;
 use geode_shell::tiling::{TileId, Workspaces};
 use geode_shell::vimfind::FindStyle;
@@ -28,13 +31,23 @@ use gpui::App;
 use gpui::prelude::*;
 use gpui::{Entity, Window};
 use gpui_component::{Root, TitleBar};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{Registry, fmt, reload};
 
 fn main() {
+    // First thing: the subscriber, before `Application::new` and before
+    // config load — the config load itself should log (spec §4.1, Phase
+    // 4b Task 2). `[log]`'s levels are applied through the returned
+    // control once `build_shell_services` has a `Config` to read them
+    // from.
+    let (log_ring, log_control) = install_logging();
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let demo_rows = match parse_args(&args) {
         Ok(rows) => rows,
         Err(message) => {
-            eprintln!("{message}");
+            tracing::error!(target: "geode::config", "{message}");
             std::process::exit(2);
         }
     };
@@ -48,7 +61,7 @@ fn main() {
     if let (Some(rows), Some(root)) = (demo_rows, &demo_root)
         && let Err(e) = demo::ensure_emitted(root, rows)
     {
-        eprintln!("[demo] failed to emit sample data into {root:?}: {e}");
+        tracing::error!(target: "geode::ingest", "failed to emit sample data into {root:?}: {e}");
         std::process::exit(1);
     }
 
@@ -77,9 +90,10 @@ fn main() {
             // `geode_blotter::init`'s own doc comment.
             geode_blotter::init(cx);
 
-            let (mut services, desk, user, bridge) = build_shell_services(demo_root.as_deref(), cx);
+            let (mut services, desk, user, bridge) =
+                build_shell_services(demo_root.as_deref(), log_ring, log_control, cx);
             for warning in services.theme.apply_from_config(&services.config, cx) {
-                eprintln!("[theme] warning: {warning}");
+                tracing::warn!(target: "geode::theme", "{warning}");
             }
 
             // Restore the session (Task 3) before constructing ShellView:
@@ -93,7 +107,7 @@ fn main() {
             if let Some(path) = &services.session_path {
                 let restored = session::load(path);
                 for warning in &restored.warnings {
-                    eprintln!("[session] warning: {warning}");
+                    tracing::warn!(target: "geode::session", "{warning}");
                 }
                 services.workspaces = restored.workspaces;
                 services.restored_tiles = restored.tiles;
@@ -165,6 +179,56 @@ fn main() {
         });
 }
 
+/// Installs the process-wide `tracing` subscriber (Phase 4b Task 2, spec
+/// §4.1–4.3), before anything else in `main` runs: a level filter behind
+/// a `reload::Layer` (starting at [`LogLevels::default`] — `[log]`'s real
+/// levels apply once `build_shell_services` has loaded a `Config`), a
+/// plain stderr `fmt` layer (replaces the old per-call-site stderr prints), the ring
+/// every subscriber layer feeds (read later by the diagnostics tile),
+/// and — only when the user config dir exists — a daily rolling file
+/// under `<user>/logs/geode.YYYY-MM-DD.log`. `None` (no home) means no
+/// file layer, exactly as `ShellServices::session_path` has no session
+/// file: logging degrades to stderr-and-ring only, never a panic.
+fn install_logging() -> (Arc<Ring>, Arc<dyn LevelControl>) {
+    let ring = Arc::new(Ring::new(4096));
+    let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
+
+    let (_, user) = config_dirs();
+    let file_layer = user.as_ref().and_then(|dir| {
+        let logs = dir.join("logs");
+        std::fs::create_dir_all(&logs).ok()?;
+        // The seven-file cap, applied once at startup — `tracing_appender`
+        // rotates going forward but never prunes files from before this
+        // run.
+        crash::trim_log_files(&logs, 7);
+        let appender = tracing_appender::rolling::RollingFileAppender::builder()
+            .rotation(tracing_appender::rolling::Rotation::DAILY)
+            .filename_prefix("geode")
+            .filename_suffix("log")
+            .build(&logs)
+            .ok()?;
+        Some(fmt::layer().with_writer(appender).with_ansi(false))
+    });
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_writer(std::io::stderr))
+        .with(RingLayer::new(ring.clone()))
+        .with(file_layer)
+        .init();
+
+    struct ReloadControl(reload::Handle<tracing_subscriber::filter::Targets, Registry>);
+    impl LevelControl for ReloadControl {
+        fn set(&self, levels: &LogLevels) -> Result<(), String> {
+            self.0
+                .reload(levels.to_targets())
+                .map_err(|e| e.to_string())
+        }
+    }
+
+    (ring, Arc::new(ReloadControl(reload_handle)))
+}
+
 /// `--demo [rows]` (default 100,000), or no arguments at all (spec §7.1).
 /// Anything else is a usage error the caller should exit(2) on — argument
 /// parsing has no config to fall back to, unlike a bad `*.toml`, so this
@@ -217,23 +281,32 @@ impl ModuleFactory for BlotterFactoryHandle {
 
 /// Load config, register the shell's and modules' builtin actions,
 /// compile the keymap, and build the starting (empty, workspace 1)
-/// workspace state. Config and keymap diagnostics print to stderr, one
-/// line each — a diagnostics UI is a later phase; invalid config must
-/// never stop the app from starting (spec §10.1). Returns the desk/user
-/// config directories alongside the services so the caller can pass the
-/// same two directories into `ShellView::new` for the config hot-reload
-/// watcher (Task 1c-1) — one `config_dirs()` call, one source of truth
-/// for what's watched — and the data bridge (`None` when the config has
-/// no datasets/views to serve), so the caller can attach it to the
-/// window once it opens.
+/// workspace state. Config and keymap diagnostics log at `geode::config`
+/// (spec §10.1: invalid config must never stop the app from starting —
+/// error/warn by [`Diagnostic::severity`], never a panic). Returns the
+/// desk/user config directories alongside the services so the caller can
+/// pass the same two directories into `ShellView::new` for the config
+/// hot-reload watcher (Task 1c-1) — one `config_dirs()` call, one source
+/// of truth for what's watched — and the data bridge (`None` when the
+/// config has no datasets/views to serve), so the caller can attach it
+/// to the window once it opens.
 ///
 /// `demo_root` is `Some` under `--demo` (spec §7.1): the directory
 /// `demo::ensure_emitted` has already populated with generated CSVs, one
 /// level above its `src` subdirectory. Its config layer goes in ahead of
 /// desk/user config, exactly where the builtin keymap already sits, so a
 /// desk or user layer can still override any of it.
+///
+/// `log_ring`/`log_control` are `install_logging`'s output (Phase 4b
+/// Task 2), threaded through here rather than reinstalled: `[log]` in
+/// the just-loaded `config` is applied through `log_control` the moment
+/// it's parsed, so it takes effect for everything logged after this
+/// call, and both go onto the returned `ShellServices` for the
+/// diagnostics tile and `:level` (later tasks) to reach.
 fn build_shell_services(
     demo_root: Option<&Path>,
+    log_ring: Arc<Ring>,
+    log_control: Arc<dyn LevelControl>,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -254,8 +327,19 @@ fn build_shell_services(
         user: user.clone(),
     });
     for diag in &config.diagnostics {
-        print_diagnostic("config", diag);
+        print_diagnostic(diag);
     }
+
+    // `[log]` (spec §4.2): parsed and applied through the reload control
+    // now that a `Config` exists, so it governs everything logged for
+    // the rest of startup and the run — the subscriber itself was
+    // already up (`install_logging`, before config load) at the
+    // conservative default so nothing logged before this point was lost.
+    let (log_levels, log_diags) = LogLevels::from_doc(&config);
+    for diag in &log_diags {
+        print_diagnostic(diag);
+    }
+    let _ = log_control.set(&log_levels);
 
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
@@ -307,16 +391,16 @@ fn build_shell_services(
 
     let (mod_alias, mod_diags) = mod_alias_from_config(&config);
     for diag in &mod_diags {
-        print_diagnostic("keymap", diag);
+        print_diagnostic(diag);
     }
     let (keymap, keymap_diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
     for diag in &keymap_diags {
-        print_diagnostic("keymap", diag);
+        print_diagnostic(diag);
     }
 
     let (theme, theme_warnings) = theme::load_bundled();
     for warning in &theme_warnings {
-        eprintln!("[theme] warning: {warning}");
+        tracing::warn!(target: "geode::theme", "{warning}");
     }
 
     // Session file lives alongside user config (spec: state-as-config),
@@ -335,16 +419,25 @@ fn build_shell_services(
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
         restored_frame: None,
+        log: Some(LogServices {
+            ring: log_ring,
+            control: log_control,
+            levels: log_levels,
+        }),
     };
     (services, desk, user, bridge)
 }
 
-fn print_diagnostic(source: &str, diag: &Diagnostic) {
-    let severity = match diag.severity {
-        Severity::Warning => "warning",
-        Severity::Error => "error",
-    };
-    eprintln!("[{source}] {severity} {diag}");
+/// A config or keymap diagnostic (spec §10.1): logged at `geode::config`,
+/// error or warn by [`Diagnostic::severity`] — the message formatted as
+/// it always has been (`Diagnostic`'s own `Display`), minus the
+/// `[source]` prefix this used to carry: the target now says where it
+/// came from.
+fn print_diagnostic(diag: &Diagnostic) {
+    match diag.severity {
+        Severity::Warning => tracing::warn!(target: "geode::config", "{diag}"),
+        Severity::Error => tracing::error!(target: "geode::config", "{diag}"),
+    }
 }
 
 /// Desk and user config directories (spec §8): desk comes from
@@ -422,5 +515,98 @@ mod tests {
     #[test]
     fn an_unrecognised_flag_is_a_usage_error() {
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
+    }
+
+    /// Phase 4b Task 2's migration invariant, kept true rather than
+    /// merely checked once: every `crates/*/src/**/*.rs` file outside a
+    /// `tests/` directory or an inline `#[cfg(test)] mod ... { ... }`
+    /// block is `eprintln!`-free — every real call site now goes through
+    /// `tracing` with a target and a level, so the ring/file/stderr
+    /// layers see everything. A test-only debug print inside an inline
+    /// `#[cfg(test)]` module (unlike `shell/tests/reload.rs`'s own,
+    /// which sits in a whole `tests/` directory and so is already
+    /// excluded) is deliberately still allowed.
+    #[test]
+    fn no_eprintln_outside_tests_in_workspace_src() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("geode-app sits at <workspace root>/crates/geode-app");
+        let crates_dir = workspace_root.join("crates");
+
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(&crates_dir).expect("workspace crates/ dir exists") {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_dir() {
+                continue;
+            }
+            let src = entry.path().join("src");
+            if src.is_dir() {
+                walk_rs_files(&src, &mut offenders);
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "eprintln! found outside a tests/ dir or an inline #[cfg(test)] module:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Recurses into `dir` collecting `"<path>:<line>"` for every
+    /// `eprintln!` call site outside a `tests/` path component or an
+    /// inline `#[cfg(test)] mod ... { ... }` block (tracked by brace
+    /// depth — a plain count of `{`/`}` per line, which is exact for
+    /// this codebase's formatting: `cargo fmt` never puts a brace inside
+    /// a string or comment on a line that also opens/closes a block
+    /// relevant here).
+    fn walk_rs_files(dir: &std::path::Path, offenders: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("readable src subdirectory") {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                walk_rs_files(&path, offenders);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            if path.components().any(|c| c.as_os_str() == "tests") {
+                continue; // a whole tests/ seam file, e.g. shell/tests/reload.rs
+            }
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+
+            let mut depth: i32 = 0;
+            let mut pending_cfg_test = false;
+            let mut cfg_test_skip_until: Option<i32> = None; // Some(depth) once inside
+            for (i, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                let skipping = cfg_test_skip_until.is_some();
+
+                if !skipping && trimmed.starts_with("#[cfg(test)]") {
+                    pending_cfg_test = true;
+                } else if !skipping && pending_cfg_test && trimmed.starts_with("mod ") {
+                    cfg_test_skip_until = Some(depth);
+                    pending_cfg_test = false;
+                } else if !trimmed.starts_with("//") {
+                    pending_cfg_test = false;
+                }
+
+                if !skipping && line.contains("eprintln!") {
+                    offenders.push(format!("{}:{}", path.display(), i + 1));
+                }
+
+                let opens = line.matches('{').count() as i32;
+                let closes = line.matches('}').count() as i32;
+                depth += opens - closes;
+                if let Some(start) = cfg_test_skip_until
+                    && depth <= start
+                    && (opens > 0 || closes > 0)
+                {
+                    cfg_test_skip_until = None;
+                }
+            }
+        }
     }
 }

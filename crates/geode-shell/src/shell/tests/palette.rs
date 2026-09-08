@@ -1126,6 +1126,7 @@ fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
     }
 }
 

@@ -57,8 +57,10 @@ use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_core::query::{DistinctOutcome, QueryKey};
 use geode_core::schema::{ColumnRole, SchemaSpec};
+use std::sync::Arc;
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
@@ -88,6 +90,22 @@ pub struct ShellServices {
     /// fresh session (no file, or one with no `[frame]` table yet) and in
     /// every test setup that doesn't opt in.
     pub restored_frame: Option<crate::session::FrameRecord>,
+    /// The `tracing` foundation (Phase 4b Task 2): the ring the
+    /// diagnostics tile reads, the control `:level` writes through, and
+    /// the levels `[log]` resolved to at startup. `None` in every test
+    /// setup that doesn't opt in — logging is then simply not wired up,
+    /// never a panic (mirrors `session_path`'s own "missing = skipped").
+    pub log: Option<LogServices>,
+}
+
+/// The pieces of the installed `tracing` subscriber the shell needs at
+/// runtime: a handle to read the ring (the diagnostics tile), a handle to
+/// change the level filter (`:level`), and the levels currently in
+/// effect.
+pub struct LogServices {
+    pub ring: Arc<Ring>,
+    pub control: Arc<dyn LevelControl>,
+    pub levels: LogLevels,
 }
 
 /// What `ShellView` tells the rest of the app about a config reload (§4.5)
@@ -909,7 +927,7 @@ impl ShellView {
                         .spawn(async move { session::write_atomic(&path, &text) })
                         .await
                         .unwrap_or_else(|e| {
-                            eprintln!("[session] warning: failed to save session: {e}")
+                            tracing::warn!(target: "geode::session", "failed to save session: {e}")
                         });
                 }
 
@@ -1176,7 +1194,7 @@ impl ShellView {
                 .spawn(async move {
                     if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping)
                     {
-                        eprintln!("[groupings] warning: {e}");
+                        tracing::warn!(target: "geode::config", "{e}");
                     }
                 })
                 .detach();
@@ -1191,7 +1209,7 @@ impl ShellView {
                 .spawn(async move {
                     if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope)
                     {
-                        eprintln!("[scopes] warning: {e}");
+                        tracing::warn!(target: "geode::config", "{e}");
                     }
                 })
                 .detach();
