@@ -829,6 +829,17 @@ trader is actually asking (§4.5).
 The live path carries no generation predicate at all; only the as-of
 path pays for history.
 
+**As built (Phase 4a follow-up):** the generation set is not scanned
+fresh from the archive per requery. A small summary table,
+`generations` (dataset, batch, book, gen_id, source_time), is
+maintained inside the `publish_file` and `retention::sweep`
+transactions that change it, so it can never disagree with the data
+tables — and the resolve above reads only that table. A rebuild from
+the data tables (`store::ddl::rebuild_generations`) exists for
+migrating a database written before the table existed, and doubles as
+the correctness oracle. Motivation and numbers in `docs/perf.md`, "the
+as-of baseline" and its follow-up section.
+
 ### 6.6 Snapshots
 
 Results come back from DuckDB as Arrow record batches, zero-copy,
