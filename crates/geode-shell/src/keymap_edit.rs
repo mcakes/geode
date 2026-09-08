@@ -169,7 +169,7 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
 
     let keys = keys_table_for(bindings, rebind.context.as_deref());
 
-    keys.insert(rebind.new_key.as_str(), value(rebind.action.as_str()));
+    set_key(keys, rebind.new_key.as_str(), value(rebind.action.as_str()));
 
     // Same-key edge case (module doc): skip displacement entirely when it
     // would touch the key `new_key` just wrote.
@@ -183,7 +183,7 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
                     Displacement::OldKeyNotFound
                 }
             } else {
-                keys.insert(old_key.as_str(), value("none"));
+                set_key(keys, old_key.as_str(), value("none"));
                 Displacement::Displaced
             }
         }
@@ -254,7 +254,7 @@ pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, S
             false
         }
     } else {
-        keys.insert(unbind.key.as_str(), value("none"));
+        set_key(keys, unbind.key.as_str(), value("none"));
         false
     };
 
@@ -354,6 +354,25 @@ fn keys_table_for<'a>(
     entry["keys"]
         .as_table_like_mut()
         .expect("just ensured 'keys' is table-like")
+}
+
+/// Set `keys[key] = item`, the way every write in this module needs to:
+/// preserving an already-present key's own comment and quoting, exactly
+/// as the module doc's comment-preserving promise requires.
+///
+/// `TableLike::insert`'s occupied-entry branch calls
+/// `entry.key_mut().fmt()`, which resets that key's own representation —
+/// stripping a leading comment and reverting custom quoting (e.g.
+/// `'mod+h'`) to a plain double-quoted key — even though only the *value*
+/// was meant to change. `get_mut` touches only the value slot when the
+/// key already exists, leaving its decor untouched; `insert` is used only
+/// on the vacant path, where there is no existing decor to lose.
+fn set_key(keys: &mut dyn TableLike, key: &str, item: Item) {
+    if let Some(existing) = keys.get_mut(key) {
+        *existing = item;
+    } else {
+        keys.insert(key, item);
+    }
 }
 
 /// Process-global counter for [`apply_rebind`]'s temp filenames — same
@@ -1111,5 +1130,38 @@ context = \"workspace\"
         assert!(out.removed);
         let text = read(dir.path());
         assert!(!text.contains("ctrl+k"), "{text}");
+    }
+
+    /// Overwriting an already-present key must preserve that key's own
+    /// comment and quoting. Round 1's index-to-insert conversion
+    /// regressed this: `TableLike::insert`'s occupied-entry branch calls
+    /// `entry.key_mut().fmt()`, which resets the key's own formatting —
+    /// stripping a leading comment and reverting custom quoting (e.g.
+    /// `'mod+h'`) to a plain double-quoted key — while indexing
+    /// assignment (what round 1 replaced) touched only the value slot.
+    /// This fires on real paths: overwriting a binding the user already
+    /// has, and the same-key rebind edge case.
+    #[test]
+    fn overwriting_an_existing_key_preserves_its_comment_and_quoting() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\
+             # my comment\n'mod+h' = \"workspace::focus_left\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        apply_rebind(dir.path(), &rebind(None, "mod+h", "workspace::focus_right")).unwrap();
+
+        let text = read(dir.path());
+        assert!(
+            text.contains("# my comment"),
+            "comment must survive: {text}"
+        );
+        assert!(
+            text.contains("'mod+h'"),
+            "custom quoting must survive: {text}"
+        );
+        assert!(
+            text.contains("workspace::focus_right"),
+            "the value must still be updated: {text}"
+        );
     }
 }

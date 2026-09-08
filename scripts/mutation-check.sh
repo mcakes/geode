@@ -1332,6 +1332,18 @@ run_mutation "keymap_edit: keys_table_for panics on an inline keys table" \
   geode-shell \
   keys_as_an_inline_table_does_not_panic_and_stays_editable
 
+# Fix round 2, Important: TableLike::insert's occupied-entry branch resets
+# the key's own formatting (entry.key_mut().fmt() strips a leading comment
+# and reverts custom quoting), which round 1's index-to-insert conversion
+# regressed for every already-present key a write touches. set_key must
+# route an occupied key through get_mut, never insert.
+run_mutation "keymap_edit: set_key always inserts instead of updating in place" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    if let Some(existing) = keys.get_mut(key) {' \
+  '    if false {' \
+  geode-shell \
+  overwriting_an_existing_key_preserves_its_comment_and_quoting
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
