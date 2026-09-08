@@ -705,10 +705,12 @@ mod tests {
     #[test]
     fn resolve_generations_agrees_with_a_full_table_scan_across_four_instants() {
         // The oracle: three generations across two batches -- a corrected
-        // republish (tied source time, straddling archive and live) and
-        // one bookless partition -- resolving from the summary must equal
-        // a full scan of the tables at every instant that matters: before
-        // all history, at the tie, in between, and after everything.
+        // republish (tied source time, straddling archive and live), one
+        // bookless partition, and (review round 1, MIN-3) one generation
+        // present at only one grain -- resolving from the summary must
+        // equal a full scan of the tables at every instant that matters:
+        // before all history, at the tie, in between, and after
+        // everything.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -723,6 +725,9 @@ mod tests {
                  create table oracle_position_live(
                      batch varchar, book varchar, gen_id bigint,
                      source_time timestamp with time zone);
+                 create table oracle_underlying_live(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
                  -- BK000: a corrected republish tied at 07:00, straddling
                  -- archive (gen 1) and live (gen 2).
                  insert into oracle_position_archive values
@@ -730,12 +735,18 @@ mod tests {
                  insert into oracle_position_live values
                    ('BK000', 'BK000', 2, '2026-08-30T07:00:00Z'),
                    -- BK001: the bookless partition, published once, later.
-                   ('BK001', NULL, 3, '2026-08-30T09:00:00Z');",
+                   ('BK001', NULL, 3, '2026-08-30T09:00:00Z');
+                 -- BK002: a generation present *only* at the underlying
+                 -- grain -- the whole reason `history_of` unions every
+                 -- grain rather than resolving from the spine alone.
+                 insert into oracle_underlying_live values
+                   ('BK002', 'BK002', 4, '2026-08-30T09:30:00Z');",
             )
             .unwrap();
         let tables = [
             "oracle_position_archive".to_string(),
             "oracle_position_live".to_string(),
+            "oracle_underlying_live".to_string(),
         ];
         crate::store::ddl::rebuild_generations(store.writer(), "risk_snapshot", &tables).unwrap();
 
@@ -754,12 +765,29 @@ mod tests {
             ts("2026-08-30T06:00:00Z"), // before all history
             ts("2026-08-30T07:00:00Z"), // the tie instant
             ts("2026-08-30T08:00:00Z"), // between the tie and BK001
-            ts("2026-08-30T10:00:00Z"), // after everything
+            ts("2026-08-30T10:00:00Z"), // after everything, including BK002
         ] {
             let via_summary =
                 sorted(resolve_generations(store.writer(), "risk_snapshot", at).unwrap());
             let via_tables = sorted(resolve_from_tables(store.writer(), &tables, at).unwrap());
             assert_eq!(via_summary, via_tables, "disagreement at {at}");
         }
+
+        // The one-grain-only generation must actually resolve, not just
+        // ride along inside an oracle equality that would pass just as
+        // well if both sides silently dropped it.
+        let after = sorted(
+            resolve_generations(store.writer(), "risk_snapshot", ts("2026-08-30T10:00:00Z"))
+                .unwrap(),
+        );
+        assert!(
+            after.contains(&(
+                "BK002".to_string(),
+                Some("BK002".to_string()),
+                4,
+                ts("2026-08-30T09:30:00Z"),
+            )),
+            "BK002's underlying-only generation must resolve: {after:?}"
+        );
     }
 }

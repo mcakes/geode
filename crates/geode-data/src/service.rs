@@ -142,6 +142,17 @@ impl DataService {
         // deletes the dataset's rows before reinserting, so running it
         // unconditionally would make the summary just a cache of the last
         // open rather than a maintained record).
+        //
+        // This can only ever notice an *absent* summary, never a
+        // *wrong* one (review round 1, MIN-2) -- a database from a build
+        // that had the table and a maintenance bug, or a hand-edited row,
+        // looks "already populated" and is left alone, by design: a full
+        // comparison at open is exactly the scan this table exists to
+        // remove. There is no palette command or flag for this today; the
+        // manual repair is `delete from generations where dataset = ?`
+        // for the affected dataset, then reopen -- the next `open` call
+        // finds an empty summary and rebuilds it from the tables, same as
+        // the first-time migration below.
         for ds in &config.schema.datasets {
             let tables = crate::store::ddl::history_of(&ds.name, ds);
             let summarised: i64 = {
