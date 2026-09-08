@@ -3198,6 +3198,63 @@ run_mutation "objectdialog: closing the modal leaves the dialog's state behind" 
   geode-shell \
   slash_filters_and_escape_walks_the_ladder
 
+# ---- Phase 4c: the object dialog's edit stage
+#
+# THE destination split (spec §4.1), and the most expensive thing on this
+# surface to get wrong. Sending the column list to `Doc` is the tidy-looking
+# version — one destination, one file — and every unit assertion about
+# order, hiding and width still passes, because the draft is unchanged and
+# only the FILE it lands in moves. What it silently does is fork the desk's
+# view into the user's `views.toml` the first time a trader hides a column,
+# and a forked view is frozen: the desk adds a column next week and this
+# trader never sees it. Only a test asserting that `views.toml` was NOT
+# created can see it.
+run_mutation "objectdialog: a presentation field is written to the view's own doc" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            dest: Destination::Presentation,' \
+  '            dest: Destination::Doc,' \
+  geode-shell \
+  hiding_a_column_writes_presentation_and_does_not_fork_the_view
+
+# Spec §7.2: validate the object being edited, not the merged result.
+# Validating the merged doc instead is green against any fixture with one
+# view in it — the diagnostics are identical — and only diverges when some
+# OTHER view in the config is broken, at which point the dialog reports a
+# stranger's problem against the object on screen and the user has nothing
+# to fix. The covering test needs two views, one of them broken, which is
+# exactly the fixture a single-view test would never build.
+run_mutation "objectdialog: validation runs against the merged doc, not the draft" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    let table = rendered_doc_table(draft);' \
+  '    let table = config.doc(DOC).map(|d| d.value.clone()).unwrap_or_default();' \
+  geode-shell \
+  validation_sees_the_draft_and_not_the_rest_of_the_config
+
+# Field edits STAGE (spec §3.2). Writing on every keystroke leaves every
+# state assertion green — the draft still holds the change, the row still
+# repaints — while firing the 500 ms mtime watcher mid-edit, so the config
+# reloads a half-finished object and the browse list re-derives underneath
+# the user. Only a test asserting that NOTHING was written before `s` can
+# see it.
+run_mutation "objectdialog: a field edit writes immediately instead of staging" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                revalidate(shell);' \
+  '                revalidate(shell); save_draft(shell, cx);' \
+  geode-shell \
+  a_field_edit_stages_and_writes_nothing_until_save
+
+# `escape` on a dirty draft asks first. Without the dirty check every
+# escape test still passes — the stage still goes back, the modal still
+# closes on the next one — and the only thing that changes is that a
+# trader's unsaved reordering is gone with one keystroke and nothing on
+# screen ever said so.
+run_mutation "objectdialog: escape on a dirty draft skips the confirm" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .is_some_and(|draft| draft.is_dirty());' \
+  '        .is_some_and(|_| false);' \
+  geode-shell \
+  escape_on_a_dirty_draft_confirms_before_discarding
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

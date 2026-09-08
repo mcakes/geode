@@ -184,6 +184,31 @@ pub(super) fn dialog_test_shell_with(
     services: ShellServices,
     action: &str,
 ) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    dialog_test_shell_in(cx, services, None, action)
+}
+/// [`dialog_test_shell_with`] with a writable user config directory — what
+/// a dialog test that asserts on the FILES a verb wrote needs, since
+/// `ShellView::user_dir` is `None` in every other fixture and every
+/// persist path in this crate skips the write when it is.
+///
+/// The reload watcher this gives `ShellView` is harmless in a test: it
+/// waits on `background_executor().timer`, and `run_until_parked` runs
+/// runnable tasks without advancing the clock, so nothing reloads under
+/// the assertions unless a test asks it to.
+pub(super) fn dialog_test_shell_in_dir(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: &std::path::Path,
+    action: &str,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    dialog_test_shell_in(cx, services, Some(user_dir.to_path_buf()), action)
+}
+fn dialog_test_shell_in(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: Option<std::path::PathBuf>,
+    action: &str,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     // Same reclaimed keybindings `main` registers in production
     // (`dialog::init_reclaimed_keybindings`'s own doc comment has the
@@ -195,7 +220,7 @@ pub(super) fn dialog_test_shell_with(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = cx.new(|cx| ShellView::new(services, None, user_dir, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })

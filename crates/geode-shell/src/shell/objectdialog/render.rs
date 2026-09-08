@@ -24,20 +24,45 @@
 //! is not receiving the keys is the single most misleading thing a modal
 //! surface can show.
 //!
-//! ## What this stage does not do
+//! ## Two stages, one routing shape
 //!
-//! Browse only. `enter` has nothing to open until Task 5 adds the edit
-//! stage, and nothing here writes — so the footer advertises exactly the
-//! keys that work today, and a key that is not advertised is claimed and
-//! dropped rather than passed down to the shell underneath the modal.
+//! `enter` on a browse row opens the **edit stage** over a [`super::Draft`]
+//! of that object. The two stages share this file's one
+//! [`dialog::ModalKeyHandler`] and split at its front door
+//! ([`handle_key`]), because everything below the split — the notice's two
+//! doors, the `escape` ladder, the claim-and-drop contract — has to behave
+//! identically in both or a user learns two dialogs.
+//!
+//! The edit stage does **not** filter its own rows, which the browse stage
+//! does. `/` there would need a second cursor space (a filtered position
+//! beside the draft's own row index) and would make `shift+j` ambiguous —
+//! moving an item past a neighbour the filter is hiding. Entering the
+//! stage therefore drops the browse query, which also keeps the `escape`
+//! ladder honest: with no query, `escape` reaches
+//! [`EscapeStep::PreviousStage`] rather than silently spending itself on
+//! `ClearQuery`.
+//!
+//! ## Nothing here applies anything
+//!
+//! A save writes files on the background executor and stops. The 500 ms
+//! mtime watcher reloads, and both stages — deriving fresh from `Config` —
+//! update themselves (spec §7.1). That is why a dialog cannot disagree
+//! with the file it wrote, and why every notice a write produces is in the
+//! unconfirmed tense: "saving", not "saved".
 
+use std::path::PathBuf;
 use std::rc::Rc;
 
+use geode_core::config::Layer;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window, div, px};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
-use super::{Domain, ObjectDialogState, ObjectRow};
+use super::{
+    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
+};
+use crate::config_write;
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
@@ -52,6 +77,9 @@ use super::super::keybindings_view::{highlighted_text, key_chip, split_label_ind
 /// `keybindings_view::ROW_HEIGHT` is, since scroll-follow goes through
 /// `ScrollHandle::scroll_to_item`, which measures real layout.
 const ROW_HEIGHT: f32 = 44.0;
+/// The same estimate for the edit stage's rows, which are one line rather
+/// than two — a field's label and its value sit side by side.
+const FIELD_ROW_HEIGHT: f32 = 28.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
 /// Target dialog content width in pixels — the keybinding dialog's, so
@@ -88,7 +116,30 @@ pub fn open(
     );
 }
 
-/// The [`dialog::ModalKeyHandler`] for this dialog — the same priority
+/// The [`dialog::ModalKeyHandler`] for this dialog: the front door both
+/// stages come through, splitting on the stage and on nothing else.
+///
+/// The split is here rather than inside each branch so the two stages
+/// cannot drift on the things they must agree about — which keys are
+/// claimed, when the notice is dropped, and which `escape` rung applies.
+fn handle_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let editing = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| matches!(state.stage, Stage::Edit { .. }));
+    if editing {
+        handle_edit_key(shell, ks, window, cx)
+    } else {
+        handle_browse_key(shell, ks, window, cx)
+    }
+}
+
+/// The browse stage's keys — the same priority
 /// order `keybindings_view::handle_key` documents, minus its rebind
 /// capture (this dialog has nothing to capture):
 ///
@@ -102,9 +153,8 @@ pub fn open(
 /// 2. in [`DialogMode::Filter`] the behaviour is the filter-first one
 ///    every other dialog has, with `escape` leaving filter mode (keeping
 ///    the query) instead of closing the dialog;
-/// 3. bare `enter` is claimed in both modes and does nothing yet — the
-///    key that opens the edit stage in Task 5, claimed now so the two
-///    modes route it identically;
+/// 3. bare `enter` is claimed in both modes and opens the edit stage on
+///    the selected row, so the two modes route it identically;
 /// 4. bare `tab`/`shift+tab` are claimed and dropped. Claiming them is
 ///    what makes them inert: with the filter focused, an unclaimed key
 ///    continues to the window's own text-input phase, and
@@ -118,7 +168,7 @@ pub fn open(
 ///    own text insertion. The one other `false` is the ladder's last
 ///    rung, which is how the shell's modal branch gets to close the
 ///    dialog.
-fn handle_key(
+fn handle_browse_key(
     shell: &mut ShellView,
     ks: &Keystroke,
     window: &mut Window,
@@ -204,11 +254,14 @@ fn handle_key(
                 // focus and printable keys become text again.
                 input.read(cx).focus_handle(cx).focus(window, cx);
             }
-            // `Commit` (enter) opens the edit stage in Task 5; `Toggle`,
-            // `EditText`, `MoveItem` and the letter verbs belong to that
-            // stage too. Until then this dialog browses, and the footer
-            // advertises only the keys that work — so these are claimed
-            // and dropped like any other unclaimed key.
+            NormalCommand::Commit => {
+                open_selected(shell, window, cx);
+                return true;
+            }
+            // `Toggle`, `EditText`, `MoveItem` and the letter verbs are
+            // the edit stage's, and the browse footer advertises none of
+            // them — so they are claimed and dropped here like any other
+            // unclaimed key.
             _ => {}
         }
         cx.notify();
@@ -229,18 +282,13 @@ fn handle_key(
     }
 
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        // `enter` is `NormalCommand::Commit`, and normal mode already
-        // claims it (the catch-all arm above). Claimed here too so the
-        // two modes route the same key the same way — the keybinding
-        // dialog's own `enter` branch is what this mirrors, and a
-        // routing difference between the two dialogs is a difference
-        // somebody eventually has to debug. It does nothing yet: Task 5
-        // opens the edit stage from exactly this branch and its
-        // normal-mode twin. Today it is inert either way — an unclaimed
-        // `enter` reaches the focused `Input`, whose
-        // `normalize_input` strips `\n`/`\r` — so claiming it changes
-        // no behaviour, and there is deliberately no mutation entry for
-        // a line no test can distinguish.
+        // `enter` is `NormalCommand::Commit`, and normal mode routes it
+        // to exactly the same place (the `Commit` arm above). Claimed
+        // here so the two modes open an object the same way — the
+        // keybinding dialog's own `enter` branch is what this mirrors,
+        // and a routing difference between the two dialogs is a
+        // difference somebody eventually has to debug.
+        open_selected(shell, window, cx);
         return true;
     }
 
@@ -318,6 +366,551 @@ fn on_row_clicked(
     cx.notify();
 }
 
+// ---- The edit stage ---------------------------------------------------
+
+/// `enter`: open the selected browse row's object in the edit stage.
+///
+/// Resolves the row through the same filtered walk everything else here
+/// uses, so what opens is the row the user is looking at even mid-filter.
+/// The shared `Input` is emptied along with the mirrored query (see this
+/// module's own "Two stages" note) and focus goes back to the shell, which
+/// is what makes the edit stage's letters verbs.
+fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let rows = derive_rows(shell);
+    let name = shell.object_dialog.as_ref().and_then(|state| {
+        let visible = super::visible_rows(state, &rows);
+        visible
+            .get(state.selected)
+            .and_then(|m| rows.get(m.row))
+            .map(|row| row.name.clone())
+    });
+    let Some(name) = name else {
+        // Only reachable with the filter hiding every row, which is not a
+        // row the user was pointing at — said out loud rather than
+        // dropped, like every other deliberately inert keystroke here.
+        set_notice(shell, "no object is selected".to_string());
+        cx.notify();
+        return;
+    };
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.enter_edit(&shell.services.config, &name);
+    }
+    let input = shell.dialog_input.clone();
+    input.update(cx, |i, cx| i.set_value("", window, cx));
+    shell.focus_handle.focus(window, cx);
+    shell.object_dialog_scroll.scroll_to_item(0);
+    cx.notify();
+}
+
+/// The edit stage's keys, in the one order they can be read in:
+///
+/// 1. an armed [`Confirm`] owns **every** keystroke until it is answered
+///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
+///    bar rather than adding a row, so nothing above it moves;
+/// 2. `escape` walks the ladder, whose `PreviousStage` rung this stage
+///    exists to reach — going back a stage, or arming the discard confirm
+///    when the draft is dirty;
+/// 3. everything else goes through [`dialogmode::normal_command`], and a
+///    key it does not claim is swallowed, exactly as in browse.
+///
+/// Every branch that changes the draft ends in [`revalidate`]: validation
+/// is a parse of a few hundred bytes (spec §7.2), so it runs synchronously
+/// on every change with no debounce, and the diagnostics on screen are
+/// never one keystroke behind the value they describe.
+fn handle_edit_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    // The same notice door `handle_browse_key` opens with, for the same
+    // reason: a notice reports on the keystroke that produced it.
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+
+    let armed = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .and_then(|draft| draft.confirm);
+    if let Some(confirm) = armed {
+        let bare = ks.mods == Modifiers::NONE;
+        if bare && matches!(ks.key.as_str(), "enter" | "y") {
+            disarm_confirm(shell);
+            run_confirmed(shell, confirm, window, cx);
+        } else if ks.key == "escape" || (bare && ks.key == "n") {
+            disarm_confirm(shell);
+        }
+        // Anything else is claimed and dropped: while a destructive
+        // question is on screen, a stray letter must not act on the
+        // object behind it.
+        cx.notify();
+        return true;
+    }
+
+    if ks.key == "escape" {
+        let step = shell.object_dialog.as_ref().map(|state| {
+            dialogmode::escape_step(
+                state.mode,
+                state.query.is_empty(),
+                state.has_previous_stage(),
+            )
+        });
+        if step == Some(EscapeStep::PreviousStage) {
+            leave_or_confirm(shell, window, cx);
+            return true;
+        }
+        // The remaining rungs cannot be reached from a stage that neither
+        // filters nor has a mode: folded into one `false` so the shell's
+        // modal branch closes the dialog, rather than forking the ladder.
+        return false;
+    }
+
+    let Some(cmd) = dialogmode::normal_command(ks) else {
+        return true;
+    };
+    match cmd {
+        NormalCommand::Nav(nav) => {
+            let selected = shell.object_dialog.as_mut().and_then(|state| {
+                let draft = state.draft.as_mut()?;
+                draft.selected = vimnav::apply(draft.selected, draft.rows().len(), nav);
+                Some(draft.selected)
+            });
+            if let Some(selected) = selected {
+                shell.object_dialog_scroll.scroll_to_item(selected);
+            }
+        }
+        NormalCommand::Toggle => {
+            let changed = draft_mut(shell).is_some_and(|draft| draft.toggle_selected());
+            if changed {
+                revalidate(shell);
+            } else {
+                set_notice(shell, "nothing on this row changes with space".to_string());
+            }
+        }
+        NormalCommand::MoveItem(delta) => {
+            let moved = draft_mut(shell).is_some_and(|draft| draft.move_item(delta));
+            if moved {
+                let selected = shell
+                    .object_dialog
+                    .as_ref()
+                    .and_then(|state| state.draft.as_ref())
+                    .map(|draft| draft.selected)
+                    .unwrap_or(0);
+                shell.object_dialog_scroll.scroll_to_item(selected);
+            } else {
+                set_notice(shell, "that is as far as this row goes".to_string());
+            }
+        }
+        NormalCommand::Verb('s') => save_draft(shell, cx),
+        NormalCommand::Verb('d') => arm_delete(shell),
+        NormalCommand::Verb('r') => arm_revert(shell),
+        NormalCommand::EnterFilter => {
+            // The one key the browse stage has that this one does not —
+            // said out loud, because a `/` that silently did nothing
+            // would read as the dialog having stopped responding.
+            set_notice(
+                shell,
+                "the object's own rows are not filtered — escape goes back to the list".to_string(),
+            );
+        }
+        // `enter` and `i` have no row to act on in a Views draft: its
+        // fields are a choice and a list, and both are `space`'s.
+        NormalCommand::Commit | NormalCommand::EditText => {
+            set_notice(shell, "press space to change the selected row".to_string());
+        }
+        NormalCommand::Verb(_) => {}
+    }
+    cx.notify();
+    true
+}
+
+/// The draft under the cursor, mutably, if the edit stage is open.
+fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
+    shell
+        .object_dialog
+        .as_mut()
+        .and_then(|state| state.draft.as_mut())
+}
+
+/// Set the footer notice, if a dialog is open at all.
+fn set_notice(shell: &mut ShellView, notice: String) {
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.notice = Some(notice);
+    }
+}
+
+fn disarm_confirm(shell: &mut ShellView) {
+    if let Some(draft) = draft_mut(shell) {
+        draft.confirm = None;
+    }
+}
+
+/// Re-run [`Domain::validate`] over the draft as it now stands.
+fn revalidate(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let domain = state.domain;
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    // Validated, then stored: `validate` needs the draft immutably and
+    // the config from a sibling field, which is exactly the disjoint
+    // borrow the compiler allows here and a `&mut self` method would not.
+    let diagnostics = domain.validate(draft, &shell.services.config);
+    if let Some(draft) = draft_mut(shell) {
+        draft.diagnostics = diagnostics;
+    }
+}
+
+/// `escape` on the edit stage: back to the browse list, or — on a dirty
+/// draft — the discard confirm first.
+///
+/// Abandoning unsaved work has to be a deliberate second keystroke (spec
+/// §3.2). Without the dirty check, one `escape` would silently throw away
+/// every change made since the object was opened, and nothing on screen
+/// would ever have said so.
+fn leave_or_confirm(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let dirty = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.is_dirty());
+    if dirty {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Discard);
+        }
+        cx.notify();
+    } else {
+        leave_edit(shell, window, cx);
+    }
+}
+
+/// Back to the browse list, with the cursor put back on the object just
+/// edited — by name, because the list it returns to is unfiltered and so
+/// is a different list from the one the object was opened out of.
+fn leave_edit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
+        Some(Stage::Edit { object }) => object.clone(),
+        _ => String::new(),
+    };
+    if let Some(state) = shell.object_dialog.as_mut() {
+        state.leave_edit();
+    }
+    let rows = derive_rows(shell);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        let visible = super::visible_rows(state, &rows);
+        state.selected = super::filtered_position(&visible, &rows, &name).unwrap_or(0);
+    }
+    let selected = shell
+        .object_dialog
+        .as_ref()
+        .map(|state| state.selected)
+        .unwrap_or(0);
+    shell.object_dialog_scroll.scroll_to_item(selected);
+    shell.focus_handle.focus(window, cx);
+    cx.notify();
+}
+
+/// The browse row for the object being edited — where `layer` and
+/// `overridden` come from, so `d` and `r` are gated by the one tested
+/// derivation rather than by a second guess made here.
+fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
+    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
+        Some(Stage::Edit { object }) => object.clone(),
+        _ => return None,
+    };
+    derive_rows(shell).into_iter().find(|row| row.name == name)
+}
+
+/// `s`: write the draft's changes, one `config_write::edit` per
+/// destination, on the background executor.
+///
+/// Nothing is applied here. The files change, the 500 ms watcher reloads,
+/// and both stages re-derive (spec §7.1) — so the notice is in the
+/// unconfirmed tense the keybinding dialog settled on: the write has been
+/// *dispatched*, and only stderr will hear if it fails.
+///
+/// Grouping by destination is what keeps a presentation-only edit out of
+/// `views.toml` entirely: a clean field contributes no group, and an empty
+/// group means that file is never opened.
+fn save_draft(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let domain = state.domain;
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let groups = draft.writes_by_destination();
+    if groups.is_empty() {
+        set_notice(shell, "nothing has changed".to_string());
+        return;
+    }
+    let name = draft.name.clone();
+    let writes: Vec<(&'static str, toml_edit::Table)> = groups
+        .keys()
+        .map(|dest| (dest.doc(domain), domain.to_table(draft, *dest)))
+        .collect();
+    let files: Vec<String> = writes
+        .iter()
+        .map(|(doc, _)| format!("{doc}.toml"))
+        .collect();
+
+    let Some(user_dir) = shell.user_dir.clone() else {
+        // The contract every persist path in this crate shares: no
+        // writable user config dir means nothing is attempted, and the
+        // user is told rather than left believing it saved.
+        set_notice(
+            shell,
+            "no writable user config directory — nothing was saved".to_string(),
+        );
+        return;
+    };
+    spawn_writes(user_dir, name.clone(), writes, cx);
+    if let Some(draft) = draft_mut(shell) {
+        draft.mark_saved();
+    }
+    set_notice(shell, format!("saving {name} to {}…", files.join(" and ")));
+}
+
+/// Run the staged writes off the render thread — `ShellView::persist_theme`'s
+/// contract exactly: cheap staging on the UI thread, the file I/O in a
+/// detached background task, a failure logged as a warning from inside it
+/// (PHILOSOPHY: nothing may stall the render thread).
+fn spawn_writes(
+    user_dir: PathBuf,
+    name: String,
+    writes: Vec<(&'static str, toml_edit::Table)>,
+    cx: &mut Context<ShellView>,
+) {
+    cx.background_executor()
+        .spawn(async move {
+            for (doc, table) in writes {
+                // `edit`, never `write`: a read-modify-write through
+                // `toml_edit` keeps the user's comments and every other
+                // object in the file, and refuses a file it cannot parse
+                // instead of replacing it.
+                if let Err(e) = config_write::edit(&user_dir, Layer::User, doc, |document| {
+                    super::set_object(document, &name, table);
+                }) {
+                    eprintln!("[config] warning: {e}");
+                }
+            }
+        })
+        .detach();
+}
+
+/// Remove `name` from each of `docs` in the user layer, off the render
+/// thread. Only docs whose **user layer** actually contains the object are
+/// opened, so a delete never creates an empty file to say nothing.
+fn spawn_removals(
+    shell: &mut ShellView,
+    docs: &[&'static str],
+    cx: &mut Context<ShellView>,
+) -> Result<Vec<String>, String> {
+    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
+        Some(Stage::Edit { object }) => object.clone(),
+        _ => return Err("nothing is open".to_string()),
+    };
+    let touched: Vec<&'static str> = docs
+        .iter()
+        .copied()
+        .filter(|doc| {
+            shell
+                .services
+                .config
+                .layered_docs(doc)
+                .iter()
+                .any(|layered| layered.layer == Layer::User && layered.table.contains_key(&name))
+        })
+        .collect();
+    if touched.is_empty() {
+        return Err(format!("nothing of yours defines {name}"));
+    }
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Err("no writable user config directory — nothing was removed".to_string());
+    };
+    let files: Vec<String> = touched.iter().map(|doc| format!("{doc}.toml")).collect();
+    cx.background_executor()
+        .spawn(async move {
+            for doc in touched {
+                if let Err(e) = config_write::edit(&user_dir, Layer::User, doc, |document| {
+                    document.remove(&name);
+                }) {
+                    eprintln!("[config] warning: {e}");
+                }
+            }
+        })
+        .detach();
+    Ok(files)
+}
+
+/// `d`: arm the delete confirm, or say why there is nothing to delete.
+///
+/// Only the user layer is ever written (spec §5.3), so deleting is only
+/// meaningful on an object the user's own layer defines. On a desk or
+/// builtin object the write would remove nothing and the object would
+/// still be there — a verb that appears to have failed, which is worse
+/// than one that explains itself.
+fn arm_delete(shell: &mut ShellView) {
+    match editing_row(shell) {
+        Some(row) if row.layer == Layer::User => {
+            if let Some(draft) = draft_mut(shell) {
+                draft.confirm = Some(Confirm::Delete);
+            }
+        }
+        Some(row) => set_notice(
+            shell,
+            format!(
+                "{} comes from the {} layer — there is nothing of yours to delete",
+                row.name,
+                row.layer.name()
+            ),
+        ),
+        None => set_notice(shell, "nothing is open".to_string()),
+    }
+}
+
+/// `r`: arm the revert confirm, or say why there is nothing to revert.
+///
+/// Gated on `overridden`, not on the winning layer: reverting deletes the
+/// user's copy, and on an object only the user layer defines that would
+/// delete the object outright instead of restoring anything.
+fn arm_revert(shell: &mut ShellView) {
+    match editing_row(shell) {
+        Some(row) if row.overridden => {
+            if let Some(draft) = draft_mut(shell) {
+                draft.confirm = Some(Confirm::Revert);
+            }
+        }
+        Some(row) => set_notice(
+            shell,
+            format!("{} has no user override to revert", row.name),
+        ),
+        None => set_notice(shell, "nothing is open".to_string()),
+    }
+}
+
+/// Carry out the destructive act the second keystroke just confirmed.
+///
+/// Delete and revert remove the same two things — the object from the
+/// domain's own user-layer doc, and its presentation table — and differ
+/// only in which precondition let the user reach them and what the notice
+/// says. The presentation table goes with the object on purpose: leaving
+/// it behind would strand a table naming a view that no longer exists,
+/// which is exactly the stale entry `ViewPresentationSpec::apply` warns
+/// about at startup and nowhere else.
+fn run_confirmed(
+    shell: &mut ShellView,
+    confirm: Confirm,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let domain = match shell.object_dialog.as_ref() {
+        Some(state) => state.domain,
+        None => return,
+    };
+    match confirm {
+        Confirm::Discard => leave_edit(shell, window, cx),
+        Confirm::Delete | Confirm::Revert => {
+            let docs = [
+                Destination::Doc.doc(domain),
+                Destination::Presentation.doc(domain),
+            ];
+            match spawn_removals(shell, &docs, cx) {
+                Ok(files) => {
+                    let verb = if confirm == Confirm::Delete {
+                        "deleting"
+                    } else {
+                        "reverting"
+                    };
+                    let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
+                        Some(Stage::Edit { object }) => object.clone(),
+                        _ => String::new(),
+                    };
+                    leave_edit(shell, window, cx);
+                    set_notice(shell, format!("{verb} {name} in {}…", files.join(" and ")));
+                }
+                Err(message) => set_notice(shell, message),
+            }
+        }
+    }
+}
+
+/// One action the edit stage's bar offers: its key, its label, and whether
+/// it is the destructive one. Built as data so the bar and the footer hint
+/// cannot disagree about which verbs are live.
+struct Action {
+    key: &'static str,
+    label: String,
+    destructive: bool,
+}
+
+/// The actions available on the object being edited, in the order they are
+/// painted.
+///
+/// `Save changes` appears only while the draft is dirty, and on an object
+/// the user's layer does not yet define it says `Copy to user layer`
+/// instead — because that is what saving a **definitional** change to a
+/// desk view does: it forks the view. A presentation-only change to that
+/// same desk view still reads `Save changes`, and truthfully so: it writes
+/// `view_presentation.toml` and forks nothing. Spec §3.2 sketched the copy
+/// verb as *replacing* save on a non-user object; that would have made a
+/// desk view's presentation unsavable, which is the one thing §4.1 exists
+/// to make cheap, so the label varies and the verb does not.
+fn actions(shell: &ShellView) -> Vec<Action> {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return Vec::new();
+    };
+    let Some(draft) = state.draft.as_ref() else {
+        return Vec::new();
+    };
+    let row = editing_row(shell);
+    let mut out = Vec::new();
+    if draft.is_dirty() {
+        let forks = draft
+            .writes_by_destination()
+            .contains_key(&Destination::Doc)
+            && row.as_ref().is_some_and(|r| r.layer != Layer::User);
+        out.push(Action {
+            key: "s",
+            label: if forks {
+                "Copy to user layer".to_string()
+            } else {
+                "Save changes".to_string()
+            },
+            destructive: false,
+        });
+    }
+    if row.as_ref().is_some_and(|r| r.layer == Layer::User) {
+        out.push(Action {
+            key: "d",
+            label: format!("Delete this {}", object_word(state.domain)),
+            destructive: true,
+        });
+    }
+    if row.as_ref().is_some_and(|r| r.overridden) {
+        out.push(Action {
+            key: "r",
+            label: "Revert to desk".to_string(),
+            destructive: true,
+        });
+    }
+    out
+}
+
+/// The singular noun one of this domain's objects goes by, for a label
+/// that has to read as English (`Delete this view`).
+fn object_word(domain: Domain) -> String {
+    let title = domain.title().to_lowercase();
+    title.strip_suffix('s').unwrap_or(&title).to_string()
+}
+
 /// The [`dialog::ShellModal::build`] closure body: the mode pill, the
 /// shared filter row, the scrollable browse list, and a muted footer
 /// stating the current mode's vocabulary. `entity` is what each row's
@@ -333,6 +926,9 @@ fn build(
     let Some(state) = shell.object_dialog.as_ref() else {
         return div().into_any_element();
     };
+    if matches!(state.stage, Stage::Edit { .. }) {
+        return build_edit(shell, entity, cx);
+    }
     // The same one derivation path `handle_key` uses — a second spelling
     // here is how a render and its key handling come to disagree about
     // which rows exist.
@@ -554,4 +1150,402 @@ fn build(
         .child(list)
         .child(footer)
         .into_any_element()
+}
+
+/// The edit stage: the object's header, its diagnostics, the scrolling
+/// row list, and — **outside** that scroll — the action bar.
+///
+/// The bar sits outside the list on purpose (spec §3.2). An earlier
+/// design made every verb a row, and the list then changed length the
+/// moment a draft went dirty: a `Save changes` row appeared under the
+/// cursor and the row the user was aiming at moved. Keeping the verbs
+/// below the scroll means nothing above them ever shifts.
+fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> AnyElement {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return div().into_any_element();
+    };
+    let Some(draft) = state.draft.as_ref() else {
+        return div().into_any_element();
+    };
+    // Built before the theme is borrowed, because both halves of it want
+    // `cx` mutably and `cx.theme()` holds it immutably for the rest of
+    // this function.
+    let action_block = match draft.confirm {
+        Some(confirm) => confirm_row(confirm, &draft.name, entity, cx),
+        None => action_bar(shell, entity, cx),
+    };
+    let theme = cx.theme();
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let row = editing_row(shell);
+
+    // The object header: its name, and the same two provenance markers
+    // the browse row carries, so opening an object never loses the
+    // context the list gave it.
+    let mut header = h_flex()
+        .w(px(WIDTH))
+        .items_center()
+        .justify_between()
+        .gap_3()
+        .child(div().text_lg().child(draft.name.clone()))
+        .debug_selector(|| "objectdialog-edit-header".to_string());
+    if let Some(row) = row.as_ref() {
+        let mut markers = h_flex().gap_1().items_center().child(
+            div()
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(row.layer.name()),
+        );
+        if row.overridden {
+            markers = markers.child(
+                div()
+                    .text_xs()
+                    .text_color(chip_fg)
+                    .bg(chip_bg)
+                    .px_1()
+                    .py_0p5()
+                    .rounded(px(4.))
+                    .flex_shrink_0()
+                    .child("overridden"),
+            );
+        }
+        header = header.child(markers);
+    }
+
+    let rows = draft.rows();
+    let mut list = v_flex()
+        .id("objectdialog-fields")
+        .w(px(WIDTH))
+        .h(px(
+            (rows.len().max(1) as f32 * FIELD_ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+        ))
+        .overflow_y_scroll()
+        .track_scroll(&shell.object_dialog_scroll)
+        .debug_selector(|| "objectdialog-fields".to_string());
+
+    for (position, edit_row) in rows.iter().enumerate() {
+        let is_selected = position == draft.selected;
+        let mut element = h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .px_2()
+            .py_1()
+            .rounded(px(4.));
+        if is_selected {
+            element = element.bg(theme.selection).text_color(theme.primary);
+        }
+        let (selector, label, value) = match *edit_row {
+            EditRow::Field(index) => {
+                let field = &draft.fields[index];
+                (
+                    format!("objectdialog-field-{}", field.key),
+                    div().child(field.label.clone()).into_any_element(),
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(field_value(field))
+                        .into_any_element(),
+                )
+            }
+            EditRow::Item { field, item } => {
+                let FieldKind::OrderedList { items } = &draft.fields[field].kind else {
+                    continue;
+                };
+                let Some(entry) = items.get(item) else {
+                    continue;
+                };
+                // The tick is the inclusion state, and a hidden item is
+                // muted as well as unticked — one signal is a thing a
+                // glance misses on a 30-row list.
+                let mark = if entry.included { "[x]" } else { "[ ]" };
+                let name = div()
+                    .pl_4()
+                    .when(!entry.included, |d| d.text_color(theme.muted_foreground))
+                    .child(format!("{mark}  {}", entry.name));
+                let width = match entry.width {
+                    Some(width) => format!("{width:.0}px"),
+                    None => "auto".to_string(),
+                };
+                (
+                    format!("objectdialog-item-{}", entry.name),
+                    name.into_any_element(),
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(width)
+                        .into_any_element(),
+                )
+            }
+        };
+        let entity_for_row = entity.clone();
+        let clicked = position;
+        list = list.child(
+            element
+                .child(label)
+                .child(value)
+                .debug_selector(move || selector.clone())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    entity_for_row.update(cx, |shell, cx| {
+                        on_edit_row_clicked(shell, clicked, window, cx);
+                    });
+                }),
+        );
+    }
+
+    // Diagnostics for the object as a whole. Attaching each to the field
+    // whose `key` matches its `path` is spec §8.5's shape and needs
+    // `Diagnostic::path`, which no reader carries yet — see
+    // `Draft::diagnostics`.
+    let diagnostics = v_flex().w(px(WIDTH)).gap_0p5().children(
+        draft
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                div()
+                    .text_xs()
+                    .text_color(theme.warning)
+                    .debug_selector(|| "objectdialog-diagnostic".to_string())
+                    .child(diagnostic.message.clone())
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    let chip = move |spec: &str| {
+        let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
+            .expect("footer hint keystrokes are hardcoded valid");
+        key_chip(&ks, chip_fg, chip_bg)
+    };
+    let sep = |text: &'static str| div().child(text).into_any_element();
+    // The hint row states this stage's vocabulary and only this stage's —
+    // the same rule the browse footer keeps.
+    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if draft.confirm.is_some() {
+        (
+            vec![sep("this needs an answer first")],
+            vec![
+                chip("enter"),
+                sep("go ahead ·"),
+                chip("escape"),
+                sep("leave it alone"),
+            ],
+        )
+    } else {
+        (
+            vec![
+                chip("j"),
+                chip("k"),
+                sep("move ·"),
+                chip("space"),
+                sep("change ·"),
+                chip("shift+j"),
+                chip("shift+k"),
+                sep("reorder"),
+            ],
+            vec![chip("escape"), sep("back to the list")],
+        )
+    };
+
+    let footer = v_flex()
+        .w(px(WIDTH))
+        .gap_1()
+        .pt_2()
+        .border_t_1()
+        .border_color(theme.border)
+        .children(state.notice.as_ref().map(|notice| {
+            div()
+                .text_sm()
+                .text_color(theme.warning)
+                .debug_selector(|| "objectdialog-notice".to_string())
+                .child(notice.clone())
+        }))
+        .child(
+            div().text_sm().text_color(theme.muted_foreground).child(
+                v_flex()
+                    .gap_0p5()
+                    .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
+                    .child(h_flex().gap_1().items_center().flex_wrap().children(action)),
+            ),
+        );
+
+    v_flex()
+        .gap_2()
+        .child(header)
+        .child(diagnostics)
+        .child(list)
+        .child(action_block)
+        .child(footer)
+        .into_any_element()
+}
+
+/// What a field row shows on its right-hand side.
+fn field_value(field: &super::Field) -> String {
+    match &field.kind {
+        FieldKind::Text(text) => text.clone(),
+        FieldKind::Number { value, .. } => value.to_string(),
+        FieldKind::Bool(value) => if *value { "yes" } else { "no" }.to_string(),
+        FieldKind::Choice { options, selected } => options
+            .get(*selected)
+            .cloned()
+            .unwrap_or_else(|| "—".to_string()),
+        FieldKind::MultiChoice { ticked, .. } => match ticked.len() {
+            0 => "none".to_string(),
+            n => format!("{n} selected"),
+        },
+        FieldKind::OrderedList { items } => {
+            let hidden = items.iter().filter(|i| !i.included).count();
+            match (items.len(), hidden) {
+                (1, 0) => "1 column".to_string(),
+                (n, 0) => format!("{n} columns"),
+                (n, h) => format!("{n} columns · {h} hidden"),
+            }
+        }
+    }
+}
+
+/// The action bar: every live verb as a button showing its own letter.
+///
+/// Buttons, not rows and not bare keys. A key alone has no clickable
+/// target, and every other verb in Geode's dialogs has one; a `ghost`
+/// button is the quiet variant the design guide calls for in a local
+/// command bar, and the destructive ones are `danger` rather than merely
+/// worded strongly.
+fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> AnyElement {
+    let theme = cx.theme();
+    let chip_fg = theme.muted_foreground;
+    let chip_bg = theme.muted;
+    let mut bar = h_flex()
+        .w(px(WIDTH))
+        .gap_2()
+        .items_center()
+        .debug_selector(|| "objectdialog-actions".to_string());
+    for action in actions(shell) {
+        let ks = crate::keymap::parse_keystroke(action.key, Modifiers::NONE)
+            .expect("action keys are hardcoded valid");
+        let entity_for_action = entity.clone();
+        let key = action.key;
+        let selector = format!("objectdialog-action-{key}");
+        let mut button = Button::new(gpui::SharedString::from(format!("objectdialog-{key}")))
+            .small()
+            .ghost()
+            .child(
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(key_chip(&ks, chip_fg, chip_bg))
+                    .child(action.label.clone()),
+            )
+            .on_click(move |_event, window, cx| {
+                entity_for_action.update(cx, |shell, cx| {
+                    press_verb(shell, key, window, cx);
+                });
+            });
+        if action.destructive {
+            button = button.danger();
+        }
+        bar = bar.child(div().debug_selector(move || selector.clone()).child(button));
+    }
+    bar.into_any_element()
+}
+
+/// The confirm block, which **replaces** the action bar rather than
+/// joining it: one question, two answers, and nothing above it moves.
+fn confirm_row(
+    confirm: Confirm,
+    name: &str,
+    entity: &Entity<ShellView>,
+    cx: &mut App,
+) -> AnyElement {
+    let theme = cx.theme();
+    let go_ahead = entity.clone();
+    let leave_it = entity.clone();
+    h_flex()
+        .w(px(WIDTH))
+        .gap_3()
+        .items_center()
+        .debug_selector(|| "objectdialog-confirm".to_string())
+        .child(
+            div()
+                .text_sm()
+                .text_color(theme.warning)
+                .child(confirm.prompt(name)),
+        )
+        .child(
+            Button::new("objectdialog-confirm-yes")
+                .small()
+                .danger()
+                .label(match confirm {
+                    Confirm::Discard => "Discard",
+                    Confirm::Delete => "Delete",
+                    Confirm::Revert => "Revert",
+                })
+                .on_click(move |_event, window, cx| {
+                    go_ahead.update(cx, |shell, cx| {
+                        let armed = shell
+                            .object_dialog
+                            .as_ref()
+                            .and_then(|state| state.draft.as_ref())
+                            .and_then(|draft| draft.confirm);
+                        if let Some(confirm) = armed {
+                            disarm_confirm(shell);
+                            run_confirmed(shell, confirm, window, cx);
+                        }
+                    });
+                }),
+        )
+        .child(
+            Button::new("objectdialog-confirm-no")
+                .small()
+                .ghost()
+                .label("Cancel")
+                .on_click(move |_event, _window, cx| {
+                    leave_it.update(cx, |shell, cx| {
+                        disarm_confirm(shell);
+                        cx.notify();
+                    });
+                }),
+        )
+        .into_any_element()
+}
+
+/// A verb pressed with the mouse instead of the keyboard. One door, so a
+/// button and its letter can never do different things.
+fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut Context<ShellView>) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    match key {
+        "s" => save_draft(shell, cx),
+        "d" => arm_delete(shell),
+        "r" => arm_revert(shell),
+        _ => {}
+    }
+    cx.notify();
+}
+
+/// A click on an edit-stage row moves the draft's cursor there — the
+/// mouse's half of `j`/`k`, and the reason a click never also acts: the
+/// verb is a second, deliberate keystroke or button press.
+fn on_edit_row_clicked(
+    shell: &mut ShellView,
+    position: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    if let Some(draft) = draft_mut(shell) {
+        if position >= draft.rows().len() {
+            return;
+        }
+        draft.selected = position;
+    }
+    shell.object_dialog_scroll.scroll_to_item(position);
+    shell.focus_handle.focus(window, cx);
+    cx.notify();
 }
