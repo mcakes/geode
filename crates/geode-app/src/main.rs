@@ -189,6 +189,17 @@ fn main() {
 /// under `<user>/logs/geode.YYYY-MM-DD.log`. `None` (no home) means no
 /// file layer, exactly as `ShellServices::session_path` has no session
 /// file: logging degrades to stderr-and-ring only, never a panic.
+///
+/// MIN-7 (fix round 1): that date is `tracing-appender`'s own clock,
+/// which is UTC (`OffsetDateTime::now_utc`) — unlike every *displayed*
+/// time in this app (Phase 4a's ruling: "times are the trader's local
+/// clock throughout"), the log file's name is not local. West of UTC,
+/// `geode.2026-09-08.log` can hold the evening of the 7th, local.
+/// `trim_log_files`'s seven-file cap still sorts and counts correctly
+/// (the names are still in age order relative to each other), only the
+/// name's meaning is off — recorded here rather than fixed, since fixing
+/// it means hand-rolling the rotation `tracing-appender`'s `Builder`
+/// does not expose a local-clock option for.
 fn install_logging() -> (Arc<Ring>, Arc<dyn LevelControl>) {
     let ring = Arc::new(Ring::new(4096));
     let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
@@ -339,7 +350,15 @@ fn build_shell_services(
     for diag in &log_diags {
         print_diagnostic(diag);
     }
-    let _ = log_control.set(&log_levels);
+    // MIN-10 (fix round 1): unreachable at startup today (only a
+    // poisoned or dropped reload handle can fail this, and neither
+    // happens between `install_logging` and here) but `LevelControl::
+    // set` is the same door `:level` (a later task) reloads through at
+    // runtime, where a failure is real and swallowing it would be wrong
+    // — so it's never discarded, even here.
+    if let Err(e) = log_control.set(&log_levels) {
+        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+    }
 
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
@@ -554,13 +573,95 @@ mod tests {
         );
     }
 
+    /// MIN-5 (fix round 1), blind spot 1: `#[cfg(test)] mod tests;` (no
+    /// body — the real one lives under a `tests/` directory) must not
+    /// swallow everything for the rest of the file.
+    #[test]
+    fn walk_rs_files_does_not_get_stuck_after_a_bodyless_cfg_test_mod_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "#[cfg(test)]\nmod tests;\n\nfn oops() {\n    eprintln!(\"real\");\n}\n",
+        )
+        .unwrap();
+        let mut offenders = Vec::new();
+        walk_rs_files(dir.path(), &mut offenders);
+        assert_eq!(
+            offenders.len(),
+            1,
+            "the real call after the bodyless declaration must still be seen: {offenders:?}"
+        );
+    }
+
+    /// MIN-5, blind spot 2: `#[cfg(any(test, feature = "test-support"))]`
+    /// gating a block is test scope too, the same as a plain
+    /// `#[cfg(test)]` — and the gated item need not be a `mod`.
+    #[test]
+    fn walk_rs_files_recognises_a_cfg_any_test_support_gated_block_as_test_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "#[cfg(any(test, feature = \"test-support\"))]\npub fn fixture() {\n    eprintln!(\"debug\");\n}\n",
+        )
+        .unwrap();
+        let mut offenders = Vec::new();
+        walk_rs_files(dir.path(), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "a cfg(any(test, ...)) item is test scope: {offenders:?}"
+        );
+    }
+
+    /// MIN-5, blind spot 3: mentioning the macro's name in prose,
+    /// uninvoked, is not a call — narrowed from a bare `eprintln!`
+    /// substring match to the call shape `eprintln!(`.
+    #[test]
+    fn walk_rs_files_ignores_prose_mentioning_the_macro_without_calling_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "// replaces the old eprintln! prints\nfn f() {}\n",
+        )
+        .unwrap();
+        let mut offenders = Vec::new();
+        walk_rs_files(dir.path(), &mut offenders);
+        assert!(
+            offenders.is_empty(),
+            "naming the macro without invoking it is not a call: {offenders:?}"
+        );
+    }
+
     /// Recurses into `dir` collecting `"<path>:<line>"` for every
-    /// `eprintln!` call site outside a `tests/` path component or an
-    /// inline `#[cfg(test)] mod ... { ... }` block (tracked by brace
-    /// depth — a plain count of `{`/`}` per line, which is exact for
-    /// this codebase's formatting: `cargo fmt` never puts a brace inside
-    /// a string or comment on a line that also opens/closes a block
-    /// relevant here).
+    /// `eprintln!(` call site outside a `tests/` path component or an
+    /// inline test-support block gated `#[cfg(test)]` or
+    /// `#[cfg(any(test, ...))]` (tracked by brace depth — a plain count
+    /// of `{`/`}` per line, which is exact for this codebase's
+    /// formatting: `cargo fmt` never puts a brace inside a string or
+    /// comment on a line that also opens/closes a block relevant here).
+    ///
+    /// Fix round 1 (MIN-5) closed three blind spots the first version
+    /// had:
+    /// - A gate followed by a semicolon-terminated declaration with no
+    ///   body of its own (`#[cfg(test)] mod tests;` — the real body is
+    ///   `mod.rs`'s own `tests/` directory, already excluded by path)
+    ///   used to be treated as "entered a skip block" with nothing ever
+    ///   bringing the brace depth back down to end it, silently
+    ///   swallowing everything after it in the file. Now: a gate is only
+    ///   "entered" when the very next real line actually opens a brace.
+    /// - The gated item no longer has to be a `mod`: `#[cfg(any(test,
+    ///   feature = "test-support"))] pub mod test_support { ... }`
+    ///   (`geode_core::config`) and the same gate on a bare `pub fn`/
+    ///   `impl` block (`geode_data::handle::DataHandle::for_tests`,
+    ///   `geode_shell::module::recording`) are recognised the same way
+    ///   `#[cfg(test)] mod tests { ... }` always was — any line that
+    ///   opens a brace right after either gate starts a skipped block.
+    /// - The eprintln! match narrowed from a bare substring to
+    ///   `eprintln!(` (the call shape), so prose mentioning the macro by
+    ///   name without invoking it (a comment reads "replaces the old
+    ///   `eprintln!` call") no longer trips the check — this only
+    ///   narrows the false-positive surface, it doesn't eliminate every
+    ///   one (a backticked code example quoting a full call would still
+    ///   match, same as a real call would).
     fn walk_rs_files(dir: &std::path::Path, offenders: &mut Vec<String>) {
         for entry in std::fs::read_dir(dir).expect("readable src subdirectory") {
             let entry = entry.unwrap();
@@ -578,33 +679,44 @@ mod tests {
             let text = std::fs::read_to_string(&path).unwrap_or_default();
 
             let mut depth: i32 = 0;
-            let mut pending_cfg_test = false;
-            let mut cfg_test_skip_until: Option<i32> = None; // Some(depth) once inside
+            let mut pending_cfg_gate = false;
+            let mut skip_until: Option<i32> = None; // Some(depth before the gated item)
             for (i, line) in text.lines().enumerate() {
                 let trimmed = line.trim();
-                let skipping = cfg_test_skip_until.is_some();
+                let skipping = skip_until.is_some();
 
-                if !skipping && trimmed.starts_with("#[cfg(test)]") {
-                    pending_cfg_test = true;
-                } else if !skipping && pending_cfg_test && trimmed.starts_with("mod ") {
-                    cfg_test_skip_until = Some(depth);
-                    pending_cfg_test = false;
-                } else if !trimmed.starts_with("//") {
-                    pending_cfg_test = false;
+                if !skipping
+                    && (trimmed.starts_with("#[cfg(test)]")
+                        || trimmed.starts_with("#[cfg(any(test,"))
+                {
+                    pending_cfg_gate = true;
+                } else if !skipping
+                    && pending_cfg_gate
+                    && !trimmed.is_empty()
+                    && !trimmed.starts_with("//")
+                {
+                    // The first real line after the gate: a block
+                    // (`mod`/`fn`/`impl`/...) opening a brace here is
+                    // what gets skipped; a semicolon-only declaration or
+                    // anything else opens nothing.
+                    if line.contains('{') {
+                        skip_until = Some(depth);
+                    }
+                    pending_cfg_gate = false;
                 }
 
-                if !skipping && line.contains("eprintln!") {
+                if !skipping && line.contains("eprintln!(") {
                     offenders.push(format!("{}:{}", path.display(), i + 1));
                 }
 
                 let opens = line.matches('{').count() as i32;
                 let closes = line.matches('}').count() as i32;
                 depth += opens - closes;
-                if let Some(start) = cfg_test_skip_until
+                if let Some(start) = skip_until
                     && depth <= start
                     && (opens > 0 || closes > 0)
                 {
-                    cfg_test_skip_until = None;
+                    skip_until = None;
                 }
             }
         }

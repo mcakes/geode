@@ -97,6 +97,39 @@ pub struct QueryParams {
     pub max_depth: usize,
 }
 
+/// Logs one `IngestEvent::Failed` at `geode::ingest` `error` (MIN-4): a
+/// file that did not load, named by dataset and batch, with the reason.
+/// A free function for the same testability reason as
+/// [`log_health_event`] just below.
+fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
+    tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
+}
+
+/// Logs one `Health` outcome at `geode::ingest`, leveled by what actually
+/// happened (Phase 4b Task 2 fix round 1, MAJ-1): `Failed` lost data or a
+/// working source, so it's `error`; `Degraded`/`PendingTooLong` are
+/// notable but not a loss, so `warn`; `Ok`/`Pending` are routine, so
+/// `info`/`debug`. The one choke point every `SchedulerEvent::Health`
+/// passes through (`scheduler_sink` below) — kept as a free function so
+/// a test can drive it directly against a scoped ring subscriber without
+/// standing up a real `Scheduler`.
+fn log_health_event(source: &str, worst: &Health, detail: &str) {
+    match worst {
+        Health::Failed { .. } => {
+            tracing::error!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }
+        Health::Degraded { .. } | Health::PendingTooLong => {
+            tracing::warn!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }
+        Health::Ok => {
+            tracing::info!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }
+        Health::Pending => {
+            tracing::debug!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }
+    }
+}
+
 pub struct DataService {
     config: DataServiceConfig,
     /// Config errors found at open (spec §10.1). Held rather than
@@ -247,13 +280,24 @@ impl DataService {
                     dataset,
                     batch,
                     reason,
-                } => sink(DataEvent::Health {
-                    source: dataset,
-                    worst: Health::Failed {
-                        reason: reason.clone(),
-                    },
-                    detail: format!("{batch}: {reason}"),
-                }),
+                } => {
+                    // MIN-4: a file that did not load is exactly the
+                    // "lost data or a feature" case `log_health_event`
+                    // maps to `error` — logged directly (dataset, batch,
+                    // reason) rather than through that helper, since the
+                    // message shape a load failure wants (which file,
+                    // which batch) differs from a discovery-level
+                    // `Health` line's (which source, what's wrong with
+                    // it).
+                    log_ingest_failure(&dataset, &batch, &reason);
+                    sink(DataEvent::Health {
+                        source: dataset,
+                        worst: Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        detail: format!("{batch}: {reason}"),
+                    })
+                }
                 IngestEvent::PlanComplete => true,
             })
         };
@@ -275,7 +319,7 @@ impl DataService {
                     worst,
                     detail,
                 } => {
-                    tracing::info!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+                    log_health_event(&source, &worst, &detail);
                     sink(DataEvent::Health {
                         source,
                         worst,
@@ -1179,5 +1223,83 @@ mod tests {
             "the planted extra row survives -- a rebuild would have dropped it"
         );
         svc.shutdown();
+    }
+
+    // ---- Phase 4b Task 2 fix round 1 (MAJ-1): log_health_event's level
+    // split, proved against a scoped ring subscriber rather than by
+    // reading the match arms. ------------------------------------------
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Runs `f` under a subscriber that feeds only a fresh [`geode_core::
+    /// log::Ring`], and returns what landed in it. Scoped
+    /// (`tracing::subscriber::with_default`), not global — this doesn't
+    /// touch the process-wide subscriber `main.rs` installs, so it's
+    /// safe to run alongside every other test in this crate.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        let ring = std::sync::Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_failed_health_logs_at_error_through_the_service_sink() {
+        let records = logged(|| {
+            log_health_event(
+                "risk",
+                &Health::Failed {
+                    reason: "discovery panicked".into(),
+                },
+                "discovery panicked",
+            );
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::ERROR);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(records[0].message.contains("risk"));
+    }
+
+    #[test]
+    fn degraded_and_pending_too_long_log_at_warn() {
+        for worst in [
+            Health::Degraded { reason: "r".into() },
+            Health::PendingTooLong,
+        ] {
+            let records = logged(|| log_health_event("risk", &worst, "d"));
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].level, tracing::Level::WARN, "{worst:?}");
+        }
+    }
+
+    #[test]
+    fn ok_and_pending_log_below_warn() {
+        let records = logged(|| log_health_event("risk", &Health::Ok, "d"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::INFO);
+
+        // `debug` is below the ring test's own default max-level hint
+        // only if something raised it; a scoped `with_default` subscriber
+        // has no `Targets` filter layer, so every level is enabled here
+        // regardless of what `main.rs`'s process-wide filter would do —
+        // this test is about which *macro* `log_health_event` calls, not
+        // about runtime filtering (that's `LogLevels::to_targets`'s own
+        // test).
+        let records = logged(|| log_health_event("risk", &Health::Pending, "d"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::DEBUG);
+    }
+
+    #[test]
+    fn a_load_failure_logs_dataset_batch_and_reason_at_error() {
+        let records = logged(|| log_ingest_failure("risk_snapshot", "b1", "bad header"));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].level, tracing::Level::ERROR);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(records[0].message.contains("risk_snapshot/b1"));
+        assert!(records[0].message.contains("bad header"));
     }
 }

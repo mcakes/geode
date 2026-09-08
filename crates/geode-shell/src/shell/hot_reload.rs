@@ -182,12 +182,11 @@ impl ShellView {
             // than discarding them, but nothing previously read that field
             // — a warning-only reload (e.g. an unknown-but-non-fatal
             // keymap key) applied silently with no trace anywhere. Surface
-            // each on stderr, one line per warning, the same
-            // `[source] warning: message` convention `main.rs`'s startup
-            // diagnostics already use (these are plain `String`s by the
-            // time they reach here — `decide` already extracted
-            // `Diagnostic::message` — so there's no `Diagnostic` Display
-            // impl to reuse here).
+            // each at `geode::config` warn, one event per warning — the
+            // same target `main.rs`'s startup diagnostics log at (Phase
+            // 4b Task 2; these are plain `String`s by the time they reach
+            // here — `decide` already extracted `Diagnostic::message` —
+            // so there's no `Diagnostic` Display impl to reuse here).
             for warning in warnings {
                 tracing::warn!(target: "geode::config", "{warning}");
             }

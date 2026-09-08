@@ -287,10 +287,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     DataEvent::Published {
                         dataset,
                         batch,
-                        gen_id,
                         books,
+                        ..
                     } => {
-                        tracing::info!(target: "geode::ingest", "published {dataset}/{batch} gen {gen_id}");
+                        // Not logged here (Phase 4b Task 2 fix round 1,
+                        // MAJ-2): `geode-data`'s own `service.rs` already
+                        // logs every publish at `info` — with more detail
+                        // (book/row counts) than this arm has — the
+                        // moment the event is constructed, so a second
+                        // line here would be a strictly less informative
+                        // duplicate, and it would run on the UI thread
+                        // (this whole match is inside `window.update`),
+                        // against the Global Constraint that UI-thread
+                        // code emits at `warn` or above only. Deleting
+                        // beats dropping to `debug`: a `debug!` call site
+                        // here would cost a (statically-disabled, but
+                        // real) max-level check on every publish for no
+                        // reason to exist at all — there's nothing this
+                        // arm could say that the engine-side line
+                        // doesn't already say better.
                         let frame = shell.read(cx).frame().clone();
                         // The event carries no timestamp of its own; the
                         // arrival instant is what a "recent publishes"
@@ -306,21 +321,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             cx.notify();
                         });
                     }
-                    DataEvent::Health {
-                        source,
-                        worst,
-                        detail,
-                    } => {
-                        // Failed is the one health outcome that has actually
-                        // lost data (the last good generation stays live, but
-                        // this file's own load did not happen) — everything
-                        // else (pending, degraded, ...) is expected traffic
-                        // for a source that hasn't landed yet.
-                        if matches!(worst, geode_data::health::Health::Failed { .. }) {
-                            tracing::error!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
-                        } else {
-                            tracing::warn!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
-                        }
+                    DataEvent::Health { source, worst, .. } => {
+                        // Not logged here either, same reasoning as
+                        // `Published` just above (MAJ-2): `geode-data`'s
+                        // `log_health_event` already logs this at the
+                        // level the outcome deserves (`error` for
+                        // `Failed`, `warn` for `Degraded`/
+                        // `PendingTooLong`, `info`/`debug` otherwise) the
+                        // moment the event is constructed. This arm keeps
+                        // only the real UI state change — the status bar
+                        // — which is not logging and so isn't subject to
+                        // the UI-thread level constraint at all.
                         shell.update(cx, |s, cx| {
                             s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
                         });

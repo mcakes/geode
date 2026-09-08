@@ -1314,7 +1314,7 @@ assertion — then GREEN), in commit order:
 **Files:**
 - Modify: `CLAUDE.md` (a "Phase 4b is done" paragraph: targets and levels, `[log]`, the ring, the entity, `mod+shift+d`, the crash file, the `open_module` door, the harness count)
 - Modify: `docs/perf.md` (a "Phase 4b" section: the diagnostics tile open with the log following must not move the frame histogram's p95 — the recipe, measured in `--demo` with the overlay by the user, template rows if no display; the ring's reader allocation test as the recorded contract)
-- Modify: `docs/superpowers/specs/2026-09-06-geode-phase-4-frame-features-design.md` §4 (as-built notes: the histogram copy on the reload tick; `Polled`; the log directory; `Failed` not `Degraded` for an ingest panic; hashes in the tail; `open_module`; the `RollingFileAppender` name format)
+- Modify: `docs/superpowers/specs/2026-09-06-geode-phase-4-frame-features-design.md` §4 (as-built notes: the histogram copy on the reload tick; `Polled`; the log directory; `Failed` not `Degraded` for an ingest panic; hashes in the tail; `open_module`; the `RollingFileAppender` name format — and, from Task 2's fix round 1 (MIN-7), that the format's date rolls on the UTC date, not the trader's local one: Phase 4a's "times are the trader's local clock throughout" ruling governs every *displayed* time, not the log file's own name)
 - Modify: `scripts/mutation-check.sh` (reconcile every entry the branch added; count)
 
 - [ ] **Step 1:** Write the three documents. **Step 2:** `grep -c

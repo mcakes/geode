@@ -35,6 +35,14 @@ struct RingInner {
 
 pub struct Ring {
     inner: Mutex<RingInner>,
+    /// Test-only instrumentation (fix round 1, MIN-9/MAJ-3): counts how
+    /// many slots `drain_since` actually examines, so a test can prove
+    /// its early-break scan really is bounded by what's new rather than
+    /// by the ring's full capacity — a mutation that keeps the right
+    /// *output* but scans everything every time would pass every other
+    /// test in this file and be invisible without this.
+    #[cfg(test)]
+    drain_visits: std::sync::atomic::AtomicU64,
 }
 
 impl Ring {
@@ -46,6 +54,8 @@ impl Ring {
                 head: 0,
                 seq: 0,
             }),
+            #[cfg(test)]
+            drain_visits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -74,23 +84,73 @@ impl Ring {
         self.inner.lock().unwrap_or_else(|e| e.into_inner()).seq
     }
 
+    /// The smallest `seq` still retained, or `None` if nothing has been
+    /// pushed yet (fix round 1, MIN-9): a reader whose own `since` has
+    /// already been overwritten can compare against this to know it was
+    /// lapped, and by how much (`oldest_seq() - since` records lost),
+    /// rather than silently getting a short list with no gap marker.
+    ///
+    /// The slot at `head` is the next one `push` will overwrite, which
+    /// makes it the oldest *surviving* record once the ring has wrapped
+    /// (every slot written at least once); before the first wrap, `head`
+    /// itself is still empty and the oldest record sits at index 0 (the
+    /// first slot ever written).
+    pub fn oldest_seq(&self) -> Option<u64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match &g.records[g.head] {
+            Some(r) => Some(r.seq),
+            None => g.records[0].as_ref().map(|r| r.seq),
+        }
+    }
+
     /// Records with `seq > since`, oldest first, into `out` (cleared
     /// first). The reader owns the buffer: a tile following the tail
     /// reuses one `Vec` for its life, so a hit allocates nothing beyond
-    /// the record clones themselves.
+    /// the record clones themselves — though each matching record's
+    /// `message: String` clone is itself a heap allocation, made while
+    /// the ring's mutex is held (the mutex is never held for
+    /// *formatting* — that already happened in `RingLayer::on_event`,
+    /// before `push` — but "held for a copy" does mean a large drain
+    /// holds the lock against writers for as long as those allocations
+    /// take).
+    ///
+    /// Slots are `seq`-ascending walking forward from `head` (the
+    /// oldest surviving slot once wrapped; before the first wrap, `head`
+    /// itself is empty and the run of real slots `0..head` holds
+    /// ascending `seq` `1..=head` — see [`Self::oldest_seq`]'s doc
+    /// comment for the same fact stated the other way around). Walking
+    /// *backward* from the newest slot instead therefore visits records
+    /// in strictly *descending* `seq`, which means the scan can stop the
+    /// moment it reaches one at or before `since` — everything further
+    /// back is even older. The common case this earns its keep for is a
+    /// reader following the tail: `since` is usually within a handful of
+    /// the latest `seq`, so a full-capacity scan (4096 slots at the
+    /// shipped size) would otherwise re-examine thousands of records
+    /// this call was never going to return, every single call.
     pub fn drain_since(&self, since: u64, out: &mut Vec<Record>) {
         out.clear();
         let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let cap = g.records.len();
-        // Oldest slot is `head` once wrapped, else 0.
         for i in 0..cap {
-            let idx = (g.head + i) % cap;
-            if let Some(r) = &g.records[idx]
-                && r.seq > since
-            {
-                out.push(r.clone());
+            let idx = (g.head + cap - 1 - i) % cap;
+            #[cfg(test)]
+            self.drain_visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            match &g.records[idx] {
+                Some(r) if r.seq > since => out.push(r.clone()),
+                // Either an empty slot (the ring hasn't wrapped yet, and
+                // we've walked past its oldest write) or a record at or
+                // before `since` — descending order means nothing
+                // further back can be newer than `since` either.
+                _ => break,
             }
         }
+        out.reverse(); // collected newest-first; the contract is oldest-first
+    }
+
+    #[cfg(test)]
+    fn drain_visits(&self) -> u64 {
+        self.drain_visits.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -187,15 +247,26 @@ impl LogLevels {
     pub fn from_doc(config: &Config) -> (LogLevels, Vec<Diagnostic>) {
         let mut levels = LogLevels::default();
         let mut diags = Vec::new();
-        let Some(table) = config.get("app", "log").and_then(|v| v.as_table()) else {
-            return (levels, diags);
-        };
         let layer = config.explain("app", "log");
         let warn = |message: String| Diagnostic {
             severity: Severity::Warning,
             layer,
             file: None,
             message,
+        };
+        let Some(value) = config.get("app", "log") else {
+            return (levels, diags);
+        };
+        // MIN-3 (fix round 1): `log = "debug"` — the obvious typo for
+        // `[log]\ndefault = "debug"` — used to be silently accepted with
+        // no effect at all, the exact failure this function's own
+        // per-key handling below already guards against one level down
+        // ("a typo must not silence a target").
+        let Some(table) = value.as_table() else {
+            diags.push(warn(
+                "[log]: expected a table, e.g. [log]\\ndefault = \"info\"".to_string(),
+            ));
+            return (levels, diags);
         };
         for (key, value) in table {
             let Some(s) = value.as_str() else {
@@ -232,8 +303,22 @@ impl LogLevels {
         (levels, diags)
     }
 
+    /// A global `Targets` filter: everything *not* under `geode` (every
+    /// third-party crate, including gpui) is capped at `warn`, `geode`
+    /// itself (every target under [`TARGETS`], absent a more specific
+    /// override) follows `self.default`, and each configured per-target
+    /// override wins over both (fix round 1, MIN-6 — `Targets` matches
+    /// by longest matching prefix, so `with_target("geode", …)` then
+    /// `with_target("geode::ingest", …)` composes the way `[log]`'s
+    /// `default` + per-suffix keys already read). Before this, `[log]
+    /// default = "trace"` (a real, supported value) would have raised
+    /// every third-party crate's callsites to `trace` too — nothing in
+    /// this dependency tree does that today, but the day one does, its
+    /// records would evict `geode`'s own from the ring.
     pub fn to_targets(&self) -> Targets {
-        let mut t = Targets::new().with_default(self.default);
+        let mut t = Targets::new()
+            .with_default(Level::WARN)
+            .with_target("geode", self.default);
         for (suffix, level) in &self.targets {
             t = t.with_target(format!("geode::{suffix}"), *level);
         }
@@ -384,5 +469,151 @@ mod tests {
         );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("bogus"));
+    }
+
+    // ---- Fix round 1 --------------------------------------------------
+
+    /// MIN-3: `log = "debug"` (present, but not a table — the obvious
+    /// typo for `[log]\ndefault = "debug"`) must warn, not silently do
+    /// nothing.
+    #[test]
+    fn log_present_but_not_a_table_is_a_warning() {
+        let cfg = crate::config::test_support::config_from(
+            "app",
+            "config_version = 1\nlog = \"debug\"\n",
+        );
+        let (levels, diags) = LogLevels::from_doc(&cfg);
+        assert_eq!(levels, LogLevels::default(), "no effect, same as today");
+        assert_eq!(diags.len(), 1);
+        assert!(diags[0].message.contains("table"));
+    }
+
+    /// MIN-6: a target outside `geode` (every third-party crate,
+    /// including gpui) is capped at `warn` regardless of `[log]
+    /// default`; `geode`'s own targets follow `default` as before.
+    #[test]
+    fn to_targets_caps_non_geode_targets_at_warn_regardless_of_default() {
+        let levels = LogLevels {
+            default: Level::TRACE,
+            targets: Vec::new(),
+        };
+        let t = levels.to_targets();
+        assert!(
+            t.would_enable("geode::shell", &Level::TRACE),
+            "geode follows [log] default"
+        );
+        assert!(
+            !t.would_enable("some_dependency", &Level::INFO),
+            "a third party is capped below info at the default trace"
+        );
+        assert!(
+            t.would_enable("some_dependency", &Level::WARN),
+            "warn itself is still the third-party ceiling"
+        );
+    }
+
+    // ---- MAJ-3: RingLayer / MessageVisitor, proved against a real
+    // subscriber rather than only by reading the match arms. -----------
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Runs `f` under a subscriber that feeds only a fresh [`Ring`],
+    /// scoped (`tracing::subscriber::with_default`) rather than global —
+    /// this never touches whatever subscriber a real process installed,
+    /// so it's safe next to every other test in the suite.
+    fn logged(capacity: usize, f: impl FnOnce()) -> Vec<Record> {
+        let ring = Arc::new(Ring::new(capacity));
+        let sub = tracing_subscriber::registry().with(RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn ring_layer_records_target_level_and_the_formatted_message() {
+        let records = logged(8, || {
+            tracing::warn!(target: "geode::shell", "hello {}", 1);
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].target, "geode::shell");
+        assert_eq!(records[0].level, Level::WARN);
+        assert_eq!(records[0].message, "hello 1");
+    }
+
+    /// The visitor's `record_str`/`record_debug` split: the message
+    /// field always renders unquoted (whichever visit method carries
+    /// it — `Debug for fmt::Arguments` forwards to `Display`, so
+    /// `record_debug`'s `{value:?}` on the message is still unquoted); a
+    /// non-message `&str` field goes through `record_str` and also
+    /// renders unquoted; a non-message field forced through `Debug`
+    /// (`?field`) renders however that type's `Debug` does — quoted, for
+    /// a `&str`.
+    #[test]
+    fn message_visitor_treats_the_message_field_specially_and_separates_others_with_spaces() {
+        let records = logged(8, || {
+            tracing::info!(target: "geode::query", plain = "x", debug = ?"y", "structured");
+        });
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].message, "structured plain=x debug=\"y\"");
+    }
+
+    /// MAJ-3's harness entry (in `scripts/mutation-check.sh`) mutates
+    /// `record_str`'s non-message branch away; this is the test that
+    /// mutation names — kept here as an explicit assertion on the exact
+    /// failure mode (a non-message field silently vanishing) rather than
+    /// only exercising it as a side effect of the test just above.
+    #[test]
+    fn a_non_message_str_field_is_not_dropped() {
+        let records = logged(8, || {
+            tracing::info!(target: "geode::query", book = "EU_TECH", "requery");
+        });
+        assert_eq!(records.len(), 1);
+        assert!(
+            records[0].message.contains("book=EU_TECH"),
+            "{:?}",
+            records[0].message
+        );
+    }
+
+    // ---- MIN-9: drain_since's early break, and oldest_seq -------------
+
+    #[test]
+    fn drain_since_stops_scanning_once_it_reaches_records_at_or_before_since() {
+        let ring = Ring::new(1024);
+        for i in 1..=1000 {
+            ring.push(rec(i, "m"));
+        }
+        let mut out = Vec::new();
+        // Only the last three are new; a bounded scan from the tail
+        // should visit a handful of slots, not all 1000+ written ones.
+        ring.drain_since(997, &mut out);
+        assert_eq!(
+            out.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            vec![998, 999, 1000]
+        );
+        assert!(
+            ring.drain_visits() < 10,
+            "expected an early break near the tail, visited {}",
+            ring.drain_visits()
+        );
+    }
+
+    #[test]
+    fn oldest_seq_is_none_when_empty_then_tracks_the_surviving_floor_through_a_wrap() {
+        let ring = Ring::new(3);
+        assert_eq!(ring.oldest_seq(), None);
+        ring.push(rec(0, "a"));
+        assert_eq!(
+            ring.oldest_seq(),
+            Some(1),
+            "not wrapped: oldest is the first write"
+        );
+        for _ in 0..4 {
+            ring.push(rec(0, "b"));
+        }
+        // 5 pushes into a 3-slot ring: seq 1 and 2 were overwritten:
+        // seq 3 is the oldest survivor.
+        assert_eq!(ring.oldest_seq(), Some(3), "wrapped: oldest is at head");
     }
 }
