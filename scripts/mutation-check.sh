@@ -1519,10 +1519,18 @@ run_mutation "commandline: word_at clamps a non-char-boundary cursor down before
   geode-shell \
   a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking
 
+# Re-anchored (Phase 4b Task 4 fix round 2, ruling 4 / fix round 1's
+# own re-anchor attempt, which never made it into the committed
+# script): the code moved from a direct `self.restart_required = None;`
+# assignment to an `if restart.is_empty() { None } else { Some(..) }`
+# expression assigned once via `restart_message.clone()`. Mutated to
+# only assign when `Some`, reintroducing "never clears".
 run_mutation "frame: restart_required clears once sources/datasets match the baseline again (M8)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                self.restart_required = None;' \
-  '                let _ = &self.restart_required;' \
+  '            self.restart_required = restart_message.clone();' \
+  '            if restart_message.is_some() {
+                self.restart_required = restart_message.clone();
+            }' \
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
 
@@ -3117,10 +3125,28 @@ run_mutation "service: Polled.next = at, next_in is ignored" \
 
 # --- Task 4: the Diagnostics entity, its feed, and the status bar -----
 
+# Phase 4b Task 4 fix round 2 (NEW-3): re-anchored — MAJ-2 (fix round
+# 1) replaced the `!is_new && ...` guard this used to anchor on with
+# `if let Some(current) = &state.health && ...`. Distinct from the
+# MAJ-2 entry below (which targets the first-real-note edge case via a
+# default-to-Ok comparison): this one disables the whole guard, so a
+# *repeat* of the same health bumps — the original behaviour this entry
+# has always covered.
 run_mutation "diagnostics: note_health bumps unconditionally, not just on a real transition" \
   crates/geode-shell/src/diagnostics.rs \
-  '        if !is_new && state.health == worst && state.detail == detail {' \
-  '        if false && !is_new && state.health == worst && state.detail == detail {' \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+        {
+            return;
+        }' \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+            && false
+        {
+            return;
+        }' \
   geode-shell a_repeated_identical_health_does_not_bump_the_version
 
 run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
@@ -3313,10 +3339,10 @@ run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a 
 
 run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                if let Some(log) = &self.services.log
-                    && new_levels != self.diagnostics.read(cx).levels
-                {
-                    if let Err(e) = log.control.set(&new_levels) {
+  '                if new_levels != self.diagnostics.read(cx).levels {
+                    if let Some(log) = &self.services.log
+                        && let Err(e) = log.control.set(&new_levels)
+                    {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
                     }
                     self.diagnostics.update(cx, |d, cx| {
@@ -3325,10 +3351,10 @@ run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
                         }
                     });
                 }' \
-  '                if new_levels != self.diagnostics.read(cx).levels {
-                    if let Some(log) = &self.services.log
-                        && let Err(e) = log.control.set(&new_levels)
-                    {
+  '                if let Some(log) = &self.services.log
+                    && new_levels != self.diagnostics.read(cx).levels
+                {
+                    if let Err(e) = log.control.set(&new_levels) {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
                     }
                     self.diagnostics.update(cx, |d, cx| {
@@ -3381,6 +3407,59 @@ run_mutation "diagnostics: MIN-8 — CONFIG_HISTORY_CAP loosened from 16" \
   'pub const CONFIG_HISTORY_CAP: usize = 16;' \
   'pub const CONFIG_HISTORY_CAP: usize = 1600;' \
   geode-shell config_history_is_capped_at_sixteen_batches
+
+# --- Task 4 fix round 2: NEW-1 (config/data diagnostics split) -------
+
+run_mutation "diagnostics: NEW-1 — note_config also clears data_diagnostics" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.config = diags.clone();
+        self.config_history.push_front((at, diags));' \
+  '        self.config = diags.clone();
+        self.data_diagnostics.clear();
+        self.config_history.push_front((at, diags));' \
+  geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
+
+run_mutation "diagnostics: NEW-1 — note_data_diagnostics also clears config" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        let mut changed = false;' \
+  '    pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        self.config.clear();
+        let mut changed = false;' \
+  geode-shell a_data_diagnostic_does_not_clobber_a_standing_config_error
+
+run_mutation "diagnostics: NEW-1 — note_data_diagnostics re-appends an identical entry" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        for d in diags {
+            if self
+                .data_diagnostics
+                .iter()
+                .any(|(_, existing)| existing == &d)
+            {
+                continue;
+            }
+            self.data_diagnostics.push_back((at, d));
+            changed = true;
+        }' \
+  '        for d in diags {
+            self.data_diagnostics.push_back((at, d));
+            changed = true;
+        }' \
+  geode-shell note_data_diagnostics_does_not_reappend_an_identical_entry
+
+run_mutation "diagnostics: NEW-1 — DATA_DIAGNOSTICS_CAP loosened from 256" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const DATA_DIAGNOSTICS_CAP: usize = 256;' \
+  'pub const DATA_DIAGNOSTICS_CAP: usize = 25600;' \
+  geode-shell data_diagnostics_is_capped_at_two_hundred_fifty_six
+
+run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if data_errors > 0 {
+            parts.push(format!("data {data_errors} error{}", plural(data_errors)));
+        }' \
+  '' \
+  geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
