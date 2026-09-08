@@ -561,6 +561,31 @@ fn the_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpui::TestAp
     );
 }
 
+/// The mode is *legible*, not just held: the pill paints in both modes.
+/// A modal surface whose only tell is whether a caret happens to be
+/// blinking is the failure this whole model has to avoid — and a pill
+/// built but never reached by the render tree would look identical to
+/// one that works, from the state assertions alone.
+#[gpui::test]
+fn the_mode_pill_paints_in_both_modes(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    let normal = cx.debug_bounds("dialog-mode-pill");
+    assert!(
+        normal.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "the mode pill should paint in normal mode, got {normal:?}"
+    );
+
+    cx.simulate_keystrokes("/");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let filter = cx.debug_bounds("dialog-mode-pill");
+    assert!(
+        filter.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "and in filter mode, got {filter:?}"
+    );
+}
+
 /// `/` enters filter mode and typing narrows, exactly as it does today.
 #[gpui::test]
 fn slash_enters_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {
