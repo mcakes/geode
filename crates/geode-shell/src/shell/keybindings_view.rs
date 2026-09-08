@@ -1194,7 +1194,7 @@ fn spawn_unbind(
 ) -> Option<String> {
     let Some(user_dir) = user_dir.clone() else {
         tracing::warn!(target: "geode::config",
-            "[keybindings] warning: no writable user config dir; the binding change for {action} was not saved"
+            "no writable user config dir; the binding change for {action} was not saved"
         );
         return Some("no writable user config directory — nothing was saved".to_string());
     };
@@ -1203,14 +1203,14 @@ fn spawn_unbind(
             match apply_unbind(&user_dir, &unbind) {
                 Ok(outcome) if unbind.is_user_layer && !outcome.removed => {
                     tracing::warn!(target: "geode::config",
-                        "[keybindings] warning: the binding for {action} was not found where \
+                        "the binding for {action} was not found where \
                          expected, so nothing was removed — it may still be reachable from \
                          wherever it actually lives"
                     )
                 }
                 Ok(_) => {}
                 Err(e) => tracing::warn!(target: "geode::config",
-                    "[keybindings] warning: failed to change the binding for {action}: {e}"
+                    "failed to change the binding for {action}: {e}"
                 ),
             }
         })

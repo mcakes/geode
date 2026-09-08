@@ -44,8 +44,13 @@ pub const HEIGHT: f32 = 26.0;
 /// §4.4: `Diagnostics::summary()` — source health, config errors and
 /// dropped events, in one terse line — same `warning` token, same
 /// reasoning); a click on that segment calls `on_diagnostics_click`
-/// (Phase 4b Task 5 — `render.rs`'s call site dispatches
-/// `diagnostics::open` through it, the same door `mod+shift+d` uses).
+/// (Phase 4b Task 5 — `render.rs`'s call site opens the tile via
+/// `ShellView::open_module("diagnostics", ..)` directly, the same end
+/// door `mod+shift+d`'s `diagnostics::open` action also opens by kind
+/// through, but not by dispatching that action itself — MIN-9, final
+/// review: the click is therefore not recorded in the crash file's
+/// action tail, though `open_module` does mark the session dirty on
+/// its own).
 /// Then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
 /// is scoped to a past instant — an unmissable `AS OF {t} · :live to
 /// return` segment in the same warning tokens the toolbar's own AS OF

@@ -987,12 +987,42 @@ Phase 4b section for the allocation contract this pins in tests.
 pub struct CatalogParams { pub key: QueryKey, pub tag: u64, pub as_of: AsOf }
 
 pub struct CatalogSnapshot {
-    pub datasets: Vec<DatasetCatalog>,   // name, per (batch, book): Vec<Generation>, live_bytes, archive_bytes
-    pub database_bytes: u64,
-    pub memory_bytes: u64,
-    pub resolved: Vec<(String, Option<i64>)>,  // per dataset, the gen_id `as_of` resolves to
+    pub datasets: Vec<DatasetCatalog>,   // name, partitions, live_rows/archive_rows (est.)
+    pub database_bytes: u64,             // sum(block_size * total_blocks), pragma_database_size()
+    pub used_blocks: u64,
+    pub block_size: u64,
+    pub memory_bytes: u64,               // sum(memory_usage_bytes), duckdb_memory()
+    pub threads: u64,                    // current_setting('threads')
+}
+
+pub struct DatasetCatalog {
+    pub name: String,
+    pub partitions: Vec<PartitionCatalog>,
+    pub live_rows: u64,      // estimated_size (a row ESTIMATE, not bytes), live tables
+    pub archive_rows: u64,   // the same, over archive tables
+}
+
+pub struct PartitionCatalog {
+    pub batch: String,
+    pub book: Option<String>,        // None is the bookless partition — real, not missing
+    pub generations: Vec<GenerationInfo>,
+    pub resolved_gen: Option<i64>,   // the gen_id `as_of` resolves to; None under AsOf::Live
 }
 ```
+
+**As-built correction (MIN-4, final-review fix):** the original sketch
+above named `live_bytes`/`archive_bytes` and a top-level `CatalogSnapshot.
+resolved: Vec<(String, Option<i64>)>`. The shipped types instead carry a
+row *estimate* (`live_rows`/`archive_rows`, correctly labelled "rows
+(est.)" on screen — DuckDB's `estimated_size` is not a byte count) on
+`DatasetCatalog`, and put `resolved_gen` on each `PartitionCatalog`
+rather than in one dataset-keyed list on the snapshot — the per-
+partition placement is what the data section's marker (below) actually
+needs, since a resolved generation is a property of one partition's
+timeline, not the whole dataset. `database_bytes`, `used_blocks`,
+`block_size`, `memory_bytes` and `threads` are real fields, wired into
+the perf section (`database bytes`, `memory bytes`, `threads`) rather
+than left computed-and-unread.
 
 Built on the data thread from `file_generations`, `pragma_database_size`
 and per-table storage info, and delivered as `DataEvent::Catalog`. The
@@ -1063,7 +1093,11 @@ filtering, rebuilt only when the observed version changes:
   `:overlay` toggles `perf::toggle_overlay`.
 
 The module renders no `DataTable`; these are lists under a few hundred
-rows, and `VirtualList` covers the log.
+rows, and `uniform_list` covers the log (as built: not `VirtualList` —
+see the as-built note below; every row is the same height, so
+`uniform_list`'s cheaper fixed-height model is sufficient and the
+`VirtualList` per-item-sizing cost §3.4's picker pays is not needed
+here).
 
 **As built (2026-09-08, Task 5; corrected in fix rounds 1–2, MAJ-1
 through MAJ-8, MIN-3/MIN-7):** `diagnostics::open` resolves through a

@@ -441,7 +441,44 @@ pub fn perf_rows(d: &Diagnostics, requery: &RequeryStats) -> Vec<Row> {
         0,
         tone,
     ));
+    // MIN-4 (final review): these three cost real DuckDB round trips
+    // (`pragma_database_size()`, `duckdb_memory()`, `current_setting`)
+    // paid on every catalog request whether or not anything showed
+    // them — wired in here rather than computed and thrown away. `None`
+    // until the first `Request::Catalog` outcome arrives, same as the
+    // data section's own "(no catalog yet)" gate.
+    if let Some(catalog) = &d.catalog {
+        out.push(row(
+            format!(
+                "database {} (checkpointed) · memory {} · threads {}",
+                format_bytes(catalog.database_bytes),
+                format_bytes(catalog.memory_bytes),
+                catalog.threads,
+            ),
+            0,
+            Tone::Muted,
+        ));
+    }
     out
+}
+
+/// A plain binary-unit byte count, no fractional precision beyond one
+/// decimal place — this is a diagnostics row, not a UI a trader reads
+/// with any regularity, so simplicity over a full humanize crate.
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1}GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1}MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1}KB", b / KB)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 #[cfg(test)]
@@ -822,5 +859,39 @@ mod tests {
         assert!(joined.contains("p95"));
         assert!(joined.contains("max"));
         assert!(joined.contains("dropped events: 3"));
+    }
+
+    /// MIN-4 (final review): `database_bytes`, `memory_bytes` and
+    /// `threads` cost real DuckDB round trips (`pragma_database_size()`,
+    /// `duckdb_memory()`, `current_setting`) and were computed on every
+    /// catalog request but displayed by no section — wire them into the
+    /// perf section rather than paying for them and throwing them away.
+    #[test]
+    fn perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let requery = RequeryStats::new();
+
+        // No catalog yet: nothing to show, and nothing claims otherwise.
+        let rows = perf_rows(&d, &requery);
+        let joined: String = rows.iter().map(|r| r.text.to_string()).collect();
+        assert!(!joined.contains("database"), "{joined}");
+
+        d.set_catalog(CatalogSnapshot {
+            datasets: Vec::new(),
+            database_bytes: 12_345_678,
+            used_blocks: 10,
+            block_size: 262_144,
+            memory_bytes: 987_654,
+            threads: 8,
+        });
+        let rows = perf_rows(&d, &requery);
+        let joined: String = rows
+            .iter()
+            .map(|r| r.text.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("database"), "{joined}");
+        assert!(joined.contains("memory"), "{joined}");
+        assert!(joined.contains("threads 8"), "{joined}");
     }
 }
