@@ -9,7 +9,7 @@ use crate::store::StoreError;
 use crate::store::ddl::{TableKind, table_name};
 use chrono::{DateTime, Duration, Utc};
 use duckdb::Connection;
-use geode_core::schema::Grain;
+use geode_core::schema::{DatasetSpec, Grain};
 
 #[derive(Debug, Clone, Default)]
 pub struct RetentionPolicy {
@@ -40,17 +40,30 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 }
 
 /// The `generations` reconciliation delete: a row survives only if at
-/// least one of `grains`' archive **or** live tables still holds it. Must
-/// cover every grain the dataset has -- `sweep`'s own callers pass
-/// `ds.grains()` -- because a generation this sweep evicted from one
-/// grain's archive can still be present at another (a cash-only book has
-/// no underlying rows, so its position-grain history outlives anything
-/// recorded at the underlying grain, and the reverse is just as real: a
-/// grain published less often can hold a generation long after a busier
-/// grain has aged it out). Reconciling against a subset would delete a
-/// summary row for a generation that a grain outside the subset still
-/// has, and time travel to it would find data with no summary entry to
-/// resolve through.
+/// least one of `grains`' archive **or** live tables still holds it.
+///
+/// `grains` here is deliberately whatever `reconcile_generations` passes
+/// -- **always** `ds.grains()`, never the subset `sweep`'s caller chose to
+/// evict (review round 1, MAJ-2). A generation this sweep evicted from
+/// one grain's archive can still be present at another (a cash-only book
+/// has no underlying rows, so its position-grain history outlives
+/// anything recorded at the underlying grain, and the reverse is just as
+/// real: a grain published less often can hold a generation long after a
+/// busier grain has aged it out). Reconciling against the swept subset
+/// instead of the whole dataset would delete a summary row for a
+/// generation that a grain outside that subset still has, and time
+/// travel to it would find data with no summary entry to resolve
+/// through -- exactly the corruption the harness's own `generations:
+/// reconciliation covers only the first grain` entry demonstrates.
+///
+/// All four join columns use `is not distinct from`, matching the
+/// eviction query above: `gen_id` and `source_time` used plain `=`
+/// before round 1 (MIN-4), which is UNKNOWN against a NULL and makes
+/// `not exists` true -- silently deleting a row with a NULL `gen_id` or
+/// `source_time`. Neither column is ever NULL through `publish_file`,
+/// but a legacy or hand-written row could hold one, the same class as
+/// the NULL `book` `a_null_book_does_not_disable_the_whole_sweep` exists
+/// for.
 ///
 /// This scans every named table, same as the eviction above already
 /// does -- background work on the sweeper's own cadence, never paid by a
@@ -71,8 +84,8 @@ fn generations_reconcile_sql(dataset: &str, grains: &[Grain]) -> String {
                      select 1 from {t} t
                      where t.batch is not distinct from g.batch
                        and t.book is not distinct from g.book
-                       and t.gen_id = g.gen_id
-                       and t.source_time = g.source_time
+                       and t.gen_id is not distinct from g.gen_id
+                       and t.source_time is not distinct from g.source_time
                  )"
             )
         })
@@ -84,15 +97,67 @@ fn generations_reconcile_sql(dataset: &str, grains: &[Grain]) -> String {
     )
 }
 
+/// Reconcile the `generations` summary against **every** table `ds` has
+/// (`ds.grains()`) -- never the subset of grains a particular `sweep`
+/// call happened to evict. Review round 1 (MAJ-2): the reconciliation
+/// used to trust `sweep`'s own `grains` parameter, which a caller
+/// bounding a large sweep's transaction to one grain at a time (an
+/// obvious thing to do) would silently narrow, deleting summary rows for
+/// generations that a grain outside the call's own list still holds. The
+/// property now belongs to this function, not to what any caller
+/// remembers to pass.
+///
+/// A no-op for a dataset with no grains at all (nothing to check
+/// against, so nothing to delete).
+fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
+    let grains = ds.grains();
+    if grains.is_empty() {
+        return Ok(());
+    }
+    let sql = generations_reconcile_sql(&ds.name, &grains);
+    conn.execute_batch(&sql).map_err(sql_err(&sql))
+}
+
+/// Evict old generations, per `RetentionPolicy`, from each of `grains`'
+/// archive tables -- bounded to what the caller is sweeping in this call
+/// (bounding a large sweep's transaction by grain is a legitimate reason
+/// to call this once per grain) -- then reconcile the `generations`
+/// summary against **every** grain `ds` declares, regardless of `grains`
+/// (`reconcile_generations`; review round 1, MAJ-2 -- the reconciliation
+/// is not the caller's to narrow).
+///
+/// One transaction: `begin`, the per-grain eviction, the reconciliation,
+/// `commit` on success, `rollback` on any error -- the counts and
+/// `min(source_time)` reads inside see the transaction's own deletes.
+/// Three consequences worth knowing before this is wired into a
+/// scheduler (review round 1, MIN-5):
+///
+/// 1. Calling `sweep` on a connection already inside a transaction now
+///    fails with a nested `begin` where it used to work. No caller does
+///    this today.
+/// 2. Every grain `ds` declares needs its **live** table to exist, not
+///    just its archive -- the reconciliation names both, for every
+///    grain, regardless of which grains this call actually swept. That
+///    is why this file's own `fixture()` grew a live table and an
+///    `ensure_tables()` call.
+/// 3. The whole call is one transaction on the single writer connection
+///    ingest publishes through (`store::mod`). A large sweep now blocks
+///    every publish for its duration, where the old per-grain
+///    auto-commits let a publish interleave between grains. Spec §7's
+///    "ingest never drops a foreground frame" makes this worth a
+///    decision when the sweeper is wired -- and the reconciliation does
+///    not actually need the evictions in its own transaction, only their
+///    committed effect, so splitting it into its own shorter transaction
+///    is available if that decision goes the other way.
 pub fn sweep(
     conn: &Connection,
-    dataset: &str,
+    ds: &DatasetSpec,
     grains: &[Grain],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
 ) -> Result<SweepReport, StoreError> {
     conn.execute_batch("begin;").map_err(sql_err("begin"))?;
-    match sweep_in_transaction(conn, dataset, grains, policy, now) {
+    match sweep_in_transaction(conn, ds, grains, policy, now) {
         Ok(report) => {
             conn.execute_batch("commit;").map_err(sql_err("commit"))?;
             Ok(report)
@@ -105,11 +170,11 @@ pub fn sweep(
 }
 
 /// The body of `sweep`, run inside the transaction `sweep` owns: eviction
-/// per grain, then the `generations` reconciliation once every grain has
-/// been swept.
+/// per grain, then `reconcile_generations` once every grain has been
+/// swept.
 fn sweep_in_transaction(
     conn: &Connection,
-    dataset: &str,
+    ds: &DatasetSpec,
     grains: &[Grain],
     policy: &RetentionPolicy,
     now: DateTime<Utc>,
@@ -117,7 +182,7 @@ fn sweep_in_transaction(
     let mut report = SweepReport::default();
 
     for grain in grains {
-        let archive = table_name(dataset, *grain, TableKind::Archive);
+        let archive = table_name(&ds.name, *grain, TableKind::Archive);
 
         if !policy.is_empty() {
             let before: i64 = {
@@ -185,10 +250,7 @@ fn sweep_in_transaction(
         };
     }
 
-    if !grains.is_empty() {
-        let sql = generations_reconcile_sql(dataset, grains);
-        conn.execute_batch(&sql).map_err(sql_err(&sql))?;
-    }
+    reconcile_generations(conn, ds)?;
 
     Ok(report)
 }
@@ -207,11 +269,50 @@ mod tests {
     use crate::store::catalog::Catalog;
     use crate::store::ddl::{assert_generations_match_tables, rebuild_generations};
     use chrono::{DateTime, Datelike, Timelike, Utc};
-    use geode_core::schema::Grain;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
 
     /// Terse RFC 3339 literal for tests.
     fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// `risk_snapshot` with a single declared grain (Position) -- so
+    /// `ds.grains()` names exactly the one grain `fixture()` creates
+    /// tables for. Most tests here sweep Position alone and must not have
+    /// the reconciliation reach for an Underlying table that does not
+    /// exist.
+    fn position_only_dataset() -> DatasetSpec {
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_snapshot.columns.daily_trading_pnl]
+type = "f64"
+role = "measure"
+grain = "position"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk_snapshot")
+            .unwrap()
+            .clone()
+    }
+
+    /// `risk_snapshot` declaring both Position and Underlying, for the
+    /// tests that create both grains' tables.
+    fn position_and_underlying_dataset() -> DatasetSpec {
+        crate::store::ddl::tests_support::sample_dataset()
     }
 
     /// The archive plus an (empty) live table, so a reconciliation query
@@ -291,7 +392,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -316,7 +417,7 @@ mod tests {
         };
         sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -336,7 +437,7 @@ mod tests {
         };
         sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &policy,
             ts("2026-08-30T10:00:00Z"),
@@ -357,7 +458,7 @@ mod tests {
         };
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &policy,
             ts("2026-08-31T00:00:00Z"),
@@ -400,7 +501,7 @@ mod tests {
 
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_and_underlying_dataset(),
             &[Grain::Position, Grain::Underlying],
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
@@ -422,7 +523,7 @@ mod tests {
         fill(&store, 5);
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
@@ -437,7 +538,7 @@ mod tests {
         let (_d, store) = fixture();
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),
@@ -466,7 +567,7 @@ mod tests {
 
         let report = sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(3),
@@ -505,7 +606,7 @@ mod tests {
                 .unwrap();
             sweep(
                 store.writer(),
-                "risk_snapshot",
+                &position_only_dataset(),
                 &[Grain::Position],
                 &RetentionPolicy {
                     keep_generations: Some(1),
@@ -542,7 +643,7 @@ mod tests {
 
         sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &RetentionPolicy {
                 keep_generations: Some(1),
@@ -601,7 +702,7 @@ mod tests {
 
         sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_and_underlying_dataset(),
             &[Grain::Position, Grain::Underlying],
             &RetentionPolicy {
                 keep_generations: Some(1),
@@ -633,6 +734,80 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_covers_every_grain_the_dataset_has_not_just_the_swept_subset() {
+        // Review round 1 (MAJ-2): `ds` declares both Position and
+        // Underlying, but this call sweeps *only* Position -- the way a
+        // caller bounding a large sweep's transaction one grain at a time
+        // naturally would. Reconciliation must still protect BK000's
+        // first generation, which survives only in Underlying, a grain
+        // this call never even evicted from. Before the fix,
+        // `generations_reconcile_sql` was built from the *swept* `grains`
+        // parameter (`&[Position]` here), so it would have checked only
+        // the Position tables and deleted this row -- exactly the
+        // corruption `generations: reconciliation covers only the first
+        // grain` demonstrates, reached through a caller that looks
+        // entirely reasonable rather than through a mutation.
+        let (_d, store) = fixture();
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_snapshot_underlying_archive(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 create table risk_snapshot_underlying_live(
+                     book varchar, batch varchar, gen_id bigint,
+                     source_time timestamp with time zone);",
+            )
+            .unwrap();
+        fill(&store, 3);
+        store
+            .writer()
+            .execute(
+                "insert into risk_snapshot_underlying_archive values (?, ?, ?, ?)",
+                duckdb::params!["BK000", "BK000", 1i64, ts("2026-08-30T01:00:00Z")],
+            )
+            .unwrap();
+
+        let tables = [
+            "risk_snapshot_position_archive",
+            "risk_snapshot_position_live",
+            "risk_snapshot_underlying_archive",
+            "risk_snapshot_underlying_live",
+        ]
+        .map(String::from);
+        rebuild_generations(store.writer(), "risk_snapshot", &tables).unwrap();
+
+        // Only Position is swept -- `ds` (declaring both grains) is what
+        // must protect Underlying's own copy during reconciliation.
+        sweep(
+            store.writer(),
+            &position_and_underlying_dataset(),
+            &[Grain::Position],
+            &RetentionPolicy {
+                keep_generations: Some(1),
+                keep_age: None,
+            },
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+
+        assert_generations_match_tables(store.writer(), "risk_snapshot", &tables);
+        let gen1_bk000: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from generations
+                 where dataset = 'risk_snapshot' and batch = 'BK000' and gen_id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            gen1_bk000, 1,
+            "BK000's first generation survives via the unswept underlying grain"
+        );
+    }
+
+    #[test]
     fn a_sweep_that_reconciles_nothing_still_leaves_the_summary_matching() {
         // An empty policy evicts no rows, so reconciliation should find
         // every summarised generation still present -- a regression check
@@ -645,7 +820,7 @@ mod tests {
 
         sweep(
             store.writer(),
-            "risk_snapshot",
+            &position_only_dataset(),
             &[Grain::Position],
             &RetentionPolicy::default(),
             ts("2026-08-31T00:00:00Z"),
@@ -658,5 +833,69 @@ mod tests {
             10,
             "nothing evicted, nothing reconciled away"
         );
+    }
+
+    #[test]
+    fn a_failed_sweep_rolls_back_both_the_archive_and_the_summary() {
+        // Review round 1 (MIN-5): a failure must roll back everything
+        // this call already did, not just leave the failing grain
+        // untouched. Position's own eviction runs first and modifies its
+        // archive inside the transaction; Underlying's archive table was
+        // never created, so its `select count(*)` fails right after --
+        // proving the whole sweep rolls back rather than committing
+        // Position's partial work.
+        let (_d, store) = fixture();
+        fill(&store, 3);
+        let tables = POSITION_TABLES.map(String::from);
+        rebuild_generations(store.writer(), "risk_snapshot", &tables).unwrap();
+        let before_remaining = remaining(&store);
+        let before_summary = generation_count(&store);
+
+        let err = sweep(
+            store.writer(),
+            &position_and_underlying_dataset(),
+            &[Grain::Position, Grain::Underlying],
+            &RetentionPolicy {
+                keep_generations: Some(1),
+                keep_age: None,
+            },
+            ts("2026-08-31T00:00:00Z"),
+        );
+        assert!(
+            err.is_err(),
+            "the missing underlying table must fail the sweep"
+        );
+
+        assert_eq!(
+            remaining(&store),
+            before_remaining,
+            "position's own eviction must be rolled back too"
+        );
+        assert_eq!(
+            generation_count(&store),
+            before_summary,
+            "and so must the summary"
+        );
+    }
+
+    #[test]
+    fn sweep_then_checkpoint_both_succeed() {
+        // Review round 1 (MIN-5): `sweep` always committed before this
+        // change and still does -- a `checkpoint` immediately afterward
+        // on the same connection must not see a transaction left open.
+        let (_d, store) = fixture();
+        fill(&store, 3);
+        sweep(
+            store.writer(),
+            &position_only_dataset(),
+            &[Grain::Position],
+            &RetentionPolicy {
+                keep_generations: Some(1),
+                keep_age: None,
+            },
+            ts("2026-08-31T00:00:00Z"),
+        )
+        .unwrap();
+        checkpoint(store.writer()).unwrap();
     }
 }
