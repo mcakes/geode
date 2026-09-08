@@ -209,6 +209,7 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                 layer: None,
                 file: None,
                 message: format!("data service failed to open: {e}"),
+                path: None,
             }]));
             return;
         }

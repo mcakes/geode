@@ -44,6 +44,7 @@ impl GroupingSlots {
                         message: format!(
                             "groupings: key '{key}' is not a slot number 1–9; ignored"
                         ),
+                        path: None,
                     });
                     continue;
                 }
@@ -60,6 +61,7 @@ impl GroupingSlots {
                         layer: None,
                         file: None,
                         message: format!("groupings: slot {slot} must be an array of column names"),
+                        path: None,
                     });
                     continue;
                 }
@@ -70,6 +72,7 @@ impl GroupingSlots {
                     layer: None,
                     file: None,
                     message: format!("groupings: slot {slot} is empty; ignored"),
+                    path: None,
                 });
                 continue;
             }
@@ -82,6 +85,7 @@ impl GroupingSlots {
                         "groupings: slot {slot} names '{unknown}', which no dataset or \
                          derived dimension declares; slot dropped"
                     ),
+                    path: None,
                 });
                 continue;
             }

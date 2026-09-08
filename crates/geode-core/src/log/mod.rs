@@ -253,6 +253,7 @@ impl LogLevels {
             layer,
             file: None,
             message,
+            path: None,
         };
         let Some(value) = config.get("app", "log") else {
             return (levels, diags);

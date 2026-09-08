@@ -57,6 +57,7 @@ impl DerivedDimensions {
                 layer: None,
                 file: None,
                 message: format!("dimension '{name}': {m}"),
+                path: None,
             };
             let Some(table) = value.as_table() else {
                 diags.push(bad("not a table".into()));

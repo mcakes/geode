@@ -147,6 +147,7 @@ impl Scope {
             layer: None,
             file: None,
             message,
+            path: None,
         };
         let mut diags: Vec<Diagnostic> = self
             .columns()

@@ -208,6 +208,7 @@ impl ViewSpec {
             layer: None,
             file: None,
             message: format!("view '{}': {m}", self.name),
+            path: None,
         };
 
         let Some(ds) = schema.dataset(&self.dataset) else {
@@ -316,6 +317,7 @@ impl ViewSpec {
                 layer: None,
                 file: None,
                 message: "top-level 'default' must be a string naming a view".to_string(),
+                path: None,
             });
         }
 
@@ -331,6 +333,7 @@ impl ViewSpec {
                 layer: None,
                 file: None,
                 message: format!("view '{name}': {m}"),
+                path: None,
             };
             let Some(table) = value.as_table() else {
                 diags.push(bad("not a table".into()));
@@ -525,6 +528,7 @@ impl ViewSpec {
                     layer: None,
                     file: None,
                     message: format!("default view '{default_name}' does not exist"),
+                    path: None,
                 }),
             },
             None => out.sort_by(|a, b| a.name.cmp(&b.name)),

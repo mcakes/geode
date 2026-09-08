@@ -542,6 +542,7 @@ pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
                           shipped literal bindings (ctrl+1..9, ctrl+0, ctrl+k, ctrl+/ …); \
                           use \"alt\" or \"cmd\""
                     .into(),
+                path: None,
             }],
         ),
         Some("cmd") => (Modifiers::CMD, Vec::new()),

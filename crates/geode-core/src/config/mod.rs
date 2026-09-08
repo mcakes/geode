@@ -44,6 +44,13 @@ pub struct Diagnostic {
     pub layer: Option<Layer>,
     pub file: Option<PathBuf>,
     pub message: String,
+    /// The reader's own key path into the doc, e.g. `"app.theme.name"`
+    /// (Phase 4b Task 4). `None` by default — every existing constructor
+    /// (`Diagnostic::error`/`warning`, every literal build site across
+    /// the workspace) leaves it unset; 4c's config dialogs attach it to
+    /// a field row via [`Self::with_path`]. Not filled in by any reader
+    /// in 4b.
+    pub path: Option<String>,
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -71,6 +78,7 @@ impl Diagnostic {
             layer: Some(layer),
             file: Some(file),
             message: message.into(),
+            path: None,
         }
     }
 
@@ -80,7 +88,17 @@ impl Diagnostic {
             layer: Some(layer),
             file: Some(file),
             message: message.into(),
+            path: None,
         }
+    }
+
+    /// Attach the reader's own key path into the doc (Phase 4b Task 4;
+    /// consumed by 4c's config dialogs — see the `path` field's own doc
+    /// comment). A builder, not a constructor parameter: every existing
+    /// call site of `error`/`warning` stays unchanged.
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 
@@ -103,6 +121,7 @@ impl LayerDoc {
             layer: Some(Layer::Builtin),
             file: None,
             message: format!("builtin doc '{name}': {e}"),
+            path: None,
         })?;
         Ok(LayerDoc {
             layer: Layer::Builtin,
@@ -288,6 +307,18 @@ mod tests {
         assert_eq!(diag.to_string(), "[user] /path/keymap.toml: bad toml");
     }
 
+    /// Phase 4b Task 4: `path` defaults to `None` on every constructor
+    /// (`error`/`warning`) and `with_path` is the one door that sets it —
+    /// 4c's config dialogs attach a reader's key path to a field row
+    /// through this builder.
+    #[test]
+    fn with_path_sets_the_field_and_defaults_to_none() {
+        let diag = Diagnostic::error(Layer::User, PathBuf::from("app.toml"), "bad");
+        assert_eq!(diag.path, None);
+        let diag = diag.with_path("app.theme.name");
+        assert_eq!(diag.path.as_deref(), Some("app.theme.name"));
+    }
+
     #[test]
     fn display_with_layer_and_no_file() {
         let diag = Diagnostic {
@@ -295,6 +326,7 @@ mod tests {
             layer: Some(Layer::Builtin),
             file: None,
             message: "builtin doc invalid".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "[builtin] <no file>: builtin doc invalid");
     }
@@ -306,6 +338,7 @@ mod tests {
             layer: None,
             file: Some(PathBuf::from("app.toml")),
             message: "unrecognized key".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "app.toml: unrecognized key");
     }
@@ -317,6 +350,7 @@ mod tests {
             layer: None,
             file: None,
             message: "generic warning".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "<no file>: generic warning");
     }
