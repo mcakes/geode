@@ -80,7 +80,16 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
 /// `shell/tests/occupants.rs`'s job).
 #[gpui::test]
 fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) {
-    let (services, _log) = services_with_recorder();
+    // MIN-8 (fix round 1): a "diagnostics"-kind factory registered, so
+    // this test can assert the click actually reached `open_module
+    // ("diagnostics", ..)` — not merely that a click on the summary
+    // split *something* open.
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
@@ -115,6 +124,11 @@ fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) 
 
     let tile = shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile());
     assert!(tile.is_some(), "the click split a tile open");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile.unwrap())),
+        Some("diagnostics"),
+        "the click must reach open_module(\"diagnostics\", ..), not just split something"
+    );
 }
 
 /// `hot_reload::apply_reload`'s `[log]`-change detection (Phase 4b

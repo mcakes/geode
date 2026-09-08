@@ -1436,6 +1436,25 @@ impl ShellView {
             cx.notify();
             return;
         }
+        // MIN-7 (Phase 4b Task 5 fix round 1): two `open_module` calls for
+        // the same kind within one render (a double `mod+shift+d` press,
+        // key-repeat) would otherwise both miss the "existing occupant"
+        // search above — the first call's split tile has no occupant yet
+        // (`ensure_occupants` only creates one at the top of the *next*
+        // render), so the second call splits again and overwrites
+        // `pending_kind_for_new_tile`, leaving one tile hosting `kind` and
+        // a stray second one hosting the default kind. A pending request
+        // for the SAME kind is a no-op — the tile that request will
+        // create is, for all `open_module`'s purposes, already "the one
+        // open occupant of this kind" the moment it's requested, whether
+        // or not `ensure_occupants` has caught up yet. A pending request
+        // for a *different* kind still overwrites, same as before (last
+        // request wins, unambiguous — nothing between two `open_module`
+        // calls for different kinds within one render should silently
+        // drop either).
+        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+            return;
+        }
         self.services
             .workspaces
             .split_active(Orientation::Horizontal);

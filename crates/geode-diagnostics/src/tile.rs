@@ -519,8 +519,16 @@ impl DiagnosticsTile {
                 cx.notify();
             });
         } else {
-            self.diagnostics.update(cx, |d, _cx| {
+            // MIN-5 (fix round 1): the `true` branch above notifies
+            // (`Diagnostics::watch`'s own doc comment calls that
+            // mandatory, for the bridge's drain); this branch used to
+            // discard `cx` (`|d, _cx|`) and never notify at all — every
+            // OTHER observer of this entity (not just the bridge) is
+            // owed the same courtesy on any real mutation, `unwatch`
+            // included.
+            self.diagnostics.update(cx, |d, cx| {
                 d.unwatch();
+                cx.notify();
             });
         }
     }
@@ -941,6 +949,50 @@ mod tests {
             .diagnostics
             .update(&mut vcx, |d, _| d.take_pending_catalog_request());
         assert!(pending);
+    }
+
+    /// MIN-5 (fix round 1): `visibility_watches_and_requests_a_catalog`
+    /// only ever covered `set_visible(true)` — nothing pinned the `false`
+    /// side, `Diagnostics::watch`'s own doc comment's mandatory
+    /// caller-must-notify contract on the way out, or `unwatch` actually
+    /// running at all (exactly what MAJ-2's `occupants.rs` fix depends
+    /// on downstream).
+    #[gpui::test]
+    fn set_visible_false_unwatches_and_notifies(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_visible(true, cx);
+        });
+        assert_eq!(h.diagnostics.read_with(&vcx, |d, _| d.watchers()), 1);
+
+        // A raw observer of our own, independent of the tile's own
+        // `cx.observe` — proves `set_visible(false)` itself notifies the
+        // entity (`Diagnostics::watch`'s own doc comment calls this
+        // mandatory; `unwatch` bumps no version, so nothing else here
+        // would wake a version-gated observer).
+        let notified = Rc::new(std::cell::Cell::new(false));
+        let notified_for_observer = notified.clone();
+        let diagnostics = h.diagnostics.clone();
+        vcx.update(|_, cx| {
+            cx.observe(&diagnostics, move |_, _| {
+                notified_for_observer.set(true);
+            })
+            .detach();
+        });
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_visible(false, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            h.diagnostics.read_with(&vcx, |d, _| d.watchers()),
+            0,
+            "set_visible(false) must unwatch"
+        );
+        assert!(
+            notified.get(),
+            "set_visible(false) must notify the entity itself"
+        );
     }
 
     // --- Fix round 1 -----------------------------------------------------

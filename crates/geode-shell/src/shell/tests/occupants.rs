@@ -525,6 +525,52 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     );
 }
 
+/// MIN-7 (Phase 4b Task 5 fix round 1): two `open_module` calls for the
+/// same kind within one render (a double `mod+shift+d` press, or
+/// key-repeat) — before the fix, both calls miss the "existing occupant"
+/// search (the first call's split tile has no occupant yet;
+/// `ensure_occupants` only creates one at the top of the *next* render),
+/// so a second call split a second tile and overwrote
+/// `pending_kind_for_new_tile`, leaving one tile hosting the requested
+/// kind and a stray second one hosting the roster's default. Two calls
+/// with no render between them must still yield exactly one split, one
+/// tile.
+#[gpui::test]
+fn two_open_module_calls_for_the_same_kind_before_any_render_split_only_once(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+            s.open_module("diagnostics", window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(
+        tiles.len(),
+        1,
+        "two open_module('diagnostics') calls with no render between them \
+         must split only once: {tiles:?}"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tiles[0])),
+        Some("diagnostics")
+    );
+}
+
 /// The other half of `open_module`'s contract: a kind with no registered
 /// factory (`services_with_recorder`'s roster only knows "rec") falls back
 /// to the roster's default kind rather than leaving the split tile
