@@ -3666,6 +3666,40 @@ run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never 
   '            if false {' \
   geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
 
+# ---- Phase 4b Task 6: the panic boundaries (the ingest error event, ----
+# ---- the crash file, the action tail) -----------------------------------
+
+run_mutation "ingest runner: the panic payload is dropped from the reported Failed.reason" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    reason: format!("ingest task panicked at {path}: {message}"),' \
+  '                    reason: format!("ingest task panicked at {path}"),' \
+  geode-data a_panicking_load_names_the_file_and_the_panic_payload
+
+run_mutation "crash file: the log ring's records are dropped from write_crash_file's output" \
+  crates/geode-app/src/crash.rs \
+  '    out.push_str("\n-- log tail --\n");
+    for r in records {
+        out.push_str(&format!("[{}] {} {}\n", r.level, r.target, r.message));
+    }' \
+  '    out.push_str("\n-- log tail --\n");' \
+  geode-app write_crash_file_contains_the_message_location_records_and_actions_in_order
+
+run_mutation "shell: dispatch never records the dispatched action into the tail" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&action.0);' \
+  '        let _ = &action.0;' \
+  geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
+
+run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
+  crates/geode-app/src/crash.rs \
+  '    for old in &files[..files.len() - keep] {' \
+  '    for old in &files[..files.len() - keep - 1] {' \
+  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
