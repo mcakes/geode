@@ -2649,6 +2649,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "gpui",
+ "gpui-component",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "geode-shell"
 version = "0.1.0"
 dependencies = [
