@@ -53,7 +53,7 @@ pub(crate) fn compile_distinct_with_cache(
         else {
             continue;
         };
-        let era = era_for(conn, &ds.name, ds, &params.as_of)?;
+        let era = era_for(conn, &ds.name, &params.as_of)?;
         let scope = compile_scope_cached(conn, &params.scope, ds, grain, dims, era.era(), cache)?;
         let derived = dims.get(&params.column);
         let value_expr = match derived {
@@ -223,6 +223,9 @@ grain = "instrument"
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         store.apply_schema(schema.dataset("risk").unwrap()).unwrap();
         store.apply_schema(schema.dataset("ref").unwrap()).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         Fixture {
             _dir: dir,
             store,
@@ -342,6 +345,18 @@ grain = "instrument"
                     TIMESTAMPTZ '2026-08-10T00:00:00Z');",
             )
             .unwrap();
+        // `compile_distinct` resolves each dataset's era through
+        // `era_for`, which now reads the `generations` summary rather
+        // than scanning tables directly -- rebuild it from this raw
+        // fixture's tables ("ref" has none, so its summary stays empty).
+        for ds in &f.schema.datasets {
+            crate::store::ddl::rebuild_generations(
+                f.conn(),
+                &ds.name,
+                &crate::store::ddl::history_of(&ds.name, ds),
+            )
+            .unwrap();
+        }
         f
     }
 

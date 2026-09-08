@@ -482,30 +482,16 @@ impl DataService {
             AsOf::Live => return Catalog::new(&self.conn).book_freshness(dataset),
             AsOf::At(t) => t,
         };
-        let Some(ds) = self.config.schema.dataset(dataset) else {
+        if self.config.schema.dataset(dataset).is_none() {
             return Ok(Vec::new());
         };
-        let tables: Vec<String> = ds
-            .grains()
-            .into_iter()
-            .flat_map(|g| {
-                [
-                    crate::store::ddl::table_name(
-                        dataset,
-                        g,
-                        crate::store::ddl::TableKind::Archive,
-                    ),
-                    crate::store::ddl::table_name(dataset, g, crate::store::ddl::TableKind::Live),
-                ]
-            })
-            .collect();
 
         // The oldest generation contributing to each book, which is the
         // same stalest-input rule live freshness applies (§4.5) — a book
         // is as fresh as the stalest file behind it, not the newest.
         let mut by_book: std::collections::BTreeMap<Option<String>, DateTime<Utc>> =
             std::collections::BTreeMap::new();
-        for g in crate::query::as_of::resolve_generations(&self.conn, &tables, at)? {
+        for g in crate::query::as_of::resolve_generations(&self.conn, dataset, at)? {
             let book = g.book.clone();
             by_book
                 .entry(book)
@@ -919,6 +905,17 @@ mod tests {
                    from risk_snapshot_position_live limit 1;",
             )
             .unwrap();
+        // The insert above went straight to the archive, bypassing
+        // `publish_file`'s own generations-summary maintenance -- rebuild
+        // it so `era_for`'s resolve (which now reads the summary, not the
+        // tables directly) can see the ghost generation.
+        let ds = svc.config.schema.dataset("risk_snapshot").unwrap();
+        crate::store::ddl::rebuild_generations(
+            &writer,
+            "risk_snapshot",
+            &crate::store::ddl::history_of("risk_snapshot", ds),
+        )
+        .unwrap();
 
         let requested = chrono::DateTime::parse_from_rfc3339("2026-08-30T00:00:00Z")
             .unwrap()

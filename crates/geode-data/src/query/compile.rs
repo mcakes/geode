@@ -8,7 +8,7 @@
 
 use crate::query::scope_sql::{DictionaryCache, Era, compile_scope_cached};
 use crate::store::StoreError;
-use crate::store::ddl::{TableKind, table_name};
+use crate::store::ddl::TableKind;
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::{Attribution, ScopeSemantics, attribution_of};
@@ -261,23 +261,6 @@ fn derived_for<'a>(
         .collect()
 }
 
-/// Every table a dataset's history lives in: the archive **and** live for
-/// each grain. Generations are resolved across all of them — a partition
-/// can be missing from one grain while present at another (a cash-only
-/// book has no underlying rows), and the generation a partition holds now
-/// is in live and nowhere else (see `Era::relation`).
-fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
-    ds.grains()
-        .into_iter()
-        .flat_map(|g| {
-            [
-                table_name(dataset, g, TableKind::Archive),
-                table_name(dataset, g, TableKind::Live),
-            ]
-        })
-        .collect()
-}
-
 /// One dataset's resolved era (spec §6.5): which table kind to read and,
 /// for an as-of query, the generation predicate and the oldest generation
 /// actually resolved. Lifted out of `compile_view` so `compile_distinct`
@@ -300,13 +283,14 @@ impl ResolvedEra {
 
 /// Resolve which era `dataset` should be read under for `as_of` (spec
 /// §6.5). Live carries no generation predicate at all; only the as-of
-/// path pays for history, resolved across every table the dataset's
-/// history lives in — not one grain's, since a partition can be missing
-/// from one grain while present at another (see `resolve_generations`).
+/// path pays for history, resolved from the `generations` summary (spec
+/// §6.5 as amended) -- which is itself maintained across every table the
+/// dataset's history lives in, not one grain's, since a partition can be
+/// missing from one grain while present at another (see
+/// `resolve_generations`).
 pub(crate) fn era_for(
     conn: &Connection,
     dataset: &str,
-    ds: &DatasetSpec,
     as_of: &crate::query::as_of::AsOf,
 ) -> Result<ResolvedEra, StoreError> {
     let mut resolved_as_of: std::collections::BTreeMap<String, chrono::DateTime<chrono::Utc>> =
@@ -314,8 +298,7 @@ pub(crate) fn era_for(
     let (kind, generations) = match as_of {
         crate::query::as_of::AsOf::Live => (TableKind::Live, None),
         crate::query::as_of::AsOf::At(t) => {
-            let gens =
-                crate::query::as_of::resolve_generations(conn, &history_of(dataset, ds), *t)?;
+            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
             if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
                 resolved_as_of.insert(dataset.to_string(), oldest);
             }
@@ -401,7 +384,7 @@ pub(crate) fn compile_view_with_cache(
     // not one grain's: a partition can be missing from one grain while
     // present at another, and resolving from one would drop it from every
     // grain's answer (see `resolve_generations`).
-    let resolved = era_for(conn, &view.dataset, ds, as_of)?;
+    let resolved = era_for(conn, &view.dataset, as_of)?;
     let mut resolved_as_of = resolved.resolved_as_of.clone();
     // One era for the whole statement: every aggregate, the spine's
     // fallback scan, the scope's membership probes and the cross-dataset
@@ -786,11 +769,7 @@ pub(crate) fn compile_view_with_cache(
                 // Each dataset has its own generations, so the spine's
                 // predicate does not apply here. Without this a
                 // historical join reads every archived generation at once.
-                let gens = crate::query::as_of::resolve_generations(
-                    conn,
-                    &history_of(&join.dataset, joined_ds),
-                    *t,
-                )?;
+                let gens = crate::query::as_of::resolve_generations(conn, &join.dataset, *t)?;
                 if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {
                     resolved_as_of.insert(join.dataset.clone(), oldest);
                 }
@@ -1054,6 +1033,9 @@ kind = "measure"
         store
             .apply_schema(schema().dataset("risk_snapshot").unwrap())
             .unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -1065,6 +1047,22 @@ kind = "measure"
             )
             .unwrap();
         (dir, store)
+    }
+
+    /// Rebuild the `generations` summary for every dataset in `schema`
+    /// from its own tables (`store::ddl::history_of`). `resolve_generations`
+    /// now reads the summary rather than scanning tables directly, so any
+    /// fixture built with raw SQL (bypassing `publish_file`'s own
+    /// maintenance) and then queried under `AsOf::At` needs this first.
+    fn rebuild_all_generations(store: &crate::store::Store, schema: &SchemaSpec) {
+        for ds in &schema.datasets {
+            crate::store::ddl::rebuild_generations(
+                store.writer(),
+                &ds.name,
+                &crate::store::ddl::history_of(&ds.name, ds),
+            )
+            .unwrap();
+        }
     }
 
     fn compile_with(store: &crate::store::Store, view: &ViewSpec) -> CompiledQuery {
@@ -1231,6 +1229,7 @@ kind = "dimension"
                  values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, TIMESTAMPTZ '2026-08-01 00:00:00Z');",
             )
             .unwrap();
+        rebuild_all_generations(&store, &schema);
         let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
@@ -1288,6 +1287,7 @@ kind = "dimension"
                  values ('BK0','L0','P1','C','I1', 4200.0, 'b', 1, 1, TIMESTAMPTZ '2026-07-20 00:00:00Z');",
             )
             .unwrap();
+        rebuild_all_generations(&store, &schema);
 
         let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
             .unwrap()
@@ -2016,9 +2016,11 @@ kind = "measure"
                 .into_iter()
                 .filter(|c| Grain::Underlying.key_columns().contains(c))
         {
-            let live = table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
+            let live =
+                crate::store::ddl::table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
             crate::store::ddl::refresh_enum(conn, "risk_snapshot", col, &live, &live).unwrap();
         }
+        rebuild_all_generations(&store, &schema());
         (dir, store)
     }
 
@@ -2308,6 +2310,7 @@ kind = "measure"
                       TIMESTAMPTZ '2026-08-01 00:00:00Z';",
         )
         .unwrap();
+        rebuild_all_generations(&store, &schema());
 
         let at = chrono::DateTime::parse_from_rfc3339("2026-08-15T00:00:00Z")
             .unwrap()
@@ -2371,6 +2374,7 @@ kind = "measure"
                    ('BK1','L1','P2','C','I2','SPX', 5, 'b1', 3, 3, TIMESTAMPTZ '2026-08-01 00:00:00Z');",
             )
             .unwrap();
+        rebuild_all_generations(&store, &schema());
         let at = |s: &str| {
             chrono::DateTime::parse_from_rfc3339(s)
                 .unwrap()
@@ -3574,7 +3578,8 @@ kind = "measure"
             .find(|c| c.name == "underlying_ref")
             .unwrap()
             .textual = true;
-        let live = table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
+        let live =
+            crate::store::ddl::table_name("risk_snapshot", Grain::Underlying, TableKind::Live);
         crate::store::ddl::refresh_enum(
             store.writer(),
             "risk_snapshot",

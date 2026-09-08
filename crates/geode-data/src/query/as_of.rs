@@ -30,30 +30,82 @@ pub struct ResolvedGeneration {
     pub source_time: DateTime<Utc>,
 }
 
-/// The newest generation at or before `at`, for every partition that
-/// existed by then, across **all** of the tables a dataset's history
-/// lives in — every grain's archive *and* live.
+/// The newest generation at or before `at`, for every partition of
+/// `dataset` that existed by then.
 ///
-/// It must be all of them, in both directions. A generation is a *file*,
-/// and one file publishes every grain under a single `gen_id` — but a
-/// partition can be absent from one grain's archive while present at
-/// another (a cash-only book has no underlying rows; a grain added later
-/// has no history at all while coarser grains have years). And the
-/// generation a partition holds *now* is in live and nowhere else: the
-/// publish transaction moves the outgoing generation to the archive, it
-/// does not copy the incoming one there (§4.3). Resolving from the archive
-/// alone answers "as of an hour ago" with this morning's *previous* file,
-/// and finds nothing at all for a partition published only once. Either
-/// omission narrows the answer silently, the same class of defect as
-/// matching a NULL book with `=`.
+/// Reads the `generations` summary table (`store::ddl`), not the data
+/// tables: `publish_file` and `retention::sweep` maintain it inside their
+/// own transactions (spec §6.5 as amended), so it cannot lag what the
+/// tables hold, and this resolve no longer scans the archive at all — it
+/// was 543 ms of compile at ~3000 generations before this table existed
+/// (docs/perf.md, "Phase 4a: the as-of baseline"). `store::ddl::
+/// rebuild_generations` is the migration path for a database written
+/// before the summary existed (`DataService::open`), and doubles as the
+/// tests' oracle — the summary is defined to equal what it produces.
+///
+/// The summary itself is built the same way this function used to read:
+/// unioned across **all** of a dataset's tables — every grain's archive
+/// *and* live. It must be all of them, in both directions. A generation
+/// is a *file*, and one file publishes every grain under a single
+/// `gen_id` — but a partition can be absent from one grain's archive
+/// while present at another (a cash-only book has no underlying rows; a
+/// grain added later has no history at all while coarser grains have
+/// years). And the generation a partition holds *now* is in live and
+/// nowhere else: the publish transaction moves the outgoing generation to
+/// the archive, it does not copy the incoming one there (§4.3). Resolving
+/// from the archive alone answers "as of an hour ago" with this morning's
+/// *previous* file, and finds nothing at all for a partition published
+/// only once. Either omission narrows the answer silently, the same class
+/// of defect as matching a NULL book with `=`.
 ///
 /// Ties on `source_time` break on `gen_id`, newest first. They are
 /// ordinary: a corrected republish keeps its source time (§4.4) and the
 /// generation it replaced goes to the archive with the same stamp, so the
-/// archive holds two generations of one partition at one instant. Without
+/// summary holds two generations of one partition at one instant. Without
 /// the tiebreak the window function's choice is whatever order the rows
 /// came back in, and `retention.rs` can keep the one this drops.
 pub fn resolve_generations(
+    conn: &Connection,
+    dataset: &str,
+    at: DateTime<Utc>,
+) -> Result<Vec<ResolvedGeneration>, StoreError> {
+    let sql = "select batch, book, gen_id, source_time from (
+             select batch, book, gen_id, source_time,
+                    row_number() over (
+                        partition by batch, book
+                        order by source_time desc, gen_id desc
+                    ) as rn
+             from generations where dataset = ? and source_time <= ?
+         ) where rn = 1";
+    let err = |source| StoreError::Sql {
+        statement: sql.to_string(),
+        source,
+    };
+    let mut stmt = conn.prepare(sql).map_err(err)?;
+    let rows = stmt
+        .query_map(duckdb::params![dataset, at], |r| {
+            Ok(ResolvedGeneration {
+                batch: r.get(0)?,
+                book: r.get(1)?,
+                gen_id: r.get(2)?,
+                source_time: r.get(3)?,
+            })
+        })
+        .map_err(err)?;
+    // Propagated, not swallowed. Discarding a row here narrows the
+    // resolved generation set, which silently narrows the *result* — a
+    // query that answers with less data than it should and says nothing.
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)
+}
+
+/// Test-only oracle: `resolve_generations`, before the summary table
+/// existed -- a full scan of `tables` rather than a read of `generations`.
+/// Kept so a scenario test can assert the two agree, and so the
+/// resolve's own doc-commented reasoning (every table, both directions;
+/// the tie-break) stays checked against an independent implementation,
+/// not just against itself.
+#[cfg(test)]
+pub(crate) fn resolve_from_tables(
     conn: &Connection,
     tables: &[String],
     at: DateTime<Utc>,
@@ -91,9 +143,6 @@ pub fn resolve_generations(
             })
         })
         .map_err(err)?;
-    // Propagated, not swallowed. Discarding a row here narrows the
-    // resolved generation set, which silently narrows the *result* — a
-    // query that answers with less data than it should and says nothing.
     rows.collect::<Result<Vec<_>, _>>().map_err(err)
 }
 
@@ -191,11 +240,30 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
+    /// `resolve_generations` now reads the `generations` summary, not
+    /// `tables` directly -- so every test here rebuilds the summary from
+    /// its raw fixture tables first (exercising `rebuild_generations` on
+    /// every call) and then resolves by dataset name. The dataset name is
+    /// arbitrary for these fixtures; only the two-dataset filter test
+    /// below cares that it is one of two.
+    fn resolve_after_rebuild(
+        store: &crate::store::Store,
+        dataset: &str,
+        tables: &[String],
+        at: DateTime<Utc>,
+    ) -> Result<Vec<ResolvedGeneration>, StoreError> {
+        crate::store::ddl::rebuild_generations(store.writer(), dataset, tables)?;
+        resolve_generations(store.writer(), dataset, at)
+    }
+
     /// An archive with two partitions refreshing on different clocks:
     /// BK000 at 07:00 and 14:00, BK001 only at 09:00.
     fn fixture() -> (tempfile::TempDir, crate::store::Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -216,8 +284,9 @@ mod tests {
     #[test]
     fn resolves_the_newest_generation_at_or_before_the_request() {
         let (_d, store) = fixture();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-30T10:00:00Z"),
         )
@@ -236,8 +305,9 @@ mod tests {
         // Books refresh independently, so 'as it stood at T' is per
         // partition, not one dataset-wide generation (spec §4.5).
         let (_d, store) = fixture();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-30T08:00:00Z"),
         )
@@ -254,6 +324,9 @@ mod tests {
         // loud failure is the only honest outcome.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -264,8 +337,12 @@ mod tests {
                    ('b', 'BK000', 'not-a-number', '2026-08-30T07:00:00Z');",
             )
             .unwrap();
-        let err = resolve_generations(
-            store.writer(),
+        // The unreadable row is caught at rebuild time now -- the cast
+        // fails inserting into `generations`, before `resolve_generations`
+        // ever runs. Either way the row must never silently vanish.
+        let err = resolve_after_rebuild(
+            &store,
+            "ds",
             &["bad_archive".to_string()],
             ts("2026-08-30T10:00:00Z"),
         );
@@ -289,6 +366,9 @@ mod tests {
         // wrong. Verified to fail without the `gen_id desc` term.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -305,8 +385,9 @@ mod tests {
             )
             .unwrap();
 
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["straddle_archive".to_string(), "straddle_live".to_string()],
             ts("2026-08-30T10:00:00Z"),
         )
@@ -337,6 +418,9 @@ mod tests {
         // with two rows the mutation survived two runs in three.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -354,13 +438,15 @@ mod tests {
                    ('BK000', 'b', 8, '2026-08-30T07:00:00Z');",
             )
             .unwrap();
+        crate::store::ddl::rebuild_generations(
+            store.writer(),
+            "ds",
+            &["risk_snapshot_position_archive".to_string()],
+        )
+        .unwrap();
         for _ in 0..20 {
-            let gens = resolve_generations(
-                store.writer(),
-                &["risk_snapshot_position_archive".to_string()],
-                ts("2026-08-30T10:00:00Z"),
-            )
-            .unwrap();
+            let gens =
+                resolve_generations(store.writer(), "ds", ts("2026-08-30T10:00:00Z")).unwrap();
             assert_eq!(gens.len(), 1);
             assert_eq!(gens[0].gen_id, 8, "the correction wins, deterministically");
         }
@@ -374,6 +460,9 @@ mod tests {
         // id, different instants — the predicate must pick one.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -385,8 +474,9 @@ mod tests {
                    ('BK000', 'b', 1, 5, '2026-08-30T09:00:00Z');",
             )
             .unwrap();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-30T10:00:00Z"),
         )
@@ -408,8 +498,9 @@ mod tests {
     #[test]
     fn a_time_before_all_history_resolves_to_nothing() {
         let (_d, store) = fixture();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-29T00:00:00Z"),
         )
@@ -420,8 +511,9 @@ mod tests {
     #[test]
     fn the_predicate_selects_exactly_the_resolved_generations() {
         let (_d, store) = fixture();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-30T10:00:00Z"),
         )
@@ -451,8 +543,9 @@ mod tests {
         // archive and prunes nothing (docs/perf.md, "the range prefilter
         // degenerates on a real archive").
         let (_d, store) = fixture();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &["risk_snapshot_position_archive".to_string()],
             ts("2026-08-30T10:00:00Z"),
         )
@@ -489,6 +582,9 @@ mod tests {
         // §4.4, §6.5).
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
         store
             .writer()
             .execute_batch(
@@ -504,8 +600,9 @@ mod tests {
                    ('b', NULL, 1, 999, '2026-08-30T14:00:00Z');",
             )
             .unwrap();
-        let gens = resolve_generations(
-            store.writer(),
+        let gens = resolve_after_rebuild(
+            &store,
+            "ds",
             &[
                 "bookless_position_archive".to_string(),
                 "bookless_position_live".to_string(),
@@ -547,5 +644,94 @@ mod tests {
     #[test]
     fn an_empty_resolution_selects_no_rows_rather_than_all() {
         assert_eq!(generation_predicate(&[]), "false");
+    }
+
+    #[test]
+    fn resolve_reads_only_the_named_dataset() {
+        // Two datasets sharing a (batch, book) with different, larger
+        // generations: if the `where dataset = ?` filter were ever
+        // dropped, resolving 'a' would see 'b's newer generation through
+        // the same `partition by (batch, book)` window and answer wrong
+        // rather than merely answering more.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into generations values
+                   ('a', 'b', 'BK0', 1, '2026-08-30T07:00:00Z'),
+                   ('b', 'b', 'BK0', 99, '2026-08-30T09:00:00Z');",
+            )
+            .unwrap();
+        let gens = resolve_generations(store.writer(), "a", ts("2026-08-30T10:00:00Z")).unwrap();
+        assert_eq!(gens.len(), 1);
+        assert_eq!(
+            gens[0].gen_id, 1,
+            "dataset 'a's own generation, not 'b's newer one"
+        );
+    }
+
+    #[test]
+    fn resolve_generations_agrees_with_a_full_table_scan_across_four_instants() {
+        // The oracle: three generations across two batches -- a corrected
+        // republish (tied source time, straddling archive and live) and
+        // one bookless partition -- resolving from the summary must equal
+        // a full scan of the tables at every instant that matters: before
+        // all history, at the tie, in between, and after everything.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "create table oracle_position_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 create table oracle_position_live(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 -- BK000: a corrected republish tied at 07:00, straddling
+                 -- archive (gen 1) and live (gen 2).
+                 insert into oracle_position_archive values
+                   ('BK000', 'BK000', 1, '2026-08-30T07:00:00Z');
+                 insert into oracle_position_live values
+                   ('BK000', 'BK000', 2, '2026-08-30T07:00:00Z'),
+                   -- BK001: the bookless partition, published once, later.
+                   ('BK001', NULL, 3, '2026-08-30T09:00:00Z');",
+            )
+            .unwrap();
+        let tables = [
+            "oracle_position_archive".to_string(),
+            "oracle_position_live".to_string(),
+        ];
+        crate::store::ddl::rebuild_generations(store.writer(), "risk_snapshot", &tables).unwrap();
+
+        fn sorted(
+            gens: Vec<ResolvedGeneration>,
+        ) -> Vec<(String, Option<String>, i64, DateTime<Utc>)> {
+            let mut v: Vec<_> = gens
+                .into_iter()
+                .map(|g| (g.batch, g.book, g.gen_id, g.source_time))
+                .collect();
+            v.sort();
+            v
+        }
+
+        for at in [
+            ts("2026-08-30T06:00:00Z"), // before all history
+            ts("2026-08-30T07:00:00Z"), // the tie instant
+            ts("2026-08-30T08:00:00Z"), // between the tie and BK001
+            ts("2026-08-30T10:00:00Z"), // after everything
+        ] {
+            let via_summary =
+                sorted(resolve_generations(store.writer(), "risk_snapshot", at).unwrap());
+            let via_tables = sorted(resolve_from_tables(store.writer(), &tables, at).unwrap());
+            assert_eq!(via_summary, via_tables, "disagreement at {at}");
+        }
     }
 }
