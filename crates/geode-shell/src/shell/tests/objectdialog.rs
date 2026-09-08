@@ -259,6 +259,16 @@ fn a_config_with_no_views_says_so(cx: &mut gpui::TestAppContext) {
 /// view was not forked" is the assertion that a user-layer `views.toml`
 /// never comes into existence.
 fn services_with_a_desk_view() -> ShellServices {
+    desk_view_services(&[])
+}
+
+/// That fixture plus `extra` user-layer documents, keyed by doc name.
+///
+/// Its one caller adds `view_presentation` and nothing else, which is
+/// exactly the state §4.1's split produces and no `views.toml` fixture
+/// can reach: a trader who hid a column has a user-layer file naming the
+/// view while the view itself is still the desk's.
+fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
@@ -276,8 +286,17 @@ fn services_with_a_desk_view() -> ShellServices {
             .parse()
             .unwrap(),
     };
+    let mut layered = vec![datasets, desk];
+    for (name, text) in extra {
+        layered.push(LayerDoc {
+            layer: Layer::User,
+            name: (*name).to_string(),
+            file: "<test:user>".into(),
+            table: text.parse().expect("fixture TOML parses"),
+        });
+    }
     services.config = Config::load(&ConfigSources {
-        builtin: vec![datasets, desk],
+        builtin: layered,
         desk: None,
         user: None,
     });
@@ -595,4 +614,69 @@ fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAp
     // Saying so is all it does: the draft is untouched and the modal stays.
     assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
     assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
+}
+
+/// **The undo for the commonest edit there is.** A desk view whose only
+/// user-layer trace is a `view_presentation.toml` entry — a trader who
+/// hid a column and nothing else — is overridden, and `r` reverts it.
+///
+/// Spec §5.3 assumed presentation always accompanies a doc override, so
+/// both verbs were gated on markers derived from the `views` doc alone:
+/// `r` answered "tree has no user override to revert" while the file it
+/// would have removed sat on disk. `d` still refuses — the view itself is
+/// the desk's — but it now names the verb that does work instead of
+/// denying the user has anything.
+#[gpui::test]
+fn revert_undoes_a_presentation_only_override(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+
+    // The browse row says so before anything is opened.
+    assert!(
+        cx.debug_bounds("objectdialog-overridden-tree").is_some(),
+        "a user-layer presentation entry is a user override, and the row has to show it"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("r reverts")),
+        "d must point at the verb that works rather than deny the override, got {notice:?}"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "d must not arm: the view itself is the desk's"
+    );
+
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "r arms on a presentation-only override"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("view_presentation.toml")),
+        "and it reverts the file that actually holds the override, got {notice:?}"
+    );
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("the presentation file is the one that gets rewritten");
+    assert!(
+        !written.contains("tree"),
+        "the view's presentation table is gone:\n{written}"
+    );
+    assert!(
+        !dir.path().join("views.toml").exists(),
+        "and reverting presentation must not touch the view's own doc"
+    );
 }

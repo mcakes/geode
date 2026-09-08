@@ -801,6 +801,14 @@ fn spawn_removals(
 /// builtin object the write would remove nothing and the object would
 /// still be there — a verb that appears to have failed, which is worse
 /// than one that explains itself.
+///
+/// The gate is the winning layer, not `overridden`, because presentation
+/// forks nothing: a desk view a trader has hidden a column on is still
+/// the desk's, and there is no *view* of theirs to delete. What there is
+/// is an override to revert, so the refusal names `r` rather than
+/// claiming they have nothing — the object reached this branch with
+/// `overridden` set only via `view_presentation.toml`, since a user-layer
+/// doc override would have made the user the winning layer above.
 fn arm_delete(shell: &mut ShellView) {
     match editing_row(shell) {
         Some(row) if row.layer == Layer::User => {
@@ -808,14 +816,21 @@ fn arm_delete(shell: &mut ShellView) {
                 draft.confirm = Some(Confirm::Delete);
             }
         }
-        Some(row) => set_notice(
-            shell,
-            format!(
-                "{} comes from the {} layer — there is nothing of yours to delete",
-                row.name,
-                row.layer.name()
-            ),
-        ),
+        Some(row) => {
+            let tail = if row.overridden {
+                " — but r reverts your changes to it"
+            } else {
+                ""
+            };
+            set_notice(
+                shell,
+                format!(
+                    "{} comes from the {} layer — there is nothing of yours to delete{tail}",
+                    row.name,
+                    row.layer.name()
+                ),
+            )
+        }
         None => set_notice(shell, "nothing is open".to_string()),
     }
 }
@@ -825,6 +840,11 @@ fn arm_delete(shell: &mut ShellView) {
 /// Gated on `overridden`, not on the winning layer: reverting deletes the
 /// user's copy, and on an object only the user layer defines that would
 /// delete the object outright instead of restoring anything.
+///
+/// `overridden` counts a user-layer `view_presentation.toml` entry as an
+/// override (`objectdialog::derive_rows`), which is what makes `r` the
+/// undo for hiding a column — the commonest edit §4.1's split exists to
+/// make cheap, and the one whose override never reaches `views.toml`.
 fn arm_revert(shell: &mut ShellView) {
     match editing_row(shell) {
         Some(row) if row.overridden => {

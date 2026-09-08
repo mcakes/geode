@@ -167,7 +167,12 @@ impl Domain {
     /// adds three more adapters onto this exact seam, which is why the
     /// hole is closed while there is still only one.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
-        derive_rows(config, self.doc(), self.summary_fn())
+        derive_rows(
+            config,
+            self.doc(),
+            Destination::Presentation.doc(self),
+            self.summary_fn(),
+        )
     }
 }
 
@@ -188,6 +193,15 @@ impl Domain {
 ///   reverting there would delete the user's own view rather than
 ///   restore anything (`render::arm_revert` gates on exactly this).
 ///
+/// "The user layer containing it" spans `presentation_doc` as well as
+/// `doc`, and that is not a refinement: §4.1's whole design is that
+/// hiding a column writes `view_presentation.toml` and forks nothing, so
+/// the commonest user override there is leaves `doc`'s user layer empty.
+/// Reading the markers off `doc` alone answered `r` with "no user
+/// override to revert" while the file `r` would have removed sat on
+/// disk. The `some earlier layer` half is still read off `doc` only —
+/// that is the half that guarantees reverting leaves an object behind.
+///
 /// Sorted by name rather than kept in file order: rows come from up to
 /// three documents, so "file order" would mean one file's order followed
 /// by whatever names the next file added, which is neither the user's
@@ -196,7 +210,22 @@ impl Domain {
 ///
 /// `config_version` is skipped — it is the schema stamp every layered
 /// doc carries, not an object.
-fn derive_rows(config: &Config, doc: &str, summary: fn(&toml::Value) -> String) -> Vec<ObjectRow> {
+fn derive_rows(
+    config: &Config,
+    doc: &str,
+    presentation_doc: &str,
+    summary: fn(&toml::Value) -> String,
+) -> Vec<ObjectRow> {
+    // Objects the user layer has personalised without overriding: a
+    // `view_presentation.toml` table names the object and forks nothing.
+    let personalised: BTreeSet<&str> = config
+        .layered_docs(presentation_doc)
+        .iter()
+        .filter(|layered| layered.layer == Layer::User)
+        .flat_map(|layered| layered.table.keys())
+        .filter(|name| *name != "config_version")
+        .map(String::as_str)
+        .collect();
     // Accumulated by name — one name can appear in up to three documents
     // and each appearance updates the same row — in a `BTreeMap`, whose
     // key order IS the by-name order described above, so the rows come
@@ -231,8 +260,8 @@ fn derive_rows(config: &Config, doc: &str, summary: fn(&toml::Value) -> String) 
     }
     rows.into_values()
         .map(|(layers, mut row)| {
-            row.overridden =
-                layers.contains(&Layer::User) && layers.iter().any(|l| *l < Layer::User);
+            let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());
+            row.overridden = mine && layers.iter().any(|l| *l < Layer::User);
             row
         })
         .collect()
@@ -1003,6 +1032,55 @@ mod tests {
         assert!(!rows[0].overridden);
     }
 
+    /// A presentation-only override **is** an override. A desk view a
+    /// trader has hidden a column on has a user-layer file naming it, so
+    /// `r` has to be offered: telling them "no user override to revert"
+    /// would be false about a file that demonstrably exists, and hiding a
+    /// column is the commonest edit this whole design exists to make
+    /// cheap. Spec §5.3 assumed presentation always accompanies a doc
+    /// override; it does not — that is the entire point of §4.1's split.
+    #[test]
+    fn a_presentation_only_override_is_marked_overridden() {
+        let config = config_from(&[
+            (Layer::Desk, "views", "[tree]\ndataset = \"risk\"\n"),
+            (
+                Layer::User,
+                "view_presentation",
+                "[tree]\nhidden = [\"npv\"]\n",
+            ),
+        ]);
+        let rows = Domain::Views.objects(&config);
+        let tree = rows.iter().find(|r| r.name == "tree").expect("tree");
+        assert_eq!(
+            tree.layer,
+            Layer::Desk,
+            "presentation forks nothing — the desk's copy still wins"
+        );
+        assert!(
+            tree.overridden,
+            "a user-layer view_presentation entry is a user override to revert"
+        );
+    }
+
+    /// And the guard that keeps `r` non-destructive: reverting deletes the
+    /// user's copy, so it may only be offered when something is left
+    /// behind. A view only the USER layer defines, personalised on top, is
+    /// still not overridden — reverting there would delete the view.
+    #[test]
+    fn a_user_only_object_with_presentation_is_still_not_overridden() {
+        let config = config_from(&[
+            (Layer::User, "views", "[mine]\ndataset = \"risk\"\n"),
+            (
+                Layer::User,
+                "view_presentation",
+                "[mine]\nhidden = [\"npv\"]\n",
+            ),
+        ]);
+        let rows = Domain::Views.objects(&config);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].overridden);
+    }
+
     /// The middle layer is the case a two-layer fixture cannot see: a
     /// desk view with no user copy is the desk's, not overridden, and a
     /// desk view the user overrode reports the USER as the winning layer
@@ -1296,12 +1374,11 @@ mod tests {
     }
 
     /// The presentation table is what `view_presentation.toml` receives:
-    /// order always, `hidden` and `width` only when there is something to
-    /// say.
+    /// `order` once the trader has actually reordered, and `hidden` and
+    /// `width` only when there is something to say.
     #[test]
     fn the_presentation_table_holds_order_hidden_and_width() {
         let mut draft = draft_for("tree");
-        draft.toggle_selected(); // hide `book`
         if let Some(FieldKind::OrderedList { items }) = draft
             .fields
             .iter_mut()
@@ -1310,16 +1387,63 @@ mod tests {
         {
             items[1].width = Some(120.0);
         }
+        draft.toggle_selected(); // hide `book`
+        draft.move_item(1); // and move it below `npv`
         let text = object_text(
             "tree",
             Domain::Views.to_table(&draft, Destination::Presentation),
         );
         assert!(
-            text.contains("order = [\"book\", \"npv\", \"delta01\"]"),
+            text.contains("order = [\"npv\", \"book\", \"delta01\"]"),
             "{text}"
         );
         assert!(text.contains("hidden = [\"book\"]"), "{text}");
         assert!(text.contains("npv = 120.0"), "{text}");
+    }
+
+    /// **A presentation save must not freeze the desk's own values.**
+    /// `order` and `width` are both read off the EFFECTIVE view, which
+    /// already carries whatever `views.toml` declared — so writing every
+    /// column's position and every declared width back into the trader's
+    /// file pins the desk's layout for that trader against the desk's
+    /// later changes. That is the same freeze [`Destination`] exists to
+    /// prevent, one field-granularity down, and it fires on the single
+    /// commonest edit there is: hiding one column.
+    #[test]
+    fn a_presentation_save_writes_only_what_the_trader_changed() {
+        let config = config_from(&[(
+            Layer::Desk,
+            "views",
+            "[tree]\ndataset = \"risk_snapshot\"\n\
+             [[tree.columns]]\nname = \"book\"\n\
+             [[tree.columns]]\nname = \"npv\"\nwidth = 140\n",
+        )]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.selected = draft
+            .rows()
+            .iter()
+            .position(|r| matches!(r, EditRow::Item { .. }))
+            .expect("the fixture view has columns");
+        assert_eq!(
+            draft.list_items("columns").map(|i| i[1].width),
+            Some(Some(140.0)),
+            "the desk's width reaches the draft — that is why it can be copied back"
+        );
+
+        draft.toggle_selected(); // hide `book`, and change nothing else
+        let text = object_text(
+            "tree",
+            Domain::Views.to_table(&draft, Destination::Presentation),
+        );
+        assert!(text.contains("hidden = [\"book\"]"), "{text}");
+        assert!(
+            !text.contains("order"),
+            "nothing was reordered, so pinning the desk's order is a freeze:\n{text}"
+        );
+        assert!(
+            !text.contains("140"),
+            "the desk's own width must not be copied into the trader's file:\n{text}"
+        );
     }
 
     /// A view with nothing hidden and no widths writes neither key, rather

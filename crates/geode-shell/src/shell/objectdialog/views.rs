@@ -13,6 +13,8 @@
 //! set itself to `views.toml` — so building it first settles the
 //! vocabulary before three thinner adapters depend on it.
 
+use std::collections::BTreeMap;
+
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
@@ -229,15 +231,31 @@ fn columns_for(source: &toml::Table, wanted: &[&str]) -> toml_edit::ArrayOfTable
 /// disk, because this table is replaced whole (see [`to_table`]). Empty
 /// `hidden`/`width` are omitted rather than written as empty containers —
 /// a file that says nothing is easier to hand-edit than one full of `[]`.
+///
+/// **Only what the trader actually changed is written.** `order` and
+/// `width` both arrive here off the *effective* view, which already
+/// carries whatever `views.toml` declared — so writing every column's
+/// position and every declared width back would pin the desk's layout
+/// for this trader against the desk's later changes. That is the same
+/// freeze [`Destination`] exists to prevent, one field-granularity down,
+/// and it would fire on the commonest edit there is: hiding one column
+/// would silently adopt the desk's order and widths forever. Both are
+/// therefore compared against [`doc_baseline`] — what this same save
+/// leaves in `views.toml` — and omitted when they still match it.
+/// `hidden` needs no such comparison: nothing but this file can set it.
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     let items = draft.list_items("columns").unwrap_or_default();
+    let (doc_order, doc_widths) = doc_baseline(draft);
 
-    let mut order = toml_edit::Array::new();
-    for item in items {
-        order.push(item.name.as_str());
+    let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+    if names != doc_order {
+        let mut order = toml_edit::Array::new();
+        for name in &names {
+            order.push(*name);
+        }
+        table["order"] = toml_edit::value(order);
     }
-    table["order"] = toml_edit::value(order);
 
     let mut hidden = toml_edit::Array::new();
     for item in items.iter().filter(|i| !i.included) {
@@ -249,15 +267,65 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
 
     let mut widths = toml_edit::Table::new();
     for item in items {
-        if let Some(width) = item.width {
-            widths[item.name.as_str()] = toml_edit::value(f64::from(width));
+        let Some(width) = item.width else { continue };
+        if doc_widths.get(item.name.as_str()) == Some(&width) {
+            continue; // the desk's own width, not the trader's
         }
+        widths[item.name.as_str()] = toml_edit::value(f64::from(width));
     }
     if !widths.is_empty() {
         table["width"] = toml_edit::Item::Table(widths);
     }
 
     table
+}
+
+/// The column order and the per-column widths **the view's own doc will
+/// hold after this same save** — read back out of [`columns_for`] rather
+/// than off `draft.source` directly, so the two halves of one save cannot
+/// disagree about what the doc says.
+///
+/// This is the "pre-presentation view" [`presentation_table`] compares
+/// against. Using the post-write doc rather than the raw source is what
+/// keeps a membership change honest: adding or dropping a column rewrites
+/// `views.toml`'s column list, and the trader has not reordered anything
+/// merely by doing so.
+fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
+    let wanted: Vec<&str> = draft
+        .list_items("columns")
+        .unwrap_or_default()
+        .iter()
+        .map(|i| i.name.as_str())
+        .collect();
+    let mut order = Vec::with_capacity(wanted.len());
+    let mut widths = BTreeMap::new();
+    for column in columns_for(&draft.source, &wanted).iter() {
+        let Some(name) = column.get("name").and_then(|item| item.as_str()) else {
+            continue;
+        };
+        // The doc's own name is borrowed from the draft's list rather than
+        // from the rendered table, which is a temporary.
+        let Some(name) = wanted.iter().find(|w| **w == name) else {
+            continue;
+        };
+        if let Some(width) = doc_width(column) {
+            widths.insert((*name).to_string(), width);
+        }
+        order.push(*name);
+    }
+    (order, widths)
+}
+
+/// One column table's declared `width`, read exactly as
+/// `ViewSpec::from_doc` reads it — an integer or a float, positive, cast
+/// to `f32`. Anything else is not a width the loader would have applied,
+/// so it is not one this can be compared against either.
+fn doc_width(column: &toml_edit::Table) -> Option<f32> {
+    let value = column.get("width")?.as_value()?;
+    let width = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|i| i as f64))?;
+    (width > 0.0).then_some(width as f32)
 }
 
 /// Everything wrong with the draft as it stands (spec §7.2).
