@@ -1,15 +1,80 @@
-//! `sources.toml` (Phase 3 spec §5.2): one named table per source,
-//! atomic by name like every other named config object (foundation §8).
-//! Every problem is a diagnostic; a source that cannot be used is skipped
-//! and the rest load.
+//! `sources.toml` (Phase 3 spec §5.2): one named table per source, atomic
+//! by name like every other named config object (foundation §8). Every
+//! problem is a diagnostic; a source that cannot be used is skipped and
+//! the rest load.
+//!
+//! Lives in `geode-core`, not `geode-data`, because `geode-shell` may
+//! never depend on `geode-data` (workspace layering rule) but still needs
+//! to validate a `sources` doc for its own Sources config dialog (Phase 4c
+//! §2.2) — this reader has no dependency beyond `MergedDoc`, `SchemaSpec`
+//! and `Diagnostic`, all of which already live here, so the whole type
+//! (including the `Readiness`/`Priority` field types it carries) moves
+//! rather than being duplicated. `geode-data`'s ingest and discovery code
+//! keeps using `SourceSpec` unchanged, by re-export
+//! (`geode_data::source::SourceSpec`).
 
-use crate::source::{Priority, Readiness, SourceSpec};
-use geode_core::config::{Diagnostic, MergedDoc, Severity};
-use geode_core::schema::SchemaSpec;
+use crate::config::{Diagnostic, MergedDoc, Severity};
+use crate::schema::SchemaSpec;
+use std::path::Path;
 use std::time::Duration;
 
 const DEFAULT_POLL: Duration = Duration::from_secs(30);
 const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How a source decides a file is complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Readiness {
+    /// `<name>.done` exists and is at least as new as the CSV.
+    Sentinel,
+    /// No sentinel convention: require a stable (size, mtime) across N polls.
+    StableMtime { polls: u32 },
+}
+
+/// Where a source sits in the cold-start ladder (spec §5.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Priority {
+    /// Current risk on screen first.
+    LatestRisk,
+    /// Vol, instrument reference, scenario data.
+    LatestOther,
+    /// Older files not already in the database.
+    Backfill,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceSpec {
+    pub name: String,
+    pub dataset: String,
+    /// One or more directory globs (spec §5.1).
+    pub paths: Vec<String>,
+    pub readiness: Readiness,
+    pub priority: Priority,
+    pub poll_interval: Duration,
+    pub pending_timeout: Duration,
+    /// Regex with a named `batch` capture, applied to the file stem, that
+    /// strips the date component so business dates share a partition
+    /// (spec §4.3). Without one the whole stem is the batch.
+    pub batch_pattern: Option<String>,
+}
+
+impl SourceSpec {
+    pub fn batch_of(&self, csv: &Path) -> String {
+        let stem = csv
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let Some(pattern) = &self.batch_pattern else {
+            return stem;
+        };
+        let Ok(re) = regex::Regex::new(pattern) else {
+            return stem;
+        };
+        re.captures(&stem)
+            .and_then(|c| c.name("batch"))
+            .map(|m| m.as_str().to_string())
+            .unwrap_or(stem)
+    }
+}
 
 /// `30s`, `10m`, `2h` — integers with one of three units. Nothing else:
 /// a bare number has no unit and a fraction has no convention.
@@ -186,9 +251,8 @@ impl SourceSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{Priority, Readiness};
-    use geode_core::config::{LayerDoc, Severity, merge_docs};
-    use geode_core::schema::SchemaSpec;
+    use crate::config::{LayerDoc, Severity, merge_docs};
+    use crate::schema::SchemaSpec;
 
     fn schema() -> SchemaSpec {
         let text = r#"
@@ -203,7 +267,7 @@ role = "key"
         SchemaSpec::from_doc(&doc).0
     }
 
-    fn parse(text: &str) -> (Vec<SourceSpec>, Vec<geode_core::config::Diagnostic>) {
+    fn parse(text: &str) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
         let doc = merge_docs("sources", &[LayerDoc::builtin("sources", text).unwrap()]);
         SourceSpec::from_doc(&doc, &schema())
     }

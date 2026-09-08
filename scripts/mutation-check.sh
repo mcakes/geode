@@ -1092,19 +1092,25 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
   an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues
 
 # ---- sources config (Phase 3 §5.2)
+#
+# Re-anchored (Phase 4c §2.2): `SourceSpec::from_doc` moved from
+# geode-data/src/source/config.rs to geode-core/src/source_config.rs, so
+# the covering tests moved with it and the entries below now run against
+# geode-core, not geode-data — an unfiltered geode-data package check
+# would find neither the mutated line nor the test that used to catch it.
 
 run_mutation "sources: an undeclared dataset skips the source" \
-  crates/geode-data/src/source/config.rs \
+  crates/geode-core/src/source_config.rs \
   '                Some(d) if schema.dataset(d).is_some() => d.to_string(),' \
   '                Some(d) => d.to_string(),' \
-  geode-data \
+  geode-core \
   a_missing_or_unknown_dataset_is_an_error_and_the_source_is_skipped
 
 run_mutation "sources: a pattern without a batch capture is dropped" \
-  crates/geode-data/src/source/config.rs \
+  crates/geode-core/src/source_config.rs \
   '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
   '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),' \
-  geode-data \
+  geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
 # ---- discovery scheduler (Phase 3 §5.3)

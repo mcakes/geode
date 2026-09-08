@@ -39,6 +39,10 @@ toml = { version = "1.1.4", features = ["preserve_order"] }
 # `cargo tree -p geode-data -i arrow` before bumping.
 arrow = "58.4.0"
 chrono = "0.4.42"
+# `source_config::SourceSpec::batch_of`/`from_doc` compile and apply the
+# user-supplied `batch_pattern` (spec §4.3). Same version geode-data used
+# before this reader moved here (Phase 4c §2.2).
+regex = "1.11.1"
 # `scopes::scope_to_table` writes the TOML table `persist_scope_to_user_config`
 # (geode-shell) merges into the user layer's `scopes.toml` — `toml_edit`
 # rather than `toml`, matching every other read-modify-write config writer

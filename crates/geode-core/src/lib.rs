@@ -10,5 +10,6 @@ pub mod schema;
 pub mod scope;
 pub mod scopes;
 pub mod snapshot;
+pub mod source_config;
 pub mod tree;
 pub mod view;
