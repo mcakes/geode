@@ -4030,14 +4030,14 @@ run_mutation "service: an ingest failure is keyed by the source name, not the da
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                            let health_delivered = sink(DataEvent::Health {
-                                source,
-                                worst,
-                                detail,
-                            });
-                            delivered && health_delivered' \
-  '                            let _ = (source, worst, detail);
-                            delivered' \
+  '                                let health_delivered = sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                });
+                                delivered && health_delivered' \
+  '                                let _ = (worst, detail);
+                                delivered' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
 run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved to DataService's shared HealthTracker)" \
@@ -4087,16 +4087,34 @@ run_mutation "service: HealthTracker.report combines by taking the discovery lan
 
 run_mutation "service: the ingest sink never writes the load lane, so a publish never affects the tracker" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report_load(
+  '                    health_tracker.report_load_and_emit(
                         &source,
                         &batch,
                         health,
                         format!("{batch}: {reason}"),
-                    ) {' \
-  '                    match {
-                        let _ = (&batch, health, &reason);
-                        None::<(Health, String)>
-                    } {' \
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                // Not `delivered && sink(...)`: `&&`
+                                // short-circuits, and skipping the send
+                                // while the tracker has already recorded
+                                // the state as reported would lose this
+                                // transition for good (it never
+                                // re-reports).
+                                let health_delivered = sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                });
+                                delivered && health_delivered
+                            }
+                            None => delivered,
+                        },
+                    )' \
+  '                    {
+                        let _ = (&source, &batch, &health, &reason, &sink);
+                        delivered
+                    }' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
 # ---- final review round 4: NEW-5 (severity rank, the deciding lane's detail)
@@ -4124,6 +4142,17 @@ run_mutation "service: an identical re-report restamps its slot, so the calling 
     None
 }' \
   geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
+
+# The anchor below occurs twice (one door each); run_mutation replaces the
+# first, which is the discovery door — enough to break the ordering the
+# named test pins.
+run_mutation "service: the discovery door emits after dropping the tracker lock, so two reporters can reorder" \
+  crates/geode-data/src/service.rs \
+  '        emit(lanes.recombine())' \
+  '        let reported = lanes.recombine();
+        drop(sources);
+        emit(reported)' \
+  geode-data a_second_reporter_cannot_emit_between_a_decision_and_its_emission
 
 run_mutation "service: the load lane is keyed by source only, so any batch's clean publish clears every other" \
   crates/geode-data/src/service.rs \
