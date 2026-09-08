@@ -1534,20 +1534,7 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                     }
                 });
             }
-            if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    if f.replace_saved_scopes(saved) {
-                        cx.notify();
-                    }
-                });
-            }
-            if views_changed {
-                self.frame.update(cx, |f, cx| {
-                    f.note_config_reloaded();
-                    cx.notify();
-                });
-            }' \
+' \
   '            if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
@@ -1556,21 +1543,10 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                     }
                 });
             }
-            if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    if f.replace_saved_scopes(saved) {
-                        cx.notify();
-                    }
-                });
-            }
             if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
-                self.frame.update(cx, |f, cx| {
-                    f.note_config_reloaded();
-                    cx.notify();
-                });
-            }' \
+            }
+' \
   geode-shell \
   emits_config_reloaded_before_the_frame_notifies
 
@@ -2743,11 +2719,13 @@ run_mutation "bridge: a refused distinct request errors the picker instead of le
 run_mutation "M2: a text session that ends where it began pops its own undo entry" \
   crates/geode-shell/src/frame.rs \
   '    pub fn end_scope_session(&mut self) {
-        if let Some(base) = self.scope_session.take()
-            && self.scope_undo.last() == Some(&base)
-            && self.scope == base
+        if let Some(session) = self.scope_session.take()
+            && session.pushed
+            && self.scope_undo.last() == Some(&session.base)
+            && self.scope == session.base
         {
             self.scope_undo.pop();
+            self.scope_redo = session.redo_snapshot;
         }
     }' \
   '    pub fn end_scope_session(&mut self) {
@@ -2780,7 +2758,7 @@ run_mutation "M8: a placeholder occupant is excluded from the barrier's key set"
   '        let has_real_occupant = |id: &TileId| {
             self.occupants
                 .get(id)
-                .is_some_and(|o| o.kind != "placeholder")
+                .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
         };' \
   '        let has_real_occupant = |id: &TileId| self.occupants.contains_key(id);' \
   geode-shell a_placeholder_occupant_is_excluded_from_the_barriers_key_set
