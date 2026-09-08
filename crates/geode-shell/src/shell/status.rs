@@ -22,7 +22,7 @@
 //! workaround, which predated those tokens' use here.
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, div, px};
+use gpui::{App, IntoElement, MouseButton, Window, div, px};
 use gpui_component::ActiveTheme as _;
 use gpui_component::status_bar::StatusBar;
 
@@ -43,7 +43,10 @@ pub const HEIGHT: f32 = 26.0;
 /// diagnostics summary when `diagnostics_summary` is `Some` (Phase 4b
 /// §4.4: `Diagnostics::summary()` — source health, config errors and
 /// dropped events, in one terse line — same `warning` token, same
-/// reasoning), then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
+/// reasoning); a click on that segment calls `on_diagnostics_click`
+/// (Phase 4b Task 5 — `render.rs`'s call site dispatches
+/// `diagnostics::open` through it, the same door `mod+shift+d` uses).
+/// Then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
 /// is scoped to a past instant — an unmissable `AS OF {t} · :live to
 /// return` segment in the same warning tokens the toolbar's own AS OF
 /// badge uses, since spec §4.5 says nothing on screen may look live when
@@ -66,6 +69,7 @@ pub fn status_bar(
     reload_message: Option<&str>,
     restart_message: Option<&str>,
     diagnostics_summary: Option<&str>,
+    on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
     as_of: Option<&str>,
     theme_name: &str,
     cx: &App,
@@ -109,7 +113,10 @@ pub fn status_bar(
             div()
                 .text_color(theme.warning)
                 .debug_selector(|| "diagnostics-summary".to_string())
-                .child(message.to_string()),
+                .child(message.to_string())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_diagnostics_click(window, cx);
+                }),
         );
     }
     if let Some(t) = as_of {

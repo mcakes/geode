@@ -71,6 +71,52 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
     );
 }
 
+/// Clicking the status bar's diagnostics summary opens the diagnostics
+/// tile — same `open_module("diagnostics", ..)` door `mod+shift+d` uses
+/// (Phase 4b Task 5). `services_with_recorder`'s roster carries no
+/// "diagnostics" factory, so the split tile falls back to the default
+/// ("rec") kind — this test is only about the click reaching
+/// `open_module` at all, not about which factory answers it (that's
+/// `shell/tests/occupants.rs`'s job).
+#[gpui::test]
+fn clicking_the_diagnostics_summary_opens_a_tile(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    diagnostics.update(&mut cx, |d, cx| {
+        d.note_health(
+            "risk",
+            Health::Degraded { reason: "x".into() },
+            "x".into(),
+            SystemTime::now(),
+        );
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
+
+    let bounds = cx.debug_bounds("diagnostics-summary").unwrap();
+    cx.simulate_mouse_down(
+        bounds.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        bounds.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::default(),
+    );
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let tile = shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile());
+    assert!(tile.is_some(), "the click split a tile open");
+}
+
 /// `hot_reload::apply_reload`'s `[log]`-change detection (Phase 4b
 /// §4.3): a reload whose `app` doc now carries a different `[log]`
 /// table applies it through `LevelControl::set` exactly once, and

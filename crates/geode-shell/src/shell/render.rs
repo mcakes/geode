@@ -789,12 +789,22 @@ impl Render for ShellView {
         // field — an empty summary means nothing to report, same
         // "`None` clears it" contract `data_status` had.
         let diagnostics_summary = self.diagnostics.read(cx).summary();
+        // Clicking the summary opens the diagnostics tile (Phase 4b Task
+        // 5), same `cx.entity()`-captured-into-a-closure shape as
+        // `on_chip_close`/`on_chip_open` just below.
+        let diagnostics_click_entity = cx.entity();
+        let on_diagnostics_click = move |window: &mut Window, cx: &mut App| {
+            diagnostics_click_entity.update(cx, |view, cx| {
+                view.open_module("diagnostics", window, cx);
+            });
+        };
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
             reload_message.as_deref(),
             self.restart_required.as_deref(),
             (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
+            on_diagnostics_click,
             bar_model.as_of.as_deref(),
             self.services.theme.active_name(),
             cx,
