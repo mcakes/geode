@@ -3173,6 +3173,215 @@ run_mutation "hot_reload: an [log] change on reload is never applied" \
   '            if false && changed("app") {' \
   geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
 
+# --- Task 4 fix round 1: CRIT-1, MAJ-1..6, MIN-2..5,8..10 -------------
+
+run_mutation "diagnostics: CRIT-1 — an unreported source counts as pending in the summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            let Some(health) = &s.health else {
+                continue; // no report yet — not counted (CRIT-1)
+            };' \
+  '            let health = s.health.clone().unwrap_or(Health::Pending);' \
+  geode-shell a_described_but_unreported_source_is_not_counted_in_the_summary
+
+run_mutation "diagnostics: MAJ-2 — note_health's first-real-note guard defaults to Ok" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+        {
+            return;
+        }' \
+  '        if state.health.clone().unwrap_or(Health::Ok) == worst && state.detail == detail {
+            return;
+        }' \
+  geode-shell the_first_real_health_note_transitions_even_after_describe_source_and_note_polled
+
+run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged histogram while watched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.frame_hist.count() == hist.count()
+            && self.frame_hist.max_micros() == hist.max_micros()
+        {
+            return false;' \
+  '        if false {
+            return false;' \
+  geode-shell refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged
+
+run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.dropped_events > 0 {
+            parts.push(format!("{} dropped", self.dropped_events));
+        }
+
+        parts.join(" · ")
+    }' \
+  '        if self.dropped_events > 0 {
+            parts.push(format!("{} dropped", self.dropped_events));
+        }
+
+        if let Some(message) = &self.restart_required {
+            parts.push(format!("restart required: {message}"));
+        }
+
+        parts.join(" · ")
+    }' \
+  geode-shell set_restart_required_does_not_appear_in_the_summary
+
+run_mutation "diagnostics: MAJ-5 — note_config appends instead of replacing" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        if self.config == diags {
+            return;
+        }
+        self.config = diags.clone();
+        self.config_history.push_front((at, diags));' \
+  '    pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        if diags.is_empty() {
+            return;
+        }
+        self.config.extend(diags.clone());
+        self.config_history.push_front((at, diags));' \
+  geode-shell note_config_is_a_no_op_for_an_identical_batch
+
+run_mutation "diagnostics: MAJ-1 — summary() rebuilds the Rc<str> on a cache hit" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        {
+            let cache = self.summary_cache.borrow();
+            if cache.0 == self.version {
+                return cache.1.clone();
+            }
+        }' \
+  '        {
+            let cache = self.summary_cache.borrow();
+            if false {
+                return cache.1.clone();
+            }
+        }' \
+  geode-shell summary_reuses_the_same_allocation_when_the_version_is_unchanged
+
+run_mutation "diagnostics: MIN-2 — describe_source bumps for an identical summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        let state = self.sources.entry(source.to_string()).or_default();
+        if state.spec.as_ref() == Some(&summary) {
+            return;
+        }
+        state.spec = Some(summary);' \
+  '        let state = self.sources.entry(source.to_string()).or_default();
+        if false {
+            return;
+        }
+        state.spec = Some(summary);' \
+  geode-shell describe_source_is_a_no_op_for_an_identical_summary
+
+run_mutation "diagnostics: MIN-3 — request_level re-queues a persist when unchanged" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self
+            .levels
+            .targets
+            .iter()
+            .any(|(t, l)| t == target && *l == level)
+        {
+            return;
+        }
+        self.levels = self.levels.with(target, level);' \
+  '        if false {
+            return;
+        }
+        self.levels = self.levels.with(target, level);' \
+  geode-shell request_level_is_a_no_op_when_the_target_already_has_that_level
+
+run_mutation "diagnostics: MIN-4 — unwatch never clears a pending catalog request" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn unwatch(&mut self) {
+        self.watchers = self.watchers.saturating_sub(1);
+        if self.watchers == 0 {
+            self.pending_catalog_request = false;
+        }
+    }' \
+  '    pub fn unwatch(&mut self) {
+        self.watchers = self.watchers.saturating_sub(1);
+    }' \
+  geode-shell unwatch_to_zero_clears_a_pending_catalog_request
+
+run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a newer snapshot" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        for state in self.datasets.values_mut() {
+            state.catalog = None;
+        }
+        for ds in &snapshot.datasets {' \
+  '        for ds in &snapshot.datasets {' \
+  geode-shell set_catalog_drops_a_dataset_missing_from_a_newer_snapshot
+
+run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                if let Some(log) = &self.services.log
+                    && new_levels != self.diagnostics.read(cx).levels
+                {
+                    if let Err(e) = log.control.set(&new_levels) {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  '                if new_levels != self.diagnostics.read(cx).levels {
+                    if let Some(log) = &self.services.log
+                        && let Err(e) = log.control.set(&new_levels)
+                    {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  geode-shell a_log_table_change_updates_the_entity_even_without_log_services
+
+run_mutation "log: MIN-10 — LogLevels.targets not canonicalised by from_doc" \
+  crates/geode-core/src/log/mod.rs \
+  '        levels.targets.sort();
+        (levels, diags)
+    }' \
+  '        let _ = &levels.targets;
+        (levels, diags)
+    }' \
+  geode-core targets_in_a_different_file_order_compare_equal
+
+# MAJ-6: both stated deviations get a harness entry.
+run_mutation "hot_reload: MAJ-6 — the reload path persists through request_level, not set_levels" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  '                    self.diagnostics.update(cx, |d, cx| {
+                        d.request_level("ingest", geode_core::log::Level::DEBUG);
+                        cx.notify();
+                    });
+                }' \
+  geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
+
+run_mutation "diagnostics: MAJ-6 — watch() no longer requests the first catalog" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn watch(&mut self) {
+        self.watchers += 1;
+        self.pending_catalog_request = true;
+    }' \
+  '    pub fn watch(&mut self) {
+        self.watchers += 1;
+    }' \
+  geode-shell watching_itself_also_requests_the_first_catalog
+
+run_mutation "diagnostics: MIN-8 — CONFIG_HISTORY_CAP loosened from 16" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const CONFIG_HISTORY_CAP: usize = 16;' \
+  'pub const CONFIG_HISTORY_CAP: usize = 1600;' \
+  geode-shell config_history_is_capped_at_sixteen_batches
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
