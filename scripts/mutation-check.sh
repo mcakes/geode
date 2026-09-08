@@ -1344,6 +1344,33 @@ run_mutation "keymap_edit: set_key always inserts instead of updating in place" 
   geode-shell \
   overwriting_an_existing_key_preserves_its_comment_and_quoting
 
+# ---- keybinding dialog: the two modes (dialog interaction model task 3)
+#
+# The opening mode is one line, and every other test in that file either
+# presses `/` first or uses keys both modes share — so the whole suite
+# stays green with the dialog opening filter-first, which is exactly the
+# behaviour this task removed. Only a test that asserts a bare letter did
+# NOT reach the filter can see it.
+run_mutation "keybindings: the dialog opens in filter mode" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            mode: DialogMode::Normal,' \
+  '            mode: DialogMode::Filter,' \
+  geode-shell \
+  the_dialog_opens_in_normal_mode_and_letters_do_not_type
+
+# `EscapeStep::LeaveFilter`'s contract is that the query stays APPLIED —
+# leaving a search leaves you on the match rather than undoing it. A
+# dialog that cleared the query on the way out would still walk the same
+# number of rungs and still close on the third press, so only an
+# assertion on the query between rungs catches it.
+run_mutation "keybindings: leaving filter mode clears the query" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        state.mode = DialogMode::Normal;' \
+  '        state.mode = DialogMode::Normal;
+        state.query.clear();' \
+  geode-shell \
+  escape_walks_the_ladder_one_rung_at_a_time
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
