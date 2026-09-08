@@ -42,6 +42,20 @@
 //! the scope rather than an act of the user's, so it leaves the flag
 //! false.
 //!
+//! A reviewer asked for more: on an already-scoped column
+//! [`request_values`]'s pre-tick makes `ticked` non-empty, so arrowing to
+//! a *different* value and pressing `enter` re-commits the pre-tick and
+//! changes nothing — the same shape of no-op, reached a different way.
+//! Rejected, because the proposed remedy (let an untouched pre-tick
+//! yield to the highlight too) would silently discard a tick the user
+//! can see on screen: open `book` with `BK000` ticked, arrow to `BK001`,
+//! press `enter`, and `BK000`'s visible tick would vanish without anyone
+//! unticking it. The two cases differ in exactly the way that matters —
+//! the original defect was invisible (an empty tick set with nothing on
+//! screen to say so), while this one is fully legible: the ticks are
+//! painted, the footer says `enter apply`, and applying them is what it
+//! does. Changing the selection is `tab`, which the footer now names.
+//!
 //! Both stages now also paint a footer hint row ([`hints`],
 //! [`hint_row`]), and the two empty states name which emptiness they are
 //! ([`columns_empty_message`], [`values_empty_message`]) — an empty
