@@ -49,12 +49,20 @@
 //! [`unbind_selected`] for why getting that backwards is destructive in
 //! two different directions.
 //!
-//! A verb that finds nothing to do writes nothing and says so, through
-//! [`KeybindingsState::notice`] — `r` on a row with no user override, `d`
-//! on a row already unbound. A key that visibly does nothing is the
-//! defect class this interaction model exists to remove, so "nothing
-//! happened" is stated in the footer rather than left to be inferred
-//! from an unchanged screen.
+//! Both verbs report in [`KeybindingsState::notice`], a line painted in
+//! the footer and dropped at the next keystroke or click. `d` uses it to
+//! acknowledge the write *immediately*, naming the key it silenced and
+//! [`RECOVERY`] — one bare, unmodified key performing a disk write needs
+//! an acknowledgement that does not wait on the ~500ms reload before the
+//! row relabels. A verb that finds nothing to do writes nothing and says
+//! that instead. A key that visibly does nothing is the defect class
+//! this interaction model exists to remove, so "nothing happened" is
+//! stated in the footer rather than left to be inferred from an
+//! unchanged screen.
+//!
+//! Neither verb prompts for confirmation. `d` is recoverable in the
+//! dialog itself ([`RECOVERY`]), so a confirm step would tax every
+//! deliberate unbind to guard against a mistake that can be undone.
 //!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
 //! visible change per press: filter → normal (keeping the query
@@ -627,6 +635,27 @@ fn handle_key(
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
     };
+    // A notice reports on the keystroke (or click) that produced it and
+    // nothing else, so it is dropped at the DOOR — here, and in
+    // [`on_row_clicked`] — rather than in each branch that happens to
+    // move the selection. Fix round 1 found four such branches (this
+    // function's normal-mode `match`, the `EscapeStep::ClearQuery` rung,
+    // the unclaimed-key early return, and the click path) of which only
+    // the first cleared it; a complaint about the row you were on,
+    // hanging under the row you are on now, is precisely the stale lie
+    // the notice exists to avoid. Two doors is the whole surface: every
+    // change to `selected` or `mode` arrives through one of them, and an
+    // arm that wants to say something sets a fresh notice after this
+    // line.
+    //
+    // `take` + a conditional `notify` rather than a bare assignment: two
+    // of those four paths (`normal_command`'s claim-and-drop early
+    // return, and a click that resolves to no row) return without
+    // notifying, so a cleared notice would stay painted until something
+    // else happened to request a frame.
+    if state.notice.take().is_some() {
+        cx.notify();
+    }
     let visible = visible_rows(state, &rows);
 
     if let Some(pending) = state.listening.as_mut() {
@@ -714,12 +743,6 @@ fn handle_key(
             // shell (which is still listening underneath the modal).
             return true;
         };
-        // A notice reports on the keystroke that produced it and nothing
-        // else, so it is cleared here — before the arms below get their
-        // chance to set a new one — rather than left to expire. A stale
-        // "nothing to reset" sitting under a row the user has since
-        // moved off would be a worse lie than saying nothing at all.
-        state.notice = None;
         match cmd {
             NormalCommand::Nav(nav) => {
                 state.selected = vimnav::apply(state.selected, visible.len(), nav);
@@ -868,6 +891,13 @@ fn on_row_clicked(
     let Some(state) = shell.keybindings.as_mut() else {
         return;
     };
+    // The dialog's other door — see [`handle_key`]'s own clear for why
+    // this belongs at the entrance rather than beside each selection
+    // change. A click is the one state change that never passes through
+    // `handle_key` at all.
+    if state.notice.take().is_some() {
+        cx.notify();
+    }
     let visible = visible_rows(state, &rows);
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
@@ -936,6 +966,18 @@ fn spawn_rebind(
         .detach();
 }
 
+/// How a silenced binding comes back, in the one sentence both verbs
+/// point at. Not a guess: `begin_capture` starts a capture on any row
+/// including an unbound one (it only checks that the list is non-empty),
+/// and `apply_rebind`'s step 1 writes through `set_key`, which
+/// *overwrites* an existing `keys` entry in place — so retyping the
+/// original keystroke replaces the `"none"` this dialog just wrote,
+/// rather than appending beside it. `d` is therefore not a one-way door,
+/// which is why fix round 1 ruled for an acknowledgement here instead of
+/// a confirmation prompt: taxing every deliberate unbind to guard
+/// against a recoverable mistake is the worse trade.
+const RECOVERY: &str = "press enter and type that key again to restore it";
+
 /// `d`: silence the selected row's currently-effective binding.
 ///
 /// Returns the notice ([`KeybindingsState::notice`]) to show when the
@@ -977,12 +1019,14 @@ fn unbind_selected(
         // exists to remove.
         return Some(format!("{} is already unbound", row.title));
     };
+    let key = palette::render_binding(&bound.keystrokes);
     let unbind = Unbind {
         context: bound.context_source.clone(),
-        key: palette::render_binding(&bound.keystrokes),
+        key: key.clone(),
         is_user_layer: bound.layer == Layer::User,
     };
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
+        .or_else(|| Some(format!("{key} silenced — {RECOVERY}")))
 }
 
 /// `r`: remove the user's own override on the selected row, so the layer
@@ -1007,18 +1051,38 @@ fn unbind_selected(
 /// binding: such a row derives as unbound (the shadow carries the
 /// `"none"` action, not this row's, so [`effective_binding`] reports no
 /// binding at all), leaving nothing on the row to name the key that
-/// would have to be removed. Restoring one of those still means editing
-/// `keymap.toml` — a real remaining gap, recorded here rather than
-/// papered over.
+/// would have to be removed. That is a convenience gap, not a
+/// correctness one — [`RECOVERY`] is the way back, and this function
+/// says so on exactly that row rather than claiming the override does
+/// not exist. Letting `r` lift a shadow directly would need
+/// `derive_rows` to carry the suppressing entry onto the row; it is
+/// recorded as a follow-up, deliberately not built here.
 fn reset_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
     let row = row?;
-    let Some(bound) = row.current.as_ref().filter(|b| b.layer == Layer::User) else {
-        return Some(format!("{} has no user override to reset", row.title));
+    let Some(bound) = row.current.as_ref() else {
+        // Unbound — which does NOT mean "no user override". The most
+        // likely way a row gets here is the user's own `d`, whose
+        // `"none"` shadow IS an override; it just carries the `"none"`
+        // action rather than this row's, so `effective_binding` reports
+        // no binding and the row has nothing left to name the key with.
+        // Claiming there is no override would be false AND would steer
+        // the user away from the one recovery that works, so this says
+        // what is actually true and points at it.
+        return Some(format!(
+            "{} is unbound — if you silenced it, {RECOVERY}",
+            row.title
+        ));
     };
+    if bound.layer != Layer::User {
+        // A live binding from a layer this app never writes: there is
+        // genuinely nothing of the user's to remove, and this is the one
+        // case where "no user override" is the honest sentence.
+        return Some(format!("{} has no user override to reset", row.title));
+    }
     let unbind = Unbind {
         context: bound.context_source.clone(),
         key: palette::render_binding(&bound.keystrokes),

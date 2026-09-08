@@ -1176,3 +1176,203 @@ fn a_notice_clears_on_the_next_normal_mode_keystroke(cx: &mut gpui::TestAppConte
         "the next keystroke clears it"
     );
 }
+
+// --- Task 4 fix round 1 ----------------------------------------------
+
+/// A user layer that silences BOTH of `palette::toggle`'s builtin keys
+/// with the `"none"` shadow `d` writes — i.e. the exact on-disk state a
+/// user reaches by pressing `d` on that row twice. The row then derives
+/// `current: None`, which is where `r`'s message used to lie.
+const USER_KEYMAP_SILENCING_THE_PALETTE: &str = "config_version = 1\n\n[[bindings]]\n\n\
+     [bindings.keys]\n\"ctrl+k\" = \"none\"\n\"ctrl+shift+p\" = \"none\"\n";
+
+fn services_with_the_palette_silenced() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_SILENCING_THE_PALETTE.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+/// Fix round 1, Important 1. A row silenced by the user's own `"none"`
+/// shadow HAS a user override — the shadow is one — so telling the user
+/// there is none is false, and it steers them away from the one
+/// recovery that works (`enter`, then retyping the key, overwrites the
+/// shadow in place). The row no longer shows the key, so the message is
+/// the only place that recovery can come from.
+#[gpui::test]
+fn r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        dir.path().join("keymap.toml"),
+        USER_KEYMAP_SILENCING_THE_PALETTE,
+    )
+    .unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_the_palette_silenced(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    let (action, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        action.0, "palette::toggle",
+        "sanity: the filter landed right"
+    );
+    assert!(
+        bound.is_none(),
+        "sanity: a shadowed row derives as unbound — that is why the \
+         message is the only thing left to guide the user"
+    );
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r must say something");
+    assert!(
+        !notice.contains("no user override"),
+        "the `\"none\"` shadow IS the user's override; denying it is a \
+         lie: {notice}"
+    );
+    assert!(
+        notice.contains("enter"),
+        "and the message must name the recovery — enter, then retyping \
+         the key: {notice}"
+    );
+}
+
+/// Fix round 1, Important 3. `d` is one bare, unmodified key performing
+/// an immediate destructive disk write, and the row does not relabel
+/// until the ~500ms config watcher gets to it — so the acknowledgement
+/// cannot wait on the reload. It names the key that was silenced and how
+/// to bring it back.
+#[gpui::test]
+fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    let (key, _) = bound.expect("bound");
+
+    vcx.simulate_keystrokes("d");
+    // Deliberately NOT `run_until_parked` first: the acknowledgement must
+    // be on screen the instant the key is pressed, not after the
+    // background write, and certainly not after the reload watcher.
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d must acknowledge the write it just performed");
+    assert!(
+        notice.contains(&key),
+        "the acknowledgement must name the key it silenced: {notice}"
+    );
+    assert!(notice.contains("enter"), "and how to get it back: {notice}");
+    vcx.run_until_parked();
+}
+
+/// Fix round 1, Important 2 (path 1 of 2): the `EscapeStep::ClearQuery`
+/// rung resets the selection to row 0, so a notice about the row the
+/// user *was* on becomes a complaint pointing at a different row.
+#[gpui::test]
+fn clearing_the_query_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("r");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_some()),
+        "sanity: r on a builtin row leaves a notice"
+    );
+
+    // The ClearQuery rung: still in normal mode, query non-empty.
+    vcx.simulate_keystrokes("escape");
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "",
+        "sanity: this escape took the ClearQuery rung"
+    );
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_none()),
+        "a rung that moves the selection must not leave the old row's \
+         complaint standing"
+    );
+}
+
+/// Fix round 1, Important 2 (path 2 of 2): a mouse click is the other
+/// door into this dialog's state, and it changes the selected row
+/// without going through `handle_key` at all.
+#[gpui::test]
+fn clicking_a_row_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("r");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_some()),
+        "sanity: r on row 0 leaves a notice"
+    );
+
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let row_1 = vcx
+        .debug_bounds("keybindings-row-1")
+        .expect("row 1 should have painted bounds to click into");
+    vcx.simulate_mouse_down(
+        gpui::point(
+            row_1.origin.x + gpui::px(10.0),
+            row_1.origin.y + gpui::px(10.0),
+        ),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        1,
+        "sanity: the click selected row 1"
+    );
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_none()),
+        "the complaint was about row 0; leaving it up under row 1 is the \
+         stale-notice lie in its plainest form"
+    );
+}

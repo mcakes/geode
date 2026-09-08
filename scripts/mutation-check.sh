@@ -1457,16 +1457,71 @@ run_mutation "keybindings: r writes on a row with no user override" \
   geode-shell \
   r_on_a_row_with_no_user_override_says_so_and_writes_nothing
 
-# A notice reports on the keystroke that produced it. Left standing, it
-# points at a row the user has since moved off — the footer lying about
-# the current selection, which is worse than saying nothing.
+# A notice reports on the keystroke (or click) that produced it. Left
+# standing, it points at a row the user has since moved off — the footer
+# lying about the current selection, which is worse than saying nothing.
+# Re-anchored in fix round 1: the clear moved out of the normal-mode
+# `match` and onto the two doors, because three other paths (the
+# ClearQuery rung, the claim-and-drop early return, and the click) all
+# changed the selection while leaving the complaint up.
 run_mutation "keybindings: a notice outlives the keystroke it reports on" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        state.notice = None;
+  '    if state.notice.take().is_some() {
+        cx.notify();
+    }
+    let visible = visible_rows(state, &rows);
+
+    if let Some(pending)' \
+  '    let visible = visible_rows(state, &rows);
+
+    if let Some(pending)' \
+  geode-shell \
+  a_notice_clears_on_the_next_normal_mode_keystroke
+
+# The second door. A click never passes through `handle_key` at all, so
+# the keystroke test above cannot see this one — and every mouse-driven
+# selection change would leave the previous row's complaint standing.
+run_mutation "keybindings: a click leaves the previous row's notice standing" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if state.notice.take().is_some() {
+        cx.notify();
+    }
+    let visible = visible_rows(state, &rows);
+    let Some(ix)' \
+  '    let visible = visible_rows(state, &rows);
+    let Some(ix)' \
+  geode-shell \
+  clicking_a_row_clears_a_standing_notice
+
+# Fix round 1, Important 1. A row silenced by the user's own `d` HAS a
+# user override — the `"none"` shadow is one — but derives as unbound, so
+# the old single-branch refusal called it "no user override to reset".
+# That is false, and it steers the user away from the one recovery that
+# works. Every other assertion in the file stays green with the lie
+# restored; only a test on the message itself sees it.
+run_mutation "keybindings: r denies the user's own none shadow" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        return Some(format!(
+            "{} is unbound — if you silenced it, {RECOVERY}",
+            row.title
+        ));' \
+  '        return Some(format!("{} has no user override to reset", row.title));' \
+  geode-shell \
+  r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override
+
+# Fix round 1, Important 3. `d` is one bare, unmodified key performing an
+# immediate destructive disk write, and the row does not relabel until
+# the ~500ms config watcher gets to it. Without the acknowledgement the
+# keystroke is silent for half a second and never names the way back —
+# and the file it wrote is identical either way, so only an assertion on
+# the notice BEFORE `run_until_parked` catches it.
+run_mutation "keybindings: d performs its write without acknowledging it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        .or_else(|| Some(format!("{key} silenced — {RECOVERY}")))
 ' \
   '' \
   geode-shell \
-  a_notice_clears_on_the_next_normal_mode_keystroke
+  d_acknowledges_the_write_immediately_and_names_the_way_back
 
 # ---- grouping slots and the frame (Phase 3 §4)
 
