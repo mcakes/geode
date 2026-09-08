@@ -824,12 +824,23 @@ impl ObjectDialogState {
     /// left applied would be ranking nothing while `escape`'s
     /// `ClearQuery` rung silently ate the keystroke that was meant to go
     /// back a stage.
+    ///
+    /// The **mode goes back to `Normal`** for the same reason, and it is
+    /// not cosmetic: `enter` opens an object from filter mode too, and a
+    /// stage left in `Filter` would send `escape` down the ladder's
+    /// `LeaveFilter` rung instead of `PreviousStage` — which this handler
+    /// does not claim, so the shell's modal branch would close the whole
+    /// dialog and take the unsaved draft with it, without ever asking.
+    /// The caller blurs the `Input` to match; a mode and a focus that
+    /// disagree is the one thing this dialog's "one switch" exists to
+    /// prevent.
     pub fn enter_edit(&mut self, config: &Config, object: &str) {
         self.draft = Some(self.domain.draft(config, object));
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
         self.query.clear();
+        self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
     }
@@ -1540,9 +1551,16 @@ mod tests {
         let mut state = ObjectDialogState::new(Domain::Views);
         state.set_query("tr".to_string());
         assert!(!state.has_previous_stage());
+        state.mode = DialogMode::Filter;
         state.enter_edit(&config, "tree");
         assert!(state.has_previous_stage());
         assert_eq!(state.query, "", "the browse query does not follow you in");
+        assert_eq!(
+            state.mode,
+            DialogMode::Normal,
+            "nor does filter mode — escape would take the LeaveFilter rung \
+             and close the dialog instead of going back a stage"
+        );
         assert_eq!(
             state.draft.as_ref().map(|d| d.name.clone()),
             Some("tree".to_string())

@@ -520,3 +520,51 @@ fn delete_and_revert_refuse_on_an_object_no_user_layer_defines(cx: &mut gpui::Te
     }
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
 }
+
+/// An object opened out of a **filtered** list still gets the edit
+/// stage's own `escape`. With the mode left in `Filter`, `escape_step`
+/// takes the `LeaveFilter` rung, which this stage does not claim — so the
+/// shell's modal branch closed the whole dialog and the draft went with
+/// it, unconfirmed. Found by reading the ladder, not by the tests above:
+/// every one of them opens the object from normal mode.
+#[gpui::test]
+fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+
+    cx.simulate_keystrokes("/ t r e e");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "tree".to_string()
+        },
+        "enter opens the object from filter mode too"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "and the edit stage is always normal mode — its letters are verbs"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "with the field blurred to match, or `s` would type instead of save"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "escape goes back a stage, not out of the dialog"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "the modal is still open"
+    );
+}

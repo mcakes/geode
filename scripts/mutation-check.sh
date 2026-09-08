@@ -3255,6 +3255,20 @@ run_mutation "objectdialog: escape on a dirty draft skips the confirm" \
   geode-shell \
   escape_on_a_dirty_draft_confirms_before_discarding
 
+# The edit stage is always normal mode. `enter` opens an object from
+# FILTER mode too, and a stage left in `Filter` sends the next `escape`
+# down the ladder's `LeaveFilter` rung — which `handle_edit_key` does not
+# claim, so the shell's modal branch closes the whole dialog and takes the
+# unsaved draft with it, without ever asking. Every escape test that opens
+# its object from normal mode stays green; only one that opens it out of a
+# filtered list can see it.
+run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.mode = DialogMode::Normal;' \
+  '' \
+  geode-shell \
+  an_object_opened_from_filter_mode_still_escapes_back_a_stage
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
