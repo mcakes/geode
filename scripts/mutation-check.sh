@@ -1576,13 +1576,15 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
-  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions != versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
@@ -2369,11 +2371,10 @@ run_mutation "frame: a new set clears redo" \
 
 run_mutation "frame: a text session pushes once" \
   crates/geode-shell/src/frame.rs \
-  '            Some(None) => self.scope_session = Some(None),' \
-  '            Some(None) => {
-                let o = self.scope.clone();
-                self.push_undo(o);
-                self.scope_session = Some(None)
+  '            Some(_) => {}' \
+  '            Some(_) => {
+                let outgoing = self.scope.clone();
+                self.push_undo(outgoing);
             }' \
   geode-shell a_text_session_coalesces_into_one_undo_entry
 
@@ -2814,6 +2815,30 @@ run_mutation "M13: FrameRecord omits an empty dimensions table" \
         }' \
   '        t.insert("dimensions".into(), toml::Value::Table(dims));' \
   geode-shell a_frame_record_with_no_dimension_selections_writes_no_dimensions_key
+
+# ---- Phase 4b Task 1 review fix round 1 (MIN-12): M6 and M9 had test
+# coverage but no harness entry of their own; M15 is a signature-
+# preserving re-export and genuinely needs none. -----------------------
+
+run_mutation "M6: an explicit default view wins over the alphabetical first" \
+  crates/geode-core/src/view.rs \
+  '                Some(v) => v.is_default = true,' \
+  '                Some(_v) => {}' \
+  geode-blotter a_fresh_tile_opens_on_the_explicit_default_view_not_the_alphabetical_first
+
+run_mutation "M9: the as-of presets cache is keyed on the frame's data version" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    let v = frame.versions().data;
+    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+        && *cached_v == v
+    {
+        return Rc::clone(cached);
+    }' \
+  '    let v = frame.versions().data;
+    if let Some((_cached_v, cached)) = state.presets_cache.borrow().as_ref() {
+        return Rc::clone(cached);
+    }' \
+  geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
