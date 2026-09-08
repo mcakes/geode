@@ -22,6 +22,32 @@
 //! [`super::dialog::init_reclaimed_keybindings`]'s own doc comment,
 //! bullet 3).
 //!
+//! ## `enter`, and the two meanings of an empty tick set
+//!
+//! Because `tab` is the selector and nothing on screen said so, the most
+//! natural single-value gesture — arrow to a value, press `enter` —
+//! applied an empty tick set, which [`PickerState::apply`] read as "drop
+//! this column". The resulting scope equalled the one it started from,
+//! `Frame::set_scope` returned `false`, and the modal closed having
+//! changed nothing: indistinguishable, from the outside, from a broken
+//! picker.
+//!
+//! An empty tick set therefore means two opposite things, and
+//! [`PickerState::ticks_touched`] separates them: empty because the user
+//! never touched it commits the highlighted value; empty because the user
+//! pressed `ctrl+x` drops the column's selection. `ctrl+x` then `enter`
+//! stays the keyboard route to clearing one dimension, which
+//! `docs/PHILOSOPHY.md`'s keyboard-reach rule requires — the scope chip's
+//! close glyph is mouse-only. The pre-tick in [`request_values`] reflects
+//! the scope rather than an act of the user's, so it leaves the flag
+//! false.
+//!
+//! Both stages now also paint a footer hint row ([`hints`],
+//! [`hint_row`]), and the two empty states name which emptiness they are
+//! ([`columns_empty_message`], [`values_empty_message`]) — an empty
+//! `ShellView::pickable` means no `datasets` doc is loaded, which no
+//! amount of backspacing in the filter will fix.
+//!
 //! ## Architecture
 //!
 //! [`PickerState`] — `stage`, `selected`, `query`, `values`, `ticked`,
@@ -103,6 +129,18 @@ pub struct PickerState {
     /// `apply`'s `Scope::dimensions` selection comes out in a stable,
     /// sorted order regardless of tick order.
     pub ticked: BTreeSet<String>,
+    /// Whether the user has operated on `ticked` themselves this session
+    /// (`tab`, `ctrl+a` or `ctrl+x`) — false through
+    /// [`request_values`]'s pre-tick, which reflects the scope rather
+    /// than an act of the user's.
+    ///
+    /// [`apply`](PickerState::apply) needs the distinction because an
+    /// empty tick set means two opposite things: *untouched* and empty is
+    /// "I arrowed to a value and pressed enter", which must commit that
+    /// value; *touched* and empty is "I pressed `ctrl+x`", which must
+    /// drop the column's selection. Conflating them is what made the
+    /// single-value flow — arrow, enter — silently do nothing.
+    pub ticks_touched: bool,
     /// Bumped once per [`request_values`] call; a `DistinctOutcome`
     /// whose tag doesn't match the *latest* bump is stale and dropped
     /// (§7.3) — see [`ShellView::deliver_distinct`].
@@ -143,6 +181,7 @@ impl PickerState {
     /// no-op if there's nothing shown at `self.selected` (an empty list,
     /// or a stale selection past its end).
     pub fn toggle_selected(&mut self) {
+        self.ticks_touched = true;
         let shown = self.shown();
         let Some((idx, _)) = shown.get(self.selected) else {
             return;
@@ -160,6 +199,7 @@ impl PickerState {
     /// Tick every value the filter currently shows (`ctrl+a`) — additive,
     /// never clears an existing tick outside the shown set.
     pub fn tick_all_shown(&mut self) {
+        self.ticks_touched = true;
         let shown = self.shown();
         let Some(Ok(values)) = &self.values else {
             return;
@@ -172,7 +212,20 @@ impl PickerState {
     /// Clear every tick (`ctrl+x`) — the whole set, not just what the
     /// filter currently shows.
     pub fn clear(&mut self) {
+        self.ticks_touched = true;
         self.ticked.clear();
+    }
+
+    /// The value the `Values` stage is highlighting, or `None` when
+    /// nothing is shown at `self.selected` (loading, a failed request, an
+    /// empty distinct result, or a filter that matched nothing).
+    fn highlighted_value(&self) -> Option<String> {
+        let shown = self.shown();
+        let (idx, _) = shown.get(self.selected)?;
+        let Some(Ok(values)) = &self.values else {
+            return None;
+        };
+        values.get(*idx).map(|(v, _)| v.clone())
     }
 
     /// Move the selection by `delta` (±1 for up/down/ctrl+p/ctrl+n),
@@ -189,22 +242,36 @@ impl PickerState {
     }
 
     /// Replace `scope`'s selection for this stage's column with whatever
-    /// is ticked — an empty tick set drops the column's selection
-    /// entirely rather than writing an empty `DimensionSelection` (spec:
-    /// empty `values` already means "no constraint", so a dropped
-    /// selection and an explicit "everything" selection must not be
-    /// conflated). A no-op clone of `scope` on the `Columns` stage — there
-    /// is no column to apply anything to yet.
+    /// is ticked — an *explicitly* emptied tick set
+    /// ([`ticks_touched`](Self::ticks_touched)) drops the column's
+    /// selection entirely rather than writing an empty
+    /// `DimensionSelection` (spec: empty `values` already means "no
+    /// constraint", so a dropped selection and an explicit "everything"
+    /// selection must not be conflated). A no-op clone of `scope` on the
+    /// `Columns` stage — there is no column to apply anything to yet.
+    ///
+    /// A tick set that is empty because the user never touched it commits
+    /// the **highlighted** value instead: arrowing to a value and
+    /// pressing `enter` is the obvious single-value gesture, and treating
+    /// it as "select nothing" made it close the modal having changed
+    /// nothing at all. Multi-select is unaffected — it is already
+    /// tick-then-enter — and `ctrl+x` then `enter` remains the keyboard
+    /// route to clearing one dimension.
     pub fn apply(&self, scope: &Scope) -> Scope {
         let Stage::Values { column } = &self.stage else {
             return scope.clone();
         };
+        let values: Vec<String> = if self.ticked.is_empty() && !self.ticks_touched {
+            self.highlighted_value().into_iter().collect()
+        } else {
+            self.ticked.iter().cloned().collect()
+        };
         let mut out = scope.clone();
         out.dimensions.retain(|d| &d.column != column);
-        if !self.ticked.is_empty() {
+        if !values.is_empty() {
             out.dimensions.push(DimensionSelection {
                 column: column.clone(),
-                values: self.ticked.iter().cloned().collect(),
+                values,
             });
         }
         out
@@ -245,6 +312,7 @@ pub fn open(
         query: String::new(),
         values: None,
         ticked: BTreeSet::new(),
+        ticks_touched: false,
         tag: 0,
     });
     sync_picker_scroll(view);
@@ -289,6 +357,10 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
         .find(|d| d.column == column)
         .map(|d| d.values.iter().cloned().collect())
         .unwrap_or_default();
+    // The pre-tick reflects the scope, not an act of the user's — a
+    // freshly-entered column starts untouched, so `enter` on it commits
+    // the highlighted value (see `PickerState::ticks_touched`).
+    p.ticks_touched = false;
     let mut minus_own = scope;
     minus_own.dimensions.retain(|d| d.column != column);
     let tag = p.tag;
@@ -483,6 +555,80 @@ fn handle_key(
     }
 }
 
+/// One element of a stage's footer hint: a key chip, or the prose
+/// between chips. Kept as data (rather than built straight into elements)
+/// so [`hints`] is a pure function this module's own `mod tests` can
+/// assert on without a window — the same "pure core + gpui shell" split
+/// the rest of this file keeps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hint {
+    Key(&'static str),
+    Text(&'static str),
+}
+
+/// The keyboard vocabulary a stage advertises. Neither stage said
+/// anything before, which is how `tab` — the only key that selects a
+/// value, chosen because `space` is printable and would be typed into
+/// the filter (module doc) — stayed invisible to anyone who had not read
+/// the source.
+pub fn hints(stage: &Stage) -> &'static [Hint] {
+    match stage {
+        Stage::Columns => &[
+            Hint::Text("type to filter ·"),
+            Hint::Key("up"),
+            Hint::Key("down"),
+            Hint::Text("move ·"),
+            Hint::Key("enter"),
+            Hint::Text("open ·"),
+            Hint::Key("escape"),
+            Hint::Text("close"),
+        ],
+        Stage::Values { .. } => &[
+            Hint::Text("type to filter ·"),
+            Hint::Key("up"),
+            Hint::Key("down"),
+            Hint::Text("move ·"),
+            Hint::Key("tab"),
+            Hint::Text("select ·"),
+            Hint::Key("ctrl+a"),
+            Hint::Text("all ·"),
+            Hint::Key("ctrl+x"),
+            Hint::Text("clear ·"),
+            Hint::Key("enter"),
+            Hint::Text("apply ·"),
+            Hint::Key("escape"),
+            Hint::Text("close"),
+        ],
+    }
+}
+
+/// What the `Columns` stage prints when its row list comes out empty.
+/// The two emptinesses are not the same failure and must not share a
+/// string: a filter that matched nothing is the user's own doing and
+/// self-corrects on backspace, while an empty `ShellView::pickable` means
+/// no `datasets` doc is loaded at all, so *every* query will match
+/// nothing and the picker is not the thing to fix. Printing "no matches"
+/// for the second is what makes an unconfigured `frame::pick` read as a
+/// broken picker.
+fn columns_empty_message(pickable_is_empty: bool) -> &'static str {
+    if pickable_is_empty {
+        "nothing to pick — no datasets config is loaded"
+    } else {
+        "no matches"
+    }
+}
+
+/// The `Values` stage's twin of [`columns_empty_message`]: a distinct
+/// query that came back with no rows at all is a fact about the data
+/// under the current scope, not about the filter the user typed.
+fn values_empty_message(values_is_empty: bool) -> &'static str {
+    if values_is_empty {
+        "no values in scope"
+    } else {
+        "no matches"
+    }
+}
+
 fn empty_row(text: &str, muted: Hsla) -> AnyElement {
     div()
         .px_2()
@@ -508,7 +654,7 @@ fn build_columns(
 ) -> AnyElement {
     let matches = PickerState::columns(&shell.pickable, &picker.query);
     if matches.is_empty() {
-        return empty_row("no matches", muted);
+        return empty_row(columns_empty_message(shell.pickable.is_empty()), muted);
     }
     let mut list = v_flex()
         .id("picker-columns")
@@ -581,7 +727,7 @@ fn build_values(
             let shown = picker.shown();
             let count = shown.len();
             if count == 0 {
-                return empty_row("no matches", muted);
+                return empty_row(values_empty_message(values.is_empty()), muted);
             }
             let values = Rc::new(values.clone());
             let shown = Rc::new(shown);
@@ -685,6 +831,47 @@ fn build(
         .w(px(WIDTH))
         .child(filter)
         .child(body)
+        .child(hint_row(
+            &picker.stage,
+            theme.muted_foreground,
+            theme.muted,
+            theme.border,
+        ))
+        .into_any_element()
+}
+
+/// The footer hint line — `settings_view::build`'s own footer, narrowed
+/// to one row: a top border, then [`hints`] rendered as key chips
+/// (`keybindings_view::key_chip`, so a key's spelling looks identical
+/// across every dialog here) interleaved with muted prose.
+fn hint_row(stage: &Stage, fg: Hsla, chip_bg: Hsla, border: Hsla) -> AnyElement {
+    let children: Vec<AnyElement> = hints(stage)
+        .iter()
+        .map(|hint| match hint {
+            Hint::Key(spec) => {
+                let ks = crate::keymap::parse_keystroke(spec, Modifiers::NONE)
+                    .expect("footer hint keystrokes are hardcoded valid");
+                super::keybindings_view::key_chip(&ks, fg, chip_bg)
+            }
+            Hint::Text(text) => div().child(*text).into_any_element(),
+        })
+        .collect();
+    div()
+        .id("picker-hints")
+        .w(px(WIDTH))
+        .pt_2()
+        .border_t_1()
+        .border_color(border)
+        .text_sm()
+        .text_color(fg)
+        .debug_selector(|| "picker-hints".to_string())
+        .child(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .flex_wrap()
+                .children(children),
+        )
         .into_any_element()
 }
 
@@ -705,6 +892,7 @@ mod tests {
                 .map(|(v, n)| (v.to_string(), *n))
                 .collect())),
             ticked: BTreeSet::new(),
+            ticks_touched: false,
             tag: 1,
         }
     }
@@ -758,6 +946,83 @@ mod tests {
         let out = s.apply(&base);
         assert_eq!(out.dimensions.len(), 1, "book dropped");
         assert_eq!(out.dimensions[0].column, "lhu");
+    }
+
+    /// The single-value flow: arrow to a value and press `enter` without
+    /// ever pressing `tab`. Before this, `apply` saw an empty tick set,
+    /// dropped the column entirely and produced a scope identical to the
+    /// one it started from — `Frame::set_scope` returned `false`, no chip
+    /// appeared, and the modal closed as if the pick had worked.
+    #[test]
+    fn enter_on_an_untouched_tick_set_commits_the_highlighted_value() {
+        let mut s = state_with(&[("BK000", 1), ("BK001", 2), ("BK002", 3)]);
+        s.selected = 1;
+        let out = s.apply(&Scope::default());
+        assert_eq!(out.dimensions.len(), 1, "the highlighted value commits");
+        assert_eq!(out.dimensions[0].column, "book");
+        assert_eq!(out.dimensions[0].values, vec!["BK001".to_string()]);
+    }
+
+    /// …but an empty tick set the user *made* empty still means "drop
+    /// this column's selection". `ctrl+x` then `enter` is the keyboard
+    /// route to clearing one dimension, and PHILOSOPHY's keyboard-reach
+    /// rule means it cannot become mouse-only (the chip's close glyph).
+    #[test]
+    fn an_explicit_clear_makes_enter_drop_the_selection() {
+        let mut s = state_with(&[("BK000", 1), ("BK001", 2)]);
+        s.ticked.insert("BK000".into()); // as `request_values` pre-ticks it
+        s.clear(); // ctrl+x
+        let base = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK000".into()],
+            }],
+            ..Scope::default()
+        };
+        assert!(
+            s.apply(&base).dimensions.is_empty(),
+            "an explicitly cleared tick set drops the column"
+        );
+    }
+
+    /// The two empty states printed the same string, so "nothing is
+    /// configured to pick" and "your filter matched nothing" were
+    /// indistinguishable — the reason an unconfigured `alt+p` reads as a
+    /// broken picker rather than an empty one.
+    #[test]
+    fn the_empty_states_say_which_emptiness_it_is() {
+        assert_ne!(columns_empty_message(true), columns_empty_message(false));
+        assert_ne!(values_empty_message(true), values_empty_message(false));
+        assert_eq!(columns_empty_message(false), "no matches");
+        assert_eq!(values_empty_message(false), "no matches");
+        assert!(columns_empty_message(true).contains("datasets"));
+    }
+
+    /// The values stage must advertise `tab`: it is the only key that
+    /// selects a value, and nothing else on screen says so.
+    #[test]
+    fn each_stage_advertises_its_own_vocabulary() {
+        let columns = hints(&Stage::Columns);
+        let values = hints(&Stage::Values {
+            column: "book".into(),
+        });
+        assert_ne!(columns, values);
+        assert!(values.contains(&Hint::Key("tab")), "{values:?}");
+        assert!(values.contains(&Hint::Key("ctrl+x")), "{values:?}");
+        assert!(
+            !columns.contains(&Hint::Key("tab")),
+            "the columns stage has nothing to tick"
+        );
+        // Every `Hint::Key` must be a spelling `key_chip` can render, or
+        // `hint_row` panics at paint time on a hardcoded string.
+        for hint in columns.iter().chain(values) {
+            if let Hint::Key(spec) = hint {
+                assert!(
+                    crate::keymap::parse_keystroke(spec, Modifiers::NONE).is_ok(),
+                    "{spec} must parse"
+                );
+            }
+        }
     }
 
     #[test]
