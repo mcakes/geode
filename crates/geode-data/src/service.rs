@@ -189,26 +189,172 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
 /// disk"), and `load`, written only by the ingest sink (content-aware —
 /// "did the last publish or load attempt succeed cleanly"). Neither
 /// lane can be written by the other producer. The value this module
-/// actually reports is always the WORSE of the two —
-/// [`geode_core::health::Health`]'s own derived `Ord` is severity order
-/// (`Ok < Pending < PendingTooLong < Degraded < Failed`, per that type's
-/// own doc comment), so a clean discovery poll can never override a
+/// actually reports is always the WORSE of the two, by
+/// [`severity_rank`], so a clean discovery poll can never override a
 /// load-set `Degraded`/`Failed`: only writing the `load` lane back to
-/// `Ok` (a corrected republish) can, because that is the only way to
-/// bring the combined maximum back down.
+/// `Ok` (a corrected republish of that batch) can, because that is the
+/// only way to bring the combined worst back down.
+///
+/// Round 4 (NEW-5, NEW-6) changed two more things about that combine,
+/// both of which were reported states that were simply wrong:
+///
+/// - Each slot carries its own `detail`, and `report_*` hands back the
+///   DECIDING slot's `(health, detail)` pair for its caller to forward
+///   verbatim. Before, each sink forwarded its OWN detail alongside
+///   whatever health the tracker returned — so an ingest sink handed
+///   back discovery's `PendingTooLong` attached a just-published
+///   batch's name to it and dropped the stuck file's, and a scheduler
+///   sink handed back a load's `Degraded` attached a clean poll's EMPTY
+///   detail, surfacing "degraded" with no reason at all.
+/// - Comparison is by [`severity_rank`], never `Health`'s derived
+///   `Ord`, and an equal rank is decided by which slot changed most
+///   recently (the ruling's `decided_by`, generalised — see
+///   [`LaneValue::changed`]). Two simultaneous `Degraded`s are ordinary
+///   (a malformed sentinel from discovery, a carried-dimension
+///   violation from a publish); derived `Ord` fell through to comparing
+///   their reason STRINGS, so which one a trader saw was decided by the
+///   alphabet and the other was never reported at all.
+///
+/// The `load` lane is keyed by BATCH, not by source (NEW-6). A
+/// `Degraded` generation stays LIVE AND QUERYABLE — that is the whole
+/// difference between `Degraded` and `Failed` — so batch `BK1`
+/// publishing cleanly says nothing whatever about the degraded rows
+/// batch `BK0` is still serving, and must not clear them. The source's
+/// load value is the worst across its batches, and only a batch's own
+/// next publish replaces its entry. The map grows one entry per batch
+/// name ever published for the source (books, or one per file for a
+/// source with no `batch_pattern`) and never shrinks: bounded by the
+/// source's own batch vocabulary, tens of entries, not a leak.
 #[derive(Debug, Clone, Default)]
 struct Lanes {
     /// What discovery alone currently believes. `None` until the first
     /// discovery report for this source.
-    discovery: Option<Health>,
-    /// What the last publish (or load failure) reported. `None` until
-    /// the first load report for this source.
-    load: Option<Health>,
-    /// The combined value last actually forwarded — distinct from
-    /// either lane on its own, so `report_discovery`/`report_load` can
-    /// tell a real change in the COMBINED (worse-of-two) value apart
-    /// from a lane merely being overwritten with an equally-severe one.
-    last_reported: Option<Health>,
+    discovery: Option<LaneValue>,
+    /// What each BATCH's last publish (or load failure) reported, keyed
+    /// by batch. Empty until the first load report for this source.
+    load: std::collections::HashMap<String, LaneValue>,
+    /// Monotonic within this source. Bumped only when a slot's value
+    /// actually changes, and stamped onto that slot — see
+    /// [`LaneValue::changed`].
+    seq: u64,
+    /// The combined value last actually forwarded — distinct from any
+    /// slot on its own, so `report_discovery`/`report_load` can tell a
+    /// real change in the COMBINED (worst-of-all-slots) value apart
+    /// from a slot merely being overwritten with an equally-severe one.
+    last_reported: Option<(Health, String)>,
+}
+
+/// The severity ordering `HealthTracker` compares by, and the only one
+/// (round 4, NEW-5).
+///
+/// [`Health`]'s own derived `Ord` must never be used for this. Its
+/// variant order IS severity order, but once two values share a variant
+/// it falls through to comparing the `reason` STRING — so between a
+/// discovery `Degraded { reason: "expected value at line 1" }` and a
+/// load `Degraded { reason: "currency varies within instrument key" }`
+/// the winner was whichever reason sorted later, and the loser was
+/// dropped without ever reaching the surface. That is the same
+/// "a real problem is never shown" failure MAJ-3 and NEW-4 were raised
+/// for, arriving through the tie-break instead.
+fn severity_rank(h: &Health) -> u8 {
+    match h {
+        Health::Failed { .. } => 4,
+        Health::Degraded { .. } => 3,
+        Health::PendingTooLong => 2,
+        Health::Pending => 1,
+        Health::Ok => 0,
+    }
+}
+
+/// One slot's current value, its producer's own explanation of it, and
+/// when it last changed.
+#[derive(Debug, Clone)]
+struct LaneValue {
+    health: Health,
+    /// The detail line this slot's own producer wrote with it (which
+    /// file, which batch, what is wrong). It travels WITH the health so
+    /// that whoever forwards the combined value forwards the deciding
+    /// slot's explanation rather than its own caller's.
+    detail: String,
+    /// [`Lanes::seq`] at the moment this value last actually CHANGED.
+    ///
+    /// This is the ruling's `decided_by` in its general form: on an
+    /// equal rank, the slot that changed most recently decides. Because
+    /// the stamp is per SLOT rather than per lane, the same rule also
+    /// orders the `load` lane's batches against each other, which a
+    /// single "which lane wrote last" flag could not do.
+    changed: u64,
+}
+
+/// `Some(stamp)` when `slot` already holds exactly this value — a
+/// re-report that changes nothing and so keeps its old stamp.
+///
+/// This is what stops an equal-rank decision from flapping. With both
+/// lanes `Degraded`, every scheduler poll rewrites the discovery slot
+/// with the value it already held; were that counted as a change, the
+/// caller would win every tie and the reported reason would alternate
+/// between the two lanes for as long as both problems stood.
+fn unchanged_stamp(slot: Option<&LaneValue>, health: &Health, detail: &str) -> Option<u64> {
+    slot.filter(|v| v.health == *health && v.detail == detail)
+        .map(|v| v.changed)
+}
+
+/// The worse of two slots: higher [`severity_rank`] wins; on an equal
+/// rank, the one that changed more recently. Total and deterministic —
+/// no two live slots within one [`Lanes`] share a `changed` stamp.
+fn worse_of<'a>(a: Option<&'a LaneValue>, b: Option<&'a LaneValue>) -> Option<&'a LaneValue> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(v), None) | (None, Some(v)) => Some(v),
+        (Some(incumbent), Some(candidate)) => Some(if displaces(candidate, incumbent) {
+            candidate
+        } else {
+            incumbent
+        }),
+    }
+}
+
+/// Whether `candidate` displaces `incumbent` — the one and only
+/// tie-break site.
+fn displaces(candidate: &LaneValue, incumbent: &LaneValue) -> bool {
+    (severity_rank(&candidate.health), candidate.changed)
+        > (severity_rank(&incumbent.health), incumbent.changed)
+}
+
+impl Lanes {
+    /// The stamp to write onto the slot being reported: the one it
+    /// already had when nothing changed, otherwise the next one.
+    fn stamp(&mut self, kept: Option<u64>) -> u64 {
+        kept.unwrap_or_else(|| {
+            self.seq += 1;
+            self.seq
+        })
+    }
+
+    /// The worst slot across both lanes, returned as its own
+    /// `(health, detail)` pair — and only when that pair differs from
+    /// the one last forwarded.
+    fn recombine(&mut self) -> Option<(Health, String)> {
+        let load = self
+            .load
+            .values()
+            .fold(None, |worst, v| worse_of(worst, Some(v)));
+        let combined = worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {
+            // An `Ok` has no problem to explain, and its slot's detail
+            // is decoration ("BK1: " from a publish, "" from a poll).
+            // Normalised away so that WHICH clean slot happens to be
+            // deciding cannot re-fire an `Ok` the surface already
+            // shows — with the load lane keyed per batch, ten batches
+            // publishing cleanly would otherwise send ten `Ok`s.
+            Health::Ok => (Health::Ok, String::new()),
+            _ => (v.health.clone(), v.detail.clone()),
+        });
+        if combined == self.last_reported {
+            return None;
+        }
+        self.last_reported = combined.clone();
+        combined
+    }
 }
 
 #[derive(Default)]
@@ -218,51 +364,56 @@ struct HealthTracker {
 
 impl HealthTracker {
     /// The scheduler sink's door: `Ok` on a clean poll, the worst
-    /// pending/orphaned state discovery found otherwise. `Some(health)`
-    /// exactly when the COMBINED (worse-of-both-lanes) value changes —
-    /// which is not the same as this lane's own value changing; see the
-    /// type's own doc comment.
-    fn report_discovery(&self, source: &str, health: Health) -> Option<Health> {
-        self.report(source, health, Lane::Discovery)
+    /// pending/orphaned state discovery found otherwise. `Some(pair)`
+    /// exactly when the COMBINED (worst-of-all-slots) value changes —
+    /// which is not the same as this lane's own value changing — and
+    /// the pair is the DECIDING slot's, which may well be the load
+    /// lane's, so the caller must forward it verbatim rather than its
+    /// own `(worst, detail)`.
+    fn report_discovery(
+        &self,
+        source: &str,
+        health: Health,
+        detail: String,
+    ) -> Option<(Health, String)> {
+        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        let lanes = sources.entry(source.to_string()).or_default();
+        let kept = unchanged_stamp(lanes.discovery.as_ref(), &health, &detail);
+        let changed = lanes.stamp(kept);
+        lanes.discovery = Some(LaneValue {
+            health,
+            detail,
+            changed,
+        });
+        lanes.recombine()
     }
 
     /// The ingest sink's door: every publish's health (`Ok` included)
-    /// and every load failure. `Some(health)` exactly when the COMBINED
-    /// value changes.
-    fn report_load(&self, source: &str, health: Health) -> Option<Health> {
-        self.report(source, health, Lane::Load)
-    }
-
-    fn report(&self, source: &str, health: Health, lane: Lane) -> Option<Health> {
+    /// and every load failure, under the BATCH it belongs to (NEW-6 —
+    /// one batch's clean publish clears only that batch). Returns the
+    /// deciding slot's pair on a real transition, on the same terms as
+    /// [`HealthTracker::report_discovery`].
+    fn report_load(
+        &self,
+        source: &str,
+        batch: &str,
+        health: Health,
+        detail: String,
+    ) -> Option<(Health, String)> {
         let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
         let lanes = sources.entry(source.to_string()).or_default();
-        match lane {
-            Lane::Discovery => lanes.discovery = Some(health),
-            Lane::Load => lanes.load = Some(health),
-        }
-        let combined = match (&lanes.discovery, &lanes.load) {
-            (None, None) => None,
-            (Some(d), None) => Some(d.clone()),
-            (None, Some(l)) => Some(l.clone()),
-            // The WORSE of the two — `Health`'s own severity `Ord`. On an
-            // exact tie (equal severity, e.g. two different `Degraded`
-            // reasons landing at once) the choice is otherwise arbitrary;
-            // `>=` prefers `load`, the content-aware lane, when neither
-            // outranks the other.
-            (Some(d), Some(l)) => Some(if l >= d { l.clone() } else { d.clone() }),
-        };
-        if combined == lanes.last_reported {
-            return None;
-        }
-        lanes.last_reported = combined.clone();
-        combined
+        let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);
+        let changed = lanes.stamp(kept);
+        lanes.load.insert(
+            batch.to_string(),
+            LaneValue {
+                health,
+                detail,
+                changed,
+            },
+        );
+        lanes.recombine()
     }
-}
-
-#[derive(Clone, Copy)]
-enum Lane {
-    Discovery,
-    Load,
 }
 
 pub struct DataService {
@@ -439,19 +590,36 @@ impl DataService {
                     // specifically — see `HealthTracker`'s own doc for
                     // why a publish's clean `Ok` and a discovery poll's
                     // clean `Ok` are no longer interchangeable.
+                    //
+                    // NEW-5/NEW-6 (round 4): under this BATCH's key, and
+                    // the returned `(worst, detail)` pair is forwarded
+                    // VERBATIM — it is the deciding slot's, which may be
+                    // the discovery lane's (a stuck file this publish
+                    // knows nothing about), and attaching this publish's
+                    // own detail to it named the wrong file.
                     let reason = match &health {
                         Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
                         _ => String::new(),
                     };
-                    match health_tracker.report_load(&source, health) {
-                        Some(reported) => {
-                            log_health_event(&source, &reported, &reason);
-                            delivered
-                                && sink(DataEvent::Health {
-                                    source,
-                                    worst: reported,
-                                    detail: format!("{batch}: {reason}"),
-                                })
+                    match health_tracker.report_load(
+                        &source,
+                        &batch,
+                        health,
+                        format!("{batch}: {reason}"),
+                    ) {
+                        Some((worst, detail)) => {
+                            log_health_event(&source, &worst, &detail);
+                            // Not `delivered && sink(...)`: `&&`
+                            // short-circuits, and skipping the send
+                            // while the tracker has already recorded the
+                            // state as reported would lose this
+                            // transition for good (it never re-reports).
+                            let health_delivered = sink(DataEvent::Health {
+                                source,
+                                worst,
+                                detail,
+                            });
+                            delivered && health_delivered
                         }
                         None => delivered,
                     }
@@ -488,18 +656,20 @@ impl DataService {
                     // re-send. NEW-4 (round 3): the LOAD lane — a load
                     // failure is content-aware, the same as any other
                     // publish outcome, never discovery's concern.
-                    let Some(reported) = health_tracker.report_load(
+                    let Some((worst, detail)) = health_tracker.report_load(
                         &source,
+                        &batch,
                         Health::Failed {
                             reason: reason.clone(),
                         },
+                        format!("{batch}: {reason}"),
                     ) else {
                         return true;
                     };
                     sink(DataEvent::Health {
                         source,
-                        worst: reported,
-                        detail: format!("{batch}: {reason}"),
+                        worst,
+                        detail,
                     })
                 }
                 IngestEvent::PlanComplete => true,
@@ -541,12 +711,19 @@ impl DataService {
                     // publish was clean". Writing this lane can never by
                     // itself clear a load-set `Degraded`/`Failed`; see
                     // `HealthTracker`'s own doc comment.
-                    match health_tracker.report_discovery(&source, worst) {
-                        Some(reported) => {
-                            log_health_event(&source, &reported, &detail);
+                    //
+                    // NEW-5 (round 4): the returned `(worst, detail)`
+                    // pair is forwarded VERBATIM. It is the deciding
+                    // slot's, which is often the LOAD lane's — a clean
+                    // poll's own detail is the empty string, so
+                    // attaching it to a load-set `Degraded` published
+                    // the word "degraded" with no reason at all.
+                    match health_tracker.report_discovery(&source, worst, detail) {
+                        Some((worst, detail)) => {
+                            log_health_event(&source, &worst, &detail);
                             sink(DataEvent::Health {
                                 source,
-                                worst: reported,
+                                worst,
                                 detail,
                             })
                         }
@@ -1716,32 +1893,57 @@ source_name = "NPV"
         svc.shutdown();
     }
 
+    /// The detail line each producer writes alongside a health, in the
+    /// shape the real sinks write it (`"{batch}: {reason}"` for the
+    /// ingest sink, `worst_health`'s `"{label}: {files}"` for the
+    /// scheduler's) — so a test that cares only about the health can go
+    /// through `poll`/`publish` below and still exercise the real
+    /// detail-carrying path.
+    fn detail_of(who: &str, h: &Health) -> String {
+        match h {
+            Health::Degraded { reason } | Health::Failed { reason } => format!("{who}: {reason}"),
+            _ => format!("{who}: {}", h.label()),
+        }
+    }
+
+    /// A discovery poll, health only.
+    fn poll(t: &HealthTracker, source: &str, h: Health) -> Option<Health> {
+        let detail = detail_of("poll", &h);
+        t.report_discovery(source, h, detail).map(|(h, _)| h)
+    }
+
+    /// One batch's publish outcome, health only.
+    fn publish(t: &HealthTracker, source: &str, batch: &str, h: Health) -> Option<Health> {
+        let detail = detail_of(batch, &h);
+        t.report_load(source, batch, h, detail).map(|(h, _)| h)
+    }
+
     #[test]
     fn health_tracker_reports_a_transition_only() {
         let t = HealthTracker::default();
         assert_eq!(
-            t.report_load("a", Health::Ok),
+            publish(&t, "a", "BK0", Health::Ok),
             Some(Health::Ok),
             "the first report for a source is always a transition"
         );
         assert_eq!(
-            t.report_load("a", Health::Ok),
+            publish(&t, "a", "BK0", Health::Ok),
             None,
             "a repeated identical report is not a transition"
         );
         let degraded = Health::Degraded { reason: "x".into() };
         assert_eq!(
-            t.report_load("a", degraded.clone()),
+            publish(&t, "a", "BK0", degraded.clone()),
             Some(degraded.clone()),
             "a changed report is a transition"
         );
         assert_eq!(
-            t.report_load("a", degraded),
+            publish(&t, "a", "BK0", degraded),
             None,
             "repeating the new state again is not a transition"
         );
         assert_eq!(
-            t.report_load("b", Health::Ok),
+            publish(&t, "b", "BK0", Health::Ok),
             Some(Health::Ok),
             "a different source's first report is its own transition, \
              independent of source \"a\""
@@ -1757,6 +1959,27 @@ source_name = "NPV"
     mod health_tracker_lanes {
         use super::*;
 
+        /// The two same-rank reasons round 4's NEW-5 trace uses: an
+        /// `Orphaned` sentinel found by discovery and a
+        /// carried-dimension violation found by a publish, both
+        /// `Degraded`, both real, both needing different action. Their
+        /// lexicographic order matters to these tests: `"currency…"`
+        /// sorts BEFORE `"expected…"`, so `Health`'s derived `Ord` —
+        /// which falls through to the reason string once the variants
+        /// tie — picks the discovery one, the opposite of what the
+        /// severity-rank-plus-most-recently-changed rule picks when the
+        /// load lane moved last.
+        fn orphan() -> Health {
+            Health::Degraded {
+                reason: "expected value at line 1".into(),
+            }
+        }
+        fn carried() -> Health {
+            Health::Degraded {
+                reason: "currency varies within instrument key I1".into(),
+            }
+        }
+
         /// A degraded LOAD, then a CLEAN DISCOVERY poll: the combined
         /// value must stay `Degraded` — a routine, content-blind poll
         /// (`worst_health` sees no stuck/malformed file) is not evidence
@@ -1765,28 +1988,30 @@ source_name = "NPV"
         fn a_degraded_load_survives_a_clean_discovery_poll() {
             let t = HealthTracker::default();
             let degraded = Health::Degraded { reason: "x".into() };
-            assert_eq!(t.report_load("a", degraded.clone()), Some(degraded));
+            assert_eq!(publish(&t, "a", "BK0", degraded.clone()), Some(degraded));
             assert_eq!(
-                t.report_discovery("a", Health::Ok),
+                poll(&t, "a", Health::Ok),
                 None,
                 "a clean discovery poll must not clear a load-set Degraded"
             );
         }
 
-        /// A degraded LOAD, then a CLEAN LOAD (a corrected republish):
-        /// only a clean load may clear a load-set Degraded.
+        /// A degraded LOAD, then a CLEAN LOAD FOR THE SAME BATCH (the
+        /// corrected file, republished): only that batch's own clean
+        /// publish may clear it.
         #[test]
         fn a_degraded_load_is_cleared_by_a_clean_load() {
             let t = HealthTracker::default();
             let degraded = Health::Degraded { reason: "x".into() };
             assert_eq!(
-                t.report_load("a", degraded),
+                publish(&t, "a", "BK0", degraded),
                 Some(Health::Degraded { reason: "x".into() })
             );
             assert_eq!(
-                t.report_load("a", Health::Ok),
+                publish(&t, "a", "BK0", Health::Ok),
                 Some(Health::Ok),
-                "a clean republish must clear the earlier degraded load"
+                "a clean republish of the same batch must clear the \
+                 earlier degraded load"
             );
         }
 
@@ -1797,9 +2022,9 @@ source_name = "NPV"
         #[test]
         fn discovery_pending_too_long_surfaces_over_a_clean_load() {
             let t = HealthTracker::default();
-            assert_eq!(t.report_load("a", Health::Ok), Some(Health::Ok));
+            assert_eq!(publish(&t, "a", "BK0", Health::Ok), Some(Health::Ok));
             assert_eq!(
-                t.report_discovery("a", Health::PendingTooLong),
+                poll(&t, "a", Health::PendingTooLong),
                 Some(Health::PendingTooLong),
                 "PendingTooLong is discovery's own domain and must surface"
             );
@@ -1815,20 +2040,20 @@ source_name = "NPV"
             // of the load lane going Degraded from an unrelated earlier
             // publish for the same source.
             assert_eq!(
-                t.report_discovery("a", Health::PendingTooLong),
+                poll(&t, "a", Health::PendingTooLong),
                 Some(Health::PendingTooLong)
             );
             let degraded = Health::Degraded {
                 reason: "carried-dimension violation".into(),
             };
             assert_eq!(
-                t.report_load("a", degraded.clone()),
+                publish(&t, "a", "BK0", degraded.clone()),
                 Some(degraded),
                 "Degraded outranks PendingTooLong, so the load report is \
                  itself a transition"
             );
             assert_eq!(
-                t.report_discovery("a", Health::Ok),
+                poll(&t, "a", Health::Ok),
                 None,
                 "discovery clearing to Ok must not override the load-set \
                  Degraded — Degraded still outranks Ok"
@@ -1844,25 +2069,226 @@ source_name = "NPV"
             let failed = Health::Failed {
                 reason: "bad header".into(),
             };
-            assert_eq!(t.report_load("a", failed.clone()), Some(failed));
+            assert_eq!(publish(&t, "a", "BK0", failed.clone()), Some(failed));
             assert_eq!(
-                t.report_discovery("a", Health::Ok),
+                poll(&t, "a", Health::Ok),
                 None,
                 "a clean discovery poll must not clear a load-set Failed"
             );
         }
 
+        /// NEW-5 (final review round 4): both lanes `Degraded` at once —
+        /// a malformed sentinel (discovery's `Orphaned`) AND a
+        /// carried-dimension violation from a publish. The second is a
+        /// real, distinct finding a trader must act on separately: it
+        /// must reach the surface, WITH ITS OWN REASON. Comparing whole
+        /// `Health` values instead of severity rank decides this by the
+        /// alphabet and drops one of the two findings entirely.
+        #[test]
+        fn a_second_degradation_at_the_same_rank_is_reported() {
+            let t = HealthTracker::default();
+            assert_eq!(
+                t.report_discovery("a", orphan(), "degraded: bad.csv".into()),
+                Some((orphan(), "degraded: bad.csv".into()))
+            );
+            assert_eq!(
+                t.report_load("a", "BK0", carried(), "BK0: currency".into()),
+                Some((carried(), "BK0: currency".to_string())),
+                "at an equal rank the lane that changed most recently \
+                 decides, and it reports ITS OWN reason — a \
+                 carried-dimension violation is a new finding, not a \
+                 duplicate of the malformed sentinel already showing"
+            );
+        }
+
+        /// A same-rank change on the DECIDING lane — a second, different
+        /// carried-dimension violation replacing the first — is a
+        /// transition: the reason is the only thing on the surface that
+        /// says which problem the trader has.
+        #[test]
+        fn a_new_load_reason_at_the_same_rank_is_a_transition() {
+            let t = HealthTracker::default();
+            t.report_discovery("a", orphan(), "degraded: bad.csv".into());
+            t.report_load("a", "BK0", carried(), "BK0: currency".into());
+            let renamed = Health::Degraded {
+                reason: "lhu varies within instrument key I2".into(),
+            };
+            assert_eq!(
+                t.report_load("a", "BK0", renamed.clone(), "BK0: lhu".into()),
+                Some((renamed, "BK0: lhu".to_string())),
+                "a different reason at the same severity is a different \
+                 finding and must surface"
+            );
+        }
+
+        /// The ruling's flap check: a standing degraded LOAD and a
+        /// source polling cleanly forever reports nothing after the
+        /// first transition.
+        #[test]
+        fn repeated_clean_polls_with_a_standing_degraded_load_report_nothing() {
+            let t = HealthTracker::default();
+            assert_eq!(
+                publish(&t, "a", "BK0", carried()),
+                Some(carried()),
+                "setup: the degraded publish is the transition"
+            );
+            for _ in 0..8 {
+                assert_eq!(
+                    poll(&t, "a", Health::Ok),
+                    None,
+                    "a clean poll changes nothing and reports nothing"
+                );
+            }
+        }
+
+        /// The other flap check, and the one that pins WHY an identical
+        /// re-report must not restamp its slot: with both lanes at the
+        /// same rank, "prefer whichever lane is calling" would hand the
+        /// decision back and forth on every poll, alternating the
+        /// reported reason between two standing problems forever.
+        #[test]
+        fn repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision() {
+            let t = HealthTracker::default();
+            t.report_discovery("a", orphan(), "degraded: bad.csv".into());
+            assert_eq!(
+                t.report_load("a", "BK0", carried(), "BK0: currency".into()),
+                Some((carried(), "BK0: currency".to_string())),
+                "setup: the load lane changed last, so it decides"
+            );
+            for _ in 0..8 {
+                assert_eq!(
+                    t.report_discovery("a", orphan(), "degraded: bad.csv".into()),
+                    None,
+                    "re-reporting a value the discovery lane already held \
+                     changes nothing and must not take the decision back"
+                );
+            }
+        }
+
+        /// A discovery `Degraded` (a malformed sentinel) over a clean
+        /// load lane reports DISCOVERY's reason — the deciding lane's,
+        /// not the caller's.
+        #[test]
+        fn a_discovery_degraded_over_a_clean_load_reports_the_discovery_detail() {
+            let t = HealthTracker::default();
+            assert_eq!(
+                t.report_load("a", "BK0", Health::Ok, "BK0: ".into()),
+                Some((Health::Ok, String::new()))
+            );
+            assert_eq!(
+                t.report_discovery("a", orphan(), "degraded: bad.csv".into()),
+                Some((orphan(), "degraded: bad.csv".to_string())),
+                "the malformed sentinel outranks the clean load, and its \
+                 own file name is the actionable half"
+            );
+        }
+
+        /// NEW-5(b): the pair handed back belongs to the DECIDING slot,
+        /// which is routinely not the caller's. A stuck stray file
+        /// (discovery `PendingTooLong`) stands while a batch fails and
+        /// is then fixed: the ingest sink's clean publish gets back
+        /// discovery's `PendingTooLong` AND discovery's detail — naming
+        /// the stuck file, which is the one thing that can be acted on.
+        #[test]
+        fn the_reported_pair_comes_from_the_deciding_lane_not_the_caller() {
+            let t = HealthTracker::default();
+            t.report_discovery(
+                "a",
+                Health::PendingTooLong,
+                "pending_too_long: stray.csv".into(),
+            );
+            let failed = Health::Failed {
+                reason: "bad header".into(),
+            };
+            assert_eq!(
+                t.report_load("a", "BK0", failed.clone(), "BK0: bad header".into()),
+                Some((failed, "BK0: bad header".to_string()))
+            );
+            assert_eq!(
+                t.report_load("a", "BK0", Health::Ok, "BK0: ".into()),
+                Some((
+                    Health::PendingTooLong,
+                    "pending_too_long: stray.csv".to_string()
+                )),
+                "the ingest sink must forward discovery's pair verbatim — \
+                 attaching the just-published batch's own detail names the \
+                 wrong file and drops the stuck one"
+            );
+        }
+
+        /// NEW-6 (final review round 4): batch `BK0`'s degraded
+        /// generation is LIVE AND QUERYABLE, so batch `BK1` publishing
+        /// cleanly says nothing about it and must not clear it.
+        #[test]
+        fn a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing() {
+            let t = HealthTracker::default();
+            assert_eq!(publish(&t, "a", "BK0", carried()), Some(carried()));
+            assert_eq!(
+                publish(&t, "a", "BK1", Health::Ok),
+                None,
+                "BK1's clean publish says nothing about BK0's still-live \
+                 degraded rows"
+            );
+            assert_eq!(
+                publish(&t, "a", "BK0", Health::Ok),
+                Some(Health::Ok),
+                "BK0's OWN clean republish is the only thing that clears it"
+            );
+        }
+
+        /// The worst across batches, not the last one written: two
+        /// degraded batches, and clearing one leaves the other showing.
+        #[test]
+        fn the_load_lane_reports_the_worst_batch_not_the_latest() {
+            let t = HealthTracker::default();
+            assert_eq!(publish(&t, "a", "BK0", carried()), Some(carried()));
+            let failed = Health::Failed {
+                reason: "bad header".into(),
+            };
+            assert_eq!(
+                publish(&t, "a", "BK1", failed.clone()),
+                Some(failed.clone()),
+                "Failed outranks Degraded"
+            );
+            assert_eq!(
+                publish(&t, "a", "BK1", Health::Ok),
+                Some(carried()),
+                "clearing the worse batch falls back to the other batch's \
+                 still-standing Degraded, never to Ok"
+            );
+        }
+
+        /// A `Failed` batch that later publishes cleanly clears — the
+        /// load lane holds each batch's LATEST outcome, so a recovered
+        /// file is genuinely recovered.
+        #[test]
+        fn a_failed_batch_is_cleared_by_its_own_clean_publish() {
+            let t = HealthTracker::default();
+            let failed = Health::Failed {
+                reason: "bad header".into(),
+            };
+            assert_eq!(publish(&t, "a", "BK0", failed.clone()), Some(failed));
+            assert_eq!(
+                publish(&t, "a", "BK0", Health::Ok),
+                Some(Health::Ok),
+                "the same batch loading cleanly is a real recovery"
+            );
+        }
+
         /// Both lanes steadily `Ok`: exactly one `Ok` is ever reported,
-        /// across many discovery polls AND publishes, in either order.
+        /// across many discovery polls AND publishes of several batches,
+        /// in either order. A clean `Ok` carries no reason, so which
+        /// clean slot happens to be deciding must never re-fire it.
         #[test]
         fn both_lanes_ok_report_exactly_one_ok() {
             let t = HealthTracker::default();
             let mut ok_count = 0;
             for i in 0..10 {
-                if t.report_discovery("a", Health::Ok).is_some() {
+                if poll(&t, "a", Health::Ok).is_some() {
                     ok_count += 1;
                 }
-                if i % 3 == 0 && t.report_load("a", Health::Ok).is_some() {
+                let batch = format!("BK{}", i % 3);
+                if i % 3 == 0 && publish(&t, "a", &batch, Health::Ok).is_some() {
                     ok_count += 1;
                 }
             }
@@ -1873,14 +2299,40 @@ source_name = "NPV"
                  same combined value"
             );
         }
+
+        /// Two sources are wholly independent: nothing either lane of
+        /// one writes can be read as the other's state.
+        #[test]
+        fn two_sources_do_not_see_each_others_lanes() {
+            let t = HealthTracker::default();
+            assert_eq!(publish(&t, "a", "BK0", carried()), Some(carried()));
+            assert_eq!(
+                poll(&t, "b", Health::Ok),
+                Some(Health::Ok),
+                "source b's first report is its own, unaffected by a"
+            );
+            assert_eq!(
+                publish(&t, "b", "BK0", Health::Ok),
+                None,
+                "and b stays Ok while a stays Degraded"
+            );
+            assert_eq!(
+                poll(&t, "a", Health::Ok),
+                None,
+                "a's own degraded load is still standing"
+            );
+        }
     }
 
-    /// NEW-1 (final review round 2): a degraded PUBLISH is cleared by a
-    /// later, CLEAN publish for the same source — the shared
-    /// `HealthTracker` closes the gap MAJ-3 opened (a second writer of
-    /// source health the scheduler's old, service-local dedup knew
-    /// nothing about). Two publishes, same source, different batches: the
-    /// first violates the carried-dimension rule, the second does not.
+    /// NEW-6 (final review round 4), superseding round 2's version of
+    /// this test (which asserted the OPPOSITE — that ANY clean publish
+    /// for the source clears an earlier degraded one, whichever batch
+    /// each belonged to): batch `BK0`'s degraded generation stays LIVE
+    /// AND QUERYABLE, that being the whole difference between `Degraded`
+    /// and `Failed`, so an unrelated batch `BK1` publishing cleanly says
+    /// nothing at all about `BK0`'s rows and must not clear them. Only
+    /// `BK0`'s own clean republish can
+    /// (`a_clean_republish_of_the_same_batch_clears_its_degraded_health`).
     ///
     /// **Isolation from the scheduler's own signal is deliberate.** Any
     /// poll that *discovers* a `Ready` file also, in that same cycle,
@@ -1897,7 +2349,7 @@ source_name = "NPV"
     /// same priority, so the degraded batch (newer `as_of`) loads before
     /// the clean one.
     #[test]
-    fn a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish() {
+    fn a_clean_publish_of_another_batch_does_not_clear_a_degraded_batch() {
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
 
@@ -1970,6 +2422,128 @@ source_name = "NPV"
         }
         assert!(saw_degraded, "setup: the first publish must degrade");
 
+        // Wait for BK1 — the CLEAN batch — to actually publish, so this
+        // test cannot pass merely by the second publish never happening,
+        // and watch for a Health::Ok the whole way there and for a
+        // moment after (the sink emits a publish's Health event
+        // immediately after its Published event, on the same thread).
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_bk1 = false;
+        let mut saw_ok = false;
+        let mut drain_until = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(DataEvent::Published { batch, .. }) if batch == "BK1" => {
+                    saw_bk1 = true;
+                    drain_until = Some(Instant::now() + Duration::from_millis(300));
+                }
+                Ok(DataEvent::Health {
+                    source,
+                    worst: Health::Ok,
+                    ..
+                }) if source == "eod_risk" => saw_ok = true,
+                _ => {}
+            }
+            if drain_until.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+        }
+        assert!(saw_bk1, "setup: the clean batch BK1 must publish");
+        assert!(
+            !saw_ok,
+            "a clean publish of BK1 says nothing about BK0, whose degraded \
+             generation is still live and queryable — it must not clear it"
+        );
+        svc.shutdown();
+    }
+
+    /// NEW-6's other half (final review round 4): the batch's OWN clean
+    /// republish — the corrected file dropped back into the source
+    /// directory — genuinely clears it, all the way through the real
+    /// door (discovery, load, publish, tracker, entity event). Without
+    /// this, "only that batch can clear it" would be satisfiable by
+    /// nothing ever clearing anything.
+    ///
+    /// A short `poll_interval` here on purpose: a SECOND poll is the
+    /// whole point, and — since round 3 — a routine poll can no longer
+    /// mask anything, so there is nothing left to isolate the test from.
+    #[test]
+    fn a_clean_republish_of_the_same_batch_clears_its_degraded_health() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let csv = src.path().join("risk_2026-08-24_BK0.csv");
+        let sentinel = src.path().join("risk_2026-08-24_BK0.csv.done");
+
+        // Currency varies within the instrument key — Degraded.
+        std::fs::write(
+            &csv,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P1,C,I1,EUR,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &sentinel,
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_millis(30),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_degraded = false;
+        while Instant::now() < deadline && !saw_degraded {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Degraded { .. },
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_degraded = true;
+            }
+        }
+        assert!(saw_degraded, "setup: the first publish must degrade");
+
+        // The corrected file, same name and so the same BATCH, with a
+        // newer `as_of` so it is a new generation rather than a stale
+        // re-read. Sentinel removed first: a file whose sentinel has not
+        // landed is `Pending`, which discovery skips — never a
+        // half-written CSV read against its old sentinel.
+        std::fs::remove_file(&sentinel).unwrap();
+        std::fs::write(
+            &csv,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P2,C,I2,USD,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &sentinel,
+            r#"{"as_of":"2026-08-24T18:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut saw_ok = false;
         while Instant::now() < deadline && !saw_ok {
@@ -1985,8 +2559,8 @@ source_name = "NPV"
         }
         assert!(
             saw_ok,
-            "a later clean publish for the same source must clear the \
-             earlier degraded health"
+            "the batch's own corrected republish must clear its degraded \
+             health"
         );
         svc.shutdown();
     }
