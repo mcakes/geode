@@ -3533,6 +3533,16 @@ run_mutation "shell: open_module never finds an existing occupant, so a second c
   '        let found: Option<(TileId, Option<DockSide>)> = None;' \
   geode-shell open_module_twice_yields_one_tile_of_that_kind_focused
 
+run_mutation "diagnostics module: the log section never reports records lost to a ring wrap" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                self.lost_records = self
+                    .ring
+                    .oldest_seq()
+                    .map(|oldest| oldest.saturating_sub(self.since + 1))
+                    .unwrap_or(0);' \
+  '                self.lost_records = 0;' \
+  geode-diagnostics the_log_section_reports_lost_records_when_the_ring_wrapped_past_since
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
