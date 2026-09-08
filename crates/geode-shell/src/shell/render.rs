@@ -777,7 +777,7 @@ impl Render for ShellView {
         // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
         // its `as_of` segment reads `bar_model.as_of`, the same formatted
         // text the toolbar's own AS OF badge shows.
-        let bar_model = self.frame.read(cx).bar_model();
+        let bar_model = self.frame.read(cx).bar_model(chrono::Local::now());
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),

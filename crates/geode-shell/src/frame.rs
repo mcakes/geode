@@ -175,7 +175,7 @@ pub struct Frame {
     /// still needs to update this cache; `Rc<ScopeBarModel>` rather than
     /// an owned clone so a cache hit costs a refcount bump, not a fresh
     /// allocation.
-    bar_cache: RefCell<Option<(FrameVersions, Rc<ScopeBarModel>)>>,
+    bar_cache: RefCell<Option<(FrameVersions, chrono::NaiveDate, Rc<ScopeBarModel>)>>,
     /// The open flip barrier (Phase 4 §3.10), if any — see
     /// [`FlipBarrier`]'s own doc comment. `None` when no scope/grouping/
     /// as-of mutation has a barrier waiting on it right now.
@@ -552,23 +552,32 @@ impl Frame {
     }
 
     /// What the toolbar's scope bar shows (spec §3.1/§3.6/§4.4). Cached
-    /// (see `bar_cache`'s doc comment) keyed on `versions()`: a call with
-    /// nothing changed since the last one returns the exact same `Rc` — a
-    /// refcount bump, no fresh allocation — rather than rebuilding.
-    pub fn bar_model(&self) -> Rc<ScopeBarModel> {
+    /// (see `bar_cache`'s doc comment) keyed on `versions()` AND `now`'s
+    /// local date (Phase 4b M12): an as-of formats as bare `HH:MM` when
+    /// its date is today (`scopebar::build_model`'s own doc comment) —
+    /// keying on `FrameVersions` alone meant that label stayed stale
+    /// past midnight, showing `HH:MM` for a now-yesterday instant until
+    /// the next unrelated mutation happened to invalidate the cache.
+    /// `now` is a parameter (rather than read from the clock in here),
+    /// same testability reason `scopebar::build_model` already takes it
+    /// explicitly — and passed straight through, so this reads the clock
+    /// once, not twice.
+    pub fn bar_model(&self, now: chrono::DateTime<chrono::Local>) -> Rc<ScopeBarModel> {
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
         // flip costs a refcount bump like any other unrelated notify,
         // not a rebuild.
         let mut versions = self.versions();
         versions.flip = 0;
-        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+        let today = now.date_naive();
+        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }
-        let built = Rc::new(scopebar::build_model(self, chrono::Local::now()));
-        *self.bar_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
+        let built = Rc::new(scopebar::build_model(self, now));
+        *self.bar_cache.borrow_mut() = Some((versions, today, Rc::clone(&built)));
         built
     }
 
@@ -1058,8 +1067,9 @@ mod tests {
         s.text = Some("spx".into());
         s.expression = Some(geode_core::scope::parse_expr("npv > 0").unwrap());
         f.set_scope(s);
-        let m1 = f.bar_model();
-        let m2 = f.bar_model();
+        let now = chrono::Local::now();
+        let m1 = f.bar_model(now);
+        let m2 = f.bar_model(now);
         assert!(Rc::ptr_eq(&m1, &m2));
         assert_eq!(m1.slot, Some((1, "book / lhu".into())));
         assert_eq!(m1.chips[0].summary, "book ∈ BK001, BK002");
@@ -1068,7 +1078,26 @@ mod tests {
         assert_eq!(m1.expr.as_deref(), Some("npv > 0"));
         assert_eq!(m1.as_of, None);
         f.set_text(None);
-        assert!(!Rc::ptr_eq(&m1, &f.bar_model()));
+        assert!(!Rc::ptr_eq(&m1, &f.bar_model(now)));
+    }
+
+    #[test]
+    fn the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged() {
+        // Phase 4b M12: the cache key used to be `FrameVersions` alone,
+        // so a call after midnight with nothing else having mutated the
+        // frame still returned yesterday's `Rc` — including its as-of
+        // label, formatted `HH:MM` only because it was "today" back when
+        // the cache was built.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let day1 = chrono::Local::now();
+        let m1 = f.bar_model(day1);
+        let day2 = day1 + chrono::Duration::days(1);
+        let m2 = f.bar_model(day2);
+        assert!(
+            !Rc::ptr_eq(&m1, &m2),
+            "versions unchanged but the date moved on: must rebuild"
+        );
     }
 
     #[test]
@@ -1077,7 +1106,10 @@ mod tests {
         let s = book_scope("A").and_then(&book_scope("B"));
         assert!(s.impossible);
         f.set_scope(s);
-        assert_eq!(f.bar_model().impossible.as_deref(), Some("∅ book"));
+        assert_eq!(
+            f.bar_model(chrono::Local::now()).impossible.as_deref(),
+            Some("∅ book")
+        );
     }
 
     #[test]
