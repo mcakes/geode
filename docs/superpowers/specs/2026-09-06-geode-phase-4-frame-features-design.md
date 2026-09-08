@@ -952,7 +952,14 @@ data never depend on each other" on day one of the entity's existence.
 `SourceState.health` is `Option<Health>`, and `summary()` counts only
 sources with a *real* health note — a configured-but-not-yet-reported
 source is not counted at all, in either direction (CRIT-1: the section
-below shows it separately as "no report yet"). `config: Vec<Diagnostic>`
+below shows it separately as "no report yet"). The value a source's
+health note actually carries is the WORSE of two independently-tracked
+lanes, discovery (content-blind: is anything currently stuck or
+malformed on disk) and load (content-aware: did the last publish or
+load attempt succeed) — final review round 3, NEW-4: a single shared
+last-value map let a routine, content-blind clean poll silently clear a
+real, unfixed `Degraded`/`Failed` a publish had set, within about one
+poll interval and with nothing actually corrected. `config: Vec<Diagnostic>`
 is not an unconditionally-appended log: `note_config` *replaces* the
 current batch wholesale and is a no-op when the new batch is
 byte-identical to the old one (MAJ-5) — an unchanged reload (e.g. the

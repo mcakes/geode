@@ -1086,7 +1086,12 @@ Phase 4b (`docs/superpowers/specs/2026-09-06-geode-phase-4-frame-features-design
 both explicitly subject to the charter's per-frame-churn rule. This
 section records the allocation and rebuild contracts that keep them off
 the render thread's budget, and the one display reading that would
-prove it — not yet taken; template rows below.
+prove it — not yet taken; template rows below. (A source's *reported*
+health is a correctness question, not a performance one, so it is
+covered in the spec's §4.4 as-built note, not here — final review round
+3, NEW-4: it is the worse of two independently-tracked lanes, discovery
+and load, precisely so a routine, content-blind clean poll can never
+silently clear a real, unfixed problem a publish set.)
 
 **The ring reader's allocation contract.** `geode_core::log::Ring::
 drain_since` is the one thing a following diagnostics tile calls every
