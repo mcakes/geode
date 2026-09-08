@@ -121,9 +121,13 @@ pub struct Frame {
     /// mutation of the session pushes the base scope onto `scope_undo`,
     /// later ones in the same session push nothing, so a whole typing
     /// burst coalesces into one undo entry. `None`: no session open;
-    /// `Some(Some(base))`: open, not yet pushed; `Some(None)`: open,
-    /// already pushed once.
-    scope_session: Option<Option<Scope>>,
+    /// `Some(base)` throughout — before the first mutation and after —
+    /// so `end_scope_session` (Phase 4b M2) can compare the scope the
+    /// session ends on against the one it began on and pop the pushed
+    /// entry back off when they're equal: a session that types something
+    /// and then deletes it back to nothing must not leave a no-op undo
+    /// entry behind.
+    scope_session: Option<Scope>,
     slots: GroupingSlots,
     active_slot: Option<u8>,
     as_of: AsOf,
@@ -238,7 +242,7 @@ impl Frame {
     /// so opening a session that never edits anything leaves undo
     /// untouched.
     pub fn begin_scope_session(&mut self) {
-        self.scope_session = Some(Some(self.scope.clone()));
+        self.scope_session = Some(self.scope.clone());
     }
 
     /// Set the scope during an open text-editing session, coalescing every
@@ -250,16 +254,25 @@ impl Frame {
     /// push-every-time behaviour when no session is open — a caller that
     /// forgets `begin_scope_session` still gets correct (if less
     /// convenient) undo semantics rather than silently losing history.
+    ///
+    /// "Already pushed this session" is read off `scope_undo`'s own top
+    /// (rather than a second flag on `scope_session`, Phase 4b M2):
+    /// nothing else can push onto the stack while a session is open (the
+    /// only other caller, `set_scope`, is never used mid-session by any
+    /// real caller), so the base staying on top *is* "this session's
+    /// first mutation already happened" — and keeping `scope_session`
+    /// itself always `Some(base)` (never transitioning to a pushed/
+    /// not-yet-pushed sentinel) is what lets `end_scope_session` compare
+    /// the session's start and end scopes.
     pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
         if self.scope == scope {
             return false;
         }
-        match self.scope_session.take() {
-            Some(Some(base)) => {
-                self.push_undo(base);
-                self.scope_session = Some(None);
+        match &self.scope_session {
+            Some(base) if self.scope_undo.last() != Some(base) => {
+                self.push_undo(base.clone());
             }
-            Some(None) => self.scope_session = Some(None),
+            Some(_) => {}
             None => {
                 let outgoing = self.scope.clone();
                 self.push_undo(outgoing);
@@ -273,8 +286,19 @@ impl Frame {
     /// Close a text-editing session (spec §3.8): the text field lost
     /// focus. The next `set_scope_in_session` call (if any) starts a fresh
     /// session rather than continuing to coalesce into this one.
+    ///
+    /// Phase 4b M2: if the session actually pushed its base entry (a real
+    /// mutation happened) but the scope it ends on is back to being
+    /// exactly that base (typed something, then deleted it), the pushed
+    /// entry is popped back off — a session that nets out to a no-op must
+    /// not leave a no-op undo entry an unlucky `ctrl+z` would land on.
     pub fn end_scope_session(&mut self) {
-        self.scope_session = None;
+        if let Some(base) = self.scope_session.take()
+            && self.scope_undo.last() == Some(&base)
+            && self.scope == base
+        {
+            self.scope_undo.pop();
+        }
     }
 
     /// Walk back one entry in the undo stack (spec §3.6). `false` when the
@@ -881,6 +905,32 @@ mod tests {
         assert!(f.undo_scope());
         assert!(f.scope().is_empty());
         assert!(!f.undo_scope());
+    }
+
+    #[test]
+    fn a_text_session_that_ends_where_it_began_leaves_no_undo_entry() {
+        // Phase 4b M2: typing then deleting back to the session's own
+        // base scope must leave undo exactly where it was before the
+        // session opened — a no-op edit is not an undo-worthy edit.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        let depth_before = f.scope_undo.len();
+        f.begin_scope_session();
+        let mut s = f.scope().clone();
+        s.text = Some("a".into());
+        assert!(f.set_scope_in_session(s));
+        let mut s = f.scope().clone();
+        s.text = None;
+        assert!(f.set_scope_in_session(s));
+        f.end_scope_session();
+        assert_eq!(
+            f.scope_undo.len(),
+            depth_before,
+            "the session's own push must be popped once it ends where it began"
+        );
+        assert!(
+            !f.undo_scope(),
+            "nothing to undo: the session never actually changed anything"
+        );
     }
 
     #[test]
