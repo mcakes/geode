@@ -90,14 +90,20 @@ pub struct DiagnosticsTile {
     /// The ring sequence this tile has drained up to.
     since: u64,
     /// How many records this tile's own `since` had already fallen behind
-    /// `ring.oldest_seq()` as of the last drain (`Ring::oldest_seq`'s own
-    /// doc comment: "a reader whose own since has already been
-    /// overwritten can compare against this to know it was lapped, and by
-    /// how much"). Recomputed fresh each rebuild, not accumulated — once
-    /// `since` catches up to a recent `latest_seq`, the gap is whatever
-    /// the ring's current state says it is, not a running total of past
-    /// gaps. Surfaced as a leading "N records lost" row (spec §4.6's log
-    /// section) when nonzero.
+    /// `ring.oldest_seq()` as of the last DRAIN that found new records
+    /// (`Ring::oldest_seq`'s own doc comment: "a reader whose own since
+    /// has already been overwritten can compare against this to know it
+    /// was lapped, and by how much"). Recomputed fresh — not
+    /// accumulated — every time the log section's rebuild finds
+    /// `ring.latest_seq() > self.since`; a rebuild that finds nothing new
+    /// leaves the previous value in place, which is still the true
+    /// answer as of that unchanged `since` (MIN-3, final review: not a
+    /// running total of past gaps, and never a number this tile did not
+    /// itself compute). `since` is seeded from `ring.latest_seq()` at
+    /// construction (MIN-3's other half), so a tile opened after the
+    /// ring already wrapped past its own capacity does not claim records
+    /// it never had on its very first drain. Surfaced as a leading "N
+    /// records lost" row (spec §4.6's log section) when nonzero.
     lost_records: u64,
     /// Reused across drains (Phase 4b Task 5 fix round 1, MAJ-5):
     /// `Ring::drain_since`'s own doc comment says a reader "reuses one
@@ -161,6 +167,13 @@ impl DiagnosticsTile {
 
         let last_diag_versions = diagnostics.read(cx).versions();
         let last_frame_versions = frame.read(cx).versions();
+        // MIN-3 (final review): `since` starts at the ring's CURRENT
+        // `latest_seq`, not `0` — a tile constructed after the ring
+        // already holds records (a second tile, a session already in
+        // progress) never had those records to lose, so it must not
+        // report `oldest_seq() - 1` of them "lost" on its very first
+        // drain.
+        let initial_since = ring.latest_seq();
 
         cx.observe(&diagnostics, |this, diagnostics, cx| {
             let now = diagnostics.read(cx).versions();
@@ -228,7 +241,7 @@ impl DiagnosticsTile {
             collapsed: BTreeSet::new(),
             filter,
             follow: true,
-            since: 0,
+            since: initial_since,
             lost_records: 0,
             drain_buf: Vec::new(),
             records: VecDeque::new(),
@@ -778,6 +791,104 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// MIN-3 (final review): a tile constructed AFTER the ring already
+    /// holds more records than its capacity, opened directly on the log
+    /// section — the shape a session restore or a second tile hits, not
+    /// covered by `open_with`'s "empty ring, then push, then switch"
+    /// order. Duplicates `open_with`'s construction (rather than adding a
+    /// parameter to it and touching all 22 existing call sites) with one
+    /// difference: the ring is pre-populated before `DiagnosticsTile::new`
+    /// ever runs.
+    fn open_with_a_prepopulated_ring(
+        cx: &mut gpui::TestAppContext,
+        prepopulate: usize,
+    ) -> (Harness, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        let ring = Arc::new(Ring::new(64));
+        for i in 0..prepopulate {
+            ring.push(Record {
+                at: SystemTime::UNIX_EPOCH,
+                level: Level::INFO,
+                target: "geode::shell",
+                message: format!("m{i}"),
+                seq: 0,
+            });
+        }
+        let mut section = toml::Table::new();
+        section.insert("section".into(), toml::Value::String("log".into()));
+        let config = Rc::new(RefCell::new(Config::default()));
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let frame =
+                        cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
+                    let ring2 = ring.clone();
+                    let config2 = config.clone();
+                    cx.new(|cx| {
+                        let tile = cx.new(|cx| {
+                            DiagnosticsTile::new(
+                                TileId(9),
+                                frame.clone(),
+                                diagnostics.clone(),
+                                ring2.clone(),
+                                config2.clone(),
+                                Some(&section),
+                                window,
+                                cx,
+                            )
+                        });
+                        Host {
+                            tile,
+                            frame,
+                            diagnostics,
+                            ring: ring2,
+                        }
+                    })
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (tile, frame, diagnostics, ring) =
+            window.root(&mut vcx).unwrap().read_with(&vcx, |h, _| {
+                (
+                    h.tile.clone(),
+                    h.frame.clone(),
+                    h.diagnostics.clone(),
+                    h.ring.clone(),
+                )
+            });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            Harness {
+                tile,
+                frame,
+                diagnostics,
+                ring,
+            },
+            vcx,
+        )
+    }
+
+    #[gpui::test]
+    fn a_freshly_opened_tile_does_not_claim_records_it_never_had(cx: &mut gpui::TestAppContext) {
+        let (h, _vcx) = open_with_a_prepopulated_ring(cx, 100);
+        let joined = h.tile.read_with(&_vcx, |t, _| {
+            t.rows()
+                .iter()
+                .map(|r| r.text.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(
+            !joined.contains("records lost"),
+            "a newly opened tile never had these records — nothing was lost from ITS \
+             perspective, even though the ring itself wrapped before it existed: {joined}"
+        );
     }
 
     #[gpui::test]
