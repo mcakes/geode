@@ -67,6 +67,7 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
+use crate::dialogmode::DialogMode;
 use crate::keymap::Keystroke;
 
 /// A modal's content builder, called as `build(shell, window, cx)` — see
@@ -332,13 +333,21 @@ pub fn open_shell_dialog<F>(
 /// this is the one place that constructs a [`ShellModal`],
 /// `open_shell_dialog` included.
 ///
-/// `focus_filter` focuses [`ShellView::dialog_input`] on open — every list
-/// dialog passes `true` (the filter-first dialog UX: the first character
-/// typed must reach the filter, not fall on the floor);
-/// `open_shell_dialog` passes `false`. A modal that passes `true` must
-/// actually render that input — [`filter_row`] — since gpui dispatches
-/// keys down the *rendered* focus path and would otherwise route them to
-/// the window root, past `ShellView`'s own key listener.
+/// [`ShellView::dialog_input`] is emptied on every open, whatever
+/// `focus_filter` says: the field is shared between dialogs and outlives
+/// each one, so a dialog whose own fresh state starts with an empty query
+/// would otherwise be ranked against the *previous* dialog's leftover
+/// text the moment anything focused the field.
+///
+/// `focus_filter` additionally focuses it — a *filter-first* dialog passes
+/// `true` (the first character typed must reach the filter, not fall on
+/// the floor), and `open_shell_dialog` passes `false`, as does the
+/// keybinding dialog since it went modal (`crate::dialogmode`): it opens
+/// in normal mode, where bare letters are verbs and the filter must not
+/// own them until `/` says so. A modal that passes `true` must actually
+/// render that input — [`filter_row`] — since gpui dispatches keys down
+/// the *rendered* focus path and would otherwise route them to the window
+/// root, past `ShellView`'s own key listener.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -377,16 +386,19 @@ pub fn open_shell_dialog_with_key<F>(
         on_key,
     });
 
+    // Reset by value, not by rebuilding the entity — the same lifecycle
+    // `toggle_palette` gives `palette_input` (see `ShellView::
+    // dialog_input`'s own doc comment). `set_value` does not emit
+    // `InputEvent::Change` (checked against the pinned checkout, same as
+    // `toggle_palette`'s own comment records), so this reset never
+    // reaches the subscription; each dialog's fresh state already starts
+    // with an empty query. Unconditional since the keybinding dialog went
+    // modal: a dialog that opens *unfocused* can still focus this field
+    // later (`/`), and it would then inherit whatever the last dialog
+    // left in it while its own `state.query` said empty.
+    view.dialog_input
+        .update(cx, |input, cx| input.set_value("", window, cx));
     if focus_filter {
-        // Reset by value, not by rebuilding the entity — the same
-        // lifecycle `toggle_palette` gives `palette_input` (see
-        // `ShellView::dialog_input`'s own doc comment). `set_value` does
-        // not emit `InputEvent::Change` (checked against the pinned
-        // checkout, same as `toggle_palette`'s own comment records), so
-        // this reset never reaches the subscription; each dialog's fresh
-        // state already starts with an empty query.
-        view.dialog_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
@@ -436,9 +448,10 @@ pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
 /// (`crates/ui/src/input/input.rs:578-584`), never the prefix child.
 ///
 /// `frozen` renders a muted, static copy of the query *instead of* the
-/// live input: the keybinding dialog passes `Some(query)` while it is
-/// listening for a binding, when the input is blurred and a caret would
-/// be a lie about where keystrokes are going. It keeps the icon, and
+/// live input: the keybinding dialog passes `Some(query)` whenever the
+/// input is blurred — while listening for a binding, and (since it went
+/// modal, `crate::dialogmode`) throughout normal mode — because a caret
+/// would be a lie about where keystrokes are going. It keeps the icon, and
 /// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
 /// `input.rs:504-508`), so entering and leaving capture doesn't shift the
 /// query text sideways.
@@ -467,6 +480,43 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
             )
             .into_any_element(),
     }
+}
+
+/// The small pill naming a modal dialog's current mode
+/// (`crate::dialogmode`), for the top-right of its content.
+///
+/// A modal surface has no caret in normal mode and a caret in filter
+/// mode, which is a real but easily-missed difference — the pill is what
+/// makes "your letters are verbs right now" legible without the user
+/// having to type one and find out. It lives here rather than in
+/// `keybindings_view` because the 4c surfaces adopt the same vocabulary
+/// and must wear the same badge; a second copy would drift.
+///
+/// Colours are `cx.theme()` tokens (house rule: never a raw colour).
+/// Filter mode takes `primary`, the same token the fuzzy-match highlight
+/// and the selected row use — it is the "you are typing into something"
+/// state; normal mode takes the muted pair every other inert chip in
+/// these dialogs wears ([`super::keybindings_view::key_chip`]'s own
+/// `muted`/`muted_foreground`), because normal is the resting state, not
+/// an alert.
+pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (label, fg, bg) = match mode {
+        DialogMode::Normal => ("normal", theme.muted_foreground, theme.muted),
+        DialogMode::Filter => ("filter", theme.primary_foreground, theme.primary),
+    };
+    div()
+        .font_family(crate::fonts::MONO)
+        .text_xs()
+        .text_color(fg)
+        .bg(bg)
+        .px_1p5()
+        .py_0p5()
+        .rounded(px(4.))
+        .flex_shrink_0()
+        .debug_selector(|| "dialog-mode-pill".to_string())
+        .child(label)
+        .into_any_element()
 }
 
 /// Cap on the modal panel's height, as a fraction of the window's viewport

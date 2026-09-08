@@ -65,26 +65,31 @@ fn keybindings_open_paints_the_modal_with_rows(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Opening the dialog focuses the shared filter, so the first
-/// character typed filters instead of falling on the floor.
+/// Opening the dialog leaves the shared filter BLURRED (it used to be
+/// focused): the dialog opens in normal mode, where a bare letter is a
+/// verb, and a focused `Input` would eat every one of them as text. `/`
+/// is what hands the field focus.
 #[gpui::test]
-fn opening_the_keybindings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+fn opening_the_keybindings_dialog_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     assert!(
         shell.read_with(&cx, |shell, _| shell.keybindings.is_some()),
         "sanity: keybindings::open should have opened the dialog"
     );
     assert!(
-        dialog_filter_is_focused(&shell, &mut cx),
-        "the filter must own focus the moment the dialog opens"
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "the filter must NOT own focus on open, or normal mode's letters \
+         would all be typed instead of acted on"
     );
 }
 
-/// The retired vim motion is now plain text: `j` types a `j` and
-/// leaves the selection where it was.
+/// Inside filter mode the retired vim motion is plain text again: `j`
+/// types a `j` and leaves the selection where it was. (Outside it, `j`
+/// moves — `j_and_k_move_in_normal_mode` below.)
 #[gpui::test]
-fn typing_j_filters_rather_than_moving_the_selection(cx: &mut gpui::TestAppContext) {
+fn typing_j_in_filter_mode_filters_rather_than_moving_the_selection(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
     cx.simulate_input("j");
     let (query, selected) = shell.read_with(&cx, |shell, _| {
         let state = shell.keybindings.as_ref().unwrap();
@@ -94,11 +99,14 @@ fn typing_j_filters_rather_than_moving_the_selection(cx: &mut gpui::TestAppConte
     assert_eq!(selected, 0, "j must not move the selection any more");
 }
 
-/// Arrow and ctrl motions still move the selection, and do it without
-/// disturbing the filter's focus or its text.
+/// Arrow and ctrl motions still move the selection *in filter mode*,
+/// and do it without disturbing the filter's focus or its text — the
+/// two modes share one navigation vocabulary, so the same motions also
+/// work in normal mode (`j_and_k_move_in_normal_mode`).
 #[gpui::test]
 fn arrows_and_ctrl_motions_move_the_selection(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
     cx.simulate_keystrokes("down down");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected),
@@ -137,6 +145,10 @@ fn arrows_and_ctrl_motions_move_the_selection(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn tab_is_reserved_and_leaves_the_keybindings_dialog_untouched(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    // Filter mode: the leak this guards against is only reachable with
+    // the `Input` actually focused, which is what makes an unclaimed key
+    // continue into the text-input phase.
+    cx.simulate_keystrokes("/");
     cx.simulate_keystrokes("down down");
     let selected_before =
         shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected);
@@ -163,6 +175,9 @@ fn tab_is_reserved_and_leaves_the_keybindings_dialog_untouched(cx: &mut gpui::Te
 #[gpui::test]
 fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    // From filter mode, where the blur is a real transition rather than
+    // the state the dialog already sits in.
+    cx.simulate_keystrokes("/");
     cx.simulate_keystrokes("enter");
     assert!(
         shell.read_with(&cx, |shell, _| shell
@@ -194,11 +209,15 @@ fn enter_starts_listening_and_a_letter_is_captured_not_typed(cx: &mut gpui::Test
     );
 }
 
-/// Escape cancels the capture, refocuses the filter, and leaves both
-/// the query and the dialog itself alone.
+/// Escape cancels the capture, refocuses the filter (the capture was
+/// started from filter mode, so that is the surface it hands focus back
+/// to — see `cancelling_a_capture_restores_focus_to_the_mode_that_
+/// started_it` for the normal-mode half), and leaves both the query and
+/// the dialog itself alone.
 #[gpui::test]
 fn escape_cancels_a_capture_without_closing_the_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
     cx.simulate_input("f");
     cx.simulate_keystrokes("enter");
     cx.simulate_input("j");
@@ -254,6 +273,7 @@ fn escape_closes_the_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn typing_a_query_narrows_the_rows_that_paint(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
     cx.simulate_input("focus");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -411,6 +431,9 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
 #[gpui::test]
 fn ctrl_a_is_reclaimed_inside_the_filter_but_typing_still_works(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    // The reclaim is scoped to a focused modal `Input`, so this test
+    // needs the dialog in filter mode to exercise it at all.
+    cx.simulate_keystrokes("/");
     cx.simulate_input("foo");
     cx.simulate_keystrokes("ctrl-a");
     cx.simulate_input("bar");
@@ -514,5 +537,188 @@ fn click_selects_a_row_and_clicking_it_again_starts_listening(cx: &mut gpui::Tes
             .listening
             .is_some()),
         "clicking the already-selected row again should start listening"
+    );
+}
+
+// --- The two-mode interaction model (spec
+// `2026-09-08-geode-dialog-interaction-model-design.md`) --------------
+
+/// The dialog now opens in normal mode, so a bare letter is a verb
+/// rather than filter text. This is the behaviour change the whole
+/// interaction model turns on.
+#[gpui::test]
+fn the_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Normal,
+    );
+    cx.simulate_keystrokes("s");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "",
+        "a bare letter in normal mode must not reach the filter"
+    );
+}
+
+/// `/` enters filter mode and typing narrows, exactly as it does today.
+#[gpui::test]
+fn slash_enters_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Filter,
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "entering filter mode must hand focus to the filter, or typing \
+         would still fall on the floor"
+    );
+    cx.simulate_keystrokes("t h e m e");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "theme",
+    );
+}
+
+/// The ladder, one visible step at a time: filter → normal keeping the
+/// query, → clear the query, → close. A dialog that skipped a rung would
+/// close on the first escape and lose the user's filter with it.
+#[gpui::test]
+fn escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/ t h e m e");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    let (mode, q) = shell.read_with(&cx, |s, _| {
+        let k = s.keybindings.as_ref().unwrap();
+        (k.mode, k.query.clone())
+    });
+    assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
+    assert_eq!(q, "theme", "leaving filter must keep the query applied");
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "and must blur the filter, or normal mode's letters would still type"
+    );
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "",
+        "the second escape clears the query"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and does not close"
+    );
+
+    cx.simulate_keystrokes("escape");
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "the third closes"
+    );
+}
+
+/// A cleared query must clear the *input* too, not just the mirrored
+/// copy: the `Input` owns the text, so a query cleared only in
+/// `KeybindingsState` would reappear the moment `/` refocused the field
+/// — and the list would be ranked against something the user cannot see.
+#[gpui::test]
+fn clearing_the_query_clears_the_field_the_next_filter_session_sees(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/ t h e m e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "x",
+        "the field must have been emptied along with the mirrored query"
+    );
+}
+
+/// `j`/`k` move in normal mode; the arrows and ctrl-steps still work in
+/// both modes, so one navigation vocabulary serves both.
+#[gpui::test]
+fn j_and_k_move_in_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("j j");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        2
+    );
+    cx.simulate_keystrokes("k");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        1
+    );
+}
+
+/// Cancelling a capture that started in normal mode must NOT hand focus
+/// to the filter: the dialog is still in normal mode, and a focused
+/// `Input` there would swallow the very letters normal mode exists to
+/// free (the next `d` would type a `d` instead of unbinding). The
+/// restore has to follow the mode, not be hardcoded to the filter.
+#[gpui::test]
+fn cancelling_a_capture_restores_focus_to_the_mode_that_started_it(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_keystrokes("escape");
+    assert!(
+        shell.read_with(&cx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_none()),
+        "sanity: escape cancels the capture"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "a capture cancelled in normal mode must leave the filter blurred"
+    );
+    cx.simulate_keystrokes("j");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        1,
+        "and normal mode's own vocabulary must still work afterwards"
+    );
+}
+
+/// The same rule for the mouse: a click that only selects a row hands
+/// focus back to the filter *in filter mode*, and leaves it blurred in
+/// normal mode.
+#[gpui::test]
+fn a_selecting_click_in_normal_mode_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let row_1 = cx
+        .debug_bounds("keybindings-row-1")
+        .expect("row 1 should have painted bounds to click into");
+    cx.simulate_mouse_down(
+        gpui::point(
+            row_1.origin.x + gpui::px(10.0),
+            row_1.origin.y + gpui::px(10.0),
+        ),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        1,
+        "sanity: the click selected row 1"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "a click in normal mode must not focus the filter behind the user's back"
     );
 }

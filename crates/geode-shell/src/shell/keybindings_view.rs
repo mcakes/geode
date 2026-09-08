@@ -1,40 +1,63 @@
 //! The keybinding dialog: a list of every registered action with its
-//! currently-effective binding, **filtered by an always-focused text
-//! field** and editable in place
-//! (`docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md`).
+//! currently-effective binding, **modal** — normal mode by default, `/`
+//! for the filter — and editable in place
+//! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
+//! which supersedes the filter-first model of
+//! `2026-09-01-dialog-filter-input-design.md` for this dialog).
 //!
-//! Opening the dialog focuses `ShellView::dialog_input`, so the first
-//! character typed narrows the list rather than falling on the floor:
-//! every printable key belongs to the filter, and the rows are ranked
-//! fresh from it by [`visible_rows`] over each row's [`searchable_text`]
-//! — the displayed title and category, never the invisible action id.
-//! What the dialog itself still claims is the short vocabulary a focused
-//! `Input` leaves free ([`crate::listfilter::nav_command`]:
-//! `up`/`down`/`ctrl+p`/`ctrl+n` ∓1, `ctrl+d`/`ctrl+u` ±5,
-//! `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus `enter` and
-//! `escape`. `tab`/`shift+tab` are also claimed, but only to be dropped —
-//! they are the settings dialog's stepping keys, reserved and inert here
-//! (see [`handle_key`]'s own doc comment for why claiming, not just
-//! ignoring, is what actually makes them inert). This replaced the vim
-//! motions ([`crate::vimnav`]) and the `/` find sessions
-//! ([`crate::vimfind`]) this dialog used to drive; both modules stay in
-//! the crate — `vimnav::apply` still does the clamped index arithmetic
-//! here.
+//! ## The two modes
+//!
+//! The dialog opens in [`DialogMode::Normal`] with `ShellView::
+//! dialog_input` **blurred**, so a bare letter is a verb rather than
+//! filter text — which is the whole reason this dialog can grow `d`
+//! (unbind) and `r` (reset) at all: while the filter owned every
+//! printable key, no letter could ever mean anything else. `/` enters
+//! [`DialogMode::Filter`], which is exactly the always-focused filter
+//! that shipped before: typing narrows, and the rows are ranked fresh by
+//! [`visible_rows`] over each row's [`searchable_text`] — the displayed
+//! title and category, never the invisible action id.
+//!
+//! Both modes share one navigation vocabulary
+//! ([`crate::listfilter::nav_command`], reached in normal mode through
+//! [`crate::dialogmode::normal_command`]): `up`/`down`/`ctrl+p`/`ctrl+n`
+//! ∓1, `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10,
+//! with `j`/`k`/`g`/`shift+g` added in normal mode where the letters are
+//! free. `enter` starts a rebind capture in either. `tab`/`shift+tab` are
+//! claimed in both, but only to be dropped — they are the settings
+//! dialog's stepping keys, reserved and inert here (see [`handle_key`]'s
+//! own doc comment for why claiming, not just ignoring, is what actually
+//! makes them inert).
+//!
+//! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
+//! visible change per press: filter → normal (keeping the query
+//! applied), → clear the query, → close the modal. The close rung is the
+//! one this module does NOT handle — it returns `false` and lets
+//! `handle_key_down`'s modal branch close the dialog, the same door a
+//! backdrop click uses.
 //!
 //! ## Rebind capture
 //!
 //! `enter` (or a click on the already-selected row) starts "listening"
 //! for a new binding on the selected row; every keystroke while
 //! listening appends to a pending sequence (multi-keystroke bindings,
-//! e.g. `"g g"`, are supported); `enter` commits it, `escape` cancels
-//! back to filtering. Listening **blurs the filter input** and hands
-//! focus to the shell root, because a focused single-line `Input`
-//! consumes bare letters as text before any raw key listener sees them —
-//! without the blur, a capture could never read a plain `j`. Cancel and
-//! commit both hand focus straight back. While listening, the filter row
-//! renders the query as static muted text rather than a live caret (see
-//! [`dialog::filter_row`]): a caret there would be a lie about where
-//! keystrokes are going.
+//! e.g. `"g g"`, are supported); `enter` commits it, `escape` cancels.
+//! Capture is a third, *momentary* mode, deliberately checked before the
+//! mode routing and never passed through `normal_command`: while it is
+//! open every keystroke is the capture's, verbs included.
+//!
+//! Listening **blurs the filter input** and hands focus to the shell
+//! root, because a focused single-line `Input` consumes bare letters as
+//! text before any raw key listener sees them — without the blur, a
+//! capture could never read a plain `j`. That blur is the same switch
+//! normal mode holds open permanently; cancelling or committing hands
+//! focus back **to whichever surface the current mode owns** (the filter
+//! in `Filter`, the shell root in `Normal`) — hardcoding the filter here
+//! would silently focus it under a dialog still claiming to be in normal
+//! mode, and the next `d` would type a `d` instead of unbinding. While
+//! listening — and, for the same reason, throughout normal mode — the
+//! filter row renders the query as static muted text rather than a live
+//! caret (see [`dialog::filter_row`]): a caret there would be a lie
+//! about where keystrokes are going.
 //!
 //! A committed capture is written to the user keymap document via
 //! [`crate::keymap_edit::apply_rebind`], same as every other config
@@ -56,8 +79,8 @@
 //!
 //! ## Architecture: two-part state (mirrors `palette`/`PaletteState`)
 //!
-//! [`KeybindingsState`] — `selected`, the in-progress capture sequence,
-//! and the mirrored filter query — is pure (no `gpui`), stored on
+//! [`KeybindingsState`] — `selected`, the mode, the in-progress capture
+//! sequence, and the mirrored filter query — is pure (no `gpui`), stored on
 //! `ShellView` as `keybindings: Option<KeybindingsState>`, exactly like
 //! `palette: Option<PaletteState>`. Its two `gpui` siblings live directly
 //! on `ShellView` rather than inside this struct: `keybindings_scroll`
@@ -94,6 +117,7 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use geode_core::config::Layer;
 
 use crate::actions::{ActionId, ActionRegistry};
+use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
 use crate::keymap_edit::{Displacement, Rebind, apply_rebind};
 use crate::listfilter::{self, Ranked};
@@ -242,7 +266,7 @@ fn is_shadowed(bindings: &[Binding], index: usize, candidate: &Binding) -> bool 
 /// module doc's "Architecture" section for why the scroll handle lives
 /// beside this instead of inside it), so every transition here is
 /// unit-testable without a window.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KeybindingsState {
     /// Index into the **filtered** row list ([`visible_rows`]), not into
     /// the full one — the palette's convention, and what
@@ -260,8 +284,36 @@ pub struct KeybindingsState {
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// the `InputEvent::Change` subscription in `ShellView::new`. The
     /// `Input` owns the text; this is the pure copy the row list is
-    /// ranked against.
+    /// ranked against. It survives leaving filter mode — the first rung
+    /// of the `escape` ladder keeps the query applied, because leaving a
+    /// search should leave you on the match, not undo the search.
     pub query: String,
+    /// Which mode this dialog is in
+    /// (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`).
+    /// `Normal` on open: bare letters are verbs, and `dialog_input` is
+    /// blurred to `shell.focus_handle` so they reach [`handle_key`] —
+    /// the same switch rebind capture has always performed, held open
+    /// rather than momentary. Every focus decision in this module (open,
+    /// capture cancel/commit, a selecting click) reads this rather than
+    /// assuming the filter, so the focused surface and the painted mode
+    /// can never disagree.
+    pub mode: DialogMode,
+}
+
+/// Hand-written rather than derived so the opening mode is one explicit,
+/// greppable line: `DialogMode` has no `Default` of its own on purpose
+/// (a filter-only surface has no mode at all — see [`DialogMode`]), and
+/// deriving one there would quietly make "normal" the answer for every
+/// future surface instead of this dialog's own stated choice.
+impl Default for KeybindingsState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            listening: None,
+            query: String::new(),
+            mode: DialogMode::Normal,
+        }
+    }
 }
 
 impl KeybindingsState {
@@ -430,7 +482,13 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Keyboard shortcuts",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        true,
+        // `false`: this dialog opens in normal mode, so the filter must
+        // NOT own focus — a focused `Input` would eat every bare letter
+        // as text before [`handle_key`] could read it as a verb. The
+        // shared field is still emptied on open (`open_shell_dialog_
+        // with_key` does that unconditionally), so the first `/` session
+        // starts from the same blank slate `state.query` does.
+        false,
     );
 }
 
@@ -462,13 +520,29 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
 /// 1. while listening, every keystroke is offered to
 ///    [`press_while_listening`] and swallowed unconditionally (`true`) —
 ///    even `escape`, which must cancel the capture rather than falling
-///    through to `handle_key_down`'s "escape closes the modal";
-/// 2. bare `enter` starts listening on the selected row and blurs the
+///    through to `handle_key_down`'s "escape closes the modal". Capture
+///    keeps first refusal deliberately: it is a third, momentary mode
+///    whose whole job is to read raw keystrokes, so routing it through
+///    [`dialogmode::normal_command`] would turn the `j` a user is trying
+///    to bind into a motion;
+/// 2. in [`DialogMode::Normal`], `escape` walks
+///    [`dialogmode::escape_step`]'s ladder and every other keystroke goes
+///    through [`dialogmode::normal_command`] — including keys it does not
+///    claim, which are swallowed (`true`) rather than passed on: normal
+///    mode's contract is that a stray letter does nothing, and letting it
+///    fall through would hand it to whatever the shell does with that key
+///    next;
+/// 3. in [`DialogMode::Filter`] the pre-modal behaviour is unchanged,
+///    with one addition: `escape` leaves filter mode (keeping the query)
+///    instead of closing the dialog;
+/// 4. bare `enter` starts listening on the selected row and blurs the
 ///    filter input, so the capture sees raw keystrokes (see the module
-///    doc's "Rebind capture");
-/// 3. [`listfilter::nav_command`] motions move the selection within the
-///    *filtered* list;
-/// 4. bare `tab`/`shift+tab` are claimed and dropped — returns `true`
+///    doc's "Rebind capture") — reached as
+///    [`NormalCommand::Commit`] in normal mode and directly in filter
+///    mode;
+/// 5. [`listfilter::nav_command`] motions move the selection within the
+///    *filtered* list, in both modes;
+/// 6. bare `tab`/`shift+tab` are claimed and dropped — returns `true`
 ///    without acting. They are the settings dialog's stepping keys,
 ///    reserved and deliberately inert here. Claiming them (not just
 ///    falling through) is what actually makes them inert: with a focused
@@ -478,12 +552,15 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
 ///    inserted edit — not `\t` — so an unclaimed `tab` would land in the
 ///    filter as a literal tab character and collapse the list to "no
 ///    matches";
-/// 5. everything else returns `false`, unhandled — which for a printable
-///    key is exactly right: the modal branch in `handle_key_down` only
-///    stops propagation for keys this handler claims, so an unclaimed
-///    character goes on to the focused `Input`'s own text-insertion
-///    phase (the same reasoning `handle_palette_key`'s catch-all arm
-///    carries).
+/// 7. in filter mode, everything else returns `false`, unhandled — which
+///    for a printable key is exactly right: the modal branch in
+///    `handle_key_down` only stops propagation for keys this handler
+///    claims, so an unclaimed character goes on to the focused `Input`'s
+///    own text-insertion phase (the same reasoning
+///    `handle_palette_key`'s catch-all arm carries). The one other
+///    `false` is the ladder's last rung — `escape` in normal mode with an
+///    empty query — which is how the shell's own modal branch gets to
+///    close the dialog.
 ///
 /// A commit that exactly re-captures the row's already-effective binding
 /// ([`is_same_key_recapture`]) skips [`spawn_rebind`] entirely — nothing
@@ -503,16 +580,30 @@ fn handle_key(
     let visible = visible_rows(state, &rows);
 
     if let Some(pending) = state.listening.as_mut() {
-        match press_while_listening(pending, ks) {
+        let outcome = press_while_listening(pending, ks);
+        // Read before the arms below borrow `state` again — and read at
+        // all rather than assumed: capture is momentary, so ending it
+        // must return focus to whichever surface the *underlying* mode
+        // owns (see the module doc's "Rebind capture").
+        let back_to_filter = state.mode == DialogMode::Filter;
+        match outcome {
             CaptureOutcome::Continue => {}
             CaptureOutcome::Cancel => {
                 state.listening = None;
-                input.read(cx).focus_handle(cx).focus(window, cx);
+                if back_to_filter {
+                    input.read(cx).focus_handle(cx).focus(window, cx);
+                } else {
+                    shell.focus_handle.focus(window, cx);
+                }
             }
             CaptureOutcome::Commit(keystrokes) => {
                 state.listening = None;
                 let selected = state.selected;
-                input.read(cx).focus_handle(cx).focus(window, cx);
+                if back_to_filter {
+                    input.read(cx).focus_handle(cx).focus(window, cx);
+                } else {
+                    shell.focus_handle.focus(window, cx);
+                }
                 if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row))
                     && !is_same_key_recapture(row, &keystrokes)
                 {
@@ -520,6 +611,88 @@ fn handle_key(
                 }
             }
         }
+        cx.notify();
+        return true;
+    }
+
+    if state.mode == DialogMode::Normal {
+        if ks.mods == Modifiers::NONE && ks.key == "escape" {
+            // `has_previous_stage: false` — this dialog is one flat list,
+            // with no nested stage to step back into (the picker's own
+            // two-stage shape is what that rung exists for). The
+            // `PreviousStage` and `LeaveFilter` arms are therefore
+            // unreachable here; they are kept folded into the catch-all
+            // rather than special-cased away, because `escape_step` is
+            // the one ladder every modal surface walks and forking it per
+            // call site is how the rungs drift apart.
+            match dialogmode::escape_step(state.mode, state.query.is_empty(), false) {
+                EscapeStep::ClearQuery => {
+                    state.query.clear();
+                    state.selected = 0;
+                    // The `Input` owns the text; clearing only the
+                    // mirrored copy would leave the old query waiting in
+                    // the field for the next `/`.
+                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                    cx.notify();
+                    return true;
+                }
+                _ => return false, // let the shell's modal branch close it
+            }
+        }
+        let Some(cmd) = dialogmode::normal_command(ks) else {
+            // Claimed and dropped: in normal mode a key with no meaning
+            // does nothing at all, rather than falling through to the
+            // shell (which is still listening underneath the modal).
+            return true;
+        };
+        match cmd {
+            NormalCommand::Nav(nav) => {
+                state.selected = vimnav::apply(state.selected, visible.len(), nav);
+                let selected = state.selected;
+                shell.keybindings_scroll.scroll_to_item(selected);
+            }
+            NormalCommand::EnterFilter => {
+                state.mode = DialogMode::Filter;
+                // The one switch, thrown the other way: the filter takes
+                // focus and printable keys become text again.
+                input.read(cx).focus_handle(cx).focus(window, cx);
+            }
+            NormalCommand::Commit => {
+                if visible.is_empty() {
+                    return true;
+                }
+                state.listening = Some(Vec::new());
+                // Already blurred in normal mode; kept for the same
+                // reason the filter-mode path below does it — capture's
+                // contract is "the shell root owns the keys", stated at
+                // every entrance to it rather than inferred from where
+                // focus happened to be.
+                shell.focus_handle.focus(window, cx);
+            }
+            // The verbs Task 4 fills in (`d` unbind, `r` reset). Listed
+            // rather than left to the catch-all so the seam is visible:
+            // both are already reaching this match, and swallowed.
+            NormalCommand::Verb('d') => {}
+            NormalCommand::Verb('r') => {}
+            // `Toggle`, `EditText`, `MoveItem` and any other verb belong
+            // to surfaces that have something to toggle, edit or reorder;
+            // this one has a flat list of actions and does neither.
+            _ => {}
+        }
+        cx.notify();
+        return true;
+    }
+
+    // ---- Filter mode: the pre-modal behaviour, unchanged -------------
+
+    if ks.mods == Modifiers::NONE && ks.key == "escape" {
+        // The ladder's first rung ([`EscapeStep::LeaveFilter`]), which
+        // must be claimed (`true`) — falling through would close the
+        // whole dialog on the escape that was only meant to leave the
+        // search. The query stays applied; blurring is what makes the
+        // letters verbs again.
+        state.mode = DialogMode::Normal;
+        shell.focus_handle.focus(window, cx);
         cx.notify();
         return true;
     }
@@ -576,7 +749,11 @@ fn handle_key(
 /// [`click_selects_or_listens`], and it moves focus the same way
 /// [`handle_key`] does: a click that starts listening blurs the filter so
 /// the capture sees raw keystrokes, and one that only selects hands focus
-/// back to it so typing keeps filtering.
+/// back to whichever surface the current mode owns — the filter in
+/// [`DialogMode::Filter`] so typing keeps filtering, the shell root in
+/// [`DialogMode::Normal`] so the letters stay verbs. Focusing the filter
+/// unconditionally here (as this did before the dialog went modal) would
+/// let a mouse click silently defeat normal mode.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &ActionId,
@@ -594,9 +771,10 @@ fn on_row_clicked(
     };
     click_selects_or_listens(state, ix);
     let listening = state.listening.is_some();
+    let filter_mode = state.mode == DialogMode::Filter;
     let selected = state.selected;
     shell.keybindings_scroll.scroll_to_item(selected);
-    if listening {
+    if listening || !filter_mode {
         shell.focus_handle.focus(window, cx);
     } else {
         input.read(cx).focus_handle(cx).focus(window, cx);
@@ -845,6 +1023,10 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
+    // The hint row states the CURRENT mode's vocabulary, not the union of
+    // both: a modal surface's whole risk is a user who cannot tell which
+    // mode they are in, and a footer listing keys that are inert right
+    // now is exactly the lie the mode pill exists to prevent.
     let hint_line: AnyElement = if state.listening.is_some() {
         h_flex()
             .gap_1()
@@ -859,28 +1041,63 @@ fn build(
             ])
             .into_any_element()
     } else {
-        // Two rows, one idiom family each: motion, then rebind/close — so
-        // the hints read as a table rather than one wrapped run-on line.
+        // Two rows, one idiom family each: motion, then rebind/escape —
+        // so the hints read as a table rather than one wrapped run-on
+        // line.
+        let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
+            DialogMode::Normal => (
+                vec![
+                    chip("j"),
+                    chip("k"),
+                    sep("move ·"),
+                    chip("ctrl+d"),
+                    chip("ctrl+u"),
+                    sep("±5 ·"),
+                    chip("ctrl+f"),
+                    chip("ctrl+b"),
+                    sep("±10"),
+                ],
+                vec![
+                    chip("/"),
+                    sep("filter ·"),
+                    chip("enter"),
+                    sep("rebind the selected row ·"),
+                    chip("escape"),
+                    // Honest about which rung the next escape takes: with
+                    // a query still applied it clears the query, and only
+                    // then closes.
+                    sep(if state.query.is_empty() {
+                        "close"
+                    } else {
+                        "clear the filter"
+                    }),
+                ],
+            ),
+            DialogMode::Filter => (
+                vec![
+                    sep("type to filter ·"),
+                    chip("up"),
+                    chip("down"),
+                    sep("move ·"),
+                    chip("ctrl+d"),
+                    chip("ctrl+u"),
+                    sep("±5 ·"),
+                    chip("ctrl+f"),
+                    chip("ctrl+b"),
+                    sep("±10"),
+                ],
+                vec![
+                    chip("enter"),
+                    sep("rebind the selected row ·"),
+                    chip("escape"),
+                    sep("back to normal"),
+                ],
+            ),
+        };
         v_flex()
             .gap_0p5()
-            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-                sep("type to filter ·"),
-                chip("up"),
-                chip("down"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ]))
-            .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-                chip("enter"),
-                sep("rebind the selected row ·"),
-                chip("escape"),
-                sep("close"),
-            ]))
+            .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
+            .child(h_flex().gap_1().items_center().flex_wrap().children(action))
             .into_any_element()
     };
 
@@ -911,13 +1128,30 @@ fn build(
                 ]),
         );
 
+    // The live `Input` is rendered only when it actually owns the
+    // keystrokes — filter mode, capture closed. In normal mode, and while
+    // listening, the same query paints as static muted text: a caret
+    // blinking in a field that is not receiving the keys is the single
+    // most misleading thing a modal surface can show.
+    let frozen_query = (state.listening.is_some() || state.mode == DialogMode::Normal)
+        .then_some(state.query.as_str());
+
     v_flex()
         .gap_2()
-        .child(dialog::filter_row(
-            &shell.dialog_input,
-            state.listening.as_ref().map(|_| state.query.as_str()),
-            cx,
-        ))
+        // The mode badge sits above the filter, right-aligned, where the
+        // eye already goes to check what a keystroke will do next. (It is
+        // not in the modal's own title row: `dialog::render_modal` paints
+        // that chrome from `ShellModal`'s fixed title alone, and it is
+        // shared with every other modal — a per-dialog, per-frame mode
+        // would have to be threaded through that type to live there.)
+        .child(
+            h_flex()
+                .w(px(WIDTH))
+                .items_center()
+                .justify_end()
+                .child(dialog::mode_pill(state.mode, cx)),
+        )
+        .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
         .child(footer)
         .into_any_element()
