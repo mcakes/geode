@@ -4030,7 +4030,7 @@ run_mutation "service: an ingest failure is keyed by the source name, not the da
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report(&source, health) {
+  '                    match health_tracker.report_load(&source, health) {
                         Some(reported) => {
                             log_health_event(&source, &reported, &reason);
                             delivered
@@ -4042,7 +4042,7 @@ run_mutation "service: a degraded publish also reaches the entity as Health" \
                         }
                         None => delivered,
                     }' \
-  '                    let _ = health_tracker.report(&source, health);
+  '                    let _ = health_tracker.report_load(&source, health);
                     delivered' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
@@ -4060,7 +4060,7 @@ run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved t
 
 run_mutation "service: HealthTracker.report returns Some unconditionally, never deduping" \
   crates/geode-data/src/service.rs \
-  '        if last.get(source) == Some(&health) {
+  '        if combined == lanes.last_reported {
             return None;
         }' \
   '        if false {
@@ -4070,7 +4070,7 @@ run_mutation "service: HealthTracker.report returns Some unconditionally, never 
 
 run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to the shared tracker" \
   crates/geode-data/src/service.rs \
-  '                    match health_tracker.report(&source, health) {
+  '                    match health_tracker.report_load(&source, health) {
                         Some(reported) => {
                             log_health_event(&source, &reported, &reason);
                             delivered
@@ -4085,7 +4085,7 @@ run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to t
   '                    if health == Health::Ok {
                         return delivered;
                     }
-                    match health_tracker.report(&source, health) {
+                    match health_tracker.report_load(&source, health) {
                         Some(reported) => {
                             log_health_event(&source, &reported, &reason);
                             delivered
@@ -4097,6 +4097,20 @@ run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to t
                         }
                         None => delivered,
                     }' \
+  geode-data a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish
+
+# ---- final review round 3: NEW-4 (two health lanes, combined as the worse) ----
+
+run_mutation "service: HealthTracker.report combines by taking the discovery lane instead of the worse of the two" \
+  crates/geode-data/src/service.rs \
+  '            (Some(d), Some(l)) => Some(if l >= d { l.clone() } else { d.clone() }),' \
+  '            (Some(d), Some(_l)) => Some(d.clone()),' \
+  geode-data a_degraded_publish_survives_several_more_clean_discovery_polls
+
+run_mutation "service: the ingest sink never writes the load lane, so a publish never affects the tracker" \
+  crates/geode-data/src/service.rs \
+  '                    match health_tracker.report_load(&source, health) {' \
+  '                    match { let _ = health; None } {' \
   geode-data a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish
 
 run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
