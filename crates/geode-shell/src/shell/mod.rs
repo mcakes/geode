@@ -213,27 +213,19 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
 /// way: `[scopes]` validated against the `datasets`/`dimensions` docs a
 /// scope's own columns must resolve against.
 ///
-/// This reproduces `hot_reload::rebuild_saved_scopes`'s load (that
+/// Phase 4b M15: this used to be its own copy of `hot_reload::
+/// rebuild_saved_scopes`'s load logic (kept separate because that
 /// function is `pub(super)` — internal reload housekeeping, out of
-/// `main.rs`'s reach across the crate boundary) rather than exposing it
-/// directly, the same "compute it again, once here before the frame
-/// exists for action registration, once inside `ShellView::new` for the
-/// frame itself" shape [`pickable_columns`] already has two independent
-/// callers of.
-pub fn saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
-    let (schema, _) = config
-        .doc("datasets")
-        .map(SchemaSpec::from_doc)
-        .unwrap_or_default();
-    let (dims, _) = config
-        .doc("dimensions")
-        .map(DerivedDimensions::from_doc)
-        .unwrap_or_default();
-    config
-        .doc("scopes")
-        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims).0)
-        .unwrap_or_default()
-}
+/// `main.rs`'s reach across the crate boundary) — a real duplication,
+/// not just a naming difference: the copy here silently dropped
+/// `saved_scopes_from_doc`'s diagnostics (`.0` on the tuple) where
+/// `rebuild_saved_scopes` prints them. A `pub use` re-export needs no
+/// copy: `hot_reload` the *module* stays private, but re-exporting one
+/// of its `pub(super)` items under a public name here is exactly as
+/// legal as `pickable_columns` living in this module in the first
+/// place — nothing about `pub(super)` prevents `shell::mod` itself,
+/// which is `hot_reload`'s parent, from naming and re-exporting it.
+pub use hot_reload::rebuild_saved_scopes as saved_scopes;
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution

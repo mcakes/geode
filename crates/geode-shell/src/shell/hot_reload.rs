@@ -64,7 +64,15 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
 /// shared the same way between `ShellView::new` (seeds the frame's
 /// initial saved scopes) and `apply_reload` (replaces them when `scopes`/
 /// `datasets`/`dimensions` changes, spec §4.5-style live pickup).
-pub(super) fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
+/// `pub`, not `pub(super)` (Phase 4b M15): `shell::mod` re-exports this
+/// as `shell::saved_scopes` (`pub use`) so `main.rs`, across the crate
+/// boundary, can call it without a second copy of its load logic — a
+/// `pub use` cannot re-export an item less visible than the path it is
+/// re-exported through, and `saved_scopes` is reached from outside this
+/// crate. `hot_reload` the *module* stays private either way (`mod
+/// hot_reload;`, no `pub`), so this doesn't otherwise widen what's
+/// reachable — only the one re-exported name is.
+pub fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
     let (schema, _) = config
         .doc("datasets")
         .map(SchemaSpec::from_doc)
