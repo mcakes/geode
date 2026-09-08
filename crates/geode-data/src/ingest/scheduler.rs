@@ -134,27 +134,29 @@ fn run(
         // silence spec §5.7 forbids.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || -> Result<bool, crate::store::StoreError> {
-                let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
-                let health = worst_health(&candidates);
-                let ok = match health {
-                    Some((worst, detail)) => sink(SchedulerEvent::Health {
-                        source: spec.name.clone(),
-                        worst,
-                        detail,
-                    }),
-                    None => true,
-                };
-                let plan = build_plan(&[(spec.clone(), candidates)]);
-                let ready = plan.items.len();
-                if ready > 0 {
-                    ingest.submit(plan);
-                }
-                Ok(ok
-                    && sink(SchedulerEvent::Polled {
-                        source: spec.name.clone(),
-                        ready,
-                        next_in: spec.poll_interval,
-                    }))
+                geode_core::panic::contained(|| {
+                    let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
+                    let health = worst_health(&candidates);
+                    let ok = match health {
+                        Some((worst, detail)) => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst,
+                            detail,
+                        }),
+                        None => true,
+                    };
+                    let plan = build_plan(&[(spec.clone(), candidates)]);
+                    let ready = plan.items.len();
+                    if ready > 0 {
+                        ingest.submit(plan);
+                    }
+                    Ok(ok
+                        && sink(SchedulerEvent::Polled {
+                            source: spec.name.clone(),
+                            ready,
+                            next_in: spec.poll_interval,
+                        }))
+                })
             },
         ));
 

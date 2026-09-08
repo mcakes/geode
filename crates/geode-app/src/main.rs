@@ -99,21 +99,36 @@ fn main() {
             // The panic hook (Phase 4b Task 6), installed after the
             // subscriber (`install_logging`, at the very top of `main`)
             // and once `services` exists, since it needs `registry.
-            // hash_names()` — a snapshot that stays live across later
-            // registrations (a config reload's `register_pick_actions`/
-            // `register_scope_actions`), not a one-time copy. `log` is
-            // always `Some` on this path (`install_logging` always
-            // builds a `Ring`); the `if let` mirrors every other
-            // "missing = skipped, never a panic" spot in this file
-            // rather than assuming it.
+            // hash_names()` — a clone of the registry's shared hash → id
+            // map (fix round 1, MIN-1: `register_pick_actions`/
+            // `register_scope_actions` both run once each, here inside
+            // `build_shell_services`, *before* this hook is installed —
+            // there is no reload-time registration for the clone to
+            // outlive; `hash_names()` is used because `ActionRegistry`
+            // itself is not `Send`/`Sync` and cannot be captured by a
+            // `'static` hook closure directly, not because the map
+            // changes after this point). `log` is always `Some` on this
+            // path (`install_logging` always builds a `Ring`); the
+            // `if let` mirrors every other "missing = skipped, never a
+            // panic" spot in this file rather than assuming it.
             if let Some(log) = &services.log {
                 let names_snapshot = services.registry.hash_names();
                 let names: Arc<dyn Fn(u64) -> Option<String> + Send + Sync> = Arc::new(move |h| {
+                    // Fix round 1, MIN-2: `try_read`, not a blocking
+                    // `read()` — see `crash.rs`'s own MIN-2 note on the
+                    // action tail's `try_lock` for why a hook must never
+                    // block on a lock the panicking thread itself might
+                    // already hold. `register` only ever *writes* this
+                    // map from the UI thread before the hook exists, so
+                    // contention here would mean the panicking thread is
+                    // the UI thread having panicked mid-`register` — the
+                    // `None` fallback (rendered as `<unknown action ..>`
+                    // by the hook) degrades gracefully rather than
+                    // risking a self-deadlock.
                     names_snapshot
-                        .read()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get(&h)
-                        .cloned()
+                        .try_read()
+                        .ok()
+                        .and_then(|m| m.get(&h).cloned())
                 });
                 crash::install_panic_hook(
                     user.clone(),

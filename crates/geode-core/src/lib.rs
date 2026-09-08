@@ -7,6 +7,7 @@ pub mod dimensions;
 pub mod groupings;
 pub mod health;
 pub mod log;
+pub mod panic;
 pub mod query;
 pub mod schema;
 pub mod scope;

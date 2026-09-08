@@ -32,13 +32,21 @@ pub struct ActionDef {
 pub struct ActionRegistry {
     actions: BTreeMap<ActionId, ActionDef>,
     /// FNV-1a hash → action id, filled at [`Self::register`]. Shared (an
-    /// `Arc`, not a plain map) so [`Self::hash_names`] can hand out a
-    /// clone that stays live and current across later registrations
-    /// (e.g. a config reload's `register_pick_actions`/
-    /// `register_scope_actions`) — the crash hook (Phase 4b Task 6,
-    /// `geode_app::crash::install_panic_hook`) is installed once, as a
-    /// 'static closure, with no live reference to this registry, and
-    /// resolves `ActionTail`'s hashes through that clone instead.
+    /// `Arc`, not a plain map) so [`Self::hash_names`] can hand a clone
+    /// to the crash hook (`geode_app::crash::install_panic_hook`),
+    /// installed once as a `'static` closure with no live reference to
+    /// this registry — `ActionRegistry` is not `Send`/`Sync`, so the
+    /// closure cannot borrow it directly, only a clone of this `Arc`.
+    ///
+    /// Fix round 1, MIN-1: this is *not* here so the hook sees
+    /// registrations made after install-time. Every caller of
+    /// `register` (`register_builtin_actions`, `register_pick_actions`,
+    /// `register_scope_actions`) runs once each, during
+    /// `build_shell_services`, before `install_panic_hook` is ever
+    /// called (`main.rs`) — `shell/mod.rs` states outright that "the
+    /// action registry itself never changes at runtime". The `Arc` is
+    /// only about ownership (a clone the hook can hold without holding
+    /// the registry), not liveness.
     hashes: Arc<RwLock<HashMap<u64, String>>>,
 }
 
@@ -73,6 +81,17 @@ impl ActionRegistry {
     /// field is `Arc<RwLock<_>>` for [`Self::hash_names`]'s sake, and a
     /// method borrowing `&self` cannot hand back a `&str` tied to a lock
     /// guard that does not outlive the call.
+    ///
+    /// Fix round 1, MIN-7: this has no production caller — the crash
+    /// hook resolves through [`Self::hash_names`]'s clone instead, since
+    /// it has no live `&ActionRegistry` to call this on — so today it is
+    /// test-only surface, kept because the brief specifies it. It is
+    /// also not a strictly redundant view of `hashes`: on an FNV-1a
+    /// collision between two ids, `hashes.insert` (in [`Self::register`])
+    /// keeps whichever was registered *last*, while this scan returns
+    /// whichever sorts *first* in `BTreeMap` order — unreachable in
+    /// practice (64 bits over a few hundred ids) but the two are not
+    /// guaranteed to agree.
     pub fn name_of_hash(&self, h: u64) -> Option<&str> {
         self.actions
             .keys()

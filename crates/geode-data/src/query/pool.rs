@@ -282,11 +282,12 @@ fn worker(
         // worker with it, shrinking the pool with nothing reported. §10.1
         // says a bad query degrades its own view; a panicking one is a bad
         // query.
-        let outcome =
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(payload) => Err(panic_message(&*payload)),
-            };
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| run(&conn, &req))
+        })) {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(payload) => Err(panic_message(&*payload)),
+        };
 
         // The stale check and the send happen under one lock. Releasing it
         // between them let a newer request land in the gap and the older

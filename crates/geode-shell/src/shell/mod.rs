@@ -33,7 +33,6 @@ pub use keys::convert_keystroke;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::time::Instant;
 
 use gpui::prelude::*;
@@ -63,7 +62,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_core::query::{DistinctOutcome, QueryKey};
 use geode_core::schema::{ColumnRole, SchemaSpec};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the

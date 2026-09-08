@@ -299,8 +299,20 @@ fn run(
         // two are matched as distinct arms so a future diagnostic can
         // tell "the read broke" from "nothing was found" apart, even
         // though both currently do the same thing.
+        //
+        // Fix round 1, MIN-10: unlike the load boundary twenty lines
+        // down, a panic caught here produces no event and no log line
+        // at all — `.unwrap_or(false)` below swallows it into "not
+        // stale" with total silence. Recorded as a known asymmetry
+        // (Task 6's brief named only the load arm) rather than fixed
+        // here: the scenario this doc comment itself describes — a
+        // `file_generations` row an older build wrote in an
+        // unrecognized shape — is exactly the one that would benefit
+        // from the same treatment.
         let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
+            geode_core::panic::contained(|| {
+                Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
+            })
         }))
         .map(|result| match result {
             Ok(Some(prev)) => is_unchanged(&prev, item.candidate.size, item.source_time),
@@ -332,20 +344,22 @@ fn run(
         // the runner keeps working. Only a render-thread panic takes the app
         // down.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let CandidateState::Ready(sentinel) = &item.candidate.state else {
-                return Err("candidate was not ready".to_string());
-            };
-            load(
-                &store,
-                &LoadRequest {
-                    dataset,
-                    dataset_name: &item.dataset,
-                    csv_path: &item.candidate.csv_path,
-                    sentinel,
-                    batch: &item.batch,
-                },
-            )
-            .map_err(|e| e.to_string())
+            geode_core::panic::contained(|| {
+                let CandidateState::Ready(sentinel) = &item.candidate.state else {
+                    return Err("candidate was not ready".to_string());
+                };
+                load(
+                    &store,
+                    &LoadRequest {
+                        dataset,
+                        dataset_name: &item.dataset,
+                        csv_path: &item.candidate.csv_path,
+                        sentinel,
+                        batch: &item.batch,
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
         }));
 
         let event = match outcome {
@@ -377,11 +391,7 @@ fn run(
                 // placeholder rather than losing the event.
                 let message = panic_payload_message(payload.as_ref());
                 let path = item.candidate.csv_path.display();
-                tracing::error!(
-                    target: "geode::ingest",
-                    file = %path,
-                    "ingest task panicked: {message}"
-                );
+                log_ingest_panic(&item.candidate.csv_path, &message);
                 IngestEvent::Failed {
                     dataset: item.dataset.clone(),
                     batch: item.batch.clone(),
@@ -419,6 +429,28 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     } else {
         "<non-string panic>".to_string()
     }
+}
+
+/// Logs a panicking load at `geode::ingest` `error`, with the file and
+/// payload (Phase 4b Task 6 fix round 1, MAJ-2). Pulled out as a free
+/// function — the crate's established pattern for a log line a test
+/// needs to drive directly, `service.rs`'s `log_health_event`/
+/// `log_ingest_failure` — for the same reason those exist: this event
+/// fires on the spawned `geode-ingest` thread, and
+/// `tracing::subscriber::with_default`'s scope is thread-local, so a
+/// test running on the *test* thread could never observe it if it
+/// stayed inline in `run`.
+///
+/// Fix round 1, MIN-9: a panicking load is logged at `error` twice —
+/// this line (which has the file) and `service.rs`'s own
+/// `log_ingest_failure` a moment later on the same thread (which has
+/// the dataset/batch, reading `Failed.reason` — the string this event's
+/// `message` also feeds). Both are correct per their own task's brief;
+/// recorded here so two `geode::ingest` errors for one failure reads as
+/// a decision, not a surprise, to whoever next looks at the ring or the
+/// diagnostics tile for this source.
+fn log_ingest_panic(path: &std::path::Path, message: &str) {
+    tracing::error!(target: "geode::ingest", file = %path.display(), "ingest task panicked: {message}");
 }
 
 #[cfg(test)]
@@ -838,6 +870,40 @@ mod tests {
             reason.contains("injected panic payload"),
             "reason must carry the panic payload: {reason}"
         );
+    }
+
+    /// `service.rs`'s own `logged(...)` pattern (Phase 4b Task 2 fix
+    /// round 1, MAJ-1), reproduced here rather than shared: `log_ingest_
+    /// panic` fires on the spawned `geode-ingest` thread, so — unlike
+    /// `a_panicking_load_names_the_file_and_the_panic_payload` above,
+    /// which only sees the `Failed.reason` string that crosses the
+    /// channel — this drives the free function directly, on the test
+    /// thread, against a scoped ring subscriber (fix round 1, MAJ-2:
+    /// exactly why it was pulled out of `run` as a free function).
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn log_ingest_panic_logs_the_file_and_payload_at_error() {
+        let records = logged(|| {
+            log_ingest_panic(std::path::Path::new("/tmp/risk_snapshot.csv"), "boom");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::ERROR);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(
+            records[0].message.contains("/tmp/risk_snapshot.csv"),
+            "{records:?}"
+        );
+        assert!(records[0].message.contains("boom"), "{records:?}");
     }
 
     #[test]
