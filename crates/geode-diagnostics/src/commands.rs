@@ -43,10 +43,19 @@ pub enum Command {
     Overlay,
 }
 
-/// The `[log]` target suffixes `:level` accepts — mirrors
-/// `geode_core::log::TARGETS`, spelled without the `geode::` prefix (as a
-/// user types them and as `[log]` itself keys on).
-const TARGETS: [&str; 6] = ["ingest", "query", "config", "session", "shell", "theme"];
+/// The `[log]` target suffixes `:level` accepts, derived from
+/// `geode_core::log::TARGETS` rather than duplicated (Phase 4b Task 5 fix
+/// round 1, MIN-2: a hardcoded copy here could silently drift from the
+/// list `LogLevels::from_doc` actually validates `[log]` keys against —
+/// add a target there and forget here, and `:level <it> debug` rejects
+/// exactly the key `[log]` itself would accept). `strip_prefix` mirrors
+/// `LogLevels::from_doc`'s own `t.strip_prefix("geode::") == Some(key.
+/// as_str())` check for the same suffixes.
+fn known_targets() -> impl Iterator<Item = &'static str> {
+    geode_core::log::TARGETS
+        .iter()
+        .filter_map(|t| t.strip_prefix("geode::"))
+}
 
 const LEVELS: [(&str, Level); 5] = [
     ("error", Level::ERROR),
@@ -65,7 +74,7 @@ fn levels_hint() -> String {
 }
 
 fn targets_hint() -> String {
-    TARGETS.join(", ")
+    known_targets().collect::<Vec<_>>().join(", ")
 }
 
 /// Parse a `:` line, without its leading colon. `Err` is one line, shown
@@ -93,7 +102,7 @@ pub fn parse(line: &str) -> Result<Command, String> {
             let level_str = words
                 .next()
                 .ok_or_else(|| "usage: level <target> <level>".to_string())?;
-            if !TARGETS.contains(&target) {
+            if !known_targets().any(|t| t == target) {
                 return Err(format!("unknown target '{target}' ({})", targets_hint()));
             }
             let level = LEVELS
@@ -115,9 +124,19 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// Completion candidates for the word under `cursor` on a `:` line — the
 /// shell ranks and shows them; this only knows the vocabulary. `cursor`
 /// truncates `line` to the text so far (the word under the cursor is the
-/// trailing token of that prefix, possibly empty).
+/// trailing token of that prefix, possibly empty). `cursor` is walked
+/// back to the nearest char boundary at or before it first (Phase 4b Task
+/// 5 fix round 1, MIN-1): the caller's cursor should always land on one,
+/// but this pure core must not depend on that and panic on the slice
+/// below otherwise — mirrors `geode_blotter::core::commands::completions`'
+/// own guard for the identical case, itself mirroring `commandline::
+/// word_at`'s.
 pub fn completions(line: &str, cursor: usize) -> Vec<String> {
-    let head = &line[..cursor.min(line.len())];
+    let mut cursor = cursor.min(line.len());
+    while !line.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    let head = &line[..cursor];
     let mut words: Vec<&str> = head.split(' ').collect();
     let partial = words.pop().unwrap_or("");
     match words.as_slice() {
@@ -131,13 +150,12 @@ pub fn completions(line: &str, cursor: usize) -> Vec<String> {
             .filter(|s| s.name().starts_with(partial))
             .map(|s| format!("section {}", s.name()))
             .collect(),
-        ["level"] => TARGETS
-            .iter()
+        ["level"] => known_targets()
             .filter(|t| t.starts_with(partial))
             .map(|t| format!("level {t}"))
             .collect(),
         ["level", target] => {
-            if !TARGETS.contains(target) {
+            if !known_targets().any(|t| t == *target) {
                 return Vec::new();
             }
             LEVELS
@@ -214,6 +232,40 @@ mod tests {
     fn an_unknown_or_empty_command_is_an_error() {
         assert!(parse("bogus").is_err());
         assert!(parse("").is_err());
+    }
+
+    /// MIN-2: `known_targets` derives from `geode_core::log::TARGETS`
+    /// rather than a hand-copied list — every one of `[log]`'s own
+    /// accepted target suffixes must parse for `:level` too.
+    #[test]
+    fn every_log_target_suffix_is_a_known_level_target() {
+        for target in geode_core::log::TARGETS {
+            let suffix = target.strip_prefix("geode::").unwrap();
+            assert!(
+                matches!(
+                    parse(&format!("level {suffix} debug")),
+                    Ok(Command::Level { .. })
+                ),
+                "{suffix} (from geode_core::log::TARGETS) must be a known :level target"
+            );
+        }
+    }
+
+    /// MIN-1: a cursor that does not land on a char boundary must not
+    /// panic — clamp back to the nearest one at or before it, same
+    /// guard `geode_blotter::core::commands::completions` and
+    /// `commandline::word_at` both already carry for this exact case.
+    #[test]
+    fn completions_clamp_a_cursor_inside_a_multibyte_char() {
+        let line = "section ✓og";
+        // "✓" is 3 bytes (U+2713); its first byte sits right after
+        // "section ", so `cursor` inside it (not on a char boundary) must
+        // not panic and should behave as if clamped to the boundary
+        // before it.
+        let mid_char = line.find('✓').unwrap() + 1;
+        assert!(!line.is_char_boundary(mid_char));
+        let result = std::panic::catch_unwind(|| completions(line, mid_char));
+        assert!(result.is_ok(), "must not panic on a non-boundary cursor");
     }
 
     #[test]

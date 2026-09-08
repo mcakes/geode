@@ -196,6 +196,19 @@ impl Config {
         self.docs.get(name)
     }
 
+    /// Every doc name this `Config` holds a merged doc for, in
+    /// alphabetical order (`docs` is a `BTreeMap`) — for a reader that
+    /// wants to enumerate "everything", not name one doc in particular
+    /// (Phase 4b Task 5 fix round 1, MIN-3: the diagnostics module's
+    /// effective-config explainer used to walk a hand-maintained constant
+    /// list of doc names instead, which could silently fall behind a doc
+    /// this or a future reader added). This is about *display*, not the
+    /// "a reader names what it wants" rationale `doc`/`get` follow for
+    /// *typed* access — an enumerator doesn't weaken that.
+    pub fn doc_names(&self) -> impl Iterator<Item = &str> {
+        self.docs.keys().map(String::as_str)
+    }
+
     /// The unmerged per-layer docs for `name`, in Builtin → Desk → User order.
     /// Consumers that layer at interpretation time (the keymap engine) use
     /// this instead of the merged doc.
@@ -312,6 +325,26 @@ mod tests {
             config.explain("views", "risk.dataset"),
             Some(Layer::Builtin)
         );
+    }
+
+    /// Phase 4b Task 5 fix round 1, MIN-3: `doc_names` lists every doc
+    /// `Config` actually holds, alphabetically — so an effective-config
+    /// explainer walking it needs no hand-maintained list to keep in
+    /// sync with what's actually loaded.
+    #[test]
+    fn doc_names_lists_every_loaded_doc_alphabetically() {
+        let sources = ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[risk]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "config_version = 1\n").unwrap(),
+                LayerDoc::builtin("keymap", "").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        };
+        let config = Config::load(&sources);
+        let names: Vec<&str> = config.doc_names().collect();
+        assert_eq!(names, vec!["app", "keymap", "views"]);
     }
 
     // --- Diagnostic Display -------------------------------------------

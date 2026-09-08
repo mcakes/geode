@@ -106,6 +106,15 @@ pub fn sources_rows(d: &Diagnostics, now: SystemTime) -> Vec<Row> {
         {
             text.push_str(&format!(" — {reason}"));
         }
+        // MIN-9 (fix round 1), accepted as-is: `now` is the instant this
+        // whole section rebuilt, and a rebuild only happens on an
+        // observed version change — a healthy, quiet source's "Ns ago"
+        // freezes at whatever it read on the last real change until
+        // something else bumps a version (the reload-poll tick's own
+        // ~500ms `refresh_frame_hist`, most commonly). Honest but
+        // occasionally stale; the absolute `since` timestamp right next
+        // to it is always correct, which is why this stays a decoration
+        // rather than the only clock reading on the row.
         let elapsed = now
             .duration_since(state.since)
             .map(|d| format!(" · {}s ago", d.as_secs()))
@@ -238,21 +247,32 @@ pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str) -> Vec<Row> {
     }
 
     out.push(row("effective config", 0, Tone::Muted));
-    for doc_name in KNOWN_DOCS {
+    // MIN-3 (fix round 1): every doc `Config` actually holds, not a
+    // hand-maintained list that could fall behind it.
+    for doc_name in config.doc_names() {
         let Some(doc) = config.doc(doc_name) else {
             continue;
         };
         let mut leaves = Vec::new();
         walk_leaves(&doc.value, "", &mut leaves);
-        for (path, value) in leaves {
+        let total = leaves.len();
+        let capped = total > MAX_LEAVES_PER_DOC;
+        for (path, value) in leaves.iter().take(MAX_LEAVES_PER_DOC) {
             let layer = config
-                .explain(doc_name, &path)
+                .explain(doc_name, path)
                 .map(|l| l.name())
                 .unwrap_or("?");
             out.push(row(
                 format!("{doc_name}.{path} = {value}  [{layer}]"),
                 1,
                 Tone::Normal,
+            ));
+        }
+        if capped {
+            out.push(row(
+                format!("… {} more", total - MAX_LEAVES_PER_DOC),
+                1,
+                Tone::Muted,
             ));
         }
     }
@@ -266,23 +286,23 @@ pub fn config_rows(d: &Diagnostics, config: &Config, filter: &str) -> Vec<Row> {
     }
 }
 
-/// Docs the effective-config explainer walks — every doc the shell's own
-/// hot-reload path reads (`shell::hot_reload::apply_reload`'s own doc
-/// list), plus `app` for `[theme]`/`[log]`/`[keymap]`/`[ui]`. `Config` has
-/// no public doc-name enumerator (by design — see its own module doc: a
-/// reader names what it wants), so this is a fixed, known vocabulary
-/// rather than a walk of everything on disk.
-const KNOWN_DOCS: [&str; 8] = [
-    "app",
-    "keymap",
-    "views",
-    "datasets",
-    "sources",
-    "dimensions",
-    "groupings",
-    "scopes",
-];
+/// A cap on how many leaf rows one doc contributes to the explainer
+/// (Phase 4b Task 5 fix round 1, MAJ-8), a final "… N more" row standing
+/// in for the rest — a pathological doc (or a future one nobody sized
+/// this for) must not turn one `:section config` render into thousands
+/// of rows.
+const MAX_LEAVES_PER_DOC: usize = 2_000;
 
+/// Walk every leaf of a merged doc's table, recursing into both nested
+/// tables AND arrays (Phase 4b Task 5 fix round 1, MAJ-8) — the merged
+/// `keymap` doc's `bindings` is an array of tables (`[[bindings]]`), and
+/// before this fix `walk_value`'s `toml::Value::Array` case did not
+/// exist, so an array was stringified whole via `Value::to_string()`:
+/// one `Row` holding the entire keymap's bindings serialised onto a
+/// single unbroken line, several kilobytes long, that `uniform_list`
+/// cannot wrap and gpui reshapes on every paint while it's in the
+/// visible range. Indexed paths (`keymap.bindings.0.keys.j`) keep every
+/// leaf its own row instead.
 fn walk_leaves(table: &toml::Table, prefix: &str, out: &mut Vec<(String, String)>) {
     for (key, value) in table {
         let path = if prefix.is_empty() {
@@ -290,10 +310,19 @@ fn walk_leaves(table: &toml::Table, prefix: &str, out: &mut Vec<(String, String)
         } else {
             format!("{prefix}.{key}")
         };
-        match value {
-            toml::Value::Table(t) => walk_leaves(t, &path, out),
-            other => out.push((path, other.to_string())),
+        walk_value(value, &path, out);
+    }
+}
+
+fn walk_value(value: &toml::Value, path: &str, out: &mut Vec<(String, String)>) {
+    match value {
+        toml::Value::Table(t) => walk_leaves(t, path, out),
+        toml::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_value(v, &format!("{path}.{i}"), out);
+            }
         }
+        other => out.push((path.to_string(), other.to_string())),
     }
 }
 
@@ -590,7 +619,7 @@ mod tests {
                     .unwrap(),
             ],
             desk: None,
-            user: Some(std::path::PathBuf::from("/nonexistent")),
+            user: None,
         });
         let rows = config_rows(&d, &config, "");
         let joined: String = rows
@@ -605,6 +634,73 @@ mod tests {
         let filtered = config_rows(&d, &config, "theme");
         assert!(filtered.iter().all(|r| r.text.contains("theme")));
         assert!(!filtered.is_empty());
+    }
+
+    /// MAJ-8: an array of tables (`[[bindings]]`, the real shape the
+    /// merged `keymap` doc's `bindings` key takes) must be recursed into
+    /// with an indexed path per leaf, not stringified whole onto one row.
+    #[test]
+    fn config_rows_recurses_into_arrays_with_indexed_paths() {
+        let d = Diagnostics::new(LogLevels::default());
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "keymap",
+                    "[[bindings]]\ncontext = \"tile\"\n[bindings.keys]\nj = \"down\"\n\
+                     [[bindings]]\ncontext = \"other\"\n[bindings.keys]\nk = \"up\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let rows = config_rows(&d, &config, "");
+        let texts: Vec<String> = rows.iter().map(|r| r.text.to_string()).collect();
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("keymap.bindings.0.context") && t.contains("\"tile\"")),
+            "{texts:?}"
+        );
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("keymap.bindings.1.keys.k") && t.contains("\"up\"")),
+            "{texts:?}"
+        );
+        assert!(
+            texts.iter().all(|t| t.len() < 200),
+            "no row should be a whole array stringified onto one line: {texts:?}"
+        );
+    }
+
+    /// MAJ-8: a doc with more than `MAX_LEAVES_PER_DOC` leaves is capped,
+    /// with a trailing "… N more" row rather than an unbounded list.
+    #[test]
+    fn config_rows_caps_leaves_per_doc_with_a_more_row() {
+        let d = Diagnostics::new(LogLevels::default());
+        // No `config_version` key — builtin docs skip that check
+        // (`LayerDoc::builtin`'s own doc comment), and adding one would
+        // be an extra leaf outside `[huge]`, throwing off the exact
+        // "N more" count this test pins.
+        let mut text = String::from("[huge]\n");
+        for i in 0..(MAX_LEAVES_PER_DOC + 50) {
+            text.push_str(&format!("k{i} = {i}\n"));
+        }
+        let config = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", &text).unwrap()],
+            desk: None,
+            user: None,
+        });
+        let rows = config_rows(&d, &config, "");
+        let more_row = rows.iter().find(|r| r.text.contains("more"));
+        assert!(more_row.is_some(), "expected a trailing '… N more' row");
+        assert!(more_row.unwrap().text.contains("50"));
+        let leaf_rows = rows
+            .iter()
+            .filter(|r| r.text.starts_with("app.huge."))
+            .count();
+        assert_eq!(leaf_rows, MAX_LEAVES_PER_DOC);
     }
 
     #[test]
