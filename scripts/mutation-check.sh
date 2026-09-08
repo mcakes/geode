@@ -4099,6 +4099,12 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
                     && part.resolved_gen == Some(generation.gen_id);' \
   geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
 
+run_mutation "occupants: pending_kind_for_new_tile is spent on the lowest TileId, deterministically" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        creation_order.sort();' \
+  '        creation_order.sort_by(|a, b| b.cmp(a));' \
+  geode-shell a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
