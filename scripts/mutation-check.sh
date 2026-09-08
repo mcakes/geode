@@ -2962,6 +2962,48 @@ run_mutation "oldest_seq ignores the wrap and always reads slot 0" \
     }' \
   geode-core oldest_seq_is_none_when_empty_then_tracks_the_surviving_floor_through_a_wrap
 
+run_mutation "catalog: live is the first generation per partition, not the last" \
+  crates/geode-data/src/query/catalog.rs \
+  '        if let Some(newest) = p.generations.last_mut() {
+            newest.live = true;
+        }' \
+  '        if let Some(newest) = p.generations.first_mut() {
+            newest.live = true;
+        }' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
+
+run_mutation "catalog: resolved_gen is ignored under AsOf::At, always None" \
+  crates/geode-data/src/query/catalog.rs \
+  '            p.resolved_gen = by_partition
+                .get(&(p.batch.clone(), p.book.clone()))
+                .copied();' \
+  '            p.resolved_gen = None;' \
+  geode-data under_an_as_of_the_resolved_generation_is_named_per_partition
+
+run_mutation "catalog: live_rows also sums the archive tables" \
+  crates/geode-data/src/query/catalog.rs \
+  '        live_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Live))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes' \
+  '        live_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Live))
+            .copied()
+            .unwrap_or(0);
+        live_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Archive))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes' \
+  geode-data the_row_counts_agree_with_duckdb_by_execution
+
+run_mutation "scheduler: Polled.next_in is zero, so the mapped DataEvent's next collapses to at" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                        next_in: spec.poll_interval,' \
+  '                        next_in: Duration::ZERO,' \
+  geode-data an_unchanged_directory_submits_nothing_on_later_polls
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
