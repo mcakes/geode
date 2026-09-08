@@ -4250,6 +4250,12 @@ run_mutation "commands: a diagnostics completion is the word under the cursor, n
   '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
   geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
 
+run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
+  crates/geode-diagnostics/src/commands.rs \
+  '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
+  '        .split('"'"' '"'"')' \
+  geode-diagnostics completions_split_words_the_way_the_shell_does
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

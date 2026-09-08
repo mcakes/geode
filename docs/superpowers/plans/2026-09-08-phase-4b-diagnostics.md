@@ -1151,6 +1151,15 @@ assertion — then GREEN), in commit order:
       assert_eq!(completions("level ingest d", 14), vec!["level ingest debug"]);
   }
   ```
+
+  > **Superseded 2026-09-08 (post-merge fix):** the sketch above is wrong
+  > and was the defect's source. A candidate is the bare WORD for the
+  > position (`ingest`, never `level ingest`) — the shell splices it in
+  > place of the word under the cursor, so these whole-line candidates
+  > produced `level level ingest` on a display. As built, `completions`
+  > returns the position's whole vocabulary unfiltered (`["sources",
+  > "data", "config", "log", "perf"]`, the targets, the five levels) and
+  > the shell's ranking narrows it.
   and in `sections.rs` (fixtures built from `Diagnostics::new` plus
   `note_*` calls):
 

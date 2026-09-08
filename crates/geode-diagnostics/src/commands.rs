@@ -126,14 +126,21 @@ pub fn parse(line: &str) -> Result<Command, String> {
 /// candidate is a bare WORD for that position (`ingest`, never `level
 /// ingest`): the shell splices the accepted candidate into the line in
 /// place of the word under the cursor (`commandline::accept`), and calls
-/// a typed word exact only when a candidate equals it, so a whole-line
-/// candidate turned `:level ` + accept into `level level ingest` and Enter
-/// on a fully typed `:level ingest debug` into `level ingest level ingest
-/// debug` (seen on a display 2026-09-08). The whole vocabulary for the
-/// position is returned, unfiltered, as the blotter's is: the shell's
-/// fuzzy ranking decides what a partial word matches. `cursor`
-/// truncates `line` to the text so far (the word under the cursor is the
-/// trailing token of that prefix, possibly empty). `cursor` is walked
+/// a typed word exact only when the vocabulary contains it, so a
+/// whole-line candidate turned `:level ` + accept into `level level
+/// ingest` and Enter on a fully typed `:level ingest debug` into `level
+/// ingest level ingest debug` (seen on a display 2026-09-08). The whole
+/// vocabulary for the position is returned, unfiltered, as the blotter's
+/// is: the shell's fuzzy (subsequence) ranking decides what a partial
+/// word matches — which also means Enter on a short prefix that several
+/// words contain (`:o`, matched by `overlay` AND `section`) is refused as
+/// ambiguous rather than run, exactly as the blotter's `:so` is; the
+/// old prefix filter used to auto-run it. Words are split the way the
+/// shell's `commandline::word_at` splits them — any whitespace or a
+/// comma — so the position this computes is the word the shell will
+/// splice over. `cursor` truncates `line` to the text so far (the word
+/// under the cursor is the trailing token of that prefix, possibly
+/// empty). `cursor` is walked
 /// back to the nearest char boundary at or before it first (Phase 4b Task
 /// 5 fix round 1, MIN-1): the caller's cursor should always land on one,
 /// but this pure core must not depend on that and panic on the slice
@@ -146,10 +153,14 @@ pub fn completions(line: &str, cursor: usize) -> Vec<String> {
         cursor -= 1;
     }
     let head = &line[..cursor];
-    let mut words: Vec<&str> = head.split(' ').collect();
+    let mut words: Vec<&str> = head
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .collect();
     // The word under the cursor is the shell's to rank; only the words
-    // before it decide which position is being completed.
+    // before it decide which position is being completed (a doubled
+    // space is no word, as `parse`'s `split_whitespace` agrees).
     words.pop();
+    words.retain(|w| !w.is_empty());
     match words.as_slice() {
         [] => ["section", "level", "overlay"]
             .iter()
@@ -273,7 +284,7 @@ mod tests {
     /// into `level ingest level ingest debug`. A candidate is the WORD
     /// under the cursor: the shell splices it into the line in place of
     /// that word (`commandline::accept`) and calls a word exact only
-    /// when a candidate equals it (`resolve_submit`). The blotter's
+    /// when the vocabulary contains it (`resolve_submit`). The blotter's
     /// vocabulary is bare words for the same reason. Never the line.
     #[test]
     fn a_candidate_is_the_word_under_the_cursor_not_the_line() {
@@ -310,8 +321,10 @@ mod tests {
     fn completions_offer_sections_then_targets_then_levels() {
         // The whole vocabulary for the position, as bare words — the
         // shell's ranking narrows it to the partial word.
-        let sections: Vec<String> = Section::ALL.iter().map(|s| s.name().to_string()).collect();
-        assert_eq!(completions("section l", 9), sections);
+        assert_eq!(
+            completions("section l", 9),
+            vec!["sources", "data", "config", "log", "perf"]
+        );
         let targets: Vec<String> = known_targets().map(str::to_string).collect();
         assert!(targets.iter().any(|t| t == "ingest"));
         assert_eq!(completions("level in", 8), targets);
@@ -319,6 +332,19 @@ mod tests {
             completions("level ingest d", 14),
             vec!["error", "warn", "info", "debug", "trace"]
         );
+    }
+
+    /// The position is computed over the same delimiters the shell's
+    /// `commandline::word_at` uses — any whitespace or a comma — so the
+    /// vocabulary offered is for the word the shell will splice over. A
+    /// doubled space is no word, as `parse`'s `split_whitespace` agrees.
+    #[test]
+    fn completions_split_words_the_way_the_shell_does() {
+        let levels = vec!["error", "warn", "info", "debug", "trace"];
+        assert_eq!(completions("level ingest,d", 14), levels, "comma");
+        assert_eq!(completions("level\tingest d", 14), levels, "tab");
+        let targets: Vec<String> = known_targets().map(str::to_string).collect();
+        assert_eq!(completions("level  d", 8), targets, "doubled space");
     }
 
     #[test]

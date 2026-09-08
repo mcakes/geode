@@ -41,6 +41,14 @@ pub trait TileContent {
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
     /// Candidates for the word under `cursor` on a `:` line. The shell
     /// ranks and shows them; the occupant only knows its vocabulary.
+    /// Each candidate is the bare WORD for that position (`ingest`,
+    /// never `level ingest`): the shell splices the accepted one into
+    /// the line in place of the word under the cursor
+    /// (`commandline::accept`), so a whole-line candidate doubles the
+    /// line (`level level ingest` — seen on a display 2026-09-08). Return
+    /// the position's whole vocabulary, unfiltered; the shell's ranking
+    /// narrows it, and Enter refuses a partial word that ranks more than
+    /// one candidate rather than guessing.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
     /// A query result addressed to this tile (§5.1).
