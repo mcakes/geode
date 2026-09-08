@@ -1078,3 +1078,90 @@ either. The larger win from a real, high-generation-count archive (the
 543 ms case above) is exactly what the summary table exists for, and
 is no longer reachable through this crate's own benches: the compile
 that used to scale with 3000 generations is now a fixed-cost lookup.
+
+## Phase 4b: diagnostics
+
+Phase 4b (`docs/superpowers/specs/2026-09-06-geode-phase-4-frame-features-design.md`
+§4) adds an always-on log ring and a `geode-diagnostics` tile over it,
+both explicitly subject to the charter's per-frame-churn rule. This
+section records the allocation and rebuild contracts that keep them off
+the render thread's budget, and the one display reading that would
+prove it — not yet taken; template rows below.
+
+**The ring reader's allocation contract.** `geode_core::log::Ring::
+drain_since` is the one thing a following diagnostics tile calls every
+time it might have new log lines, so its cost model is pinned by tests,
+not just documented:
+
+- `a_hit_allocates_nothing_in_the_reader` (`crates/geode-core/src/log/mod.rs`)
+  drains once, records the returned `Vec`'s capacity, pushes more
+  records, drains again for the same count, and asserts the capacity
+  did not grow — the reader owns its buffer and reuses it, so a tile
+  following the tail allocates only for records genuinely newer than
+  its `since`, never for the act of reading.
+- `drain_since` itself walks backward from the newest slot and stops
+  the instant it reaches a record at-or-before `since` (or an unwritten
+  pre-wrap slot), rather than scanning all 4,096 slots on every call —
+  a `#[cfg(test)]` `Ring::drain_visits` counter proves the bound
+  directly rather than inferring it from timing.
+- The one real allocation on a hit is each matching record's `message:
+  String` clone, made while the ring's mutex is held — the mutex is
+  never held for *formatting* (that happens on the emitting thread,
+  before `push`), only for the copy.
+
+**The no-rebuild-on-bare-notify discipline.** Every diagnostics section
+rebuilds only when an observed version actually changed, not on every
+`cx.notify()` a nearby entity happens to fire — a ring push carries no
+notify of its own, so a real caller relies on some other `Diagnostics`/
+`Frame` version bump (the reload-poll tick, a health note, a config
+reload) landing nearby to pick up new log lines, and that same version
+comparison must not rebuild on a notify that changed nothing.
+`an_unchanged_entity_does_not_rebuild_rows` (`crates/geode-diagnostics/
+src/tile.rs`) pins this the hard way: it calls `cx.notify()` on both
+`diagnostics` and `frame` with no real mutation behind either call and
+asserts `rebuild_count` does not move. `DiagnosticsTile::
+frame_versions_relevant_eq` narrows the comparison to exactly the two
+`FrameVersions` fields any section reads (`as_of`, `config`) — a
+scope-only or grouping-only frame change is not a reason for this tile
+to rebuild.
+
+**The histogram copy cadence.** `ShellView::perf: FrameHistogram` stays
+the value the overlay and the render path read every frame;
+`Diagnostics.frame_hist` is a *copy*, refreshed on the shell's existing
+~500 ms reload-poll tick and only while `Diagnostics.watchers() > 0` —
+an open-but-invisible or closed diagnostics tile costs nothing here.
+`refresh_frame_hist` also compares before copying, so even a watched
+tile's copy is a no-op once the histogram stops changing between ticks.
+Pinned by `the_frame_histogram_is_copied_only_while_watched` and
+`refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged`
+(`crates/geode-shell/src/diagnostics.rs`).
+
+**Display recipe — not yet run, template rows below.** The claim to
+verify: opening a diagnostics tile with the log section following (so
+it is draining the ring on every relevant tick) must not move the
+frame-time histogram's p95 against a baseline with no diagnostics tile
+open. Recipe, matching the Phase 3/4a sections' convention above:
+
+```sh
+cargo run --release -p geode-app -- --demo 1000000
+```
+
+1. With no diagnostics tile open, reset the overlay's counters
+   (`perf::reset`, palette-only) and hold `j` in a blotter tile for a
+   few seconds the way the Phase 3 wide-view reading above did; read
+   **p50**/**p95**/**max** before releasing.
+2. Open a diagnostics tile (`mod+shift+d`), switch to the `log`
+   section (`]`/`[` or `:section log`) so it is following the tail,
+   trigger some log activity (an ingest tick, a `:level` change),
+   `perf::reset` again, and repeat the same `j` hold in the blotter
+   tile.
+3. Compare the two p95 readings — the claim holds if they agree within
+   noise (same order of magnitude as the Phase 3 wide-view p95 above,
+   not a new tail introduced by the diagnostics tile's background
+   copying).
+
+| reading | where read | value |
+| --- | --- | --- |
+| baseline `j`-hold, no diagnostics tile, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
+| same hold, diagnostics tile open + log section following, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
+| verdict: does the diagnostics tile move p95? | comparison of the two rows above | *(template — not yet measured)* |
