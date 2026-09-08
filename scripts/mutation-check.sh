@@ -2486,14 +2486,57 @@ run_mutation "picker: ctrl+x no longer counts as touching the tick set" \
 
 # "Nothing is configured to pick" and "your filter matched nothing" must
 # not print the same string: the first is why an unconfigured `alt+p`
-# reads as a broken picker rather than an empty one.
-run_mutation "picker: both empty states print the same string" \
+# reads as a broken picker rather than an empty one. Collapse the
+# columns stage's empty-pickable arms back onto "no matches".
+run_mutation "picker: the columns stage's empty states print the same string" \
   crates/geode-shell/src/shell/picker.rs \
-  '    if pickable_is_empty {
-        "nothing to pick — no datasets config is loaded"' \
-  '    if false {
-        "nothing to pick — no datasets config is loaded"' \
+  '        (false, _) => "no matches",' \
+  '        (false, _) | (true, _) => "no matches",' \
   geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: the two reasons `pickable` comes out empty are
+# unrelated — no `datasets` doc, or a doc declaring no categorical
+# columns — and blaming a missing file for the second sends the reader
+# to the wrong place. Serve the missing-file message for both.
+run_mutation "picker: a loaded schema is reported as a missing file" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        (true, true) => "nothing to pick — this schema declares no categorical columns",' \
+  '        (true, true) => "nothing to pick — no datasets config is loaded",' \
+  geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: the values stage's own branch had no entry of its
+# own, only the columns stage's. A distinct query that returned no rows
+# at all is a fact about the data under the current scope, not about the
+# filter the user typed.
+run_mutation "picker: the values stage's empty states print the same string" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    if values_is_empty {
+        "no values in scope"' \
+  '    if false {
+        "no values in scope"' \
+  geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: `tab`/`ctrl+a` set `ticks_touched` ahead of their own
+# guards, so a keystroke that visibly ticked nothing (a filter matching
+# nothing, or values not yet delivered) permanently disarmed the
+# highlight-commit path — the original defect by another route. Hoist
+# the flag back above the guard.
+run_mutation "picker: a tab that ticks nothing still counts as a touch" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    pub fn toggle_selected(&mut self) {
+        let shown = self.shown();' \
+  '    pub fn toggle_selected(&mut self) {
+        self.ticks_touched = true;
+        let shown = self.shown();' \
+  geode-shell a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching
+
+run_mutation "picker: a ctrl+a over nothing still counts as a touch" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        if shown.is_empty() {
+            return; // see `toggle_selected` on why this is not a touch
+        }' \
+  '' \
+  geode-shell a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching
 
 # `tab` is the only key that selects a value, and the footer is the only
 # place that says so. Serve the columns stage's vocabulary to both.

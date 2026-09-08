@@ -181,7 +181,6 @@ impl PickerState {
     /// no-op if there's nothing shown at `self.selected` (an empty list,
     /// or a stale selection past its end).
     pub fn toggle_selected(&mut self) {
-        self.ticks_touched = true;
         let shown = self.shown();
         let Some((idx, _)) = shown.get(self.selected) else {
             return;
@@ -191,6 +190,12 @@ impl PickerState {
             return;
         };
         let value = values[idx].0.clone();
+        // Only a keystroke that actually moved a tick counts as a touch
+        // (review finding): setting the flag ahead of these guards let a
+        // `tab` that visibly did nothing — nothing shown, or no values
+        // delivered yet — disarm `apply`'s highlight-commit for the rest
+        // of the session.
+        self.ticks_touched = true;
         if !self.ticked.remove(&value) {
             self.ticked.insert(value);
         }
@@ -199,11 +204,14 @@ impl PickerState {
     /// Tick every value the filter currently shows (`ctrl+a`) — additive,
     /// never clears an existing tick outside the shown set.
     pub fn tick_all_shown(&mut self) {
-        self.ticks_touched = true;
         let shown = self.shown();
         let Some(Ok(values)) = &self.values else {
             return;
         };
+        if shown.is_empty() {
+            return; // see `toggle_selected` on why this is not a touch
+        }
+        self.ticks_touched = true;
         for (idx, _) in &shown {
             self.ticked.insert(values[*idx].0.clone());
         }
@@ -211,6 +219,11 @@ impl PickerState {
 
     /// Clear every tick (`ctrl+x`) — the whole set, not just what the
     /// filter currently shows.
+    ///
+    /// Unlike its two siblings this counts as a touch even when it
+    /// changes nothing: `ctrl+x` on an already-empty set is still the
+    /// user saying "select nothing here", and `apply` must honour that by
+    /// dropping the column rather than committing the highlight.
     pub fn clear(&mut self) {
         self.ticks_touched = true;
         self.ticked.clear();
@@ -603,18 +616,25 @@ pub fn hints(stage: &Stage) -> &'static [Hint] {
 }
 
 /// What the `Columns` stage prints when its row list comes out empty.
-/// The two emptinesses are not the same failure and must not share a
-/// string: a filter that matched nothing is the user's own doing and
-/// self-corrects on backspace, while an empty `ShellView::pickable` means
-/// no `datasets` doc is loaded at all, so *every* query will match
-/// nothing and the picker is not the thing to fix. Printing "no matches"
-/// for the second is what makes an unconfigured `frame::pick` read as a
-/// broken picker.
-fn columns_empty_message(pickable_is_empty: bool) -> &'static str {
-    if pickable_is_empty {
-        "nothing to pick — no datasets config is loaded"
-    } else {
-        "no matches"
+/// The three emptinesses are different failures and must not share a
+/// string. A filter that matched nothing is the user's own doing and
+/// self-corrects on backspace. An empty `ShellView::pickable` means
+/// *every* query will match nothing and the picker is not the thing to
+/// fix — printing "no matches" for that is what makes an unconfigured
+/// `frame::pick` read as a broken picker.
+///
+/// The last two are worth separating (review finding) because
+/// [`pickable_columns`](super::pickable_columns) comes out empty for two
+/// unrelated reasons: no `datasets` doc at all, or a doc whose columns
+/// are all keys, measures or plain attributes — including dimensions
+/// `validate_dataset` dropped at load for a bad `grain`. Naming a missing
+/// file for the second sends the reader to the wrong place, in a change
+/// whose whole point is an accurate empty state.
+fn columns_empty_message(pickable_is_empty: bool, has_datasets_doc: bool) -> &'static str {
+    match (pickable_is_empty, has_datasets_doc) {
+        (false, _) => "no matches",
+        (true, false) => "nothing to pick — no datasets config is loaded",
+        (true, true) => "nothing to pick — this schema declares no categorical columns",
     }
 }
 
@@ -654,7 +674,13 @@ fn build_columns(
 ) -> AnyElement {
     let matches = PickerState::columns(&shell.pickable, &picker.query);
     if matches.is_empty() {
-        return empty_row(columns_empty_message(shell.pickable.is_empty()), muted);
+        return empty_row(
+            columns_empty_message(
+                shell.pickable.is_empty(),
+                shell.services.config.doc("datasets").is_some(),
+            ),
+            muted,
+        );
     }
     let mut list = v_flex()
         .id("picker-columns")
@@ -948,6 +974,41 @@ mod tests {
         assert_eq!(out.dimensions[0].column, "lhu");
     }
 
+    /// Review finding: `tab` and `ctrl+a` set `ticks_touched` before
+    /// their own guards, so a keystroke that visibly did nothing —
+    /// `tab` while the filter matches nothing, or before the distinct
+    /// query has returned — permanently disarmed the highlight-commit
+    /// path. Backspace the filter, arrow to a value, press `enter`, and
+    /// the modal closes having changed nothing: the exact defect this
+    /// work exists to remove, reachable by a different route.
+    #[test]
+    fn a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching() {
+        // `tab` with a filter that matches nothing.
+        let mut s = state_with(&[("BK000", 1), ("BK001", 2)]);
+        s.query = "zzzz".into();
+        assert!(s.shown().is_empty(), "the fixture must match nothing");
+        s.toggle_selected();
+        assert!(!s.ticks_touched, "a tab that ticked nothing is not a touch");
+
+        // `ctrl+a` with the same empty shown set.
+        s.tick_all_shown();
+        assert!(!s.ticks_touched, "ctrl+a over nothing is not a touch");
+
+        // `tab` before the distinct query returns.
+        let mut loading = state_with(&[]);
+        loading.values = None;
+        loading.toggle_selected();
+        loading.tick_all_shown();
+        assert!(!loading.ticks_touched, "no values yet is not a touch");
+
+        // …so the highlight still commits once the filter is cleared.
+        s.query.clear();
+        s.selected = 1;
+        let out = s.apply(&Scope::default());
+        assert_eq!(out.dimensions.len(), 1, "the highlight still commits");
+        assert_eq!(out.dimensions[0].values, vec!["BK001".to_string()]);
+    }
+
     /// The single-value flow: arrow to a value and press `enter` without
     /// ever pressing `tab`. Before this, `apply` saw an empty tick set,
     /// dropped the column entirely and produced a scope identical to the
@@ -991,11 +1052,25 @@ mod tests {
     /// broken picker rather than an empty one.
     #[test]
     fn the_empty_states_say_which_emptiness_it_is() {
-        assert_ne!(columns_empty_message(true), columns_empty_message(false));
-        assert_ne!(values_empty_message(true), values_empty_message(false));
-        assert_eq!(columns_empty_message(false), "no matches");
+        // A filter that matched nothing, whatever the config looks like.
+        assert_eq!(columns_empty_message(false, true), "no matches");
+        assert_eq!(columns_empty_message(false, false), "no matches");
         assert_eq!(values_empty_message(false), "no matches");
-        assert!(columns_empty_message(true).contains("datasets"));
+        assert_ne!(values_empty_message(true), values_empty_message(false));
+
+        // Nothing to pick, for either of its two unrelated reasons — and
+        // the no-doc case is the only one allowed to blame a missing
+        // file (review finding).
+        let no_doc = columns_empty_message(true, false);
+        let no_categoricals = columns_empty_message(true, true);
+        assert_ne!(no_doc, "no matches");
+        assert_ne!(no_categoricals, "no matches");
+        assert_ne!(no_doc, no_categoricals);
+        assert!(no_doc.contains("datasets config"), "{no_doc}");
+        assert!(
+            !no_categoricals.contains("config is loaded"),
+            "a schema that IS loaded must not be reported as missing: {no_categoricals}"
+        );
     }
 
     /// The values stage must advertise `tab`: it is the only key that
