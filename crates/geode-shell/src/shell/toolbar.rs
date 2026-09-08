@@ -108,8 +108,8 @@ pub fn toolbar(
                 ),
         );
     }
-    if let Some(t) = &model.text {
-        chips_row = chips_row.child(chip(format!("text \"{t}\""), chip_fg, chip_bg, || {
+    if let Some(t) = &model.text_chip {
+        chips_row = chips_row.child(chip(t.clone(), chip_fg, chip_bg, || {
             "scope-text-chip".to_string()
         }));
     }
@@ -153,12 +153,15 @@ pub fn toolbar(
                     .font_family(fonts::MONO)
                     .text_sm()
                     .debug_selector(|| "frame-readout".to_string())
-                    .when_some(model.as_of.as_ref(), |el, t| {
+                    .when_some(model.as_of_badge.as_ref(), |el, badge| {
                         // The existing warning treatment on the whole bar
                         // (slot + chips + badge) — a stray as-of scope
                         // must be unmissable, not a small badge easy to
                         // miss at the edge of the eye. `scope-asof` names
-                        // the badge text itself for tests.
+                        // the badge text itself for tests. `badge` is
+                        // already the finished "AS OF …" string
+                        // (`ScopeBarModel::as_of_badge`, Phase 4b Task 1
+                        // fix round 1 MAJ-2) — this only clones it.
                         el.bg(theme.warning.opacity(0.25))
                             .px_2()
                             .rounded(px(4.))
@@ -166,16 +169,13 @@ pub fn toolbar(
                                 div()
                                     .text_color(theme.warning_foreground)
                                     .debug_selector(|| "scope-asof".to_string())
-                                    .child(format!("AS OF {t}")),
+                                    .child(badge.clone()),
                             )
                     })
                     .child(
                         div()
                             .text_color(theme.muted_foreground)
-                            .child(match &model.slot {
-                                Some((n, label)) => format!("{n} · {label}"),
-                                None => "view default".to_string(),
-                            }),
+                            .child(model.slot_label.clone()),
                     )
                     .when(has_chips, |el| el.child(chips_row)),
             )
