@@ -1086,7 +1086,10 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
             });
             clear_in_flight(&queue);
             if !failed {
-                return;
+                log_refused_event(&format!(
+                    "the undeclared-dataset failure for {}/{}",
+                    item.dataset, item.batch
+                ));
             }
             continue;' \
   '            clear_in_flight(&queue);
