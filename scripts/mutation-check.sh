@@ -3658,6 +3658,14 @@ run_mutation "diagnostics module: MIN-11 — the header never shows the filtered
                     .text_color(theme.warning_foreground)' \
   geode-diagnostics a_filtered_tile_shows_the_filtered_pill
 
+# --- Task 5 fix round 2 ----------------------------------------------
+
+run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
