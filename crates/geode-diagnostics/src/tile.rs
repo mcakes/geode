@@ -61,6 +61,16 @@ pub struct DiagnosticsTile {
     follow: bool,
     /// The ring sequence this tile has drained up to.
     since: u64,
+    /// How many records this tile's own `since` had already fallen behind
+    /// `ring.oldest_seq()` as of the last drain (`Ring::oldest_seq`'s own
+    /// doc comment: "a reader whose own since has already been
+    /// overwritten can compare against this to know it was lapped, and by
+    /// how much"). Recomputed fresh each rebuild, not accumulated — once
+    /// `since` catches up to a recent `latest_seq`, the gap is whatever
+    /// the ring's current state says it is, not a running total of past
+    /// gaps. Surfaced as a leading "N records lost" row (spec §4.6's log
+    /// section) when nonzero.
+    lost_records: u64,
     records: VecDeque<Record>,
     rows: Vec<Row>,
     last_diagnostics_version: u64,
@@ -126,6 +136,7 @@ impl DiagnosticsTile {
             filter,
             follow: true,
             since: 0,
+            lost_records: 0,
             records: VecDeque::new(),
             rows: Vec::new(),
             last_diagnostics_version,
@@ -151,6 +162,18 @@ impl DiagnosticsTile {
         if self.section == Section::Log {
             let latest = self.ring.latest_seq();
             if latest > self.since {
+                // `Ring::oldest_seq`'s own doc comment: read BEFORE
+                // draining, so this reflects what was still retained at
+                // the moment we asked — a gap exists only when the
+                // oldest surviving record's seq is more than one past
+                // `since` (seq `since + 1` itself is still readable; see
+                // that method's `oldest_seq_is_none_when_empty_then_
+                // tracks_the_surviving_floor_through_a_wrap` test).
+                self.lost_records = self
+                    .ring
+                    .oldest_seq()
+                    .map(|oldest| oldest.saturating_sub(self.since + 1))
+                    .unwrap_or(0);
                 let mut drained = Vec::new();
                 self.ring.drain_since(self.since, &mut drained);
                 self.since = latest;
@@ -172,7 +195,23 @@ impl DiagnosticsTile {
                 Section::Config => sections::config_rows(d, &self.config.borrow(), &self.filter),
                 Section::Log => {
                     let records: Vec<Record> = self.records.iter().cloned().collect();
-                    sections::log_rows(&records, &self.filter)
+                    let mut rows = sections::log_rows(&records, &self.filter);
+                    if self.lost_records > 0 {
+                        rows.insert(
+                            0,
+                            Row {
+                                text: format!(
+                                    "{} records lost — the ring wrapped",
+                                    self.lost_records
+                                )
+                                .into(),
+                                depth: 0,
+                                tone: Tone::Warn,
+                                collapsible: None,
+                            },
+                        );
+                    }
+                    rows
                 }
                 Section::Perf => sections::perf_rows(d, &frame.requery),
             };
@@ -583,6 +622,44 @@ mod tests {
             .diagnostics
             .update(&mut vcx, |d, _| d.take_pending_level());
         assert_eq!(pending, Some(("ingest".to_string(), Level::DEBUG)));
+    }
+
+    /// `Ring::oldest_seq`'s own contract: a reader whose `since` has
+    /// fallen behind what the ring still retains has lost records — the
+    /// log section reports how many rather than silently skipping the
+    /// gap. `open`'s harness ring is 64 deep; 100 pushes before the tile
+    /// ever switches to the log section (so it never got a chance to
+    /// drain along the way) wraps past `since = 0`.
+    #[gpui::test]
+    fn the_log_section_reports_lost_records_when_the_ring_wrapped_past_since(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        for i in 0..100 {
+            h.ring.push(Record {
+                at: SystemTime::UNIX_EPOCH,
+                level: Level::INFO,
+                target: "geode::shell",
+                message: format!("m{i}"),
+                seq: 0,
+            });
+        }
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section log", cx).unwrap();
+        });
+        let joined = h.tile.read_with(&vcx, |t, _| {
+            t.rows()
+                .iter()
+                .map(|r| r.text.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(joined.contains("records lost"), "{joined}");
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.rows()[0].tone),
+            Tone::Warn,
+            "the lost-records row leads, toned as a warning"
+        );
     }
 
     #[gpui::test]
