@@ -60,6 +60,16 @@ pub struct FrameVersions {
     pub as_of: u64,
     pub data: u64,
     pub config: u64,
+    /// Bumped by [`Frame::save_scope`] (Phase 4b M11) — deliberately NOT
+    /// `config`: saving a named scope changes nothing about the CURRENT
+    /// scope, grouping or data, so bumping `config` made
+    /// `geode_blotter::tile::BlotterTile::follows_changed` requery every
+    /// visible tile for an edit that touched none of them. Nothing in
+    /// `follows_changed` compares this counter (same reasoning as
+    /// `flip`, just below); the palette's `scope::<name>` list rebuilds
+    /// on every open regardless of any version, so it needs no counter
+    /// of its own to stay current.
+    pub saved_scopes: u64,
     /// Bumped only by the flip barrier's [`Frame::release`](Frame) once
     /// every following tile's outcome for one `(scope, grouping, as_of)`
     /// has arrived or the deadline passed (Phase 4 §3.10). Deliberately
@@ -498,7 +508,7 @@ impl Frame {
         self.saved_scopes
             .insert(name.to_string(), self.scope.clone());
         self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));
-        self.versions.config += 1;
+        self.versions.saved_scopes += 1;
         Ok(())
     }
 
@@ -1001,6 +1011,23 @@ mod tests {
         );
         assert_eq!(f.take_pending_scope_persist(), None);
         assert!(f.save_scope("").is_err());
+    }
+
+    #[test]
+    fn save_scope_bumps_saved_scopes_not_config() {
+        // Phase 4b M11: saving a named scope changes nothing about the
+        // current scope, grouping or data — bumping `config` made every
+        // visible tile requery for an edit that touched none of them.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let before = f.versions();
+        f.save_scope("mine").unwrap();
+        let after = f.versions();
+        assert_eq!(
+            after.config, before.config,
+            "save_scope must not bump config"
+        );
+        assert_eq!(after.saved_scopes, before.saved_scopes + 1);
     }
 
     #[test]
