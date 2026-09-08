@@ -112,16 +112,26 @@ impl CompareOp {
 }
 
 impl std::fmt::Display for Literal {
-    /// A string is single-quoted with no escape — the parser's own string
-    /// lexing (`Parser::parse_literal`) has none either: the first `'`
-    /// after the opening quote always closes the string, so a literal
-    /// containing one cannot round-trip through this grammar at all.
-    /// `Num` uses `f64`'s own `Display`, which already omits a trailing
-    /// `.0` on a whole number (`100.0` prints `100`) — exactly the
-    /// spelling `parse_literal`'s `f64::from_str` accepts back.
+    /// A string is single-quoted, doubling any `'` inside it (Phase 4b
+    /// M10) — the standard SQL escaping convention, which `Parser::
+    /// parse_literal` now accepts back (`''` inside a string literal is
+    /// one literal `'`, not the closing quote). `Num` uses `f64`'s own
+    /// `Display`, which already omits a trailing `.0` on a whole number
+    /// (`100.0` prints `100`) — exactly the spelling `parse_literal`'s
+    /// `f64::from_str` accepts back.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Literal::Str(s) => write!(f, "'{s}'"),
+            Literal::Str(s) => {
+                write!(f, "'")?;
+                for c in s.chars() {
+                    if c == '\'' {
+                        write!(f, "''")?;
+                    } else {
+                        write!(f, "{c}")?;
+                    }
+                }
+                write!(f, "'")
+            }
             Literal::Num(n) => write!(f, "{n}"),
             Literal::Bool(b) => write!(f, "{b}"),
         }
@@ -347,15 +357,29 @@ impl<'a> Parser<'a> {
         }
         if self.rest().starts_with('\'') {
             self.pos += 1;
-            let start = self.pos;
+            // Phase 4b M10: `''` inside the string is one literal `'`
+            // (the SQL escaping convention `Display for Literal` now
+            // writes), not the closing quote — so this can no longer
+            // slice the source directly (`self.src[start..self.pos]`)
+            // the way the no-escape version did; an escaped literal
+            // needs its own owned `String` with the doubled quotes
+            // collapsed.
+            let mut text = String::new();
             loop {
                 match self.rest().chars().next() {
                     Some('\'') => {
-                        let text = self.src[start..self.pos].to_string();
                         self.pos += 1;
+                        if self.rest().starts_with('\'') {
+                            text.push('\'');
+                            self.pos += 1;
+                            continue;
+                        }
                         return Ok(Literal::Str(text));
                     }
-                    Some(c) => self.pos += c.len_utf8(),
+                    Some(c) => {
+                        text.push(c);
+                        self.pos += c.len_utf8();
+                    }
                     None => return Err(self.err("unterminated string")),
                 }
             }
@@ -506,13 +530,34 @@ mod tests {
             "book in ('A', 'B')",
             "name like 'sp%'", // the grammar's own spelling of Like
             "flag = true",
-            "note = 'its'", // the grammar has no in-string quote escape
+            "note = 'its'",
         ] {
             let e = parse_expr(src).unwrap_or_else(|err| panic!("{src}: {err}"));
             let rendered = e.to_string();
             let again = parse_expr(&rendered).unwrap_or_else(|err| panic!("{rendered}: {err}"));
             assert_eq!(e, again, "{src} -> {rendered}");
         }
+    }
+
+    #[test]
+    fn a_quote_inside_a_string_literal_escapes_as_a_doubled_quote_and_round_trips() {
+        // Phase 4b M10: `Display for Literal` used to have no in-string
+        // quote escape at all — a literal containing `'` rendered
+        // unquoted-broken text the parser could not read back. `''` is
+        // the SQL convention: one literal `'`, not the closing quote.
+        let e = parse_expr("book = 'O''Neil'").unwrap();
+        assert_eq!(
+            e,
+            Expr::Compare {
+                column: "book".into(),
+                op: CompareOp::Eq,
+                value: Literal::Str("O'Neil".into()),
+            }
+        );
+        let rendered = e.to_string();
+        assert_eq!(rendered, "book = 'O''Neil'");
+        let again = parse_expr(&rendered).unwrap_or_else(|err| panic!("{rendered}: {err}"));
+        assert_eq!(e, again, "{rendered} must round-trip");
     }
 
     #[test]
