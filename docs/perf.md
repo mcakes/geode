@@ -1005,3 +1005,12 @@ simply cannot reproduce the fixture-dependence the display exposed.
 The IN-list's value is entirely in the case this bench does not model:
 an archive whose resolved ids are spread across the id space, where
 the range prunes nothing and the IN-list still does.
+
+**Verified on the display, 2026-09-07 evening:** with both fixes merged
+(`f6ac302`) and the demo database deleted and rebuilt, the same
+as-of text-filter requery that read 4823 ms reads **47 ms + 4 ms**
+(requery + paint, the perf overlay's figures) — a hundredfold, and
+back inside the §7.1 budget with the paint included. That is a
+one-generation database; the headless figures above (68 ms `zzz`,
+133 ms `spx`) were taken through the bench harness on a different
+process and needle, so the display reading is the one of record.
