@@ -485,8 +485,8 @@ run_mutation "generations: the publish insert dedup guard is dropped" \
 
 run_mutation "generations: sweep reconciliation removed" \
   crates/geode-data/src/store/retention.rs \
-  'if !grains.is_empty() {' \
-  'if false {' \
+  '    reconcile_generations(conn, ds)?;' \
+  '    let _ = ds;' \
   geode-data sweeping_leaves_the_summary_matching_the_tables
 
 run_mutation "generations: reconciliation covers only the first grain" \
