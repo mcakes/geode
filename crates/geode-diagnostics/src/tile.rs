@@ -195,6 +195,15 @@ impl DiagnosticsTile {
             }
         })
         .detach();
+        // MIN-7 (final review): the `Config` `Section::Config` rebuilds
+        // from (`self.config`, below) is the SAME `Rc<RefCell<Config>>`
+        // `geode-app::main`'s own `cx.observe(&frame, ..)` refreshes on
+        // this identical `config` version bump — freshness here depends
+        // on that other observer having already run this render, which
+        // holds only because it is registered first, at window setup,
+        // before any diagnostics tile can exist to register this one.
+        // gpui invokes an entity's observers in registration order; see
+        // that call site's own comment for the fuller story.
         cx.observe(&frame, |this, frame, cx| {
             let now = frame.read(cx).versions();
             let as_of_changed = now.as_of != this.last_frame_versions.as_of;

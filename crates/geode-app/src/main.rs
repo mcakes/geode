@@ -254,6 +254,22 @@ fn main() {
                     let frame = shell.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
+                    // MIN-7 (final review): registered here, before any
+                    // diagnostics tile can exist to register its own
+                    // `cx.observe(&frame, ..)` — gpui invokes an entity's
+                    // observers in registration order, so this refresh of
+                    // `diagnostics_factory`'s shared `Rc<RefCell<Config>>`
+                    // is guaranteed to run before `DiagnosticsTile`'s own
+                    // frame observer (`geode-diagnostics/src/tile.rs`)
+                    // rebuilds the config section FROM that same `Config`
+                    // on the SAME `config` version bump. That ordering is
+                    // load-bearing and not stated anywhere gpui enforces
+                    // it structurally — if a future refactor ever let a
+                    // tile's observer register before this one (a second
+                    // window, a different construction order), the tile
+                    // would rebuild from the previous `Config` and never
+                    // rebuild again, since its own version is already
+                    // consumed by the time this one updates.
                     cx.observe(&frame, move |frame, cx| {
                         let now = frame.read(cx).versions().config;
                         if now != last_config_version.get() {
