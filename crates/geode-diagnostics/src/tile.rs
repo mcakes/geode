@@ -19,8 +19,8 @@ use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, IntoElement, ScrollStrategy, UniformListScrollHandle, Window, div, px,
-    uniform_list,
+    App, Context, Entity, IntoElement, ScrollStrategy, SharedString, UniformListScrollHandle,
+    Window, div, px, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -65,6 +65,13 @@ fn diag_version_for_section(section: Section, v: geode_shell::diagnostics::DiagV
         Section::Log => v.log_levels,
         Section::Perf => v.perf,
     }
+}
+
+/// The header row's text (MIN-1, final review) — a pure function of
+/// `section` alone, computed once per real section change rather than
+/// on every paint.
+fn header_text_for(section: Section) -> SharedString {
+    format!("diagnostics · {} · [ ] to switch", section.name()).into()
 }
 
 pub struct DiagnosticsTile {
@@ -118,6 +125,11 @@ pub struct DiagnosticsTile {
     /// not rebuild, say, the config section's expensive explainer walk.
     last_diag_versions: geode_shell::diagnostics::DiagVersions,
     last_frame_versions: FrameVersions,
+    /// MIN-1 (final review): a pure function of `section` alone, cached
+    /// beside it and replaced only in `set_section` — `render` used to
+    /// `format!()` this fresh on every single paint, not just this
+    /// tile's own rebuilds.
+    header_text: SharedString,
     visible: bool,
     scroll: UniformListScrollHandle,
     #[cfg(test)]
@@ -223,6 +235,7 @@ impl DiagnosticsTile {
             rows: Rc::new(Vec::new()),
             last_diag_versions,
             last_frame_versions,
+            header_text: header_text_for(section),
             visible: false,
             scroll: UniformListScrollHandle::new(),
             #[cfg(test)]
@@ -363,6 +376,15 @@ impl DiagnosticsTile {
         self.section
     }
 
+    /// MIN-1 (final review): the header's own cache — a clone (cheap:
+    /// `SharedString` is `Arc`-backed once past its inline-string
+    /// threshold), for comparing `.as_ptr()` across paints the way
+    /// `rows_rc`'s `Rc::ptr_eq` pins the row list's.
+    #[cfg(test)]
+    pub(crate) fn header_text(&self) -> SharedString {
+        self.header_text.clone()
+    }
+
     /// MAJ-1 (fix round 1): the row index `scroll_to_item` most recently
     /// asked the list to show — `UniformListScrollHandle::
     /// logical_scroll_top_index`'s own doc comment: "the index of the
@@ -412,6 +434,7 @@ impl DiagnosticsTile {
             return;
         }
         self.section = section;
+        self.header_text = header_text_for(section);
         self.cursor = 0;
         self.rebuild(cx);
     }
@@ -602,10 +625,7 @@ impl gpui::Render for DiagnosticsTile {
             .border_b_1()
             .border_color(theme.border)
             .debug_selector(|| format!("diagnostics-header-{}", self.tile.0))
-            .child(format!(
-                "diagnostics · {} · [ ] to switch",
-                self.section.name()
-            ));
+            .child(self.header_text.clone());
         // MIN-11 (fix round 1): a tile restored from a session with a
         // saved `filter` used to paint a narrowed list with no on-screen
         // indication why — same "filtered" pill the blotter's own header
@@ -1187,6 +1207,41 @@ mod tests {
             h.tile.read_with(&vcx, |t, _| t.rebuild_count()),
             before_count,
             "sanity: genuinely no rebuild happened"
+        );
+    }
+
+    /// MIN-1 (final review): the header text used to be a fresh
+    /// `format!()` on every single `render` call — every shell repaint,
+    /// not just this tile's own rebuilds. It is now a cached
+    /// `SharedString`, replaced only in `set_section`, so two paints with
+    /// no section change share the same backing allocation.
+    #[gpui::test]
+    fn the_header_text_is_cached_across_paints_and_replaced_on_section_change(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        let a = h.tile.read_with(&vcx, |t, _| t.header_text());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = h.tile.read_with(&vcx, |t, _| t.header_text());
+        assert_eq!(
+            a.as_str().as_ptr(),
+            b.as_str().as_ptr(),
+            "no section change between paints must not reallocate the header text"
+        );
+        assert!(a.contains("sources"), "{a}");
+
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section perf", cx).unwrap();
+        });
+        let c = h.tile.read_with(&vcx, |t, _| t.header_text());
+        assert!(
+            c.contains("perf"),
+            "the header must follow a real section change: {c}"
         );
     }
 
