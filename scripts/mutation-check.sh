@@ -4078,6 +4078,12 @@ run_mutation "sections: the perf section shows database/memory bytes and threads
   '                "db {} (checkpointed) · mem {} · thr {}",' \
   geode-diagnostics perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives
 
+run_mutation "diagnostics tile: set_section replaces the cached header text" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        self.header_text = header_text_for(section);' \
+  '        let _ = header_text_for(section);' \
+  geode-diagnostics the_header_text_is_cached_across_paints_and_replaced_on_section_change
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
