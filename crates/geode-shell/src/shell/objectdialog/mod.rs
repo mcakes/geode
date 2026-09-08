@@ -1405,6 +1405,27 @@ mod tests {
         );
     }
 
+    /// `fields` takes `Option<&str>` because spec §4 has it serve the
+    /// create path too, and a name nothing defines has to come back as an
+    /// empty object rather than a panic — a `Choice` with no dataset
+    /// selected and a list with no items.
+    #[test]
+    fn an_object_that_does_not_exist_has_empty_fields_rather_than_panicking() {
+        let config = demo_config();
+        for object in [None, Some("nonesuch")] {
+            let fields = Domain::Views.fields(&config, object);
+            assert_eq!(fields.len(), 2, "{object:?}");
+            assert!(
+                matches!(&fields[1].kind, FieldKind::OrderedList { items } if items.is_empty()),
+                "{object:?} should have no columns, got {:?}",
+                fields[1].kind
+            );
+            // The destinations do not depend on the object, which is what
+            // lets the create path reuse them unchanged.
+            assert_eq!(fields[0].dest, Destination::Doc);
+            assert_eq!(fields[1].dest, Destination::Presentation);
+        }
+    }
     /// A draft nobody touched writes nothing at all — which is what keeps
     /// opening a view, looking at it and pressing `s` from forking it.
     #[test]

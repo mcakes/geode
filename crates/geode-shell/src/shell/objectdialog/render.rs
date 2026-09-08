@@ -463,9 +463,14 @@ fn handle_edit_key(
             leave_or_confirm(shell, window, cx);
             return true;
         }
-        // The remaining rungs cannot be reached from a stage that neither
-        // filters nor has a mode: folded into one `false` so the shell's
-        // modal branch closes the dialog, rather than forking the ladder.
+        // `LeaveFilter` and `ClearQuery` are both unreachable here, and
+        // by construction rather than by luck: `enter_edit` forces the
+        // mode to `Normal` and empties the query, so this stage is always
+        // the ladder's third rung. They are still folded into one `false`
+        // rather than special-cased away, because `escape_step` is the
+        // one ladder every modal surface walks and forking it per call
+        // site is how the rungs drift apart. The `false` hands the
+        // keystroke to the shell's modal branch, which closes the dialog.
         return false;
     }
 
