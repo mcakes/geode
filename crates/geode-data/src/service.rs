@@ -131,6 +131,53 @@ impl DataService {
         }
         Catalog::new(store.writer()).ensure_tables()?;
 
+        // Migration: a database written before `generations` existed has
+        // real rows in its data tables and nothing in the summary. Rebuild
+        // it once, here, per dataset -- but only when the summary is
+        // actually empty for that dataset *and* at least one of its
+        // tables holds data, so a dataset that has simply never been
+        // published to is not given a spurious rebuild, and a database
+        // whose summary is already maintained is never rebuilt merely
+        // because it was opened (`rebuild_generations` is destructive: it
+        // deletes the dataset's rows before reinserting, so running it
+        // unconditionally would make the summary just a cache of the last
+        // open rather than a maintained record).
+        for ds in &config.schema.datasets {
+            let tables = crate::store::ddl::history_of(&ds.name, ds);
+            let summarised: i64 = {
+                let sql = "select count(*) from generations where dataset = ?";
+                store
+                    .writer()
+                    .query_row(sql, duckdb::params![&ds.name], |r| r.get(0))
+                    .map_err(|source| StoreError::Sql {
+                        statement: sql.to_string(),
+                        source,
+                    })?
+            };
+            if summarised > 0 {
+                continue;
+            }
+            let mut has_data = false;
+            for t in &tables {
+                let sql = format!("select exists(select 1 from {t})");
+                let exists: bool =
+                    store
+                        .writer()
+                        .query_row(&sql, [], |r| r.get(0))
+                        .map_err(|source| StoreError::Sql {
+                            statement: sql,
+                            source,
+                        })?;
+                if exists {
+                    has_data = true;
+                    break;
+                }
+            }
+            if has_data {
+                crate::store::ddl::rebuild_generations(store.writer(), &ds.name, &tables)?;
+            }
+        }
+
         // Every reader the service will ever need is cloned before the
         // store moves onto the ingest thread (Phase 3 §2.5).
         let conn = store.reader()?;
@@ -986,6 +1033,129 @@ mod tests {
         svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
             .unwrap();
         assert!(next(&rx).snapshot.unwrap().rows() > 1, "data is queryable");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn open_rebuilds_the_summary_when_it_is_absent_and_data_exists() {
+        // The migration path: a database written before `generations`
+        // existed has real rows in its data tables and nothing in the
+        // summary. `open` must notice and rebuild it, or every as-of
+        // query against such a database silently resolves nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let ds = crate::store::ddl::tests_support::sample_dataset();
+        {
+            let store = crate::store::Store::open(&db_path).unwrap();
+            store.apply_schema(&ds).unwrap();
+            Catalog::new(store.writer()).ensure_tables().unwrap();
+            store
+                .writer()
+                .execute_batch(
+                    "insert into risk_snapshot_position_live
+                         (book, lhu, position_ref, counterparty, daily_trading_pnl,
+                          batch, source_file_id, gen_id, source_time)
+                     values ('BK0', 'L0', 'P1', 'C', 7, 'b', 1, 1, now());",
+                )
+                .unwrap();
+            let before: i64 = store
+                .writer()
+                .query_row(
+                    "select count(*) from generations where dataset = 'risk_snapshot'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(before, 0, "sanity: the summary starts absent");
+        }
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+        })
+        .unwrap();
+
+        let after: i64 = svc
+            .conn
+            .query_row(
+                "select count(*) from generations where dataset = 'risk_snapshot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(after, 1, "open must rebuild the summary from the tables");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn open_leaves_an_already_populated_summary_untouched() {
+        // The other half of the migration guard: a database that already
+        // has summary rows for a dataset must not be rebuilt on open --
+        // rebuilding unconditionally would make the summary just a cache
+        // of the last open, not a maintained record. A row that matches
+        // nothing in the tables proves it: a rebuild would drop it.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("geode.duckdb");
+        let ds = crate::store::ddl::tests_support::sample_dataset();
+        {
+            let store = crate::store::Store::open(&db_path).unwrap();
+            store.apply_schema(&ds).unwrap();
+            Catalog::new(store.writer()).ensure_tables().unwrap();
+            store
+                .writer()
+                .execute_batch(
+                    "insert into risk_snapshot_position_live
+                         (book, lhu, position_ref, counterparty, daily_trading_pnl,
+                          batch, source_file_id, gen_id, source_time)
+                     values ('BK0', 'L0', 'P1', 'C', 7, 'b', 1, 1,
+                             TIMESTAMPTZ '2026-08-30T07:00:00Z');
+                     insert into generations values
+                       ('risk_snapshot', 'b', 'BK0', 1, TIMESTAMPTZ '2026-08-30T07:00:00Z'),
+                       ('risk_snapshot', 'stale', 'BKX', 99, TIMESTAMPTZ '2020-01-01T00:00:00Z');",
+                )
+                .unwrap();
+        }
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let (svc, _rx) = DataService::open_channel(DataServiceConfig {
+            db_path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: Vec::new(),
+        })
+        .unwrap();
+
+        let count: i64 = svc
+            .conn
+            .query_row(
+                "select count(*) from generations where dataset = 'risk_snapshot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "row count unchanged by open");
+        let stale: i64 = svc
+            .conn
+            .query_row(
+                "select count(*) from generations
+                 where dataset = 'risk_snapshot' and gen_id = 99",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stale, 1,
+            "the planted extra row survives -- a rebuild would have dropped it"
+        );
         svc.shutdown();
     }
 }
