@@ -87,7 +87,7 @@ pub struct AsOfState {
 /// The frame's recent publishes as as-of presets (spec §3.6): newest
 /// first (`Frame::recent_publishes` is already ordered that way), each
 /// labelled `"14:05:12 · risk / EOD · 3 books"` in local time.
-pub fn presets(frame: &Frame) -> Vec<PresetRow> {
+fn presets(frame: &Frame) -> Vec<PresetRow> {
     #[cfg(test)]
     tests::PRESETS_CALLS.with(|c| c.set(c.get() + 1));
     frame
@@ -255,10 +255,14 @@ fn handle_key(
         let text = shell.dialog_input.read(cx).value().to_string();
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            let selected = shell.as_of_dialog.as_ref().map(|s| s.selected).unwrap_or(0);
+            // Phase 4b Task 1 fix round 1, MIN-11: one borrow of
+            // `as_of_dialog`, not two — `selected` used to be read off a
+            // separate `as_ref()` call purely to have a fallback-to-0
+            // default outside the `and_then`, which `state.selected`
+            // gives for free from inside the single borrow below.
             let at = shell.as_of_dialog.as_ref().and_then(|state| {
                 cached_presets(state, shell.frame.read(cx))
-                    .get(selected)
+                    .get(state.selected)
                     .map(|(at, _)| *at)
             });
             if let Some(at) = at {
