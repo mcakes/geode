@@ -1144,7 +1144,26 @@ builder reading `self.records.make_contiguous()` directly rather than
 cloning it. The log tail scrolls the cursor into view on `move_cursor`/
 `top`/`bottom`/rebuild (MAJ-1, `scroll_to_item`), and reports "N records
 lost" via `Ring::oldest_seq()` when the ring has wrapped past the
-tile's own `since`. **Four display checks remain unverified** — no
+tile's own `since`. `since` is seeded from `ring.latest_seq()` at
+construction, not `0` (MIN-3, final review), so a tile opened after the
+ring already holds more records than its capacity does not report
+records it never had as "lost" on its first drain; `lost_records`
+itself is recomputed on every log-section rebuild that finds new
+records, and left in place — a real, still-true number — on one that
+finds none.
+
+**Two gaps recorded rather than fixed (MIN-11, final review), both
+judged harmless:** `:level` accepts only the six target suffixes
+(`commands.rs`), not `default` — `[log] default` can only be changed by
+editing the file directly, defensible since `default` is a
+whole-process floor, not a per-target override the tile's own
+vocabulary is about. And the log section shows neither the current
+`LogLevels` nor which level is in force for any target — `Diagnostics.
+levels` is carried on the entity and displayed by no section, so a
+trader who runs `:level ingest debug` has no in-tile confirmation it
+took effect beyond watching debug-level lines start appearing.
+
+**Four display checks remain unverified** — no
 display was available in the implementing environment: `mod+shift+d`
 opening a split tile, `]`/`[` cycling sources → data → config → log →
 perf, `:level ingest debug` showing in the log section, and that
