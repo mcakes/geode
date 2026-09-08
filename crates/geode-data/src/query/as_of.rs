@@ -477,13 +477,13 @@ mod tests {
         // row's value and not live's.
         //
         // The shared `gen_id` is load-bearing, not incidental: with only
-        // one resolved generation, `lo == hi == 1`, and the range term
-        // `gen_id between 1 and 1` cannot tell the two rows apart — both
-        // carry `gen_id = 1`. Only the tuple's `source_time` column can,
-        // so this fixture makes the tuple do real work rather than
-        // merely riding along behind a range that already excludes live
-        // on its own (a distinct `gen_id` for live would let the range
-        // alone pass this test). `book = '…'` cannot match a NULL book;
+        // one resolved generation, the IN-list term `gen_id in (1)`
+        // cannot tell the two rows apart — both carry `gen_id = 1`. Only
+        // the tuple's `source_time` column can, so this fixture makes the
+        // tuple do real work rather than merely riding along behind an
+        // IN-list that already excludes live on its own (a distinct
+        // `gen_id` for live would let the IN-list alone pass this test).
+        // `book = '…'` cannot match a NULL book;
         // DuckDB's row-value (struct) comparison treats NULL fields as
         // equal, so the tuple form needs no `coalesce` sentinel (spec
         // §4.4, §6.5).
@@ -538,8 +538,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             total, 100.0,
-            "the archived NULL-book row's value, not live's 999 — the range \
-             alone (gen_id between 1 and 1) cannot exclude live's row, which \
+            "the archived NULL-book row's value, not live's 999 — the \
+             IN-list alone (gen_id in (1)) cannot exclude live's row, which \
              shares gen_id 1; only the tuple's source_time term can"
         );
     }

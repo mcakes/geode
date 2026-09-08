@@ -63,12 +63,14 @@ struct Queue {
     items: Vec<WorkItem>,
     shutdown: bool,
     /// The file the runner has popped and is loading (or is about to skip
-    /// as stale) right now, if any. Set when an item is popped, cleared
-    /// once that item's outcome — `Published`, `Failed`, or a silent
+    /// as stale) right now, if any — keyed the same way `enqueue`'s dedupe
+    /// is, `(csv_path, size, source_time)`, so the two agree on what
+    /// counts as "the same file". Set when an item is popped, cleared once
+    /// that item's outcome — `Published`, `Failed`, or a silent
     /// stale-skip — has been reported. Kept for the whole load, not just
-    /// before it starts, so `submit`'s dedupe still sees it as spoken for
+    /// before it starts, so `enqueue`'s dedupe still sees it as spoken for
     /// the entire time a poll could otherwise re-add it.
-    in_flight: Option<(PathBuf, DateTime<Utc>)>,
+    in_flight: Option<(PathBuf, u64, DateTime<Utc>)>,
 }
 
 pub struct IngestHandle {
@@ -107,42 +109,28 @@ impl IngestRunner {
 impl IngestHandle {
     /// Add work. Items are merged into the queue and the whole queue is
     /// re-sorted, so a current file preempts pending backfill. Returns how
-    /// many of `plan`'s items were actually enqueued, for tests: the
-    /// runner's own pop-time re-check (below) independently guarantees a
-    /// duplicate is never *loaded* twice regardless of what this dedupe
-    /// does, so a test that only observes `IngestEvent`s cannot isolate
-    /// this method's own contribution from that backstop.
+    /// many of `plan`'s items were newly queued (see `enqueue`), for
+    /// tests: the runner's own pop-time re-check (below) independently
+    /// guarantees a duplicate is never *loaded* twice regardless of what
+    /// this dedupe does, so a test that only observes `IngestEvent`s
+    /// cannot isolate this method's own contribution from that backstop.
     ///
-    /// An incoming item is dropped if an item naming the same
-    /// `(csv_path, source_time)` is already queued or is the item the
-    /// runner is loading right now (`Queue::in_flight`). Discovery polls
-    /// on its own clock and re-reports every file the catalog does not yet
-    /// reflect — including one this queue already holds, or one the runner
-    /// is in the middle of loading, whose catalog record is written only
-    /// at the end of the load. Without this, a poll shorter than a load
-    /// re-adds a copy of every not-yet-published file every time it runs:
-    /// the production symptom was 3051 generations of 17 files that never
-    /// changed, even though (as the doc above notes) the pop-time re-check
-    /// alone would already have kept every one of those copies from
-    /// actually reloading — what this dedupe adds on top is bounding how
-    /// large the queue, and how many wasted pop-time catalog lookups, a
-    /// quiet poll interval can pile up.
+    /// See `enqueue` for the dedupe and promotion rule this applies.
+    /// Discovery polls on its own clock and re-reports every file the
+    /// catalog does not yet reflect — including one this queue already
+    /// holds, or one the runner is in the middle of loading, whose catalog
+    /// record is written only at the end of the load. Without dedupe, a
+    /// poll shorter than a load re-adds a copy of every not-yet-published
+    /// file every time it runs: the production symptom was 3051
+    /// generations of 17 files that never changed, even though (as the doc
+    /// above notes) the pop-time re-check alone would already have kept
+    /// every one of those copies from actually reloading — what the
+    /// dedupe adds on top is bounding how large the queue, and how many
+    /// wasted pop-time catalog lookups, a quiet poll interval can pile up.
     pub fn submit(&self, plan: WorkPlan) -> usize {
         let (lock, cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let mut enqueued = 0;
-        for item in plan.items {
-            let key = (item.candidate.csv_path.clone(), item.source_time);
-            let already_queued = q.in_flight.as_ref() == Some(&key)
-                || q.items.iter().any(|existing| {
-                    (&existing.candidate.csv_path, existing.source_time) == (&key.0, key.1)
-                });
-            if already_queued {
-                continue;
-            }
-            q.items.push(item);
-            enqueued += 1;
-        }
+        let enqueued = enqueue(&mut q, plan.items);
         q.items.sort_by(|a, b| {
             a.priority
                 .cmp(&b.priority)
@@ -169,6 +157,59 @@ impl Drop for IngestHandle {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// The queue mutation `submit` performs under its lock, pulled out as a
+/// free function so a test can drive it synchronously against a bare
+/// `Queue` — no runner thread, no timing at all — which is the only way
+/// to exercise the `in_flight` half of the dedupe condition directly
+/// rather than incidentally through `submit`'s return value.
+///
+/// An incoming item naming the same `(csv_path, size, source_time)` as
+/// one already queued or in flight is not queued again — `size` is part
+/// of the key, not just `source_time`, because that is exactly the pair
+/// `is_unchanged` compares (`source/discovery.rs`); a key coarser than
+/// the change-detection rule it defends would let two different sizes at
+/// one source time collapse into "the same file".
+///
+/// If the match is against an item still sitting in the queue (not one
+/// already in flight — that copy is past the point of reprioritising),
+/// its priority is promoted to the better of the two
+/// (`existing.priority.min(item.priority)`) rather than the new offer
+/// being dropped with no effect. `build_plan` decides an item's priority
+/// fresh on every poll from whichever candidate is currently the newest
+/// *Ready* one for its batch (spec §5.4): once today's file loads and
+/// reads `Unchanged`, yesterday's still-queued file can become that
+/// newest-Ready candidate and get offered at the source's own priority
+/// instead of `Backfill`. Without promotion, a file already queued would
+/// stay stuck at whatever priority it first queued under, sitting behind
+/// another source's current work it should now jump ahead of.
+///
+/// Returns how many items were newly queued; a promotion does not count,
+/// since nothing new entered the queue.
+fn enqueue(q: &mut Queue, items: Vec<WorkItem>) -> usize {
+    let mut enqueued = 0;
+    for item in items {
+        let key = (
+            item.candidate.csv_path.clone(),
+            item.candidate.size,
+            item.source_time,
+        );
+        if q.in_flight.as_ref() == Some(&key) {
+            continue;
+        }
+        if let Some(existing) = q.items.iter_mut().find(|existing| {
+            existing.candidate.csv_path == key.0
+                && existing.candidate.size == key.1
+                && existing.source_time == key.2
+        }) {
+            existing.priority = existing.priority.min(item.priority);
+            continue;
+        }
+        q.items.push(item);
+        enqueued += 1;
+    }
+    enqueued
 }
 
 /// Clears `Queue::in_flight`, unconditionally. Called once an item's
@@ -199,7 +240,11 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 if !q.items.is_empty() {
                     announced_idle = false;
                     let it = q.items.remove(0);
-                    q.in_flight = Some((it.candidate.csv_path.clone(), it.source_time));
+                    q.in_flight = Some((
+                        it.candidate.csv_path.clone(),
+                        it.candidate.size,
+                        it.source_time,
+                    ));
                     break it;
                 }
                 if !announced_idle {
@@ -220,10 +265,26 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
         // different, no-longer-in-flight copy — while this one waited.
         // `submit`'s dedupe (above) catches the common case; this catches
         // what slips past it (spec §5.7: not a failure, so no event).
-        let stale = match Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path) {
+        //
+        // Wrapped in its own panic boundary, same reasoning as the load's
+        // below: `lookup_by_path` unwraps every column it reads
+        // (`store/catalog.rs`), so a `file_generations` row an older build
+        // wrote in a shape this build does not expect can panic here
+        // rather than return `Err`. A panic and a `StoreError` both fail
+        // open — "not stale", so the load proceeds rather than an item
+        // being silently dropped by a check that itself broke — but the
+        // two are matched as distinct arms so a future diagnostic can
+        // tell "the read broke" from "nothing was found" apart, even
+        // though both currently do the same thing.
+        let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
+        }))
+        .map(|result| match result {
             Ok(Some(prev)) => is_unchanged(&prev, item.candidate.size, item.source_time),
-            _ => false,
-        };
+            Ok(None) => false,
+            Err(_store_error) => false,
+        })
+        .unwrap_or(false);
         if stale {
             clear_in_flight(&queue);
             continue;
@@ -365,6 +426,152 @@ mod tests {
         (db_dir, src_dir, store, ds, plan)
     }
 
+    /// Terse RFC 3339 literal, matching the convention used by
+    /// `discovery.rs` and `as_of.rs`'s own test modules.
+    fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    /// A minimal `WorkItem` naming a file at `path` with the given `size`
+    /// and `source_time` — enough to drive `enqueue` directly, with no
+    /// store, no runner thread, and no real file on disk. `Candidate`'s
+    /// other fields do not matter to `enqueue`, which only ever reads
+    /// `candidate.csv_path` and `candidate.size`.
+    fn work_item(
+        path: &str,
+        size: u64,
+        source_time: DateTime<Utc>,
+        priority: Priority,
+    ) -> WorkItem {
+        WorkItem {
+            source: "test".into(),
+            dataset: "risk_snapshot".into(),
+            batch: "BK000".into(),
+            candidate: crate::source::Candidate {
+                csv_path: PathBuf::from(path),
+                sentinel_path: PathBuf::from(format!("{path}.done")),
+                batch: "BK000".into(),
+                size,
+                mtime: std::time::SystemTime::now(),
+                state: CandidateState::Pending,
+            },
+            priority,
+            source_time,
+        }
+    }
+
+    #[test]
+    fn enqueue_drops_an_item_already_queued_for_the_same_file() {
+        // The `q.items` half of the dedupe condition, exercised directly
+        // and synchronously.
+        let mut q = Queue::default();
+        let first = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        );
+        assert_eq!(enqueue(&mut q, vec![first]), 1);
+
+        let dup = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        );
+        let n = enqueue(&mut q, vec![dup]);
+        assert_eq!(n, 0, "the real queue's own length must not grow: {n}");
+        assert_eq!(
+            q.items.len(),
+            1,
+            "asserting on the queue itself, not a counter the code being tested computes for itself"
+        );
+    }
+
+    #[test]
+    fn enqueue_drops_an_item_matching_the_in_flight_key() {
+        // The `q.in_flight` half of the dedupe condition — the half that,
+        // through the public `submit`/runner API, only ever gets exercised
+        // incidentally by timing. Driven directly here: no runner thread,
+        // no race, `q.in_flight` just pre-set as if the runner had already
+        // popped this exact file and were loading it right now.
+        let mut q = Queue {
+            in_flight: Some((PathBuf::from("/src/a.csv"), 10, ts("2026-08-30T07:00:00Z"))),
+            ..Queue::default()
+        };
+        let item = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::LatestRisk,
+        );
+        let n = enqueue(&mut q, vec![item]);
+        assert_eq!(
+            n, 0,
+            "an item matching the in-flight key must not be queued"
+        );
+        assert!(
+            q.items.is_empty(),
+            "and nothing landed in the real queue: {:?}",
+            q.items
+        );
+    }
+
+    #[test]
+    fn enqueue_treats_a_different_size_at_the_same_source_time_as_a_different_file() {
+        // The dedupe key must be exactly as fine as `is_unchanged`'s own
+        // change-detection rule — `(size, source_time)` — or it can
+        // collapse two genuinely different generations into one.
+        let mut q = Queue::default();
+        let a = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        );
+        assert_eq!(enqueue(&mut q, vec![a]), 1);
+
+        let b = work_item(
+            "/src/a.csv",
+            11,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        );
+        let n = enqueue(&mut q, vec![b]);
+        assert_eq!(
+            n, 1,
+            "a different size is a different generation, not a duplicate"
+        );
+        assert_eq!(q.items.len(), 2);
+    }
+
+    #[test]
+    fn enqueue_promotes_a_queued_items_priority_to_the_better_of_the_two() {
+        let mut q = Queue::default();
+        let low = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        );
+        assert_eq!(enqueue(&mut q, vec![low]), 1);
+
+        let promote = work_item(
+            "/src/a.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::LatestRisk,
+        );
+        let n = enqueue(&mut q, vec![promote]);
+        assert_eq!(n, 0, "the file is already queued; nothing new is enqueued");
+        assert_eq!(q.items.len(), 1);
+        assert_eq!(
+            q.items[0].priority,
+            Priority::LatestRisk,
+            "the queued entry is promoted, not left stuck at Backfill"
+        );
+    }
+
     #[test]
     fn works_a_plan_and_reports_every_publish() {
         let (_db, _src, store, ds, plan) = harness();
@@ -447,6 +654,60 @@ mod tests {
         assert!(
             positions[0] < expected - 1,
             "a current file must not wait behind all remaining backfill: {positions:?}"
+        );
+    }
+
+    #[test]
+    fn a_dedupe_hit_promotes_the_queued_items_priority_to_the_better_of_the_two() {
+        // Unlike the test above (a brand-new file jumping the queue), this
+        // is the *same* file resubmitted at a better priority — a poll
+        // finding that yesterday's still-queued file is now the newest
+        // Ready candidate for its batch, once whatever used to eclipse it
+        // has already loaded (spec §5.4, `build_plan`). The resubmission
+        // must promote the queued entry rather than being dropped with no
+        // effect, or the file would be stuck behind other Backfill work it
+        // should now jump ahead of.
+        let (_db, _src, store, ds, mut plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
+        for item in &mut plan.items {
+            item.priority = Priority::Backfill;
+        }
+        let expected = plan.items.len();
+        let promoted = plan.items[0].clone();
+
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(plan);
+        let mut re_offer = promoted.clone();
+        re_offer.priority = Priority::LatestRisk;
+        let enqueued = handle.submit(WorkPlan {
+            items: vec![re_offer],
+        });
+        assert_eq!(
+            enqueued, 0,
+            "the file is already queued; the resubmission is a dedupe hit, not a new item"
+        );
+
+        let events = drain(&rx, expected);
+        handle.shutdown();
+
+        let positions: Vec<usize> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    IngestEvent::Published { .. } | IngestEvent::Failed { .. }
+                )
+            })
+            .enumerate()
+            .filter_map(|(i, e)| match e {
+                IngestEvent::Published { batch, .. } if *batch == promoted.batch => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert!(!positions.is_empty(), "the promoted item never ran");
+        assert!(
+            positions[0] < expected - 1,
+            "a promoted item must not wait behind all remaining backfill: {positions:?}"
         );
     }
 
@@ -638,12 +899,13 @@ mod tests {
         let events = drain(&rx, 1);
         handle.shutdown();
 
-        assert!(
-            events.iter().any(
-                |e| matches!(e, IngestEvent::Published { batch, .. } if *batch == fresh.batch)
-            ),
-            "the fresh file must still load: {events:?}"
-        );
+        // Order matters here: `stale` (LatestRisk) is popped before
+        // `fresh` (Backfill), and `drain(&rx, 1)` returns after the
+        // *first* terminal event. Under the mutation this test exists to
+        // catch (the pop-time guard disabled), that first event is
+        // `stale` reloading — so this assertion, not the one below, is
+        // the one that actually fails and names the real defect. Keeping
+        // it first means the failure message points at what broke.
         assert!(
             events.iter().all(|e| !matches!(
                 e,
@@ -652,6 +914,74 @@ mod tests {
             )),
             "a file already loaded before this item was popped must not \
              reload: {events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, IngestEvent::Published { batch, .. } if *batch == fresh.batch)
+            ),
+            "the fresh file must still load: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_malformed_catalog_row_panics_the_pop_time_lookup_without_killing_the_runner() {
+        // The pop-time re-check calls `lookup_by_path`, which unwraps
+        // every column it reads (`store/catalog.rs`). A `file_generations`
+        // row this build cannot read the shape of — here, `mtime` is
+        // NULL, which the read side never expects — panics there instead
+        // of returning an `Err`. That panic must degrade only the item
+        // being popped (fail open: "not stale", so its own load proceeds
+        // normally) and must not take the ingest thread down with it
+        // (spec §5.7): a second, distinct item queued behind it must
+        // still publish.
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need two distinct files");
+        let poisoned = plan.items[0].clone();
+        let good = plan.items[1].clone();
+        assert_ne!(
+            poisoned.batch, good.batch,
+            "fixture must offer distinct files"
+        );
+
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into file_generations
+                     (file_id, dataset, batch, path, size, mtime, source_time,
+                      gen_id, loaded_at, row_count, health, health_reason,
+                      archived_only)
+                 values
+                     (-1, '{}', '{}', '{}', {}, NULL, '{}'::timestamptz, -1,
+                      now(), 1, 'ok', NULL, false);",
+                poisoned.dataset,
+                poisoned.batch,
+                poisoned.candidate.csv_path.display(),
+                poisoned.candidate.size,
+                poisoned.source_time.to_rfc3339(),
+            ))
+            .unwrap();
+
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan {
+            items: vec![poisoned.clone(), good.clone()],
+        });
+
+        let events = drain(&rx, 2);
+        handle.shutdown();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::Published { batch, .. } if *batch == good.batch)),
+            "a poisoned catalog row must not take the ingest thread down — \
+             the next item still publishes: {events:?}"
+        );
+        assert!(
+            events.iter().any(
+                |e| matches!(e, IngestEvent::Published { batch, .. } if *batch == poisoned.batch)
+            ),
+            "fail-open means \"not stale\": the poisoned item's own load \
+             still proceeds rather than being silently skipped: {events:?}"
         );
     }
 }

@@ -855,7 +855,8 @@ What the probe established, each point load-bearing for the design:
    *side* when it holds none of the resolved ids (a pure-archive
    era's live side, a pure-live era's archive side). With it, the
    race-free "read both sides" form matches a static side-drop within
-   noise in every cell above.
+   noise in every cell above. **(Superseded — see below: this range
+   degenerates on a real archive and is replaced by an IN-list.)**
 4. Dropping a side statically is **racy** and is rejected: `publish_file`
    is one transaction *per grain*, and compile (the resolve, on the
    service connection) and execution (a pool worker's connection) are

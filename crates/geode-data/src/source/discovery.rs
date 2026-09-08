@@ -205,6 +205,12 @@ fn classify(
 /// (`ingest::runner::run`), so a duplicate queued item is harmless even if
 /// one slips past `IngestHandle::submit`'s dedupe — both call sites apply
 /// exactly the same rule.
+///
+/// `Health` is not part of the rule: a generation recorded for a load that
+/// then failed (e.g. in `attribute_conflicts`, after the catalog write)
+/// still counts as "loaded" here, at both call sites, exactly as it always
+/// has for `classify` — this extraction does not change that, only
+/// applies it a second place.
 pub(crate) fn is_unchanged(prev: &FileGeneration, size: u64, source_time: DateTime<Utc>) -> bool {
     prev.size == size && prev.source_time == source_time
 }

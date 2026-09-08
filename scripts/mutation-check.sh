@@ -264,9 +264,9 @@ run_mutation "discovery: an unparsable sentinel is orphaned, not merely pending"
 
 run_mutation "discovery: a changed file is reloaded" \
   crates/geode-data/src/source/discovery.rs \
-  '        && prev.size == meta.len()
-        && prev.source_time == sentinel.as_of' \
-  '        && true'
+  'is_unchanged(&prev, meta.len(), sentinel.as_of)' \
+  'true' \
+  geode-data a_changed_file_is_ready_again
 
 # ---- as-of routing (spec §6.5)
 
@@ -309,14 +309,17 @@ run_mutation "as-of: ENUM cast era guard" \
   'if era.kind != TableKind::Live {' \
   'if false {'
 
-# The generation predicate used to be a per-generation OR chain; it is
-# now a gen_id range plus a tuple semi-join, pushed into both sides of
-# the era relation (Phase 4a's as-of baseline fix, docs/perf.md). The
-# two entries this replaced ("as-of: NULL book predicate", "as-of:
-# predicate names the source time") anchored the OR-chain form and no
-# longer match live code.
+# The generation predicate used to be a per-generation OR chain, then a
+# gen_id range plus a tuple semi-join (Phase 4a's as-of baseline fix,
+# docs/perf.md), and is now a gen_id IN-list plus the same tuple
+# semi-join, pushed into both sides of the era relation — the range
+# degenerated on a real archive with spread-out generation ids and
+# pruned nothing at all (docs/perf.md, "the range prefilter degenerates
+# on a real archive"). The two entries the OR-chain form's removal
+# replaced ("as-of: NULL book predicate", "as-of: predicate names the
+# source time") no longer match live code either.
 
-run_mutation "as-of: generation range excludes the lowest resolved id" \
+run_mutation "as-of: generation IN-list excludes the lowest resolved id" \
   crates/geode-data/src/query/as_of.rs \
   '    ids.sort_unstable();
     ids.dedup();' \
@@ -895,15 +898,18 @@ run_mutation "service: replace_views actually replaces" \
 
 run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
   crates/geode-data/src/ingest/runner.rs \
-  '            if !sink(IngestEvent::Failed {
+  '            let failed = sink(IngestEvent::Failed {
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '"'"'{}'"'"' is not declared", item.dataset),
-            }) {
+            });
+            clear_in_flight(&queue);
+            if !failed {
                 return;
             }
             continue;' \
-  '            continue;' \
+  '            clear_in_flight(&queue);
+            continue;' \
   geode-data \
   an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues
 

@@ -416,7 +416,24 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(45);
         while std::time::Instant::now() < deadline {
             match ingest_rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(IngestEvent::Published { .. }) => published += 1,
+                Ok(IngestEvent::Published { .. }) => {
+                    published += 1;
+                    // Fail on the defect itself, immediately, rather than
+                    // waiting out the full 45s bound: a regression means
+                    // published keeps climbing past the file count (the
+                    // RED run against `a18d0a9` reached 45 duplicate
+                    // publishes in the first 10s alone, still climbing),
+                    // and the two assertions below — the honest ones —
+                    // are otherwise unreachable in that case, since `idle`
+                    // never becomes true first. This makes the 45s bound
+                    // something only a genuinely slow-but-correct run
+                    // ever pays in full.
+                    assert!(
+                        published <= ready_files.len(),
+                        "{published} publishes for {} files — duplicates",
+                        ready_files.len()
+                    );
+                }
                 Ok(IngestEvent::PlanComplete) if published >= 1 => {
                     idle = true;
                     break;
