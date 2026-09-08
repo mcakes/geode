@@ -3100,6 +3100,64 @@ run_mutation "service: Polled.next = at, next_in is ignored" \
   '        next: at,' \
   geode-data polled_event_next_is_at_plus_next_in
 
+# --- Task 4: the Diagnostics entity, its feed, and the status bar -----
+
+run_mutation "diagnostics: note_health bumps unconditionally, not just on a real transition" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if !is_new && state.health == worst && state.detail == detail {' \
+  '        if false && !is_new && state.health == worst && state.detail == detail {' \
+  geode-shell a_repeated_identical_health_does_not_bump_the_version
+
+run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const SOURCE_HISTORY_CAP: usize = 16;' \
+  'pub const SOURCE_HISTORY_CAP: usize = 1600;' \
+  geode-shell history_is_capped_at_sixteen_transitions
+
+run_mutation "diagnostics: summary's LABELS silently drops degraded" \
+  crates/geode-shell/src/diagnostics.rs \
+  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  geode-shell the_summary_counts_sources_by_health_and_config_errors
+
+run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers > 0 {
+            self.pending_catalog_request = true;
+        }' \
+  '        if true {
+            self.pending_catalog_request = true;
+        }' \
+  geode-shell a_publish_requests_a_catalog_only_while_watched
+
+run_mutation "diagnostics: refresh_frame_hist copies the histogram while unwatched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-shell the_frame_histogram_is_copied_only_while_watched
+
+run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::Catalog(outcome) => {
+                        if outcome.tag != catalog_tag.get() {
+                            return;
+                        }' \
+  '                    DataEvent::Catalog(outcome) => {
+                        if false {
+                            return;
+                        }' \
+  geode-app a_stale_catalog_outcome_is_dropped_and_the_latest_is_applied
+
+run_mutation "hot_reload: an [log] change on reload is never applied" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if changed("app") {' \
+  '            if false && changed("app") {' \
+  geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

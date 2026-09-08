@@ -27,7 +27,8 @@ use std::time::{Duration, SystemTime};
 /// small burst; a full channel is counted by the bridge's own
 /// `dropped` counter. The sink handed to `DataService::spawn` must
 /// `try_send`, never block, and a refusal is counted rather than
-/// silently lost — surfaced through `ShellView::set_data_status`.
+/// silently lost — surfaced through `Diagnostics::note_dropped` (Phase
+/// 4b §4.4; was `ShellView::set_data_status` before that entity existed).
 const EVENT_BOUND: usize = 256;
 
 pub struct DataSetup {
