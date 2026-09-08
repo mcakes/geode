@@ -119,12 +119,25 @@ pub fn install_panic_hook(
                         // first: if a panic inside the subscriber (e.g.
                         // the rolling appender's writer lock already
                         // held by this same thread) deadlocks here, the
-                        // artifact is already on disk. Verified
-                        // separately that no flush is needed either way:
-                        // `install_logging` uses a plain
-                        // `RollingFileAppender`, not `non_blocking`, so
-                        // every earlier log line is already written by
-                        // the time a panic reaches this hook.
+                        // artifact is already on disk. This crash file
+                        // itself does not depend on the daily log file's
+                        // own state either way — `write_crash_file`
+                        // reads the ring's in-memory tail directly, never
+                        // the file layer.
+                        //
+                        // MIN-8 (final review), superseding the earlier
+                        // note here: `install_logging` now uses
+                        // `tracing_appender::non_blocking`, not a plain
+                        // `RollingFileAppender` — writes to the daily log
+                        // file go through a bounded channel to a
+                        // background thread, so an EARLIER log line is no
+                        // longer guaranteed to already be on disk by the
+                        // time a panic reaches this hook (a buffered
+                        // batch can still be in flight). Accepted: the
+                        // file layer is UI-thread `warn`+ only (the
+                        // Global Constraint), so the window is small, and
+                        // the crash file — the artifact this hook exists
+                        // to guarantee — is unaffected either way.
                         tracing::error!(
                             target: "geode::shell",
                             "crash file written to {}",

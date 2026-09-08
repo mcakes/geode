@@ -43,7 +43,11 @@ fn main() {
     // 4b Task 2). `[log]`'s levels are applied through the returned
     // control once `build_shell_services` has a `Config` to read them
     // from.
-    let (log_ring, log_control) = install_logging();
+    //
+    // `_log_guard` MUST stay bound (never `let _ = ..`) for the rest of
+    // `main` — see `install_logging`'s own doc comment for why dropping
+    // it silently stops the file layer.
+    let (log_ring, log_control, _log_guard) = install_logging();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let demo_rows = match parse_args(&args) {
@@ -305,11 +309,33 @@ fn main() {
 /// name's meaning is off — recorded here rather than fixed, since fixing
 /// it means hand-rolling the rotation `tracing-appender`'s `Builder`
 /// does not expose a local-clock option for.
-fn install_logging() -> (Arc<Ring>, Arc<dyn LevelControl>) {
+///
+/// Returns the file layer's [`tracing_appender::non_blocking::WorkerGuard`]
+/// (MIN-8, final review), `None` when there is no user dir to log into.
+/// **The caller MUST hold this for the life of the process — binding it
+/// with a leading underscore (`let _log_guard = ..`), never discarding
+/// it (`let _ = ..`) or letting the return value's temporary drop at the
+/// end of the call statement.** Dropping a `WorkerGuard` stops that
+/// background writer thread: `NonBlocking::write` after that silently
+/// drops every further log line bound for the file (the channel's
+/// receiver is gone, and `NonBlocking` fails open rather than blocking
+/// or panicking) rather than erroring. This was a plain, synchronous
+/// `RollingFileAppender` before this fix — every `tracing::*!` call that
+/// reached the file layer blocked the calling thread on that write.
+/// `non_blocking` moves the write onto a dedicated worker thread instead
+/// (PHILOSOPHY.md: "nothing may stall the render thread" — a UI-thread
+/// `warn`, the Global Constraint's one permitted level there, used to do
+/// synchronous file I/O inline on a paint).
+fn install_logging() -> (
+    Arc<Ring>,
+    Arc<dyn LevelControl>,
+    Option<tracing_appender::non_blocking::WorkerGuard>,
+) {
     let ring = Arc::new(Ring::new(4096));
     let (filter, reload_handle) = reload::Layer::new(LogLevels::default().to_targets());
 
     let (_, user) = config_dirs();
+    let mut log_guard = None;
     let file_layer = user.as_ref().and_then(|dir| {
         let logs = dir.join("logs");
         std::fs::create_dir_all(&logs).ok()?;
@@ -323,7 +349,19 @@ fn install_logging() -> (Arc<Ring>, Arc<dyn LevelControl>) {
             .filename_suffix("log")
             .build(&logs)
             .ok()?;
-        Some(fmt::layer().with_writer(appender).with_ansi(false))
+        // MIN-8 (final review): `non_blocking` hands the write to a
+        // background thread rather than doing it on the calling thread
+        // (see this function's own doc for the trade this makes and the
+        // `WorkerGuard` contract). `crash.rs`'s panic hook used to rely
+        // on the OLD blocking behaviour to guarantee every earlier log
+        // line was already on disk by the time a panic reached it —
+        // updated there too: the crash file itself is built from the
+        // in-memory ring, not the file layer, so it is unaffected; only
+        // the on-disk daily log can now lag a panic by a buffered batch,
+        // an accepted trade documented at that call site.
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
+        log_guard = Some(guard);
+        Some(fmt::layer().with_writer(non_blocking).with_ansi(false))
     });
 
     tracing_subscriber::registry()
@@ -342,7 +380,7 @@ fn install_logging() -> (Arc<Ring>, Arc<dyn LevelControl>) {
         }
     }
 
-    (ring, Arc::new(ReloadControl(reload_handle)))
+    (ring, Arc::new(ReloadControl(reload_handle)), log_guard)
 }
 
 /// `--demo [rows]` (default 100,000), or no arguments at all (spec §7.1).
