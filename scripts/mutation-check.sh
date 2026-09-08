@@ -1371,6 +1371,29 @@ run_mutation "keybindings: leaving filter mode clears the query" \
   geode-shell \
   escape_walks_the_ladder_one_rung_at_a_time
 
+# Review round 1, Important: the ClearQuery rung reset `selected` to 0
+# without moving the viewport, which is parked wherever the *filtered*
+# list left it — so row 0 painted above the top of the screen. Every
+# state assertion in that file stays green with this deleted; only a test
+# that asserts the row intersects the painted viewport sees it.
+run_mutation "keybindings: clearing the query leaves the viewport parked" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                    shell.keybindings_scroll.scroll_to_item(0);' \
+  '' \
+  geode-shell \
+  clearing_the_query_scrolls_back_to_the_top
+
+# Review round 1, Minor: a bare-only escape guard in normal mode sends
+# `shift+escape` to the claim-and-drop arm, where it does nothing at all
+# — `handle_key_down`'s own close never looked at modifiers. Nothing else
+# in the suite presses a modified escape.
+run_mutation "keybindings: escape only walks the ladder when unmodified" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        if ks.key == "escape" {' \
+  '        if ks.mods == Modifiers::NONE && ks.key == "escape" {' \
+  geode-shell \
+  a_modified_escape_walks_the_same_ladder_as_a_bare_one
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
