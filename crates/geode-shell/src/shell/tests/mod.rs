@@ -22,6 +22,10 @@ use gpui_component::{Root, TITLE_BAR_HEIGHT};
 
 pub(super) fn test_services() -> ShellServices {
     let config = Config::load(&ConfigSources::default());
+    // No compiled-in builtin layer in this fixture, so a reload has
+    // nothing to preserve — `ShellServices::builtin` always mirrors the
+    // `ConfigSources::builtin` the config beside it was loaded from.
+    let builtin = Vec::new();
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     // The startup ordering `main.rs` uses (`register_pick_actions` right
@@ -45,6 +49,7 @@ pub(super) fn test_services() -> ShellServices {
     assert!(warnings.is_empty(), "{warnings:?}");
     ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,
@@ -283,6 +288,7 @@ pub(super) fn filter_is_focused(
 /// tests exercise a pending keystroke at all.
 pub(super) fn test_services_with_gg_binding() -> ShellServices {
     let config = Config::load(&ConfigSources::default());
+    let builtin = Vec::new();
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     registry
@@ -308,6 +314,7 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
     assert!(warnings.is_empty(), "{warnings:?}");
     ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,

@@ -33,11 +33,17 @@ fn services_with_views() -> ShellServices {
             .parse()
             .unwrap(),
     };
+    // `ShellServices::builtin` mirrors the `ConfigSources::builtin` the
+    // config was loaded from, exactly as `main.rs` does — a config hot
+    // reload re-merges these docs, so a fixture that set one without the
+    // other would model a shell whose reload deletes its own views.
+    let builtin = vec![builtin, user];
     services.config = Config::load(&ConfigSources {
-        builtin: vec![builtin, user],
+        builtin: builtin.clone(),
         desk: None,
         user: None,
     });
+    services.builtin = builtin;
     services
 }
 
@@ -296,10 +302,12 @@ fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
         });
     }
     services.config = Config::load(&ConfigSources {
-        builtin: layered,
+        builtin: layered.clone(),
         desk: None,
         user: None,
     });
+    // See `services_with_views` on why the two travel together.
+    services.builtin = layered;
     services
 }
 
@@ -365,6 +373,59 @@ fn enter_opens_the_edit_stage_and_paints_every_column(cx: &mut gpui::TestAppCont
     assert!(cx.debug_bounds("objectdialog-row-tree").is_none());
     // Nothing is dirty yet, so the bar offers no save.
     assert!(cx.debug_bounds("objectdialog-action-s").is_none());
+}
+
+/// The trader-visible half of the reload bug: a save writes a config
+/// file, the 500 ms watcher reloads because of it, and the desk's views
+/// must still be there afterwards. They were not — the reload rebuilt the
+/// builtin layer instead of reusing the one the app started with, so the
+/// first save of a session emptied the browse list ("no views are
+/// configured"), the edit appeared to do nothing, and only a restart
+/// brought the views back.
+///
+/// This drives the save through real keys and then runs the two steps the
+/// watcher schedules (`reload::load_config` off the live `services.
+/// builtin`, then `apply_reload`) — its timer cannot be advanced from a
+/// gpui test, see `ShellView::apply_reload`'s doc comment.
+///
+/// It also pins the written file across the reload: `hidden` is what the
+/// trader asked for, and a reload must not be able to launder it away.
+#[gpui::test]
+fn the_reload_a_save_triggers_leaves_the_views_and_the_hidden_column_intact(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+
+    let builtin = shell.read_with(&cx, |shell, _| shell.services.builtin.clone());
+    let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
+
+    // Back to the browse list: the view the trader just edited is still
+    // listed, from the same layer as before.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let rows = shell.read_with(&cx, |shell, _| {
+        objectdialog::Domain::Views.objects(&shell.services.config)
+    });
+    assert!(
+        rows.iter().any(|row| row.name == "tree"),
+        "the reload the save itself triggered dropped the desk's views — \
+         the dialog now says none are configured and the trader's edit \
+         looks like it did nothing: {rows:?}"
+    );
+
+    let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("view_presentation.toml should have been written");
+    assert!(
+        presentation.contains("hidden = [\"book\"]"),
+        "the hidden column must survive the reload the save triggered:\n{presentation}"
+    );
 }
 
 /// **The assertion this whole task exists for.** Hiding a column on a

@@ -3340,6 +3340,35 @@ run_mutation "views: a presentation save copies the desk's widths into the user'
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
+# ---- Phase 4c: the reload keeps the app's own builtin layer ----------
+
+# The shipped bug, and the reason this entry exists at all: the reload
+# rebuilt the builtin layer as "the builtin keymap, surely" instead of
+# reusing the docs the process started with. Under `--demo` that layer is
+# a whole generated desk, so the first config write of a session — a theme
+# toggle, a font-size change, a dialog save — silently deleted the views,
+# datasets and sources, and the views dialog then reported "no views are
+# configured". Every test in the suite was green throughout: none of them
+# had a builtin layer wider than the keymap, so none could tell reuse from
+# reconstruction. The mutation below is exactly the old code.
+run_mutation "reload: the builtin layer is reused, not rebuilt from the keymap alone" \
+  crates/geode-shell/src/reload.rs \
+  '    Config::load(&ConfigSources {
+        builtin,
+        desk,
+        user,
+    })' \
+  '    Config::load(&ConfigSources {
+        builtin: builtin
+            .into_iter()
+            .filter(|doc| doc.name == "keymap")
+            .collect(),
+        desk,
+        user,
+    })' \
+  geode-shell \
+  a_reload_keeps_every_builtin_doc_not_just_the_keymap
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

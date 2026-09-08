@@ -368,7 +368,7 @@ mod tests {
     /// from here: it is `pub(super)` inside that crate's test module),
     /// built from public items only.
     fn test_shell_services() -> ShellServices {
-        test_shell_services_with_config(Config::load(&ConfigSources::default()))
+        test_shell_services_with_config(Config::load(&ConfigSources::default()), Vec::new())
     }
 
     /// A trimmed `datasets` doc making `book` pickable (categorical
@@ -389,14 +389,21 @@ role = "key"
     /// only emits `DistinctRequested`) for a column `ShellView.pickable`
     /// actually names.
     fn test_shell_services_with_pickable_book() -> ShellServices {
-        test_shell_services_with_config(Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("datasets", PICKABLE_DATASETS_DOC).unwrap()],
-            desk: None,
-            user: None,
-        }))
+        let builtin = vec![LayerDoc::builtin("datasets", PICKABLE_DATASETS_DOC).unwrap()];
+        test_shell_services_with_config(
+            Config::load(&ConfigSources {
+                builtin: builtin.clone(),
+                desk: None,
+                user: None,
+            }),
+            builtin,
+        )
     }
 
-    fn test_shell_services_with_config(config: Config) -> ShellServices {
+    /// `builtin` is the compiled-in layer `config` was loaded from — the
+    /// two travel together, because a config hot reload re-merges exactly
+    /// those docs (see `ShellServices::builtin`).
+    fn test_shell_services_with_config(config: Config, builtin: Vec<LayerDoc>) -> ShellServices {
         let mut registry = ActionRegistry::default();
         register_builtin_actions(&mut registry);
         let mod_alias = default_mod();
@@ -407,6 +414,7 @@ role = "key"
         assert!(warnings.is_empty(), "{warnings:?}");
         ShellServices {
             config,
+            builtin,
             registry,
             keymap,
             mod_alias,

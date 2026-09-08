@@ -1099,6 +1099,7 @@ fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) 
 /// `palette::toggle` binding for that key.
 fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
     let config = Config::load(&ConfigSources::default());
+    let builtin = Vec::new();
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     let mod_alias = default_mod();
@@ -1117,6 +1118,7 @@ fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
     assert!(warnings.is_empty(), "{warnings:?}");
     ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,

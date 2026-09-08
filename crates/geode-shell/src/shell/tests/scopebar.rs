@@ -29,6 +29,7 @@ fn book_scope(book: &str) -> Scope {
 /// point just as well.
 fn test_services_with_ctrl_alias() -> ShellServices {
     let config = Config::load(&ConfigSources::default());
+    let builtin = Vec::new();
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     let mod_alias = Modifiers::CTRL;
@@ -39,6 +40,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
     assert!(warnings.is_empty(), "{warnings:?}");
     ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,
@@ -270,8 +272,9 @@ const SCOPES_DOC: &str = "[eu]\ntext = \"eu\"\n";
 /// function's own comment on why it still calls `register_scope_actions`
 /// anyway, over nothing).
 fn services_with_saved_scope() -> ShellServices {
+    let builtin = vec![LayerDoc::builtin("scopes", SCOPES_DOC).unwrap()];
     let config = Config::load(&ConfigSources {
-        builtin: vec![LayerDoc::builtin("scopes", SCOPES_DOC).unwrap()],
+        builtin: builtin.clone(),
         ..ConfigSources::default()
     });
     let mut registry = ActionRegistry::default();
@@ -285,6 +288,7 @@ fn services_with_saved_scope() -> ShellServices {
     assert!(warnings.is_empty(), "{warnings:?}");
     ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,

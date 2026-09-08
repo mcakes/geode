@@ -67,6 +67,23 @@ use geode_core::schema::{ColumnRole, SchemaSpec};
 /// life of the window.
 pub struct ShellServices {
     pub config: Config,
+    /// The compiled-in builtin layer `config` was loaded from: the
+    /// default keymap, plus whatever else this particular binary compiled
+    /// in for this run (the app decides — under `--demo` it is a whole
+    /// generated desk: `app`, `datasets`, `dimensions`, `groupings`,
+    /// `sources`, `views`).
+    ///
+    /// Kept here because it is process-lifetime state, decided at startup
+    /// and reachable from nowhere on disk, while a config hot reload
+    /// re-reads only the desk and user *directories*. The reload path
+    /// must therefore REUSE these docs ([`crate::reload::load_config`]
+    /// takes them verbatim) rather than reconstruct a guess at what the
+    /// app compiled in. Reconstructing them was a live bug: the reload
+    /// rebuilt the builtin keymap and nothing else, so the first config
+    /// write of a session — a theme toggle, a font-size change, a dialog
+    /// save — dropped every other builtin doc, and under `--demo` the
+    /// views, datasets and sources vanished until restart.
+    pub builtin: Vec<LayerDoc>,
     pub registry: ActionRegistry,
     pub keymap: Keymap,
     pub mod_alias: Modifiers,
@@ -927,9 +944,17 @@ impl ShellView {
                     continue;
                 }
 
+                // The builtin layer is read off the live services rather
+                // than rebuilt here (see `ShellServices::builtin`), and
+                // only once a change has actually been seen — a clone per
+                // 500ms poll would be pure per-frame churn for a reload
+                // that almost never happens.
+                let Ok(builtin) = this.update(cx, |view, _cx| view.services.builtin.clone()) else {
+                    return;
+                };
                 let new_config = cx
                     .background_executor()
-                    .spawn(async move { reload::load_config(desk_dir, user_dir) })
+                    .spawn(async move { reload::load_config(builtin, desk_dir, user_dir) })
                     .await;
 
                 if this

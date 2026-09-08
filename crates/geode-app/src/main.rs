@@ -248,8 +248,13 @@ fn build_shell_services(
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
     }
+    // Cloned, not moved: these same docs go into `ShellServices::builtin`
+    // below so a config hot reload re-merges the layer this process
+    // actually started with (see that field's doc comment — rebuilding a
+    // guess at it silently deleted the demo desk on the first config
+    // write of a session).
     let config = Config::load(&ConfigSources {
-        builtin,
+        builtin: builtin.clone(),
         desk: desk.clone(),
         user: user.clone(),
     });
@@ -322,6 +327,7 @@ fn build_shell_services(
 
     let services = ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,

@@ -7,6 +7,92 @@ use super::*;
 // below need this to resolve to the real module rather than to `self`.
 use crate::reload;
 
+/// A `views` doc the app compiled in — the shape `--demo` supplies a
+/// whole generated desk in (`app`, `datasets`, `groupings`, `sources`,
+/// `views`), reduced to the one doc this test asserts on.
+const BUILTIN_VIEWS_DOC: &str = "[risk]\ncolumns = [\"delta\"]\n";
+
+/// `test_services()` with a compiled-in builtin layer that is more than
+/// the keymap — the only fixture in which the reload's builtin handling
+/// is observable at all, since every other one starts from an empty
+/// `ConfigSources`.
+fn services_with_a_builtin_views_doc() -> ShellServices {
+    let builtin = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        LayerDoc::builtin("views", BUILTIN_VIEWS_DOC).unwrap(),
+    ];
+    let mut services = test_services();
+    services.config = Config::load(&ConfigSources {
+        builtin: builtin.clone(),
+        desk: None,
+        user: None,
+    });
+    services.builtin = builtin;
+    services
+}
+
+/// The bug a trader actually hit: the app writes a config file of its own
+/// accord — here `theme::toggle_mode`'s `persist_theme`, exactly as the
+/// views dialog's save or a font-size change would — the mtime watcher
+/// sees the change and reloads, and the views the app compiled in are
+/// gone. Under `--demo` that meant the views dialog reporting "no views
+/// are configured" the instant anything was saved, with only a restart to
+/// bring them back.
+///
+/// The watcher's own timer cannot be driven from a gpui test (see
+/// `apply_reload`'s doc comment), so this runs the two steps it schedules
+/// verbatim: `reload::load_config` off the live `services.builtin`, then
+/// `apply_reload`.
+#[gpui::test]
+fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_a_builtin_views_doc(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    assert!(
+        shell.read_with(&vcx, |shell, _| shell
+            .services
+            .config
+            .doc("views")
+            .is_some()),
+        "fixture is wrong: the shell should start with the builtin views doc"
+    );
+
+    // The user changes the theme; `persist_theme` writes `app.toml` into
+    // the user config dir off the UI thread.
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(
+                &ActionId("theme::toggle_mode".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    assert!(
+        dir.path().join("app.toml").exists(),
+        "the theme toggle should have written app.toml — without that \
+         write there is no reload to test"
+    );
+
+    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&vcx, |shell, _| {
+        assert!(
+            shell.services.config.get("views", "risk.columns").is_some(),
+            "the reload triggered by the app's own config write dropped the \
+             builtin views — every module reading views sees an empty desk \
+             until restart"
+        );
+    });
+}
+
 /// A clean reload (no error diagnostics) is applied: the mod alias
 /// (and therefore the keymap built from it) updates to match the new
 /// config, an open palette closes (brief: "must close on a successful
