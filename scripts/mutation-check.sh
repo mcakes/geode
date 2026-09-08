@@ -1450,10 +1450,14 @@ run_mutation "keybindings: r shadows instead of removing the user's override" \
 # the user file — which writes an otherwise-empty keymap.toml and, worse,
 # lowers to a `"none"` shadow the moment the guard is relaxed the other
 # way. Only a test that asserts NO file was written can see it.
+# Re-anchored in fix round 1: the single `.filter(...)` refusal split
+# into two branches, an unbound row (which HAS an override — the `"none"`
+# shadow — and is told how to recover) and a live lower-layer binding
+# (which genuinely has none). This entry defends the second guard.
 run_mutation "keybindings: r writes on a row with no user override" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  'row.current.as_ref().filter(|b| b.layer == Layer::User)' \
-  'row.current.as_ref()' \
+  '    if bound.layer != Layer::User {' \
+  '    if false {' \
   geode-shell \
   r_on_a_row_with_no_user_override_says_so_and_writes_nothing
 
