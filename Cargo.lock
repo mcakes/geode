@@ -2616,7 +2616,6 @@ dependencies = [
  "geode-demo-data",
  "glob",
  "proptest 1.11.0",
- "regex",
  "serde",
  "serde_json",
  "tempfile",
