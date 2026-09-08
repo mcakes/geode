@@ -317,11 +317,17 @@ mod tests {
     }
 
     #[test]
-    fn a_row_that_cannot_be_read_is_an_error_not_a_smaller_answer() {
+    fn a_row_that_cannot_be_rebuilt_is_an_error_not_a_smaller_answer() {
         // Swallowing a decode error here silently narrows the resolved
         // generation set, which silently narrows the *result*: a query
         // that answers with less data than it has and says nothing. A
         // loud failure is the only honest outcome.
+        //
+        // Caught at rebuild time now, not at resolve time: the cast fails
+        // inserting into `generations`, before `resolve_generations` ever
+        // runs. `a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer`
+        // below is `resolve_generations`'s own equivalent, once a row is
+        // already in the summary.
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
         crate::store::Catalog::new(store.writer())
@@ -337,9 +343,6 @@ mod tests {
                    ('b', 'BK000', 'not-a-number', '2026-08-30T07:00:00Z');",
             )
             .unwrap();
-        // The unreadable row is caught at rebuild time now -- the cast
-        // fails inserting into `generations`, before `resolve_generations`
-        // ever runs. Either way the row must never silently vanish.
         let err = resolve_after_rebuild(
             &store,
             "ds",
@@ -347,6 +350,31 @@ mod tests {
             ts("2026-08-30T10:00:00Z"),
         );
         assert!(err.is_err(), "an unreadable generation row must propagate");
+    }
+
+    #[test]
+    fn a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer() {
+        // The summary itself is well-typed (`batch` is a non-nullable
+        // `String` in `ResolvedGeneration`), so this needs a row the
+        // maintenance code never writes -- a NULL `batch`, which the
+        // `generations` table's own schema still permits (spec: no
+        // primary key, no NOT NULL). Discarding it here is the same
+        // silent-narrowing defect as above, now anchored on
+        // `resolve_generations`'s own row decode rather than the
+        // rebuild's insert.
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into generations values ('ds', NULL, 'BK000', 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        let err = resolve_generations(store.writer(), "ds", ts("2026-08-30T10:00:00Z"));
+        assert!(err.is_err(), "an unreadable summary row must propagate");
     }
 
     #[test]

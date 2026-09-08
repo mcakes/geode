@@ -270,10 +270,21 @@ run_mutation "discovery: a changed file is reloaded" \
 
 # ---- as-of routing (spec §6.5)
 
+# Re-anchored (generations-table change): `resolve_generations` no longer
+# takes a table list -- it reads the `generations` summary by dataset --
+# so "resolving across every grain" is now a property of what
+# `history_of` names when the summary is built (`rebuild_generations`,
+# called from `DataService::open`'s migration and from `publish_file`'s
+# and `sweep`'s own maintenance via the tables they're handed directly).
+# Dropping the live half here is the same class of omission the old
+# entry caught: a partition whose current generation lives only in
+# `_live` would vanish from the rebuilt summary.
 run_mutation "as-of: multi-grain generation resolution" \
-  crates/geode-data/src/query/compile.rs \
-  '&history_of(dataset, ds), *t)' \
-  '&history_of(dataset, ds)[2..], *t)'
+  crates/geode-data/src/store/ddl.rs \
+  '                table_name(dataset, g, TableKind::Archive),
+                table_name(dataset, g, TableKind::Live),' \
+  '                table_name(dataset, g, TableKind::Archive),' \
+  geode-data history_of_names_the_archive_and_live_table_of_every_grain
 
 run_mutation "as-of: current generation read from live" \
   crates/geode-data/src/query/scope_sql.rs \
@@ -390,10 +401,74 @@ run_mutation "retention: source-time tie breaks on gen_id" \
   'order by source_time desc, gen_id desc' \
   'order by source_time desc'
 
+# ---- the generations summary table (docs/perf.md, "the as-of baseline"
+# and its follow-up): a small table maintained inside the publish and
+# sweep transactions, resolved from directly instead of scanning the
+# archive per requery.
+
+run_mutation "generations: the publish insert removed from the normal branch" \
+  crates/geode-data/src/store/publish.rs \
+  '        staging = req.staging_table,
+        summary = generation_summary_insert(req),' \
+  '        staging = req.staging_table,
+        summary = String::new(),' \
+  geode-data a_normal_publish_records_the_generation_in_the_summary
+
+run_mutation "generations: the publish insert removed from the archived-only branch" \
+  crates/geode-data/src/store/publish.rs \
+  '            req.staging_table,
+            summary = generation_summary_insert(req),' \
+  '            req.staging_table,
+            summary = String::new(),' \
+  geode-data an_archived_only_publish_records_the_generation_too
+
+run_mutation "generations: the publish insert dedup guard is dropped" \
+  crates/geode-data/src/store/publish.rs \
+  'where not exists (' \
+  'where true or not exists (' \
+  geode-data publishing_the_same_files_second_grain_does_not_duplicate_the_summary_row
+
+run_mutation "generations: sweep reconciliation removed" \
+  crates/geode-data/src/store/retention.rs \
+  'if !grains.is_empty() {' \
+  'if false {' \
+  geode-data sweeping_leaves_the_summary_matching_the_tables
+
+run_mutation "generations: reconciliation covers only the first grain" \
+  crates/geode-data/src/store/retention.rs \
+  'let checks: Vec<String> = grains
+        .iter()' \
+  'let checks: Vec<String> = grains
+        .iter()
+        .take(1)' \
+  geode-data a_generation_present_at_only_one_grain_survives_the_reconciliation
+
+run_mutation "generations: the open-time migration rebuild is skipped" \
+  crates/geode-data/src/service.rs \
+  '            if has_data {' \
+  '            if false {' \
+  geode-data open_rebuilds_the_summary_when_it_is_absent_and_data_exists
+
+run_mutation "generations: resolve drops the dataset filter" \
+  crates/geode-data/src/query/as_of.rs \
+  'from generations where dataset = ? and source_time <= ?' \
+  'from generations where (dataset = ? or true) and source_time <= ?' \
+  geode-data resolve_reads_only_the_named_dataset
+
+# Re-anchored (generations-table change): `resolve_generations` reads
+# `generations`, not the raw archive, so the covering test needed to move
+# with it -- `a_row_that_cannot_be_rebuilt_is_an_error_not_a_smaller_answer`
+# (the old anchor's covering test, renamed) now errors during
+# `rebuild_generations`'s insert, before this line ever runs, and no
+# longer sees this mutation at all. A named filter is required here
+# because the string this anchors is duplicated verbatim in the test-only
+# `resolve_from_tables` oracle right below it in the file, and the two
+# unfiltered occurrences are otherwise indistinguishable to the harness.
 run_mutation "as-of: error propagation" \
   crates/geode-data/src/query/as_of.rs \
   'rows.collect::<Result<Vec<_>, _>>().map_err(err)' \
-  'Ok(rows.filter_map(|r| r.ok()).collect())'
+  'Ok(rows.filter_map(|r| r.ok()).collect())' \
+  geode-data a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer
 
 run_mutation "provenance: resolved vs requested time" \
   crates/geode-data/src/service.rs \
