@@ -278,3 +278,72 @@ Steps 1 and 2 are one branch. 4c does not start until it merges.
 2. **`g`/`shift+g` versus count prefixes.** Both are specified; whether
    traders use either in a dialog of six rows is unknown. Cheap to keep,
    cheap to drop after a week of use.
+
+## 15. As built
+
+Tasks 1–4 implemented this spec. Where the built code differs from the
+design above:
+
+- **§2's mode indicator lives in the dialog, not the shared chrome.**
+  `render_modal` paints its title row from `ShellModal`'s fixed
+  `title: SharedString`, shared verbatim by settings, the picker and the
+  as-of selector; threading a per-dialog, per-frame mode through that
+  struct and every call site was out of proportion to what one surface
+  needed. The pill is instead `dialog::mode_pill`, rendered as the
+  keybinding dialog's own first content child, right-aligned above the
+  filter row — visually the same corner the design intended. The helper
+  still lives in `dialog.rs` so Phase 4c's modal surfaces share the one
+  badge; the shared chrome (`render_modal` itself) is unchanged.
+- **§9's `NORMAL`/`FILTER` labels shipped lowercase** (`normal`/
+  `filter`). Deliberate: this crate's key rendering
+  (`palette::render_keystroke`'s `ctrl+k`) is already lowercase, and a
+  shouted badge next to those chips would read as a different design
+  system.
+- **§6's `dialog` key contexts were not built.** Modals intercept keys
+  before the `Matcher` runs (`handle_key_down`'s modal branch,
+  `ModalKeyHandler`'s first refusal), so routing `d`/`r`/`enter`/etc.
+  through registered, user-rebindable actions is a real change to how
+  modals see input, not a small one. §14's open question 1 already
+  recommended deferring this, and Task 3 took that recommendation:
+  `dialogmode::normal_command` is matched directly in
+  `keybindings_view::handle_key`, with no `dialog` context and nothing
+  registered in the action registry.
+- **§8's `r` cannot lift a `"none"` shadow in one press.** A row a
+  previous `d` silenced holds a user-layer `"none"` entry, which
+  `derive_rows` then resolves as *unbound* — nothing on the row names
+  the key that would need removing, so `r` cannot find it. Recovery is
+  `enter` then retyping the same keystroke, which `apply_rebind`'s
+  existing overwrite-in-place path (`set_key`) handles today; `r`'s
+  refusal message now names this recovery instead of denying that a
+  user override exists. Closing the gap for real needs `derive_rows` to
+  record *which* user-layer entry is suppressing a row — a change to the
+  row vocabulary, not a call-site fix — and is parked as a follow-up,
+  not built here.
+- **§8's `d` on a user-layer row reverts to the lower layer rather than
+  unbinding the action outright.** This falls out of `apply_unbind`'s
+  existing shadow-vs-remove split (`is_user_layer`, from Task 2): a row
+  whose effective binding *is* the user's own is removed from the user
+  layer, which un-shadows whatever a lower layer already bound to that
+  key (builtin or desk) rather than leaving the action with no key at
+  all. A trader who wants the action fully unbound therefore presses `d`
+  twice — once to drop back to the lower layer's binding (if any), once
+  more to shadow that. This is the same shape `apply_rebind`'s
+  displacement step already had; §8 did not call out the two-press case
+  and this note is the reconciliation.
+- **Task 2 fixed two pre-existing `keymap_edit` defects surfaced by
+  wiring `apply_unbind` to a live keystroke**, beyond anything §8 asked
+  for: a keymap whose `bindings` was a plain TOML array of inline tables
+  (legal per `build.rs`, but not `toml_edit::ArrayOfTables`) was silently
+  replaced with an empty array and the whole keymap destroyed on the
+  next write; and an inline `keys = { ... }` table passed
+  `Item::is_table_like` but panicked on the very next line, which
+  assumed `as_table_mut` would succeed. Both are now guarded (a
+  wrong-shaped `bindings` is rejected with the file left untouched; both
+  table shapes are handled via `as_table_like_mut`) and covered by
+  tests. Neither defect is dialog-interaction-model behaviour — they are
+  pre-existing `keymap_edit` bugs this task's new caller happened to
+  reach first.
+
+Everything else — the pure `dialogmode` core, the escape ladder, the
+modal vocabulary, which surfaces are modal (§3), and §7's reclaim-count
+observation — was built as specified.
