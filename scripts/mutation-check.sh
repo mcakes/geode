@@ -2624,6 +2624,85 @@ run_mutation "bridge: a refused distinct request errors the picker instead of le
   '                if false {' \
   geode-app a_refused_distinct_request_errors_the_picker
 
+# ---- Phase 4b Task 1: the deferred 4a-review minors (M2, M5, M7, M8,
+# M10, M11, M12, M13) ---------------------------------------------------
+
+run_mutation "M2: a text session that ends where it began pops its own undo entry" \
+  crates/geode-shell/src/frame.rs \
+  '    pub fn end_scope_session(&mut self) {
+        if let Some(base) = self.scope_session.take()
+            && self.scope_undo.last() == Some(&base)
+            && self.scope == base
+        {
+            self.scope_undo.pop();
+        }
+    }' \
+  '    pub fn end_scope_session(&mut self) {
+        self.scope_session = None;
+    }' \
+  geode-shell a_text_session_that_ends_where_it_began_leaves_no_undo_entry
+
+run_mutation "M5: the picker's tag is session-wide, not per-open" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    view.next_picker_tag += 1;
+    let tag = view.next_picker_tag;' \
+  '    let tag = view.next_picker_tag;' \
+  geode-shell a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first
+
+run_mutation "M7: the flip barrier is swept on the reload-poll tick" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
+                    return; // window/entity gone; stop polling
+                };
+                frame.update(cx, |f, cx| {
+                    if f.sweep(Instant::now()) {
+                        cx.notify();
+                    }
+                });' \
+  '' \
+  geode-shell the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline
+
+run_mutation "M8: a placeholder occupant is excluded from the barrier's key set" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        let has_real_occupant = |id: &TileId| {
+            self.occupants
+                .get(id)
+                .is_some_and(|o| o.kind != "placeholder")
+        };' \
+  '        let has_real_occupant = |id: &TileId| self.occupants.contains_key(id);' \
+  geode-shell a_placeholder_occupant_is_excluded_from_the_barriers_key_set
+
+run_mutation "M10: Expr Display escapes an embedded quote in a string literal" \
+  crates/geode-core/src/scope/expr.rs \
+  "                    if c == '\\'' {" \
+  "                    if false {" \
+  geode-core a_quote_inside_a_string_literal_escapes_as_a_doubled_quote_and_round_trips
+
+run_mutation "M11: save_scope bumps saved_scopes, not config" \
+  crates/geode-shell/src/frame.rs \
+  '        self.versions.saved_scopes += 1;' \
+  '        self.versions.config += 1;' \
+  geode-shell save_scope_bumps_saved_scopes_not_config
+
+run_mutation "M12: the bar-model cache key includes today's date" \
+  crates/geode-shell/src/frame.rs \
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+            && *cached_versions == versions
+            && *cached_today == today
+        {' \
+  '        if let Some((cached_versions, _cached_today, cached)) = self.bar_cache.borrow().as_ref()
+            && *cached_versions == versions
+        {' \
+  geode-shell the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged
+
+run_mutation "M13: FrameRecord omits an empty dimensions table" \
+  crates/geode-shell/src/session.rs \
+  '        if !dims.is_empty() {
+            t.insert("dimensions".into(), toml::Value::Table(dims));
+        }' \
+  '        t.insert("dimensions".into(), toml::Value::Table(dims));' \
+  geode-shell a_frame_record_with_no_dimension_selections_writes_no_dimensions_key
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
