@@ -601,6 +601,16 @@ pub struct ShellView {
     /// cleared by [`close_modal`](Self::close_modal), same as the other
     /// two dialogs.
     picker: Option<picker::PickerState>,
+    /// The tag [`picker::open`]/[`picker::request_values`] hands out next
+    /// (Phase 4b M5) — monotonic across the whole session, never reset
+    /// per open. `PickerState::new` used to always start a fresh picker
+    /// at `tag: 0`, so two separate opens on the same column produced
+    /// the *same* sequence of tags (0, then 1 once the first request
+    /// went out); a `DistinctOutcome` that arrived late from the first
+    /// open could then be mistaken for the second open's own answer.
+    /// Reusing one counter across opens instead of restarting it makes
+    /// every tag this session ever hands out unique.
+    next_picker_tag: u64,
     /// Scroll state for the picker's `Values`-stage `uniform_list` (fix
     /// round 1, Finding 1) — the `keybindings_scroll`/`settings_scroll`/
     /// `palette_scroll` split, one gpui type over: `uniform_list` is
@@ -1021,6 +1031,7 @@ impl ShellView {
             data_status: None,
             pickable,
             picker: None,
+            next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
         }
