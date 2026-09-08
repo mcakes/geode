@@ -26,6 +26,7 @@
 //! only place an `AsOfState` is constructed — nothing survives a
 //! close/reopen, the same contract every other modal here keeps.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use chrono::{DateTime, Local, Utc};
@@ -45,6 +46,13 @@ use super::dialog;
 // Pure core — no gpui.
 // ---------------------------------------------------------------------
 
+/// One formatted preset row: the publish's instant, and its
+/// `"14:05:12 · risk / EOD · 3 books"` label.
+type PresetRow = (DateTime<Utc>, String);
+/// [`AsOfState::presets_cache`]'s value type — named so clippy's
+/// `type_complexity` lint doesn't fire on the field declaration.
+type PresetsCache = RefCell<Option<(u64, Rc<Vec<PresetRow>>)>>;
+
 /// Persistent state for one open as-of dialog session — the
 /// `picker`/`keybindings`/`settings` fields' own contract: no `gpui`
 /// types, so every transition here is unit-testable without a window.
@@ -63,12 +71,25 @@ pub struct AsOfState {
     /// never set for `"live"`, which has no instant to preview. Mutually
     /// exclusive with `error`.
     pub resolved: Option<DateTime<Utc>>,
+    /// Lazy cache for [`cached_presets`] (Phase 4b M9), keyed on
+    /// `Frame::versions().data` — the only counter a fresh publish bumps,
+    /// and publishes are exactly what `Frame::recent_publishes` (and so
+    /// [`presets`]) reflects; every other frame mutation (scope, grouping,
+    /// as-of, config) leaves the preset list untouched. `build` (the
+    /// render path) used to call `presets` fresh on every paint, allocating
+    /// a `Vec` of formatted `String`s for a value that almost always
+    /// matches the previous paint's — the same `RefCell<Option<(key,
+    /// Rc<..>)>>` shape `Frame::bar_cache` already uses, for the same
+    /// reason.
+    presets_cache: PresetsCache,
 }
 
 /// The frame's recent publishes as as-of presets (spec §3.6): newest
 /// first (`Frame::recent_publishes` is already ordered that way), each
 /// labelled `"14:05:12 · risk / EOD · 3 books"` in local time.
-pub fn presets(frame: &Frame) -> Vec<(DateTime<Utc>, String)> {
+pub fn presets(frame: &Frame) -> Vec<PresetRow> {
+    #[cfg(test)]
+    tests::PRESETS_CALLS.with(|c| c.set(c.get() + 1));
     frame
         .recent_publishes()
         .iter()
@@ -86,6 +107,24 @@ pub fn presets(frame: &Frame) -> Vec<(DateTime<Utc>, String)> {
             )
         })
         .collect()
+}
+
+/// [`presets`], cached on `state.presets_cache` (Phase 4b M9): a call
+/// with `frame`'s data version unchanged since the last one returns the
+/// exact same `Rc` — a refcount bump, no fresh allocation — rather than
+/// rebuilding the whole list. Every call site in this module that used
+/// to call `presets` directly from a render/key-handling path (`build`,
+/// `handle_key`'s enter/up-down arms) goes through this instead.
+fn cached_presets(state: &AsOfState, frame: &Frame) -> Rc<Vec<PresetRow>> {
+    let v = frame.versions().data;
+    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+        && *cached_v == v
+    {
+        return Rc::clone(cached);
+    }
+    let built = Rc::new(presets(frame));
+    *state.presets_cache.borrow_mut() = Some((v, Rc::clone(&built)));
+    built
 }
 
 /// Resolve the as-of field's raw text (spec §3.6): `"live"` (any case)
@@ -217,8 +256,12 @@ fn handle_key(
         let trimmed = text.trim();
         if trimmed.is_empty() {
             let selected = shell.as_of_dialog.as_ref().map(|s| s.selected).unwrap_or(0);
-            let list = presets(shell.frame.read(cx));
-            if let Some((at, _)) = list.get(selected).cloned() {
+            let at = shell.as_of_dialog.as_ref().and_then(|state| {
+                cached_presets(state, shell.frame.read(cx))
+                    .get(selected)
+                    .map(|(at, _)| *at)
+            });
+            if let Some(at) = at {
                 commit_at(shell, at, window, cx);
             }
             return true;
@@ -238,7 +281,11 @@ fn handle_key(
     }
     if ks.mods == Modifiers::NONE && (ks.key == "up" || ks.key == "down") {
         let delta = if ks.key == "up" { -1 } else { 1 };
-        let len = presets(shell.frame.read(cx)).len();
+        let len = shell
+            .as_of_dialog
+            .as_ref()
+            .map(|state| cached_presets(state, shell.frame.read(cx)).len())
+            .unwrap_or(0);
         if let Some(state) = shell.as_of_dialog.as_mut() {
             move_selection(&mut state.selected, delta, len);
         }
@@ -294,8 +341,9 @@ fn build(
         );
     }
 
+    let presets_list = cached_presets(state, shell.frame.read(cx));
     let list = build_presets(
-        &presets(shell.frame.read(cx)),
+        &presets_list,
         state.selected,
         entity,
         primary,
@@ -357,6 +405,15 @@ mod tests {
     use super::*;
     use crate::frame::Publish;
     use chrono::TimeZone;
+    use std::cell::Cell;
+
+    // Phase 4b M9: counts real `presets` calls so a test can prove
+    // `cached_presets` actually skips rebuilding when nothing relevant
+    // changed, rather than only checking the returned value (which would
+    // look identical whether or not the cache did its job).
+    thread_local! {
+        pub(super) static PRESETS_CALLS: Cell<u32> = const { Cell::new(0) };
+    }
 
     fn publish(dataset: &str, batch: &str, books: usize, at: DateTime<Utc>) -> Publish {
         Publish {
@@ -403,6 +460,44 @@ mod tests {
     }
 
     #[test]
+    fn cached_presets_rebuilds_only_when_the_frames_data_version_changes() {
+        use geode_core::groupings::GroupingSlots;
+        use geode_core::scopes::SavedScopes;
+
+        let mut f = Frame::new(GroupingSlots::default(), SavedScopes::new(), None);
+        f.note_published(publish(
+            "risk",
+            "EOD",
+            3,
+            Utc.with_ymd_and_hms(2026, 9, 6, 14, 5, 12).unwrap(),
+        ));
+        let state = AsOfState::default();
+
+        PRESETS_CALLS.with(|c| c.set(0));
+        let a = cached_presets(&state, &f);
+        let b = cached_presets(&state, &f);
+        assert!(Rc::ptr_eq(&a, &b), "the second call must hit the cache");
+        assert_eq!(
+            PRESETS_CALLS.with(|c| c.get()),
+            1,
+            "two calls with the frame's data version unchanged must build the list once"
+        );
+
+        f.note_published(publish(
+            "risk",
+            "EOD",
+            4,
+            Utc.with_ymd_and_hms(2026, 9, 6, 14, 6, 0).unwrap(),
+        ));
+        let c = cached_presets(&state, &f);
+        assert!(
+            !Rc::ptr_eq(&a, &c),
+            "a new publish must invalidate the cache"
+        );
+        assert_eq!(PRESETS_CALLS.with(|c| c.get()), 2);
+    }
+
+    #[test]
     fn resolve_input_delegates_to_parse_as_of_for_a_clock_time() {
         let now = Utc.with_ymd_and_hms(2026, 9, 6, 16, 0, 0).unwrap();
         // F1 (final fix wave): `HH:MM` resolves on the LOCAL date (spec
@@ -442,6 +537,7 @@ mod tests {
             selected: 0,
             error: Some("stale".into()),
             resolved: Some(now),
+            ..AsOfState::default()
         };
         on_query_changed(&mut state, "   ", now);
         assert!(state.error.is_none());
