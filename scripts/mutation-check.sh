@@ -4065,6 +4065,13 @@ run_mutation "scheduler: a recovered source is reported Health::Ok" \
   '                        None => true,' \
   geode-data a_degraded_source_that_recovers_emits_an_ok_health_event
 
+run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                diag_version_for_section(this.section, now)
+                    != diag_version_for_section(this.section, this.last_diag_versions)' \
+  '                true' \
+  geode-diagnostics refresh_frame_hist_does_not_rebuild_the_config_section
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
