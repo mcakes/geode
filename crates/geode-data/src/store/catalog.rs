@@ -99,6 +99,20 @@ CREATE TABLE IF NOT EXISTS attribute_conflicts (
   column_name VARCHAR,
   entities BIGINT
 );
+-- The generation summary (spec §6.5 as amended): which generations exist,
+-- per dataset and partition, maintained inside the publish and sweep
+-- transactions rather than scanned fresh from the archive per as-of
+-- requery (`query::as_of::resolve_generations`, `store::ddl::
+-- rebuild_generations`). No primary key -- DuckDB will not key a nullable
+-- column (`book` is NULL for the bookless partition) -- so uniqueness is
+-- by the maintaining code's own guards, not the schema.
+CREATE TABLE IF NOT EXISTS generations (
+  dataset VARCHAR,
+  batch VARCHAR,
+  book VARCHAR,
+  gen_id BIGINT,
+  source_time TIMESTAMP WITH TIME ZONE
+);
 ";
 
 impl<'a> Catalog<'a> {

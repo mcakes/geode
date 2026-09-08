@@ -17,6 +17,8 @@
 //! declared as an `attribute` at the grain that owns it, or as a dimension
 //! carried by one.
 
+use crate::store::StoreError;
+use duckdb::Connection;
 use geode_core::schema::{ColumnRole, DatasetSpec, Grain};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +184,149 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         table_name(&ds.name, grain, kind),
         cols.join(",\n")
     )
+}
+
+/// Every table a dataset's history lives in: the archive **and** live for
+/// each grain. Generations are resolved (and rebuilt) across all of them
+/// — a partition can be missing from one grain while present at another
+/// (a cash-only book has no underlying rows), and the generation a
+/// partition holds now is in live and nowhere else (see
+/// `query::as_of::resolve_generations`). Shared by `service.rs` (the
+/// freshness fold and the open-time migration) and `query::compile`
+/// (`era_for` and the join path) so the table list is named in one place.
+pub fn history_of(dataset: &str, ds: &DatasetSpec) -> Vec<String> {
+    ds.grains()
+        .into_iter()
+        .flat_map(|g| {
+            [
+                table_name(dataset, g, TableKind::Archive),
+                table_name(dataset, g, TableKind::Live),
+            ]
+        })
+        .collect()
+}
+
+fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
+    move |source| StoreError::Sql {
+        statement: statement.to_string(),
+        source,
+    }
+}
+
+/// A `(batch, book, gen_id, source_time)` relation covering every
+/// generation any of `tables` records, deduplicated **across** tables as
+/// well as within one: a file publishes every grain, so one generation
+/// ordinarily appears in more than one grain's table under the identical
+/// tuple, and a raw `union all` of per-table distincts would multiply it
+/// by how many grains carry it. The outer `distinct` is what keeps this
+/// query's answer at "one row per generation" -- the same invariant
+/// `publish_file`'s `where not exists` guard maintains incrementally.
+///
+/// An empty `tables` yields an empty, correctly-typed relation rather
+/// than invalid SQL from an empty `union all`.
+fn generations_union_sql(tables: &[String]) -> String {
+    if tables.is_empty() {
+        return "select null::varchar as batch, null::varchar as book, \
+                 null::bigint as gen_id, \
+                 null::timestamp with time zone as source_time \
+                 where false"
+            .to_string();
+    }
+    let union = tables
+        .iter()
+        .map(|t| format!("select batch, book, gen_id, source_time from {t}"))
+        .collect::<Vec<_>>()
+        .join(" union all ");
+    format!("select distinct batch, book, gen_id, source_time from ({union})")
+}
+
+/// Rebuild the `generations` summary for `dataset` from its data tables
+/// (spec §6.5 as amended): the migration path for a database written
+/// before the table existed (`DataService::open`), and the tests' oracle
+/// -- the summary is defined to equal this, always.
+///
+/// Inside one transaction: delete every row currently recorded for
+/// `dataset`, then reinsert one row per generation found across `tables`
+/// (ordinarily `history_of(dataset, ds)` -- every grain's archive and
+/// live table, so a partition missing from one grain's history is not
+/// silently dropped from the rebuilt summary either). Returns how many
+/// rows the summary now holds for the dataset.
+pub fn rebuild_generations(
+    conn: &Connection,
+    dataset: &str,
+    tables: &[String],
+) -> Result<usize, StoreError> {
+    let escaped = dataset.replace('\'', "''");
+    let sql = format!(
+        "begin;
+         delete from generations where dataset = '{escaped}';
+         insert into generations
+         select '{escaped}', batch, book, gen_id, source_time from ({union});
+         commit;",
+        union = generations_union_sql(tables),
+    );
+    if let Err(source) = conn.execute_batch(&sql) {
+        let _ = conn.execute_batch("rollback;");
+        return Err(StoreError::Sql {
+            statement: sql,
+            source,
+        });
+    }
+    let count_sql = "select count(*) from generations where dataset = ?";
+    conn.query_row(count_sql, duckdb::params![dataset], |r| r.get::<_, i64>(0))
+        .map(|n| n as usize)
+        .map_err(sql_err(count_sql))
+}
+
+/// Test-only oracle: the `generations` summary for `dataset` must equal a
+/// fresh rebuild from `tables`, as a multiset (sorted, duplicate rows
+/// included) -- so a duplicate the maintenance code accidentally left
+/// behind fails this even though the *set* of generations still looks
+/// right.
+#[cfg(test)]
+pub(crate) fn assert_generations_match_tables(conn: &Connection, dataset: &str, tables: &[String]) {
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    struct Row {
+        batch: String,
+        book: Option<String>,
+        gen_id: i64,
+        source_time: chrono::DateTime<chrono::Utc>,
+    }
+    fn fetch(conn: &Connection, sql: &str) -> Vec<Row> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Row {
+                    batch: r.get(0)?,
+                    book: r.get(1)?,
+                    gen_id: r.get(2)?,
+                    source_time: r.get(3)?,
+                })
+            })
+            .unwrap();
+        let mut v: Vec<Row> = rows.map(|r| r.unwrap()).collect();
+        v.sort();
+        v
+    }
+    let expected = fetch(
+        conn,
+        &format!(
+            "select batch, book, gen_id, source_time from ({})",
+            generations_union_sql(tables)
+        ),
+    );
+    let escaped = dataset.replace('\'', "''");
+    let actual = fetch(
+        conn,
+        &format!(
+            "select batch, book, gen_id, source_time from generations where dataset = '{escaped}'"
+        ),
+    );
+    assert_eq!(
+        actual, expected,
+        "the generations summary for '{dataset}' must equal a rebuild from \
+         its tables (as a multiset -- duplicates included): summary {actual:?}, rebuild {expected:?}"
+    );
 }
 
 #[cfg(test)]
@@ -382,5 +527,210 @@ mod tests {
                 "expiry"
             ]
         );
+    }
+
+    #[test]
+    fn history_of_names_the_archive_and_live_table_of_every_grain() {
+        let ds = sample_dataset();
+        let tables = history_of("risk_snapshot", &ds);
+        assert!(tables.contains(&"risk_snapshot_position_archive".to_string()));
+        assert!(tables.contains(&"risk_snapshot_position_live".to_string()));
+        assert!(tables.contains(&"risk_snapshot_underlying_archive".to_string()));
+        assert!(tables.contains(&"risk_snapshot_underlying_live".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod rebuild_generations_tests {
+    use super::*;
+    use crate::store::Store;
+    use crate::store::catalog::Catalog;
+
+    fn store_with_generations_table() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("g.duckdb")).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store)
+    }
+
+    fn dataset_count(conn: &duckdb::Connection, dataset: &str) -> i64 {
+        conn.query_row(
+            "select count(*) from generations where dataset = ?",
+            duckdb::params![dataset],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn rebuild_populates_the_summary_from_the_tables() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        let n = rebuild_generations(store.writer(), "ds", &["t_archive".to_string()]).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(dataset_count(store.writer(), "ds"), 1);
+    }
+
+    #[test]
+    fn rebuild_replaces_a_prior_summary_rather_than_appending() {
+        // A stray or stale row for this dataset must not survive a
+        // rebuild -- the summary after rebuilding must equal exactly what
+        // the tables hold, not the union of the old summary and the
+        // tables.
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');
+                 insert into generations values ('ds', 'stale', 'BKX', 99, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        let n = rebuild_generations(store.writer(), "ds", &["t_archive".to_string()]).unwrap();
+        assert_eq!(n, 1, "the stale planted row must be gone");
+        let kept: String = store
+            .writer()
+            .query_row(
+                "select batch from generations where dataset = 'ds'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "b");
+    }
+
+    #[test]
+    fn rebuild_with_no_tables_clears_the_summary_and_returns_zero() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "insert into generations values ('ds', 'stale', 'BKX', 99, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        let n = rebuild_generations(store.writer(), "ds", &[]).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(dataset_count(store.writer(), "ds"), 0);
+    }
+
+    #[test]
+    fn rebuild_deduplicates_a_generation_shared_by_every_grains_tables() {
+        // One file publishes every grain under the same (batch, book,
+        // gen_id, source_time). Rebuilding from a raw per-table union
+        // must not multiply that one generation by how many grain tables
+        // carry it, or the summary would disagree with what publish's
+        // own dedup-guarded insert produces for the same data.
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table pos_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 create table under_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into pos_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');
+                 insert into under_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        let n = rebuild_generations(
+            store.writer(),
+            "ds",
+            &["pos_archive".to_string(), "under_archive".to_string()],
+        )
+        .unwrap();
+        assert_eq!(n, 1, "one generation, seen at two grains, is one row");
+    }
+
+    #[test]
+    fn rebuild_keeps_a_null_book_partition() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', NULL, 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        rebuild_generations(store.writer(), "ds", &["t_archive".to_string()]).unwrap();
+        let book: Option<String> = store
+            .writer()
+            .query_row(
+                "select book from generations where dataset = 'ds'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(book, None, "the bookless partition must round-trip");
+    }
+
+    #[test]
+    fn rebuild_scopes_to_the_named_dataset_only() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');
+                 insert into generations values ('other', 'x', 'BKX', 1, '2020-01-01T00:00:00Z');",
+            )
+            .unwrap();
+        rebuild_generations(store.writer(), "ds", &["t_archive".to_string()]).unwrap();
+        assert_eq!(
+            dataset_count(store.writer(), "other"),
+            1,
+            "another dataset's summary must be untouched"
+        );
+    }
+
+    #[test]
+    fn assert_generations_match_tables_passes_after_a_rebuild() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        rebuild_generations(store.writer(), "ds", &["t_archive".to_string()]).unwrap();
+        assert_generations_match_tables(store.writer(), "ds", &["t_archive".to_string()]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn assert_generations_match_tables_catches_a_duplicate_row() {
+        let (_d, store) = store_with_generations_table();
+        store
+            .writer()
+            .execute_batch(
+                "create table t_archive(
+                     batch varchar, book varchar, gen_id bigint,
+                     source_time timestamp with time zone);
+                 insert into t_archive values ('b', 'BK0', 1, '2026-08-30T07:00:00Z');
+                 -- Two identical rows in the summary where the tables hold one.
+                 insert into generations values
+                   ('ds', 'b', 'BK0', 1, '2026-08-30T07:00:00Z'),
+                   ('ds', 'b', 'BK0', 1, '2026-08-30T07:00:00Z');",
+            )
+            .unwrap();
+        assert_generations_match_tables(store.writer(), "ds", &["t_archive".to_string()]);
     }
 }
