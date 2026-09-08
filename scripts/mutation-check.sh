@@ -2962,7 +2962,7 @@ run_mutation "oldest_seq ignores the wrap and always reads slot 0" \
     }' \
   geode-core oldest_seq_is_none_when_empty_then_tracks_the_surviving_floor_through_a_wrap
 
-run_mutation "catalog: live is the first generation per partition, not the last" \
+run_mutation "build_catalog: live is the first generation per partition, not the last" \
   crates/geode-data/src/query/catalog.rs \
   '        if let Some(newest) = p.generations.last_mut() {
             newest.live = true;
@@ -2972,7 +2972,7 @@ run_mutation "catalog: live is the first generation per partition, not the last"
         }' \
   geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
 
-run_mutation "catalog: resolved_gen is ignored under AsOf::At, always None" \
+run_mutation "build_catalog: resolved_gen is ignored under AsOf::At, always None" \
   crates/geode-data/src/query/catalog.rs \
   '            p.resolved_gen = by_partition
                 .get(&(p.batch.clone(), p.book.clone()))
@@ -2980,29 +2980,125 @@ run_mutation "catalog: resolved_gen is ignored under AsOf::At, always None" \
   '            p.resolved_gen = None;' \
   geode-data under_an_as_of_the_resolved_generation_is_named_per_partition
 
-run_mutation "catalog: live_rows also sums the archive tables" \
+# MIN-1/MIN-2 (review round 1): retargeted at `archive_rows` rather than
+# `live_rows` — the `live_rows` direction of this mutation was already
+# caught twice over (this test's own oracle *and*
+# `the_catalog_lists_every_partitions_generations_with_the_live_one_marked`'s
+# `ds.live_rows == 5`), so neither test was proven isolated. Mutating
+# `archive_rows` instead has exactly one defence: the `archive_rows`
+# assertion this fix round added here.
+run_mutation "build_catalog: archive_rows sums the live tables too" \
   crates/geode-data/src/query/catalog.rs \
-  '        live_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        archive_rows += sizes' \
-  '        live_rows += sizes
-            .get(&table_name(&ds.name, grain, TableKind::Live))
-            .copied()
-            .unwrap_or(0);
-        live_rows += sizes
+  '        archive_rows += sizes
             .get(&table_name(&ds.name, grain, TableKind::Archive))
             .copied()
             .unwrap_or(0);
-        archive_rows += sizes' \
+    }' \
+  '        archive_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Live))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Archive))
+            .copied()
+            .unwrap_or(0);
+    }' \
   geode-data the_row_counts_agree_with_duckdb_by_execution
 
-run_mutation "scheduler: Polled.next_in is zero, so the mapped DataEvent's next collapses to at" \
+# Review round 1 MAJ-1: the fixture's `file_id`s (11, 12, 13) are
+# deliberately not the same as the `gen_id`s (1, 2, 3) they name, so a
+# join keyed on the wrong column no longer lines up by accident.
+run_mutation "build_catalog: loaded_at/file_rows join on file_id, not gen_id" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \' \
+  '    let sql = "select fg.file_id, fg.loaded_at, fg.row_count \' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
+
+# Review round 1 MAJ-2: `file_generations_for` must stay bounded to the
+# generations `generations` still names, not every row `file_generations`
+# has ever accumulated (that table is never pruned). Removing the
+# `exists` bound reproduces the unbounded read the fixture's orphan row
+# (gen_id 99, no matching `generations` row) exists to catch.
+run_mutation "build_catalog: file_generations_for reads every row ever recorded, not just the surviving ones" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \
+               from file_generations fg \
+               where fg.dataset = ? \
+                 and exists (select 1 from generations g \
+                             where g.dataset = fg.dataset and g.gen_id = fg.gen_id)";' \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \
+               from file_generations fg \
+               where fg.dataset = ?";' \
+  geode-data file_generations_for_excludes_a_row_whose_generation_no_longer_exists
+
+# Review round 1 MAJ-3, isolating the `batch` half of the `(batch, book)`
+# partition key: `fixture_one_batch_many_books` gives EOD/BK000,
+# EOD/BK001 and EOD/NULL the same batch, so comparing `batch` alone
+# collapses all three into one partition.
+run_mutation "build_catalog: partitions group by batch alone" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch);' \
+  geode-data partitions_group_by_batch_and_book_together_not_either_alone
+
+# Review round 1 MAJ-3, isolating the `book` half: EOD/NULL and
+# FOLLOWUP/NULL sort adjacently (NULL last within a batch, "EOD" <
+# "FOLLOWUP") and share book `None`, so comparing `book` alone collapses
+# those two into one partition across the batch boundary.
+run_mutation "build_catalog: partitions group by book alone" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.book == book);' \
+  geode-data partitions_group_by_batch_and_book_together_not_either_alone
+
+# Review round 1 MAJ-3: the bookless partition (rows with `book is
+# null`) is a real partition, spec §4.4/§4.4-adjacent code (as_of.rs,
+# retention.rs, publish.rs) all carry the same warning about it.
+run_mutation "build_catalog: the bookless partition is dropped" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        if book.is_none() {
+            continue;
+        }
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  geode-data the_bookless_partition_is_kept_as_its_own_partition_with_its_generation_live
+
+# Review round 1 MAJ-4(a): renamed to what this actually defends — the
+# `SchedulerEvent::Polled` emit site's `next_in`, not the mapped
+# `DataEvent::Polled.next` (which the entry below now covers on its
+# own, restoring the brief's own Step 8 entry rather than only
+# substituting for it).
+run_mutation "scheduler: Polled carries a zero next_in" \
   crates/geode-data/src/ingest/scheduler.rs \
   '                        next_in: spec.poll_interval,' \
   '                        next_in: Duration::ZERO,' \
   geode-data an_unchanged_directory_submits_nothing_on_later_polls
+
+# Review round 1 MAJ-4(b): the brief's Step 8 entry ("Polled.next = at")
+# restored directly against the extracted `polled_event` helper.
+run_mutation "service: Polled.next = at, next_in is ignored" \
+  crates/geode-data/src/service.rs \
+  '        next: at.checked_add(next_in).unwrap_or(at),' \
+  '        next: at,' \
+  geode-data polled_event_next_is_at_plus_next_in
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -31,7 +31,7 @@ use geode_core::view::ViewSpec;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -111,6 +111,27 @@ pub struct QueryParams {
     pub scope: Scope,
     pub as_of: AsOf,
     pub max_depth: usize,
+}
+
+/// `SchedulerEvent::Polled` -> `DataEvent::Polled` (Phase 4b §4.4's
+/// last/next-poll diagnostic), extracted as a pure free function
+/// (review round 1 MAJ-4) so the `next = at + next_in` arithmetic is
+/// unit-testable without spinning up a real scheduler thread — nothing
+/// in the suite otherwise ever observes `DataEvent::Polled` at all,
+/// since `service()`'s test fixture runs with `sources: Vec::new()`.
+///
+/// `checked_add` with a saturating fallback (MIN-7), not `at + next_in`
+/// directly: `poll_interval` is user-configured
+/// (`source::config::parse_duration`) and unbounded in magnitude, so a
+/// pathological config value must not panic the request loop over a
+/// diagnostic nobody asked to see fail.
+fn polled_event(source: String, ready: usize, at: SystemTime, next_in: Duration) -> DataEvent {
+    DataEvent::Polled {
+        source,
+        ready,
+        at,
+        next: at.checked_add(next_in).unwrap_or(at),
+    }
 }
 
 /// Logs one `IngestEvent::Failed` at `geode::ingest` `error` (MIN-4): a
@@ -332,13 +353,7 @@ impl DataService {
                     next_in,
                 } => {
                     tracing::debug!(target: "geode::ingest", "polled {source}: {ready} ready");
-                    let at = SystemTime::now();
-                    sink(DataEvent::Polled {
-                        source,
-                        ready,
-                        at,
-                        next: at + next_in,
-                    })
+                    sink(polled_event(source, ready, SystemTime::now(), next_in))
                 }
                 SchedulerEvent::Health {
                     source,
@@ -825,6 +840,42 @@ mod tests {
         assert_eq!(snap.datasets.len(), 1);
         assert_eq!(snap.datasets[0].name, "risk_snapshot");
         svc.shutdown();
+    }
+
+    #[test]
+    fn polled_event_next_is_at_plus_next_in() {
+        // Review round 1 MAJ-4, restoring the brief's own Step 8 entry
+        // ("Polled.next = at"): the one line the plan's "Rulings taken
+        // while planning" section specifically called for, now unit-
+        // tested directly rather than only through a scheduler.
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let next_in = Duration::from_secs(30);
+        match polled_event("risk".into(), 3, at, next_in) {
+            DataEvent::Polled {
+                source,
+                ready,
+                at: got_at,
+                next,
+            } => {
+                assert_eq!(source, "risk");
+                assert_eq!(ready, 3);
+                assert_eq!(got_at, at);
+                assert_eq!(next, at + next_in);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn polled_event_saturates_rather_than_panics_on_a_huge_poll_interval() {
+        // MIN-7: `poll_interval` is user-configured and unbounded in
+        // magnitude (`source::config::parse_duration`); `at + next_in`
+        // must not panic the request loop over a diagnostic value.
+        let at = SystemTime::now();
+        match polled_event("risk".into(), 0, at, Duration::MAX) {
+            DataEvent::Polled { next, .. } => assert!(next >= at),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

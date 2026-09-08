@@ -29,13 +29,14 @@ pub fn build_catalog(
     for ds in &schema.datasets {
         datasets.push(dataset_catalog(conn, ds, as_of, &sizes)?);
     }
-    let (database_bytes, used_blocks) = database_size(conn)?;
+    let (database_bytes, used_blocks, block_size) = database_size(conn)?;
     let memory_bytes = memory_bytes(conn)?;
     let threads = threads(conn)?;
     Ok(CatalogSnapshot {
         datasets,
         database_bytes,
         used_blocks,
+        block_size,
         memory_bytes,
         threads,
     })
@@ -151,13 +152,38 @@ fn partitions_for(conn: &Connection, dataset: &str) -> Result<Vec<PartitionCatal
     Ok(partitions)
 }
 
-/// `gen_id -> (loaded_at, row_count)` for every generation
-/// `file_generations` recorded for `dataset`.
+/// `gen_id -> (loaded_at, row_count)`, bounded to the generations
+/// `generations` still names for `dataset` — never every row
+/// `file_generations` has ever recorded.
+///
+/// `file_generations` is never pruned (`generations` is, by
+/// `retention::sweep`'s reconciliation): one row per file ever loaded,
+/// forever. An unqualified `select … from file_generations where
+/// dataset = ?` is still catalog-*shaped* SQL, but its cost grows with
+/// the database's whole history rather than with what the snapshot can
+/// display, which is what "catalog-sized" is supposed to rule out — on
+/// a multi-year desk this can be orders of magnitude more rows than the
+/// handful of generations any partition actually keeps. The `exists`
+/// join below bounds the read to exactly the generations already
+/// surviving in `partitions_for`'s result, and it survives retention
+/// pruning for free since it reads the swept table as the boundary.
+///
+/// A legacy database written before the `gen_id` sequence existed can
+/// hold two generations of one partition sharing an id
+/// (`query::as_of::resolve_generations`'s doc comment); on such a
+/// database `out.insert` is last-write-wins over an unordered read, so
+/// this map is not authoritative about *which* of the two a shared
+/// `gen_id` reports `loaded_at`/`file_rows` for. Not worth a query
+/// change — a caller needing that precision should join by `file_id`.
 fn file_generations_for(
     conn: &Connection,
     dataset: &str,
 ) -> Result<HashMap<i64, (DateTime<Utc>, u64)>, StoreError> {
-    let sql = "select gen_id, loaded_at, row_count from file_generations where dataset = ?";
+    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \
+               from file_generations fg \
+               where fg.dataset = ? \
+                 and exists (select 1 from generations g \
+                             where g.dataset = fg.dataset and g.gen_id = fg.gen_id)";
     let err = |source| StoreError::Sql {
         statement: sql.to_string(),
         source,
@@ -180,11 +206,17 @@ fn file_generations_for(
     Ok(out)
 }
 
-/// `estimated_size` per table, over every table `duckdb_tables()` knows
-/// about — a row *estimate*, not an exact count; `build_catalog`'s
-/// callers label the field "rows (est.)".
+/// `estimated_size` per table in the `main` schema, over every table
+/// `duckdb_tables()` knows about — a row *estimate*, not an exact
+/// count; `build_catalog`'s callers label the field "rows (est.)".
+/// Scoped to `schema_name = 'main'` so a same-named table in another
+/// schema (`temp`, from a session-local `CREATE TEMP TABLE`) cannot
+/// collide with a dataset's table in the map — `table_name` builds bare
+/// names with no schema qualifier, so without this filter the later
+/// `HashMap::insert` would silently keep whichever same-named table's
+/// row came back last.
 fn table_sizes(conn: &Connection) -> Result<HashMap<String, u64>, StoreError> {
-    let sql = "select table_name, estimated_size from duckdb_tables()";
+    let sql = "select table_name, estimated_size from duckdb_tables() where schema_name = 'main'";
     let err = |source| StoreError::Sql {
         statement: sql.to_string(),
         source,
@@ -201,21 +233,34 @@ fn table_sizes(conn: &Connection) -> Result<HashMap<String, u64>, StoreError> {
     Ok(out)
 }
 
-/// `block_size * total_blocks` and `used_blocks`, both in blocks/bytes,
-/// from `pragma_database_size()`.
-fn database_size(conn: &Connection) -> Result<(u64, u64), StoreError> {
-    let sql = "select block_size, total_blocks, used_blocks from pragma_database_size()";
+/// `(database_bytes, used_blocks, block_size)` from
+/// `pragma_database_size()`.
+///
+/// `pragma_database_size()` returns one row **per attached database**
+/// (its first column, `database_name`, is why) — `query_row` on the raw
+/// three-column select would silently take whichever row DuckDB happens
+/// to return first, with no `where` and no ordering. Geode attaches
+/// exactly one database today, so that was latent, not wrong yet; a
+/// future second `ATTACH` (a read replica, an extension) would have
+/// retargeted the number without changing a single call site. Summing
+/// is stable regardless of how many rows come back, and costs nothing
+/// extra for the one-row case this runs against today.
+fn database_size(conn: &Connection) -> Result<(u64, u64, u64), StoreError> {
+    let sql = "select coalesce(sum(block_size * total_blocks), 0), \
+               coalesce(sum(used_blocks), 0), coalesce(max(block_size), 0) \
+               from pragma_database_size()";
     let err = |source| StoreError::Sql {
         statement: sql.to_string(),
         source,
     };
     conn.query_row(sql, [], |r| {
-        let block_size: i64 = r.get(0)?;
-        let total_blocks: i64 = r.get(1)?;
-        let used_blocks: i64 = r.get(2)?;
+        let bytes: i64 = r.get(0)?;
+        let used_blocks: i64 = r.get(1)?;
+        let block_size: i64 = r.get(2)?;
         Ok((
-            (block_size * total_blocks).max(0) as u64,
+            bytes.max(0) as u64,
             used_blocks.max(0) as u64,
+            block_size.max(0) as u64,
         ))
     })
     .map_err(err)
@@ -308,6 +353,15 @@ grain = "position"
     /// populated directly (not through `publish_file`) so the test
     /// controls `gen_id`, `source_time`, `loaded_at` and `row_count`
     /// exactly.
+    ///
+    /// `file_generations`' own `file_id`s (11, 12, 13) are deliberately
+    /// **not** the same as the `gen_id`s (1, 2, 3) they name: review
+    /// round 1 MAJ-1 found that with `file_id == gen_id`, a join keyed
+    /// on the wrong column still happened to line up, and no assertion
+    /// checked the actual `loaded_at`/`file_rows` *values* to notice.
+    /// One more `file_generations` row (file_id 199, gen_id 99) has no
+    /// matching `generations` row at all — an orphan `file_generations`
+    /// never reconciled away, the shape MAJ-2's bound exists for.
     fn fixture_with_two_generations() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
@@ -336,15 +390,18 @@ grain = "position"
                    ('risk_snapshot','BK000','BK000',2,TIMESTAMPTZ '2026-08-10T00:00:00Z'),
                    ('risk_snapshot','BK001','BK001',3,TIMESTAMPTZ '2026-08-12T00:00:00Z');
                  insert into file_generations values
-                   (1,'risk_snapshot','BK000','/p1',100,
+                   (11,'risk_snapshot','BK000','/p1',100,
                     TIMESTAMPTZ '2026-08-01T00:05:00Z',TIMESTAMPTZ '2026-08-01T00:00:00Z',
                     1,TIMESTAMPTZ '2026-08-01T00:05:00Z',2,'ok',NULL,false),
-                   (2,'risk_snapshot','BK000','/p2',150,
+                   (12,'risk_snapshot','BK000','/p2',150,
                     TIMESTAMPTZ '2026-08-10T00:05:00Z',TIMESTAMPTZ '2026-08-10T00:00:00Z',
                     2,TIMESTAMPTZ '2026-08-10T00:05:00Z',3,'ok',NULL,false),
-                   (3,'risk_snapshot','BK001','/p3',120,
+                   (13,'risk_snapshot','BK001','/p3',120,
                     TIMESTAMPTZ '2026-08-12T00:05:00Z',TIMESTAMPTZ '2026-08-12T00:00:00Z',
-                    3,TIMESTAMPTZ '2026-08-12T00:05:00Z',2,'ok',NULL,false);",
+                    3,TIMESTAMPTZ '2026-08-12T00:05:00Z',2,'ok',NULL,false),
+                   (199,'risk_snapshot','ORPHAN','/orphan',1,
+                    TIMESTAMPTZ '2026-08-13T00:05:00Z',TIMESTAMPTZ '2026-08-13T00:00:00Z',
+                    99,TIMESTAMPTZ '2026-08-13T00:05:00Z',7,'ok',NULL,false);",
             )
             .unwrap();
         // `pragma_database_size()`'s `total_blocks` reflects what has
@@ -388,11 +445,36 @@ grain = "position"
             vec![(1, false), (2, true)]
         );
         assert_eq!(bk000.resolved_gen, None, "live: nothing resolved");
-        assert!(
-            bk000.generations[1].loaded_at.is_some() && bk000.generations[1].file_rows.is_some()
+        // By value, not just presence (review round 1 MAJ-1): both
+        // generations, so a join that takes "any row" rather than the
+        // one keyed by this exact `gen_id` cannot pass by accident.
+        assert_eq!(
+            bk000.generations[0].loaded_at,
+            Some(ts("2026-08-01T00:05:00Z")),
+            "gen 1's own loaded_at"
+        );
+        assert_eq!(
+            bk000.generations[0].file_rows,
+            Some(2),
+            "gen 1's own file, not gen 2's"
+        );
+        assert_eq!(
+            bk000.generations[1].loaded_at,
+            Some(ts("2026-08-10T00:05:00Z")),
+            "gen 2's own loaded_at"
+        );
+        assert_eq!(
+            bk000.generations[1].file_rows,
+            Some(3),
+            "gen 2's own file, not gen 1's"
         );
         assert_eq!(ds.live_rows, f.live_rows_expected);
-        assert!(snap.database_bytes > 0 && snap.memory_bytes > 0 && snap.threads > 0);
+        assert!(
+            snap.database_bytes > 0
+                && snap.block_size > 0
+                && snap.memory_bytes > 0
+                && snap.threads > 0
+        );
     }
 
     #[test]
@@ -412,7 +494,20 @@ grain = "position"
     fn the_row_counts_agree_with_duckdb_by_execution() {
         // `estimated_size` is an estimate; on a freshly checkpointed
         // table it equals `count(*)` (verified by execution 2026-09-08).
+        // This only verifies the easy direction: the fixture never
+        // deletes, so it says nothing about `estimated_size` diverging
+        // from `count(*)` after a delete that has not been vacuumed —
+        // exactly what a republish does (`store::publish`'s outgoing
+        // generation is deleted from live before the incoming one is
+        // inserted). That gap is consistent with the field being
+        // documented as an estimate, not a defect this test should
+        // close.
         let f = fixture_with_two_generations();
+        // Redundant with `fixture_with_two_generations`'s own
+        // up-front checkpoint (kept for this test's own documentation
+        // value: this is the assertion that specifically depends on a
+        // checkpointed table, so it states the precondition itself
+        // rather than relying on the fixture silently having done it).
         f.store.writer().execute_batch("checkpoint;").unwrap();
         let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
         let live: i64 = f
@@ -425,5 +520,130 @@ grain = "position"
             )
             .unwrap();
         assert_eq!(snap.datasets[0].live_rows, live as u64);
+        // MIN-1: `archive_rows` had no assertion anywhere and no
+        // harness entry defended it — the fixture's own oracle is the 2
+        // rows inserted into `risk_snapshot_position_archive`.
+        assert_eq!(snap.datasets[0].archive_rows, 2);
+    }
+
+    /// Review round 1 MAJ-2: `file_generations_for` must read only the
+    /// generations `generations` still names, not every row
+    /// `file_generations` has ever accumulated. The fixture's orphan
+    /// row (`gen_id` 99, `file_id` 199) has no matching `generations`
+    /// row; a correct read excludes it, so the map holds exactly the
+    /// three surviving generations, not four.
+    #[test]
+    fn file_generations_for_excludes_a_row_whose_generation_no_longer_exists() {
+        let f = fixture_with_two_generations();
+        let loaded = file_generations_for(f.store.writer(), "risk_snapshot").unwrap();
+        assert_eq!(
+            loaded.len(),
+            3,
+            "exactly the three generations `generations` still names, not the orphan too"
+        );
+        assert!(
+            !loaded.contains_key(&99),
+            "the orphaned file_generations row must not be read"
+        );
+    }
+
+    /// The production shape (`store::publish`'s `generation_summary_insert`):
+    /// one file publishes every book it touches under a single `gen_id`
+    /// and `source_time`, and `book` can be NULL — a real partition, not
+    /// a missing one (review round 1 MAJ-3). Two batches so a test can
+    /// isolate either half of the `(batch, book)` partition key:
+    ///
+    /// - `EOD/BK000` (2 generations), `EOD/BK001`, and `EOD/NULL` all
+    ///   share batch `"EOD"` — comparing `batch` alone collapses these
+    ///   three into one partition.
+    /// - `EOD/NULL` and `FOLLOWUP/NULL` share book `None` and sort
+    ///   adjacently (`order by batch, book, …`, NULL last within a
+    ///   batch, `"EOD" < "FOLLOWUP"`) — comparing `book` alone collapses
+    ///   these two into one partition instead.
+    ///
+    /// No live/archive data rows: `partitions_for` and `resolve_
+    /// generations` read only `generations`, so this fixture populates
+    /// nothing else.
+    fn fixture_one_batch_many_books() -> Fixture {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        let ds = position_only_dataset();
+        store.apply_schema(&ds).unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        store
+            .writer()
+            .execute_batch(
+                "insert into generations values
+                   ('risk_snapshot','EOD','BK000',1,TIMESTAMPTZ '2026-08-01T00:00:00Z'),
+                   ('risk_snapshot','EOD','BK000',2,TIMESTAMPTZ '2026-08-10T00:00:00Z'),
+                   ('risk_snapshot','EOD','BK001',2,TIMESTAMPTZ '2026-08-10T00:00:00Z'),
+                   ('risk_snapshot','EOD',NULL,2,TIMESTAMPTZ '2026-08-10T00:00:00Z'),
+                   ('risk_snapshot','FOLLOWUP',NULL,6,TIMESTAMPTZ '2026-08-11T00:00:00Z');",
+            )
+            .unwrap();
+
+        Fixture {
+            _dir: dir,
+            store,
+            schema,
+            between: ts("2026-08-05T00:00:00Z"),
+            live_rows_expected: 0,
+        }
+    }
+
+    #[test]
+    fn partitions_group_by_batch_and_book_together_not_either_alone() {
+        let f = fixture_one_batch_many_books();
+        let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
+        let ds = &snap.datasets[0];
+        let names: std::collections::BTreeSet<(String, Option<String>)> = ds
+            .partitions
+            .iter()
+            .map(|p| (p.batch.clone(), p.book.clone()))
+            .collect();
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from([
+                ("EOD".to_string(), Some("BK000".to_string())),
+                ("EOD".to_string(), Some("BK001".to_string())),
+                ("EOD".to_string(), None),
+                ("FOLLOWUP".to_string(), None),
+            ]),
+            "four distinct (batch, book) partitions — neither half of the key alone"
+        );
+    }
+
+    #[test]
+    fn the_bookless_partition_is_kept_as_its_own_partition_with_its_generation_live() {
+        let f = fixture_one_batch_many_books();
+        let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::Live).unwrap();
+        let ds = &snap.datasets[0];
+        let bookless = ds
+            .partitions
+            .iter()
+            .find(|p| p.batch == "EOD" && p.book.is_none())
+            .expect("EOD's bookless partition must be present, not dropped");
+        assert_eq!(bookless.generations.len(), 1);
+        assert_eq!(bookless.generations[0].gen_id, 2);
+        assert!(bookless.generations[0].live);
+    }
+
+    #[test]
+    fn under_an_as_of_the_bookless_partition_resolves_too() {
+        let f = fixture_one_batch_many_books();
+        let at = ts("2026-08-15T00:00:00Z"); // after every generation
+        let snap = build_catalog(f.store.writer(), &f.schema, &AsOf::At(at)).unwrap();
+        let ds = &snap.datasets[0];
+        let bookless = ds
+            .partitions
+            .iter()
+            .find(|p| p.batch == "EOD" && p.book.is_none())
+            .unwrap();
+        assert_eq!(bookless.resolved_gen, Some(2));
     }
 }
