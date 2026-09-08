@@ -4019,6 +4019,52 @@ run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
   '    Ok(path)' \
   geode-app write_crash_file_prunes_to_the_newest_ten
 
+# ---- Final fix wave (whole-branch review, 2026-09-08): MAJ-1..MAJ-4 ----
+
+run_mutation "service: an ingest failure is keyed by the source name, not the dataset" \
+  crates/geode-data/src/service.rs \
+  '                    sink(DataEvent::Health {
+                        source,
+                        worst: Health::Failed {' \
+  '                    sink(DataEvent::Health {
+                        source: dataset.clone(),
+                        worst: Health::Failed {' \
+  geode-data a_load_failure_reports_health_under_the_source_name_not_the_dataset_name
+
+run_mutation "service: a degraded publish also reaches the entity as Health" \
+  crates/geode-data/src/service.rs \
+  '                    if health != Health::Ok {' \
+  '                    if false && health != Health::Ok {' \
+  geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
+
+run_mutation "scheduler: Health::Ok goes out only on a transition, not every clean poll" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                            if *last == Some(Health::Ok) {
+                                true
+                            } else {' \
+  '                            if false {
+                                true
+                            } else {' \
+  geode-data a_steadily_healthy_source_produces_exactly_one_ok_across_many_polls
+
+run_mutation "scheduler: a recovered source is reported Health::Ok" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                        None => {
+                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
+                            if *last == Some(Health::Ok) {
+                                true
+                            } else {
+                                *last = Some(Health::Ok);
+                                sink(SchedulerEvent::Health {
+                                    source: spec.name.clone(),
+                                    worst: Health::Ok,
+                                    detail: String::new(),
+                                })
+                            }
+                        }' \
+  '                        None => true,' \
+  geode-data a_degraded_source_that_recovers_emits_an_ok_health_event
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
