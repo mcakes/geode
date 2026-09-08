@@ -60,9 +60,12 @@ pub enum IngestEvent {
     PlanComplete,
 }
 
-/// Where events go. `false` means nobody is listening, which stops the
-/// runner. Called from the runner's own thread with no lock held, so a
-/// sink must not block indefinitely — a channel send is fine.
+/// Where events go. `false` means "this event was not delivered" —
+/// the caller's bounded channel was full, or its receiver is gone. It is
+/// never a shutdown signal: the runner keeps working through one and the
+/// event is simply dropped (Phase 4b follow-up, Task 1; the runner's only
+/// stop is `IngestHandle::shutdown`). Called from the runner's own thread,
+/// so a sink must not block indefinitely — a channel send is fine.
 pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 
 #[derive(Default)]
@@ -280,7 +283,7 @@ fn run(
                 if !announced_idle {
                     announced_idle = true;
                     if !sink(IngestEvent::PlanComplete) {
-                        return;
+                        log_refused_event("the queue-drained announcement");
                     }
                 }
                 let (guard, _) = cvar
@@ -342,7 +345,10 @@ fn run(
             });
             clear_in_flight(&queue);
             if !failed {
-                return;
+                log_refused_event(&format!(
+                    "the undeclared-dataset failure for {}/{}",
+                    item.dataset, item.batch
+                ));
             }
             continue;
         };
@@ -414,9 +420,26 @@ fn run(
         // duplicate submitted mid-load harmless.
         clear_in_flight(&queue);
         if !delivered {
-            return; // receiver gone: nothing left to report to
+            log_refused_event(&format!(
+                "the load outcome for {}/{}",
+                item.dataset, item.batch
+            ));
         }
     }
+}
+
+/// A refused event was not delivered — the caller's bounded channel was
+/// momentarily full, or its receiver is gone. Either way the runner keeps
+/// going (Phase 4b follow-up, Task 1: exit-on-false was never the shutdown
+/// path — `IngestHandle::shutdown` + `Drop` is, and one cold-start burst
+/// filling a 256-slot channel used to end ingest for the session). Logged
+/// once per refusal, never retried: the health transitions that matter are
+/// re-offered by `HealthTracker` on the next report.
+fn log_refused_event(what: &str) {
+    tracing::warn!(
+        target: "geode::ingest",
+        "event channel refused {what}: dropped, the runner keeps working",
+    );
 }
 
 /// Backfill items yield between files so current work is not starved. The
@@ -519,6 +542,131 @@ mod tests {
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
         let plan = crate::ingest::build_plan(&[(spec, found)]);
         (db_dir, src_dir, store, ds, plan)
+    }
+
+    /// A sink that forwards into a channel but REFUSES the first event
+    /// matching `refuse` — returning `false` without sending it. `false`
+    /// means "this event was not delivered", never "stop producing"
+    /// (Phase 4b follow-up, Task 1): every test below asserts the runner
+    /// kept working through one. The returned counter is how many
+    /// refusals actually happened, so a test can wait for the refusal
+    /// rather than racing it.
+    fn refusing_sink(
+        refuse: fn(&IngestEvent) -> bool,
+    ) -> (
+        IngestSink,
+        Receiver<IngestEvent>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (tx, rx) = channel();
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&refusals);
+        let sink: IngestSink = Arc::new(move |e: IngestEvent| {
+            if refuse(&e) && counter.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return false;
+            }
+            tx.send(e).is_ok()
+        });
+        (sink, rx, refusals)
+    }
+
+    /// Block until `counter` reaches `n`, or fail. The refusal happens on
+    /// the runner's own thread; a test that submitted more work without
+    /// waiting would not know whether the refusal came first.
+    fn wait_for_count(counter: &std::sync::atomic::AtomicUsize, n: usize, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if counter.load(std::sync::atomic::Ordering::SeqCst) >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {n} {what}");
+    }
+
+    #[test]
+    fn a_refused_publish_does_not_stop_the_runner() {
+        // A momentarily full event channel is not a shutdown signal: the
+        // runner's own `shutdown` is (Phase 4b follow-up, Task 1).
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
+        let first = plan.items[0].clone();
+        let second = plan.items[1].clone();
+
+        let (sink, rx, refusals) = refusing_sink(|e| {
+            matches!(
+                e,
+                IngestEvent::Published { .. } | IngestEvent::Failed { .. }
+            )
+        });
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        handle.submit(WorkPlan { items: vec![first] });
+        wait_for_count(&refusals, 1, "refused terminal events");
+
+        handle.submit(WorkPlan {
+            items: vec![second.clone()],
+        });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Published { batch, .. } if *batch == second.batch
+            )),
+            "the item after a refused event must still load and report: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_plan_complete_does_not_stop_the_runner() {
+        let (_db, _src, store, ds, plan) = harness();
+        let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::PlanComplete));
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        // The runner idles immediately with an empty queue, announces
+        // once, and that announcement is refused.
+        wait_for_count(&refusals, 1, "refused PlanComplete events");
+
+        handle.submit(plan);
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::Published { .. })),
+            "work submitted after a refused idle announcement must still load: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_undeclared_dataset_failure_does_not_stop_the_runner() {
+        let (_db, _src, store, ds, plan) = harness();
+        let mut undeclared = plan.items[0].clone();
+        undeclared.dataset = "not_declared_anywhere".into();
+        let good = plan.items[0].clone();
+
+        let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::Failed { .. }));
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        handle.submit(WorkPlan {
+            items: vec![undeclared],
+        });
+        wait_for_count(&refusals, 1, "refused Failed events");
+
+        handle.submit(WorkPlan {
+            items: vec![good.clone()],
+        });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Published { batch, .. } if *batch == good.batch
+            )),
+            "an undeclared dataset's refused failure must not end the runner: {events:?}"
+        );
     }
 
     /// Terse RFC 3339 literal, matching the convention used by
