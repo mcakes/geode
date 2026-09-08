@@ -1590,22 +1590,52 @@ source_name = "NPV"
     /// source health the scheduler's old, service-local dedup knew
     /// nothing about). Two publishes, same source, different batches: the
     /// first violates the carried-dimension rule, the second does not.
+    ///
+    /// **Isolation from the scheduler's own signal is deliberate.** Any
+    /// poll that *discovers* a `Ready` file also, in that same cycle,
+    /// computes `worst_health` as `None` over it (`Ready` candidates are
+    /// skipped, never counted unhealthy) — so a poll that notices a new
+    /// clean file tends to send its own `Ok` before that file has even
+    /// finished loading, which would let the SCHEDULER path mask a
+    /// broken ingest-sink path rather than this test catching it. Both
+    /// files are written and discovered together, in the ONE poll a
+    /// 3600s `poll_interval` allows within this test's run — after that,
+    /// the only thing that can still change the entity's health is a
+    /// PUBLISH. `source_time` (the sentinel's `as_of`) makes the load
+    /// order deterministic: the runner's queue sorts newest-first at the
+    /// same priority, so the degraded batch (newer `as_of`) loads before
+    /// the clean one.
     #[test]
     fn a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish() {
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
 
         // batch BK0: currency varies within its instrument key — Degraded.
+        // Newer `as_of` than BK1, so it is queued (and loads) first.
         std::fs::write(
-            src.path().join("risk_2026-08-24_BK0.csv"),
+            src.path().join("risk_2026-08-25_BK0.csv"),
             "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
              BK0,L0,P1,C,I1,USD,100\n\
              BK0,L0,P1,C,I1,EUR,100\n",
         )
         .unwrap();
         std::fs::write(
-            src.path().join("risk_2026-08-24_BK0.csv.done"),
-            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+            src.path().join("risk_2026-08-25_BK0.csv.done"),
+            r#"{"as_of":"2026-08-25T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        // batch BK1: a clean, non-violating publish for the SAME source.
+        // Older `as_of` than BK0, so it loads second.
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK1.csv"),
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK1,L0,P2,C,I2,USD,50\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK1.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK1"]}"#,
         )
         .unwrap();
 
@@ -1624,7 +1654,10 @@ source_name = "NPV"
                 paths: vec![format!("{}/*.csv", src.path().display())],
                 readiness: crate::source::Readiness::Sentinel,
                 priority: crate::source::Priority::LatestRisk,
-                poll_interval: Duration::from_millis(50),
+                // Long enough that the cold-start poll is the only one
+                // to ever run within this test — see the doc comment
+                // above for why that matters.
+                poll_interval: Duration::from_secs(3600),
                 pending_timeout: Duration::from_secs(3600),
                 batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
             }],
@@ -1645,19 +1678,6 @@ source_name = "NPV"
             }
         }
         assert!(saw_degraded, "setup: the first publish must degrade");
-
-        // batch BK1: a clean, non-violating publish for the SAME source.
-        std::fs::write(
-            src.path().join("risk_2026-08-25_BK1.csv"),
-            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
-             BK1,L0,P2,C,I2,USD,50\n",
-        )
-        .unwrap();
-        std::fs::write(
-            src.path().join("risk_2026-08-25_BK1.csv.done"),
-            r#"{"as_of":"2026-08-25T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK1"]}"#,
-        )
-        .unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(30);
         let mut saw_ok = false;
