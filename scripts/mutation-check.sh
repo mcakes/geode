@@ -1308,6 +1308,30 @@ run_mutation "keymap_edit: unbind always shadows instead of removing" \
   geode-shell \
   unbinding_a_user_layer_binding_removes_the_key
 
+# Fix round 1, Critical: `bindings = [ { ... } ]` is a legal keymap
+# document (build.rs reads it as a plain TOML array) but is not an
+# `ArrayOfTables`, so the old code silently replaced it with an empty one
+# and destroyed every binding on write. Disabling the shape guard falls
+# through to treating it as already-fine, which this entry catches.
+run_mutation "keymap_edit: bindings-not-an-array-of-tables is silently accepted" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        Some(item) if item.as_array_of_tables().is_none() => {' \
+  '        Some(item) if false => {' \
+  geode-shell \
+  bindings_as_a_plain_array_is_rejected_without_touching_the_file
+
+# Fix round 1, Important: `keys = { ... }` (an inline table) is also legal
+# and also loaded fine by build.rs, but `Item::as_table_mut` returns `None`
+# for one even though `is_table_like` already said yes — the old code
+# panicked on exactly the input its own guard claimed to have handled.
+# Reachable from a keystroke once Task 4 wires `d` to apply_unbind.
+run_mutation "keymap_edit: keys_table_for panics on an inline keys table" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        .as_table_like_mut()' \
+  '        .as_table_mut()' \
+  geode-shell \
+  keys_as_an_inline_table_does_not_panic_and_stays_editable
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \
