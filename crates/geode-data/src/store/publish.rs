@@ -86,6 +86,45 @@ fn partition_predicate(partitions: &[Partition]) -> String {
     }
 }
 
+/// The `generations` summary insert for one publish: one `values` row per
+/// `req.partitions` entry, guarded by `where not exists` so it is
+/// idempotent across the grains that call `publish_file` for the same
+/// file -- every grain names the identical (dataset, batch, book, gen_id,
+/// source_time) tuple, and only the first grain's call actually inserts
+/// it. Literals are quoted the same way `partition_predicate` quotes
+/// them: these values come from the catalog and the sentinel, not user
+/// input.
+fn generation_summary_insert(req: &PublishRequest) -> String {
+    let dataset = req.dataset.replace('\'', "''");
+    let time = req.source_time.to_rfc3339();
+    let rows = req
+        .partitions
+        .iter()
+        .map(|p| {
+            let book = match &p.book {
+                Some(b) => format!("'{}'", b.replace('\'', "''")),
+                None => "NULL::varchar".to_string(),
+            };
+            format!(
+                "('{dataset}', '{}', {book}, {}::bigint, '{time}'::timestamptz)",
+                p.batch.replace('\'', "''"),
+                req.gen_id,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "insert into generations
+         select v.* from (values {rows}) v(dataset, batch, book, gen_id, source_time)
+         where not exists (
+             select 1 from generations g
+             where g.dataset = v.dataset and g.batch = v.batch
+               and g.book is not distinct from v.book
+               and g.gen_id = v.gen_id and g.source_time = v.source_time
+         );"
+    )
+}
+
 pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOutcome, StoreError> {
     let live = table_name(&req.dataset, req.grain, TableKind::Live);
     let archive = table_name(&req.dataset, req.grain, TableKind::Archive);
@@ -124,13 +163,26 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     };
 
     if superseded {
+        // In its own transaction, same as the normal branch below: the
+        // generation must not be recorded in the summary unless the
+        // archive insert it describes actually committed.
         let sql = format!(
-            "insert into {archive} select *, {}, '{}'::timestamptz from {}",
+            "begin;
+             insert into {archive} select *, {}, '{}'::timestamptz from {};
+             {summary}
+             commit;",
             req.gen_id,
             req.source_time.to_rfc3339(),
-            req.staging_table
+            req.staging_table,
+            summary = generation_summary_insert(req),
         );
-        conn.execute_batch(&sql).map_err(sql_err(&sql))?;
+        if let Err(source) = conn.execute_batch(&sql) {
+            let _ = conn.execute_batch("rollback;");
+            return Err(StoreError::Sql {
+                statement: sql,
+                source,
+            });
+        }
         return Ok(PublishOutcome::ArchivedOnly {
             rows: staged_rows as usize,
             reason: format!(
@@ -141,8 +193,10 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
     }
 
     // One transaction: archive the outgoing rows, drop them from live,
-    // insert the new ones. Any failure rolls the whole thing back, so a
-    // failed load leaves live untouched (spec §5.7).
+    // insert the new ones, and record the generation in the summary. Any
+    // failure rolls the whole thing back, so a failed load leaves live
+    // untouched (spec §5.7) *and* the summary unrecorded -- it must never
+    // claim a generation that did not actually land.
     //
     // The outgoing rows move with `select *` — keeping the `gen_id` and
     // `source_time` they carried while live. Stamping them with the
@@ -154,10 +208,12 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
          delete from {live} where {predicate};
          insert into {live}
              select *, {gen}, '{time}'::timestamptz from {staging};
+         {summary}
          commit;",
         gen = req.gen_id,
         time = req.source_time.to_rfc3339(),
         staging = req.staging_table,
+        summary = generation_summary_insert(req),
     );
     if let Err(source) = conn.execute_batch(&sql) {
         let _ = conn.execute_batch("rollback;");
@@ -176,6 +232,8 @@ pub fn publish_file(conn: &Connection, req: &PublishRequest) -> Result<PublishOu
 mod tests {
     use super::*;
     use crate::store::Store;
+    use crate::store::catalog::Catalog;
+    use crate::store::ddl::assert_generations_match_tables;
     use chrono::{DateTime, Utc};
 
     /// Terse RFC 3339 literal for tests.
@@ -183,11 +241,26 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
+    /// This dataset's whole history, for the generations-summary oracle.
+    const POSITION_TABLES: [&str; 2] = [
+        "risk_snapshot_position_live",
+        "risk_snapshot_position_archive",
+    ];
+
+    fn assert_summary_matches(store: &Store) {
+        assert_generations_match_tables(
+            store.writer(),
+            "risk_snapshot",
+            &POSITION_TABLES.map(String::from),
+        );
+    }
+
     /// Minimal live/archive pair so the test exercises the transaction, not
     /// DDL generation.
     fn fixture() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
         store
             .writer()
             .execute_batch(
@@ -495,5 +568,242 @@ mod tests {
             vec![("BK000".to_string(), 10.0)],
             "a failed load never clobbers the last good generation (spec §5.7)"
         );
+    }
+
+    fn generation_row_count(store: &Store) -> i64 {
+        store
+            .writer()
+            .query_row(
+                "select count(*) from generations where dataset = 'risk_snapshot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn a_normal_publish_records_the_generation_in_the_summary() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        assert_summary_matches(&store);
+        assert_eq!(generation_row_count(&store), 1);
+    }
+
+    #[test]
+    fn a_republish_leaves_the_summary_matching_the_archived_and_live_generations() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-29T07:00:00Z")),
+        )
+        .unwrap();
+        store
+            .writer()
+            .execute_batch("delete from staging_position")
+            .unwrap();
+        stage(&store, "BK000", 99.0, "BK000", 2);
+        let mut req = request("BK000", "BK000", 2, ts("2026-08-30T07:00:00Z"));
+        req.live_source_time = Some(ts("2026-08-29T07:00:00Z"));
+        publish_file(store.writer(), &req).unwrap();
+
+        assert_summary_matches(&store);
+        assert_eq!(generation_row_count(&store), 2, "both generations recorded");
+    }
+
+    #[test]
+    fn an_archived_only_publish_records_the_generation_too() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 99.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        store
+            .writer()
+            .execute_batch("delete from staging_position")
+            .unwrap();
+        stage(&store, "BK000", 10.0, "BK000", 2);
+        let mut req = request("BK000", "BK000", 2, ts("2026-08-25T07:00:00Z"));
+        req.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
+        let out = publish_file(store.writer(), &req).unwrap();
+        assert!(matches!(out, PublishOutcome::ArchivedOnly { .. }));
+
+        assert_summary_matches(&store);
+        let recorded: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from generations
+                 where dataset = 'risk_snapshot' and batch = 'BK000'
+                   and gen_id = 2 and source_time = '2026-08-25T07:00:00Z'::timestamptz",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1, "the archived-only generation must be recorded");
+    }
+
+    #[test]
+    fn a_failed_publish_leaves_no_summary_row() {
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+
+        let mut bad = request("BK000", "BK000", 2, ts("2026-08-31T07:00:00Z"));
+        bad.staging_table = "no_such_table".into();
+        bad.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
+        assert!(publish_file(store.writer(), &bad).is_err());
+
+        assert_summary_matches(&store);
+        assert_eq!(
+            generation_row_count(&store),
+            1,
+            "the failed publish's rollback must cover the summary insert too"
+        );
+    }
+
+    /// A second grain's live/archive pair, publishing the same file's other
+    /// grain under the identical generation.
+    fn add_underlying_tables(store: &Store) {
+        store
+            .writer()
+            .execute_batch(
+                "create table risk_snapshot_underlying_live(
+                     book varchar, position_ref varchar, delta01 double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 create table risk_snapshot_underlying_archive(
+                     book varchar, position_ref varchar, delta01 double,
+                     batch varchar, source_file_id bigint,
+                     gen_id bigint, source_time timestamp with time zone);
+                 create table staging_underlying(
+                     book varchar, position_ref varchar, delta01 double,
+                     batch varchar, source_file_id bigint);",
+            )
+            .unwrap();
+    }
+
+    fn underlying_request(
+        batch: &str,
+        book: Option<&str>,
+        generation: i64,
+        t: DateTime<Utc>,
+    ) -> PublishRequest {
+        PublishRequest {
+            dataset: "risk_snapshot".into(),
+            grain: Grain::Underlying,
+            staging_table: "staging_underlying".into(),
+            partitions: vec![Partition {
+                batch: batch.into(),
+                book: book.map(String::from),
+            }],
+            gen_id: generation,
+            source_time: t,
+            live_source_time: None,
+        }
+    }
+
+    #[test]
+    fn publishing_the_same_files_second_grain_does_not_duplicate_the_summary_row() {
+        let (_d, store) = fixture();
+        add_underlying_tables(&store);
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        store
+            .writer()
+            .execute(
+                "insert into staging_underlying values ('BK000', 'POS1', 5.0, 'BK000', 1)",
+                [],
+            )
+            .unwrap();
+
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        publish_file(
+            store.writer(),
+            &underlying_request("BK000", Some("BK000"), 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+
+        let tables = [
+            "risk_snapshot_position_live",
+            "risk_snapshot_position_archive",
+            "risk_snapshot_underlying_live",
+            "risk_snapshot_underlying_archive",
+        ]
+        .map(String::from);
+        assert_generations_match_tables(store.writer(), "risk_snapshot", &tables);
+        assert_eq!(
+            generation_row_count(&store),
+            1,
+            "one file publishing two grains under the same generation is one row"
+        );
+    }
+
+    #[test]
+    fn a_null_book_partition_round_trips_with_no_duplicate_on_the_second_grain() {
+        let (_d, store) = fixture();
+        add_underlying_tables(&store);
+        store
+            .writer()
+            .execute(
+                "insert into staging_position values (NULL, 'POS9', 3.0, 'BK000', 1)",
+                [],
+            )
+            .unwrap();
+        store
+            .writer()
+            .execute(
+                "insert into staging_underlying values (NULL, 'POS9', 5.0, 'BK000', 1)",
+                [],
+            )
+            .unwrap();
+
+        publish_file(
+            store.writer(),
+            &underlying_request("BK000", None, 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        let mut pos_req = request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z"));
+        pos_req.partitions = vec![Partition {
+            batch: "BK000".into(),
+            book: None,
+        }];
+        publish_file(store.writer(), &pos_req).unwrap();
+
+        let tables = [
+            "risk_snapshot_position_live",
+            "risk_snapshot_position_archive",
+            "risk_snapshot_underlying_live",
+            "risk_snapshot_underlying_archive",
+        ]
+        .map(String::from);
+        assert_generations_match_tables(store.writer(), "risk_snapshot", &tables);
+        assert_eq!(
+            generation_row_count(&store),
+            1,
+            "no duplicate on the second grain"
+        );
+        let book: Option<String> = store
+            .writer()
+            .query_row(
+                "select book from generations where dataset = 'risk_snapshot'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(book, None, "the bookless partition must be present");
     }
 }
