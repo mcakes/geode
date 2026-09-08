@@ -140,6 +140,26 @@ impl ShellView {
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
         self.fill_all_tiles(&mut all);
+        // Phase 4b Task 5 fix round 1, MAJ-2: tell a vanished tile's
+        // occupant it is no longer visible BEFORE dropping it — the
+        // visibility diff further down only ever compares
+        // `self.visible_tiles` against `active` (the *live* set), so a
+        // tile that closed between one render and the next was never in
+        // `active` to begin with and that diff's `self.occupants.get(id)`
+        // would already be `None` by the time it got there, silently
+        // skipping the `set_visible(false)` call every occupant is owed
+        // (`TileContent::set_visible`'s own doc comment: "hidden tiles
+        // may drop subscriptions"). No `Drop` impl can do this instead —
+        // it has no `Context` to call back into gpui with — and this is
+        // generic over every module, not diagnostics-specific: any
+        // occupant that opens something in `set_visible(true)` (a
+        // `Diagnostics::watch()`, a future module's own equivalent) leaks
+        // it forever otherwise.
+        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                o.content.set_visible(false, cx);
+            }
+        }
         self.occupants.retain(|id, _| all.contains(id));
 
         // Computed here, ahead of the creation loop (I2, final review),

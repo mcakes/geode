@@ -7,6 +7,159 @@ use super::*;
 // this to resolve to the real module rather than to the sibling test file.
 use crate::session;
 
+/// A minimal `ModuleFactory` that calls `Diagnostics::watch`/`unwatch`
+/// from `set_visible` — the same thing `geode_diagnostics::DiagnosticsTile`
+/// does (a crate `geode-shell` cannot depend on: layering), modelling the
+/// generic occupant-lifecycle contract MAJ-2 is about (`ensure_occupants`
+/// must tell a vanished tile's occupant it is hidden before dropping it)
+/// without needing the real module.
+mod watching {
+    use super::*;
+    use crate::keymap::KeyContext;
+    use crate::module::{FindEvent, ModuleFactory, TileContent, TileOccupant};
+    use geode_core::query::QueryOutcome;
+    use gpui::{App, Context, FocusHandle, Render, div};
+
+    pub const WATCHING_KIND: &str = "watching";
+
+    pub struct WatchingFactory;
+
+    struct WatchingView {
+        tile: TileId,
+        focus: FocusHandle,
+    }
+    impl Render for WatchingView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .track_focus(&self.focus)
+                .debug_selector(|| format!("tile-content-{}", self.tile.0))
+        }
+    }
+
+    struct WatchingContent {
+        diagnostics: Entity<Diagnostics>,
+        // Mirrors `DiagnosticsTile::visible`'s own de-dup guard: `ensure_
+        // occupants` tells a freshly created, active occupant `true`
+        // twice (I2, final review — "harmless" for a private bool flip,
+        // but `Diagnostics::watch` is a real counter, so a real occupant
+        // must not double-count it either).
+        visible: std::cell::Cell<bool>,
+    }
+    impl TileContent for WatchingContent {
+        fn key_context(&self, _cx: &App) -> KeyContext {
+            KeyContext::new(WATCHING_KIND)
+        }
+        fn dispatch(&self, _: &ActionId, _: Option<u32>, _: &mut Window, _: &mut App) -> bool {
+            false
+        }
+        fn command(&self, _: &str, _: &mut Window, _: &mut App) -> Result<(), String> {
+            Err("no commands".into())
+        }
+        fn completions(&self, _: &str, _: usize, _: &App) -> Vec<String> {
+            Vec::new()
+        }
+        fn find(&self, _: FindEvent, _: &mut Window, _: &mut App) {}
+        fn deliver(&self, _: QueryOutcome, _: &mut Window, _: &mut App) {}
+        fn set_visible(&self, visible: bool, cx: &mut App) {
+            if self.visible.get() == visible {
+                return;
+            }
+            self.visible.set(visible);
+            self.diagnostics.update(cx, |d, cx| {
+                if visible {
+                    d.watch();
+                } else {
+                    d.unwatch();
+                }
+                cx.notify();
+            });
+        }
+        fn serialize(&self, _: &App) -> toml::Table {
+            toml::Table::new()
+        }
+    }
+
+    impl ModuleFactory for WatchingFactory {
+        fn kind(&self) -> &'static str {
+            WATCHING_KIND
+        }
+        fn register_actions(&self, _: &mut ActionRegistry) {}
+        fn create(
+            &self,
+            tile: TileId,
+            _restored: Option<&toml::Table>,
+            _frame: Entity<Frame>,
+            diagnostics: Entity<Diagnostics>,
+            _window: &mut Window,
+            cx: &mut App,
+        ) -> TileOccupant {
+            let focus = cx.focus_handle();
+            let view = cx.new(|_| WatchingView { tile, focus });
+            TileOccupant {
+                kind: WATCHING_KIND,
+                view: view.into(),
+                content: Box::new(WatchingContent {
+                    diagnostics,
+                    visible: std::cell::Cell::new(false),
+                }),
+            }
+        }
+    }
+}
+
+/// MAJ-2 (Phase 4b Task 5 fix round 1): closing a tile must tell its
+/// occupant it went invisible before dropping it, so an occupant that
+/// opened something in `set_visible(true)` (`Diagnostics::watch`, here)
+/// gets the matching `unwatch` rather than leaking a watcher forever.
+#[gpui::test]
+fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let mut roster = crate::module::ModuleRoster::new("watching");
+    roster.add(Box::new(watching::WatchingFactory));
+    roster.register_actions(&mut services.registry);
+    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let (keymap, diags) = build_keymap(&[doc], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services.roster = roster;
+
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        Some(watching::WATCHING_KIND)
+    );
+    assert_eq!(
+        diagnostics.read_with(&cx, |d, _| d.watchers()),
+        1,
+        "the freshly opened, visible tile watches"
+    );
+
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        None,
+        "the occupant is gone"
+    );
+    assert_eq!(
+        diagnostics.read_with(&cx, |d, _| d.watchers()),
+        0,
+        "closing the tile must unwatch, not leak the watcher"
+    );
+}
+
 #[gpui::test]
 fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(cx: &mut gpui::TestAppContext) {
     // The record names a kind nothing in the roster registers, so

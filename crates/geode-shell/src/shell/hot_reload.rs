@@ -387,7 +387,25 @@ impl ShellView {
                     }
                 });
             }
-            if views_changed {
+            // Phase 4b Task 5 fix round 1, MAJ-3: unconditional now,
+            // unlike the `ConfigReloaded` emission just above — that event
+            // is scoped to what the DATA thread needs (`views`/
+            // `dimensions`), but `versions.config` is a general "some
+            // config was reloaded" signal other observers key off (the
+            // diagnostics module's config-section explainer, `main.rs`'s
+            // own config-refresh subscription) and must bump on every
+            // applied reload, including an `[log]`- or `[theme]`-only
+            // edit that leaves `views`/`dimensions` untouched — otherwise
+            // exactly the reload `:level`'s own persist write causes
+            // never refreshes the one tile whose job is to show it.
+            // `BlotterTile::follows_changed` also reads this counter (a
+            // requery on config != data change), so this does mean a
+            // visible blotter tile now requeries on every applied reload,
+            // not only a `views`/`dimensions` one — accepted: reloads are
+            // rare, deliberate file edits (the ~500ms poll only acts when
+            // something actually changed), not a per-frame or per-
+            // keystroke cost.
+            {
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();

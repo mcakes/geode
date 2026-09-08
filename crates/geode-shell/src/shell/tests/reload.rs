@@ -67,6 +67,52 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     });
 }
 
+/// Phase 4b Task 5 fix round 1, MAJ-3: `versions.config` must bump on
+/// every *applied* reload, not only one that changes `views`/
+/// `dimensions` — `note_config_reloaded`'s call used to sit behind the
+/// same `views_changed` gate as `ShellEvent::ConfigReloaded` (which is
+/// correctly scoped to what the data thread needs), so anything gating
+/// on "config was just reloaded" — chiefly the diagnostics module's
+/// config-section explainer — went stale on the reload `:level`'s own
+/// persist write causes (an `[log]`-only `app.toml` change).
+/// `config_with_mod` only touches `app.toml`'s `[keymap]` table:
+/// `views`/`dimensions` are both absent, so `views_changed` is false for
+/// this reload, and before the fix `versions.config` would not have
+/// moved at all.
+#[gpui::test]
+fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view().clone().downcast::<ShellView>().unwrap()
+    });
+
+    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let new_config = config_with_mod("cmd");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    let v1 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    assert!(
+        v1.config > v0.config,
+        "views/dimensions untouched, but the config version must still bump \
+         (v0={v0:?}, v1={v1:?})"
+    );
+}
+
 /// An error-severity diagnostic in the new config (here: an
 /// unsupported `config_version`) means the entire previous `Config`
 /// (and everything built from it — mod alias, keymap) is kept

@@ -465,6 +465,28 @@ impl Diagnostics {
         self.watchers
     }
 
+    /// Queue a fresh catalog request without changing any diagnostic data
+    /// (Phase 4b Task 5 fix round 1, MAJ-7): the resolved-generation
+    /// marker the data section paints (spec §4.5) is computed by the data
+    /// thread from the `CatalogParams::as_of` the request that produced
+    /// the held `CatalogSnapshot` carried — nothing re-requests one when
+    /// the frame's as-of changes, so a stale snapshot keeps marking a
+    /// generation the engine would no longer resolve to. The diagnostics
+    /// tile calls this when its own observed `as_of` version changed
+    /// while visible; the bridge's drain (already reading the frame's
+    /// *current* as-of at request time) does the rest.
+    ///
+    /// Never bumps `version` — same reasoning as [`Self::watch`]'s own
+    /// "does not itself bump" doc comment: nothing about the diagnostic
+    /// *data* changed, only what the bridge's drain is queued to do next.
+    /// Callers MUST `cx.notify()` themselves in the same update block —
+    /// the bridge's `cx.observe(&diagnostics, ..)` drain does not gate on
+    /// `version`, only on the pending flag, but it never runs at all
+    /// without a notify to wake it.
+    pub fn request_catalog(&mut self) {
+        self.pending_catalog_request = true;
+    }
+
     /// `:level <target> <level>` (a later task's module command) or the
     /// reload-driven `[log]` pickup: updates `self.levels` (via
     /// `LogLevels::with`, the same retain-then-push `[log]` parsing
@@ -840,6 +862,21 @@ mod tests {
             d.take_pending_catalog_request(),
             "becoming watched requests the first catalog"
         );
+        assert!(!d.take_pending_catalog_request(), "drained");
+    }
+
+    /// Phase 4b Task 5 fix round 1, MAJ-7: `request_catalog` queues a
+    /// request without touching `version` — a caller (the diagnostics
+    /// tile, on an as-of change) must still notify itself for the bridge
+    /// to see it, but nothing about this call is itself a diagnostic-data
+    /// change.
+    #[test]
+    fn request_catalog_queues_without_bumping_the_version() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let v = d.version();
+        d.request_catalog();
+        assert_eq!(d.version(), v, "no diagnostic data changed");
+        assert!(d.take_pending_catalog_request());
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 

@@ -179,30 +179,45 @@ fn main() {
                 }
 
                 // The diagnostics factory's config refresh (Phase 4b Task
-                // 5): independent of the data bridge above — this module
-                // needs no `DataHandle`, so it subscribes for itself
-                // rather than piggybacking on `bridge::attach`, which does
-                // not run at all when no `[sources]`/`[datasets]` are
-                // configured. `ShellEvent::ConfigReloaded` fires on every
-                // reload that changed `views`/`dimensions` (`shell::
-                // hot_reload::apply_reload`); `set_config` gives the
-                // config section's explainer a fresh `Config` to walk the
-                // same way `BlotterFactory::set_views`/`set_schema` refresh
-                // theirs on the same event.
+                // 5, fix round 1 MAJ-3): independent of the data bridge
+                // above — this module needs no `DataHandle`, so it
+                // subscribes for itself rather than piggybacking on
+                // `bridge::attach`, which does not run at all when no
+                // `[sources]`/`[datasets]` are configured. `ShellEvent::
+                // ConfigReloaded` (the original wiring) only fires when a
+                // reload changed `views`/`dimensions` — most reloads
+                // (`[log]`, `[theme]`, `keymap.toml`, ...) never touch it,
+                // so the config section's explainer went stale on exactly
+                // the reload `:level`'s own persist causes. `Frame::
+                // versions().config` now bumps on every *applied* reload
+                // (`hot_reload::apply_reload`'s `note_config_reloaded`
+                // call moved out from under the `views_changed` gate), so
+                // observing the frame directly and comparing that counter
+                // is the ungated signal this refresh actually needs — the
+                // same counter `DiagnosticsTile`'s own `cx.observe(&frame,
+                // ..)` narrows to (`config` + `as_of` only, fix round 1
+                // MAJ-6). `last_config_version` is a `Cell` (not a plain
+                // local) so the `FnMut` the observer boxes can update it
+                // between calls — same shape as `bridge.rs`'s own
+                // `catalog_tag: Rc<Cell<u64>>`. Guarded so a frame notify
+                // for an unrelated reason (a scope keystroke, an as-of
+                // change) does not re-clone `Config` for nothing.
                 cx.update(|cx| {
                     let shell = window
                         .read(cx)
                         .ok()
                         .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
                         .expect("the window's root view is the shell");
-                    cx.subscribe(
-                        &shell,
-                        move |shell, event: &geode_shell::shell::ShellEvent, cx| {
-                            if matches!(event, geode_shell::shell::ShellEvent::ConfigReloaded) {
-                                diagnostics_factory.set_config(shell.read(cx).config().clone());
-                            }
-                        },
-                    )
+                    let frame = shell.read(cx).frame().clone();
+                    let last_config_version =
+                        std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).versions().config));
+                    cx.observe(&frame, move |frame, cx| {
+                        let now = frame.read(cx).versions().config;
+                        if now != last_config_version.get() {
+                            last_config_version.set(now);
+                            diagnostics_factory.set_config(shell.read(cx).config().clone());
+                        }
+                    })
                     .detach();
                 });
             })
