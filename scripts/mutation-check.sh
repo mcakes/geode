@@ -4090,6 +4090,15 @@ run_mutation "diagnostics tile: since is seeded from the ring's current latest_s
   '            since: 0,' \
   geode-diagnostics a_freshly_opened_tile_does_not_claim_records_it_never_had
 
+run_mutation "sections: the resolved-generation marker requires the snapshot's own as_of to match the frame's" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                let marked = !as_of.is_live()
+                    && snapshot_matches_as_of
+                    && part.resolved_gen == Some(generation.gen_id);' \
+  '                let marked = !as_of.is_live()
+                    && part.resolved_gen == Some(generation.gen_id);' \
+  geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
