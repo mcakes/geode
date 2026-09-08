@@ -108,8 +108,9 @@ Phase 4c is done when, in `geode --demo`:
 - **Editing `datasets` or `dimensions`.** They are the desk's schema
   contract, a change is restart-required, and the inspector is read-only
   (§9).
-- **New default key bindings.** Every dialog is palette-only, as
-  `keybindings::open` already is (§10).
+- **New default key bindings to *open* a dialog.** Every dialog is
+  palette-only, as `keybindings::open` already is (§10). The verbs
+  *inside* a dialog are letters, per the interaction model.
 - **The workspace scope layer**, vim-modal editing, multi-window,
   scenario datasets, the sidecar split and as-of diffing — all still out,
   per Phase 4 §1.3.
@@ -196,75 +197,66 @@ stage recursive.
 built first (§14): if the vocabulary is wrong, it is wrong before three
 more adapters depend on it.
 
-### 3.2 Keys, and why there are no new bindings
+### 3.2 Keys
 
-Inside a `GeodeModal` with a focused `Input`, the key space is nearly
-exhausted. `listfilter::nav_command` claims `up`/`down`/`ctrl+p`/
-`ctrl+n`/`ctrl+d`/`ctrl+u`/`ctrl+b`/`ctrl+f`/`pageup`/`pagedown`;
-`dialog::init_reclaimed_keybindings` has spent `tab`, `ctrl+a`,
-`ctrl+x` and `ctrl+f`. There is no room for new/delete/revert/save
-chords, and inventing them would mean reclaiming more keys from
-gpui-component's `Input` for every dialog in the app.
+These dialogs are **modal surfaces** under
+`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
+which governs the vocabulary and must land first. They open in normal
+mode; `/` enters filter mode; letters are verbs.
 
-So **every verb is a row, not a chord.** The browse list opens with a
-`+ New <thing>` row. The edit list ends with an action block:
-
-- `Save changes` — shown only while the draft is dirty, and the only
-  thing that writes. There is no `ctrl+s`: a save is a row like any
-  other, committed with `enter`.
-- `Delete this <thing>`
-- `Revert to desk` — shown only when the object is overridden
-- `Copy to user layer` — shown instead of the three above when the
-  object's winning layer is builtin or desk and nothing overrides it yet
-
-Each is committed with `enter`, the key both stages already use. This
-costs nothing in the keymap, is discoverable without a hint line, and
-keeps every dialog's vocabulary identical to the two that already exist.
-
-Field edits therefore **stage into the draft and do not write**. This is
-the one place these dialogs deliberately differ from `settings_view`,
-where a step applies immediately: a setting is one scalar with a live
-preview, while an object is a set of fields that is only coherent once,
-and writing on every `tab` would fire the watcher mid-edit and reload a
-half-finished object.
-
-The full vocabulary, advertised in a footer hint row in the mould
-`shell::picker` now uses:
+An earlier draft of this section made every verb a row, because with an
+always-focused `Input` the key space was exhausted and there was nowhere
+else to put them. Two prototypes changed that: the row form makes the
+list **reflow while you edit** (a `Save changes` row appearing under the
+cursor the moment a draft goes dirty), and dropping the focused input
+frees every letter. Verbs are now keys *and* buttons.
 
 | Stage | Keys |
 |---|---|
-| Browse | type to filter · `up`/`down` move · `enter` open · `escape` close |
-| Edit | type to filter · `up`/`down` move · `tab` change value · `enter` commit a row · `escape` back |
+| Browse | `/` filter · `j`/`k` move · `enter` open · `n` new · `escape` close |
+| Edit | `/` filter · `j`/`k` move · `space` include · `shift+j`/`shift+k` reorder · `i` edit text · `s` save · `d` delete · `r` revert · `escape` back |
 
-`escape` in `Browse` closes the modal, as it does in every other Geode
-dialog. `escape` in `Edit` returns to `Browse`; if the draft is dirty it
-first replaces the action block with a single `Discard unsaved changes?`
-row, so abandoning work is itself a deliberate `enter` rather than a
-keystroke that silently throws it away.
+Every verb is **also a button** in a bar pinned below the row list,
+labelled with its own key. That is what makes a letter verb
+discoverable and mouse-reachable — a key alone has no clickable target,
+and every other verb in Geode's dialogs has one. `Save changes` appears
+in the bar only while the draft is dirty, `Revert to desk` only when the
+object is overridden, and `Copy to user layer` replaces both when the
+winning layer is builtin or desk. The bar sits outside the scrolling
+list, so **the row list never changes length as you edit**.
+
+Field edits **stage into the draft and do not write**. This is the one
+place these dialogs deliberately differ from `settings_view`, where a
+step applies immediately: a setting is one scalar with a live preview,
+while an object is a set of fields that is only coherent once, and
+writing on every keystroke would fire the watcher mid-edit and reload a
+half-finished object.
+
+`escape` follows the interaction model's ladder (§5 there): filter mode
+→ normal mode keeping the query, → clear the query, → back a stage, →
+close. Leaving `Edit` with a dirty draft runs a confirm first, so
+abandoning work is a deliberate act rather than a keystroke that
+silently discards it.
 
 ### 3.3 Editing a field
 
-`tab` is the universal "change this value" key, as it already is in
-`settings_view` (step) and `picker` (tick):
+`space` is the universal "change this value" key in normal mode:
 
 - `Bool` — toggles.
-- `Choice` — steps forward, `shift+tab` back, wrapping, exactly
-  `settings_view::step`.
+- `Choice` — steps forward, `shift+space` back, wrapping — the same
+  stepping `settings_view::step` performs, on a key that is free here.
 - `Number` — steps by the field's increment, clamped to `min`/`max`.
-- `MultiChoice` — ticks the highlighted option, `ctrl+a` ticks all
-  shown, `ctrl+x` clears, exactly `picker`'s values stage.
-- `OrderedList` — `tab` toggles `included`. Reordering cannot use
-  `ctrl+p`/`ctrl+n`, which `listfilter::nav_command` already owns as
-  list navigation in every surface here, so it borrows the stage idea
-  instead: `enter` on an item **picks it up**, `up`/`down` then move the
-  held item rather than the selection, and `enter` drops it. One held
-  item at a time, `escape` drops it where it started. No new key, and
-  the held state is visible in the row's own styling. Width is a
-  `Number` sub-row shown under an included item.
-- `Text` — `enter` on the row retargets `ShellView::dialog_input` from
-  the filter to that field, with the filter suppressed until `enter` or
-  `escape` commits or abandons it. This is the one genuinely new
-  interaction, and it is confined to one field kind.
+- `MultiChoice` — ticks the highlighted option; `ctrl+a` ticks all
+  shown and `ctrl+x` clears, exactly as `picker`'s values stage does.
+- `OrderedList` — `space` toggles `included`, and `shift+j`/`shift+k`
+  move the item. An earlier draft needed a pick-up sub-mode here
+  (`enter` to grab, arrows to move, `enter` to drop) purely because no
+  key was free; the interaction model deletes it. Width is a `Number`
+  sub-row shown under an included item.
+- `Text` — `i` edits the value in place, `escape` leaves the field. An
+  earlier draft retargeted the always-focused filter input at the field,
+  which was this spec's least certain interaction and its open question
+  2; normal mode removes the need for it.
 
 ## 4. The adapter seam
 
@@ -645,10 +637,14 @@ working rhythm: worktree, review per task, all five CI checks green on
 macOS and Windows, `--changed` mutation after every task, the full
 harness at branch end.
 
+0. **The interaction model lands first**, on its own branch — the mode
+   machinery and the keybinding dialog's migration, per that spec's §13.
+   Nothing below starts until it merges, because every task after this
+   one assumes its vocabulary.
 1. **The write door.** `config_write`, and the six existing persist
-   paths migrated onto it. No new UI. This lands first because
-   everything writes through it and because it is the one task that can
-   regress existing behaviour.
+   paths migrated onto it. No new UI. This lands first among 4c's own
+   tasks because everything writes through it and because it is the one
+   task that can regress existing behaviour.
 2. **`SourceSpec::from_doc` moves to `geode-core`** (§2.2), with
    `geode-data` re-exporting. Its own task because it touches the crate
    graph.
@@ -671,10 +667,11 @@ None block the plans. Recorded so they are not rediscovered.
 
 1. **The 500 ms apply latency** (§7.1). Measured on a display before
    deciding whether a post-write watcher nudge is worth its complexity.
-2. **`Text` field input retargeting** (§3.3) is the one new interaction
-   in the design. If it proves awkward on a display, the fallback is a
-   dedicated single-field sub-stage, which costs a stage but no new
-   keys.
+2. **`space` as the toggle key** (§3.3). Free in normal mode and
+   universal for checkbox lists, but also the key most likely to be
+   pressed by someone who thinks they are still typing. The mode
+   indicator is the defence; `x` is the fallback. Carried from the
+   interaction model's own risk 3, and settled there, not here.
 3. **Whether `layouts` deserves a sixth dialog.** It is an atomic doc
    like the rest, but nothing authors layouts by hand today — the
    session does it. Left out until there is a story for it.
