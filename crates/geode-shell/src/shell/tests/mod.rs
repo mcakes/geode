@@ -55,6 +55,9 @@ pub(super) fn test_services() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 
@@ -260,6 +263,9 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 /// `apply_reload` is `ShellView`'s real config-hot-reload apply path
@@ -288,6 +294,7 @@ mod diagnostics;
 mod dock;
 mod drag;
 mod flip;
+mod input;
 mod keybindings_dialog;
 mod occupants;
 mod palette;

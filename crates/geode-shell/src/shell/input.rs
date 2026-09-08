@@ -105,6 +105,18 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Recorded before matching (Phase 4b Task 6): the crash hook's
+        // only view into "what was the user doing" reads this tail
+        // through the `Arc<Mutex<_>>` it was handed at startup, so every
+        // dispatch — reached or not by the branches below — must land in
+        // it first. A hash, not the `ActionId` itself (`ActionTail::
+        // record`'s own doc comment): no allocation per keypress.
+        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&action.0);
+
         // Every workspace verb below ignores the count; only the module
         // fall-through at the end (Phase 3 §3.3) is count-aware today.
         let handled = apply_workspace_action(&mut self.services.workspaces, action);

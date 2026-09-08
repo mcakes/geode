@@ -21,7 +21,7 @@
 //! without interrupting a load in flight (spec §5.4).
 
 use crate::health::Health;
-use crate::ingest::load::{LoadRequest, load_file};
+use crate::ingest::load::{LoadError, LoadOutcome, LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
@@ -80,13 +80,30 @@ pub struct IngestHandle {
 
 pub struct IngestRunner;
 
+/// The work a file load does. A function pointer rather than a direct
+/// call to [`load_file`] so a test can inject one that panics — the
+/// same shape as `geode_data::query::pool::RunFn`, and for the same
+/// reason: there is no CSV that makes `load_file` itself panic, and
+/// panic-safety (Phase 4b Task 6: the file and the panic payload land
+/// in the reported `Failed.reason`) is the property worth testing here.
+type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
+
 impl IngestRunner {
     pub fn spawn(store: Store, schema: SchemaSpec, sink: IngestSink) -> IngestHandle {
+        Self::spawn_with_load(store, schema, sink, load_file)
+    }
+
+    fn spawn_with_load(
+        store: Store,
+        schema: SchemaSpec,
+        sink: IngestSink,
+        load: LoadFn,
+    ) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
             .name("geode-ingest".into())
-            .spawn(move || run(store, schema, worker_queue, sink))
+            .spawn(move || run(store, schema, worker_queue, sink, load))
             .expect("spawning the ingest thread");
         IngestHandle {
             queue,
@@ -223,7 +240,13 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
     q.in_flight = None;
 }
 
-fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, sink: IngestSink) {
+fn run(
+    store: Store,
+    schema: SchemaSpec,
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    sink: IngestSink,
+    load: LoadFn,
+) {
     // PlanComplete is announced once per drain, on the transition from
     // working to idle — not on every wakeup. An idle runner would otherwise
     // push an event every poll interval, forever, into an unbounded channel.
@@ -312,7 +335,7 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
             let CandidateState::Ready(sentinel) = &item.candidate.state else {
                 return Err("candidate was not ready".to_string());
             };
-            load_file(
+            load(
                 &store,
                 &LoadRequest {
                     dataset,
@@ -345,11 +368,26 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 batch: item.batch.clone(),
                 reason,
             },
-            Err(_) => IngestEvent::Failed {
-                dataset: item.dataset.clone(),
-                batch: item.batch.clone(),
-                reason: "ingest task panicked".into(),
-            },
+            Err(payload) => {
+                // The panic's payload (Phase 4b Task 6, spec §4.7's
+                // as-built deviation: a panicking load is `Failed`, not
+                // `Degraded` — the plan's ruling): `&str`/`String` cover
+                // every `panic!`/`unwrap`/`expect` in practice; anything
+                // else (a custom payload type) falls back to a named
+                // placeholder rather than losing the event.
+                let message = panic_payload_message(payload.as_ref());
+                let path = item.candidate.csv_path.display();
+                tracing::error!(
+                    target: "geode::ingest",
+                    file = %path,
+                    "ingest task panicked: {message}"
+                );
+                IngestEvent::Failed {
+                    dataset: item.dataset.clone(),
+                    batch: item.batch.clone(),
+                    reason: format!("ingest task panicked at {path}: {message}"),
+                }
+            }
         };
         let delivered = sink(event);
         // Cleared only now: while the load ran, `in_flight` kept a
@@ -366,6 +404,21 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
 /// intent is testable and named.
 pub fn is_preemptible(item: &WorkItem) -> bool {
     item.priority == Priority::Backfill
+}
+
+/// A `catch_unwind` payload as text, for the `Failed.reason` a panicking
+/// load produces (Phase 4b Task 6). `panic!`/`unwrap`/`expect` payloads
+/// are always `&'static str` or `String`; anything else (a custom
+/// `panic_any` payload) falls back to a named placeholder rather than
+/// losing the event.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    }
 }
 
 #[cfg(test)]
@@ -738,6 +791,52 @@ mod tests {
         assert_eq!(
             published, good,
             "one bad file must not stop the run (spec §5.7)"
+        );
+    }
+
+    /// A runner delivering into a channel, built on an injected `load` —
+    /// mirrors `query/pool.rs`'s `channel_pool_with`, for a test that
+    /// needs to control what a load does (panic) rather than run a real
+    /// one.
+    fn spawn_channel_with_load(
+        store: Store,
+        schema: geode_core::schema::SchemaSpec,
+        load: LoadFn,
+    ) -> (IngestHandle, Receiver<IngestEvent>) {
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        (IngestRunner::spawn_with_load(store, schema, sink, load), rx)
+    }
+
+    fn boom(_store: &Store, _req: &LoadRequest) -> Result<LoadOutcome, LoadError> {
+        panic!("injected panic payload");
+    }
+
+    #[test]
+    fn a_panicking_load_names_the_file_and_the_panic_payload() {
+        let (_db, _src, store, ds, plan) = harness();
+        let item = plan.items[0].clone();
+        let path = item.candidate.csv_path.clone();
+
+        let (handle, rx) = spawn_channel_with_load(store, schema_of(ds), boom);
+        handle.submit(WorkPlan { items: vec![item] });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                IngestEvent::Failed { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Failed event: {events:?}"));
+        assert!(
+            reason.contains(&path.display().to_string()),
+            "reason must name the file: {reason}"
+        );
+        assert!(
+            reason.contains("injected panic payload"),
+            "reason must carry the panic payload: {reason}"
         );
     }
 

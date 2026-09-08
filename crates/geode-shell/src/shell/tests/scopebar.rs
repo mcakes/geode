@@ -49,6 +49,9 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 
@@ -288,6 +291,9 @@ fn services_with_saved_scope() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 

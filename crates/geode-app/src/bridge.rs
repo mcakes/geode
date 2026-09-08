@@ -597,6 +597,9 @@ role = "key"
             restored_tiles: TileRecords::new(),
             restored_frame: None,
             log: None,
+            action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+                geode_shell::diagnostics::ActionTail::new(),
+            )),
         }
     }
 

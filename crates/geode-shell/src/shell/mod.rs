@@ -33,6 +33,7 @@ pub use keys::convert_keystroke;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use gpui::prelude::*;
@@ -44,7 +45,7 @@ use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
-use crate::diagnostics::Diagnostics;
+use crate::diagnostics::{ActionTail, Diagnostics};
 use crate::fontsize::FontSize;
 use crate::frame::{Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
@@ -98,6 +99,15 @@ pub struct ShellServices {
     /// setup that doesn't opt in — logging is then simply not wired up,
     /// never a panic (mirrors `session_path`'s own "missing = skipped").
     pub log: Option<LogServices>,
+    /// The last 32 dispatched actions' hashes (Phase 4b Task 6): recorded
+    /// by `ShellView::dispatch` before it matches the action, read by the
+    /// crash hook (`geode_app::crash::install_panic_hook`) through the
+    /// `Arc<Mutex<_>>` handed to it at startup — a shared handle, not a
+    /// snapshot, so the hook always sees the latest keypresses right up
+    /// to the panic. A `Mutex`, not `RefCell`: this must be `Send + Sync`
+    /// to be captured by the 'static panic hook closure alongside
+    /// `ActionRegistry::hash_names`'s own `Arc<RwLock<_>>`.
+    pub action_tail: Arc<Mutex<ActionTail>>,
 }
 
 /// The pieces of the installed `tracing` subscriber the shell needs at

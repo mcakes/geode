@@ -1127,6 +1127,9 @@ fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 

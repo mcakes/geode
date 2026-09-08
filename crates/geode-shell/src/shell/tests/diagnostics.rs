@@ -359,6 +359,9 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     };
 
     let window = cx

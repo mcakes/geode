@@ -8,7 +8,7 @@ mod demo;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
@@ -19,7 +19,7 @@ use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
     register_scope_actions,
 };
-use geode_shell::diagnostics::Diagnostics;
+use geode_shell::diagnostics::{ActionTail, Diagnostics};
 use geode_shell::fonts;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
@@ -95,6 +95,34 @@ fn main() {
 
             let (mut services, desk, user, bridge, diagnostics_factory) =
                 build_shell_services(demo_root.as_deref(), log_ring, log_control, cx);
+
+            // The panic hook (Phase 4b Task 6), installed after the
+            // subscriber (`install_logging`, at the very top of `main`)
+            // and once `services` exists, since it needs `registry.
+            // hash_names()` — a snapshot that stays live across later
+            // registrations (a config reload's `register_pick_actions`/
+            // `register_scope_actions`), not a one-time copy. `log` is
+            // always `Some` on this path (`install_logging` always
+            // builds a `Ring`); the `if let` mirrors every other
+            // "missing = skipped, never a panic" spot in this file
+            // rather than assuming it.
+            if let Some(log) = &services.log {
+                let names_snapshot = services.registry.hash_names();
+                let names: Arc<dyn Fn(u64) -> Option<String> + Send + Sync> = Arc::new(move |h| {
+                    names_snapshot
+                        .read()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&h)
+                        .cloned()
+                });
+                crash::install_panic_hook(
+                    user.clone(),
+                    log.ring.clone(),
+                    services.action_tail.clone(),
+                    names,
+                );
+            }
+
             for warning in services.theme.apply_from_config(&services.config, cx) {
                 tracing::warn!(target: "geode::theme", "{warning}");
             }
@@ -531,6 +559,12 @@ fn build_shell_services(
             control: log_control,
             levels: log_levels,
         }),
+        // Phase 4b Task 6: the shared handle the crash hook resolves
+        // through, installed once `main`'s `run` closure has this
+        // `ShellServices` back (`install_panic_hook` needs `registry.
+        // hash_names()`, which only exists once `registry` — moved into
+        // `services` above — is built).
+        action_tail: Arc::new(Mutex::new(ActionTail::new())),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }
