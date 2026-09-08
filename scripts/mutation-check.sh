@@ -3459,6 +3459,80 @@ run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
   '' \
   geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
 
+# --- Task 5: the geode-diagnostics module ---------------------------
+
+run_mutation "diagnostics module: sources sorted best-first instead of worst-first" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    reported.sort_by(|a, b| b.1.health.cmp(&a.1.health).then_with(|| a.0.cmp(b.0)));' \
+  '    reported.sort_by(|a, b| a.1.health.cmp(&b.1.health).then_with(|| a.0.cmp(b.0)));' \
+  geode-diagnostics sources_are_sorted_worst_first_with_their_detail
+
+run_mutation "diagnostics module: the resolved-generation marker points at the wrong generation" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                let marked = !as_of.is_live() && part.resolved_gen == Some(generation.gen_id);' \
+  '                let marked = !as_of.is_live() && part.resolved_gen == Some(generation.gen_id + 1);' \
+  geode-diagnostics data_rows_mark_the_resolved_generation_under_an_as_of
+
+run_mutation "diagnostics module: the log filter matches every row regardless of target or level" \
+  crates/geode-diagnostics/src/sections.rs \
+  '        .filter(|r| filter.is_empty() || r.text.contains(filter))
+        .collect()' \
+  '        .filter(|_r| true)
+        .collect()' \
+  geode-diagnostics log_rows_filter_by_target_or_level_text
+
+run_mutation "diagnostics module: move_cursor never clears follow" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        let target = (self.cursor as isize + delta).clamp(0, len - 1);
+        self.cursor = target as usize;
+        self.follow = false;
+        cx.notify();
+    }' \
+  '        let target = (self.cursor as isize + delta).clamp(0, len - 1);
+        self.cursor = target as usize;
+        cx.notify();
+    }' \
+  geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
+
+run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        cx.observe(&diagnostics, |this, diagnostics, cx| {
+            let now = diagnostics.read(cx).version();
+            if now != this.last_diagnostics_version {
+                this.last_diagnostics_version = now;
+                this.rebuild(cx);
+            }
+        })
+        .detach();' \
+  '        cx.observe(&diagnostics, |this, diagnostics, cx| {
+            let now = diagnostics.read(cx).version();
+            this.last_diagnostics_version = now;
+            this.rebuild(cx);
+        })
+        .detach();' \
+  geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
+
+run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let ws = self.services.workspaces.active();
+        let found: Option<(TileId, Option<DockSide>)> = ws
+            .tree()
+            .tiles()
+            .into_iter()
+            .find(|id| self.occupant_kind(*id) == Some(kind))
+            .map(|id| (id, None))
+            .or_else(|| {
+                ws.docks().iter().find_map(|(side, dock)| {
+                    dock.tree()
+                        .tiles()
+                        .into_iter()
+                        .find(|id| self.occupant_kind(*id) == Some(kind))
+                        .map(|id| (id, Some(side)))
+                })
+            });' \
+  '        let found: Option<(TileId, Option<DockSide>)> = None;' \
+  geode-shell open_module_twice_yields_one_tile_of_that_kind_focused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
