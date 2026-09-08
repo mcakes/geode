@@ -4256,6 +4256,68 @@ run_mutation "commands: diagnostics completions split words on the shell's delim
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
 
+run_mutation "runner: a refused idle announcement drops the event, it does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    if !sink(IngestEvent::PlanComplete) {
+                        log_refused_event("the queue-drained announcement");
+                    }' \
+  '                    if !sink(IngestEvent::PlanComplete) {
+                        return;
+                    }' \
+  geode-data a_refused_plan_complete_does_not_stop_the_runner
+
+run_mutation "runner: a refused undeclared-dataset failure does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            if !failed {
+                log_refused_event(&format!(
+                    "the undeclared-dataset failure for {}/{}",
+                    item.dataset, item.batch
+                ));
+            }' \
+  '            if !failed {
+                return;
+            }' \
+  geode-data a_refused_undeclared_dataset_failure_does_not_stop_the_runner
+
+run_mutation "runner: a refused load outcome does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if !delivered {
+            log_refused_event(&format!(
+                "the load outcome for {}/{}",
+                item.dataset, item.batch
+            ));
+        }' \
+  '        if !delivered {
+            return;
+        }' \
+  geode-data a_refused_publish_does_not_stop_the_runner
+
+run_mutation "scheduler: a refused event does not stop polling every source" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            tracing::warn!(
+                target: "geode::ingest",
+                "event channel refused a discovery event for source '"'"'{}'"'"': dropped, polling continues",
+                spec.name,
+            );' \
+  '            return;' \
+  geode-data a_refused_event_does_not_stop_the_scheduler
+
+run_mutation "pool: a refused result does not stop the worker" \
+  crates/geode-data/src/query/pool.rs \
+  '            tracing::warn!(
+                target: "geode::query",
+                "event channel refused the result for view '"'"'{}'"'"': dropped, the worker keeps working",
+                req.view.0,
+            );' \
+  '            return;' \
+  geode-data a_refused_result_does_not_stop_the_worker
+
+run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never a full one" \
+  crates/geode-app/src/bridge.rs \
+  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
+  '            if !warned_closed.swap(true, Ordering::Relaxed) {' \
+  geode-app a_full_channel_is_counted_but_not_reported_as_a_gone_receiver
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
