@@ -529,15 +529,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
 mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
-    use geode_core::query::{CatalogOutcome, CatalogSnapshot};
+    use geode_core::log::Ring;
+    use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot};
     use geode_data::source::{Priority, Readiness, SourceSpec};
+    use geode_diagnostics::DiagnosticsFactory;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
-    use geode_shell::module::ModuleRoster;
+    use geode_shell::module::{ModuleFactory, ModuleRoster};
     use geode_shell::session::TileRecords;
     use geode_shell::shell::ShellServices;
-    use geode_shell::tiling::Workspaces;
+    use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
 
@@ -889,6 +891,104 @@ role = "key"
         match request_rx.try_recv() {
             Ok(geode_data::Request::Catalog(_)) => {}
             other => panic!("expected a Request::Catalog on the wire, got {other:?}"),
+        }
+    }
+
+    /// MAJ-7 (Phase 4b Task 5, re-reviewed fix round 2: "tested through
+    /// the bridge drain" — the entity- and tile-level tests added in fix
+    /// round 1 were not enough on their own). The data thread computes
+    /// the data section's resolved-generation marker under the as-of
+    /// carried on the `CatalogParams` of the request that produced the
+    /// held `CatalogSnapshot`; nothing re-requested one when the frame's
+    /// as-of changed until `DiagnosticsTile`'s own frame observer started
+    /// calling `Diagnostics::request_catalog()`. Exercised end to end
+    /// through the real `geode_diagnostics::DiagnosticsFactory`, a real
+    /// visible tile, and the real `attach()`-installed observer + drain:
+    /// opening the tile watches (the first `Request::Catalog`, drained
+    /// here), then changing the frame's as-of must produce a SECOND
+    /// `Request::Catalog` carrying the new as-of — not the entity/tile
+    /// unit tests' proxy of "the pending flag got set", but the real
+    /// request landing on the wire with the right value.
+    #[gpui::test]
+    fn an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, request_rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+        // A real diagnostics tile, created through the real factory, the
+        // same door `main.rs`'s roster and `ensure_occupants` use.
+        let diagnostics_factory =
+            DiagnosticsFactory::new(Arc::new(Ring::new(64)), Config::default());
+        let occupant = vcx.update(|window, cx| {
+            diagnostics_factory.create(
+                TileId(999),
+                None,
+                frame.clone(),
+                diagnostics.clone(),
+                window,
+                cx,
+            )
+        });
+        // Becoming visible watches — the same first `Request::Catalog`
+        // `watch_reaching_the_bridge_drain_requires_the_callers_own_notify`
+        // proves above; drained here so only the as-of-driven second
+        // request is left to observe.
+        vcx.update(|_window, cx| {
+            occupant.content.set_visible(true, cx);
+        });
+        vcx.run_until_parked();
+        match request_rx.try_recv() {
+            Ok(geode_data::Request::Catalog(_)) => {}
+            other => panic!("expected the first Request::Catalog on visibility, got {other:?}"),
+        }
+
+        let at = chrono::Utc::now();
+        frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(at));
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        match request_rx.try_recv() {
+            Ok(geode_data::Request::Catalog(params)) => {
+                assert_eq!(
+                    params.as_of,
+                    AsOf::At(at),
+                    "the second catalog request must carry the new as-of"
+                );
+            }
+            other => {
+                panic!("expected a second Request::Catalog carrying the new as-of, got {other:?}")
+            }
         }
     }
 
