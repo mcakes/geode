@@ -969,7 +969,11 @@ severity rank, never `Health`'s derived `Ord` — which compares the
 were ordered by the alphabet and one was dropped — and an equal rank is
 decided by whichever slot changed most recently, with an identical
 re-report changing nothing so that repeated clean polls cannot flap it
-(round 4, NEW-5). `config: Vec<Diagnostic>`
+(round 4, NEW-5). Deciding a transition and emitting it happen under one
+lock, since the two producers are separate threads and `note_health` is
+last-write-wins: released in between, two decisions could reach the
+entity in the reverse of the order they were made in and latch it on the
+older one. `config: Vec<Diagnostic>`
 is not an unconditionally-appended log: `note_config` *replaces* the
 current batch wholesale and is a no-op when the new batch is
 byte-identical to the old one (MAJ-5) — an unchanged reload (e.g. the
