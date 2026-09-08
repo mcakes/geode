@@ -1290,6 +1290,290 @@ run_mutation "matcher: the count is capped" \
   geode-shell \
   the_count_is_capped
 
+# ---- keymap_edit: unbind (dialog interaction model task 2) --------------
+#
+# The dangerous branch: a wrong `true` deletes the user's own binding on
+# that key instead of shadowing a desk one.
+run_mutation "keymap_edit: unbind always removes instead of shadowing" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    let removed = if unbind.is_user_layer {' \
+  '    let removed = if true {' \
+  geode-shell \
+  unbinding_a_lower_layer_binding_writes_a_none_shadow
+
+run_mutation "keymap_edit: unbind always shadows instead of removing" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    let removed = if unbind.is_user_layer {' \
+  '    let removed = if false {' \
+  geode-shell \
+  unbinding_a_user_layer_binding_removes_the_key
+
+# Fix round 1, Critical: `bindings = [ { ... } ]` is a legal keymap
+# document (build.rs reads it as a plain TOML array) but is not an
+# `ArrayOfTables`, so the old code silently replaced it with an empty one
+# and destroyed every binding on write. Disabling the shape guard falls
+# through to treating it as already-fine, which this entry catches.
+run_mutation "keymap_edit: bindings-not-an-array-of-tables is silently accepted" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        Some(item) if item.as_array_of_tables().is_none() => {' \
+  '        Some(item) if false => {' \
+  geode-shell \
+  bindings_as_a_plain_array_is_rejected_without_touching_the_file
+
+# Fix round 1, Important: `keys = { ... }` (an inline table) is also legal
+# and also loaded fine by build.rs, but `Item::as_table_mut` returns `None`
+# for one even though `is_table_like` already said yes — the old code
+# panicked on exactly the input its own guard claimed to have handled.
+# Reachable from a keystroke once Task 4 wires `d` to apply_unbind.
+run_mutation "keymap_edit: keys_table_for panics on an inline keys table" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '        .as_table_like_mut()' \
+  '        .as_table_mut()' \
+  geode-shell \
+  keys_as_an_inline_table_does_not_panic_and_stays_editable
+
+# Fix round 2, Important: TableLike::insert's occupied-entry branch resets
+# the key's own formatting (entry.key_mut().fmt() strips a leading comment
+# and reverts custom quoting), which round 1's index-to-insert conversion
+# regressed for every already-present key a write touches. set_key must
+# route an occupied key through get_mut, never insert.
+run_mutation "keymap_edit: set_key always inserts instead of updating in place" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    if let Some(existing) = keys.get_mut(key) {' \
+  '    if false {' \
+  geode-shell \
+  overwriting_an_existing_key_preserves_its_comment_and_quoting
+
+# ---- keybinding dialog: the two modes (dialog interaction model task 3)
+#
+# The opening mode is one line, and every other test in that file either
+# presses `/` first or uses keys both modes share — so the whole suite
+# stays green with the dialog opening filter-first, which is exactly the
+# behaviour this task removed. Only a test that asserts a bare letter did
+# NOT reach the filter can see it.
+run_mutation "keybindings: the dialog opens in filter mode" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            mode: DialogMode::Normal,' \
+  '            mode: DialogMode::Filter,' \
+  geode-shell \
+  the_dialog_opens_in_normal_mode_and_letters_do_not_type
+
+# `EscapeStep::LeaveFilter`'s contract is that the query stays APPLIED —
+# leaving a search leaves you on the match rather than undoing it. A
+# dialog that cleared the query on the way out would still walk the same
+# number of rungs and still close on the third press, so only an
+# assertion on the query between rungs catches it.
+run_mutation "keybindings: leaving filter mode clears the query" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        state.mode = DialogMode::Normal;' \
+  '        state.mode = DialogMode::Normal;
+        state.query.clear();' \
+  geode-shell \
+  escape_walks_the_ladder_one_rung_at_a_time
+
+# Review round 1, Important: the ClearQuery rung reset `selected` to 0
+# without moving the viewport, which is parked wherever the *filtered*
+# list left it — so row 0 painted above the top of the screen. Every
+# state assertion in that file stays green with this deleted; only a test
+# that asserts the row intersects the painted viewport sees it.
+run_mutation "keybindings: clearing the query leaves the viewport parked" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '                    shell.keybindings_scroll.scroll_to_item(0);' \
+  '' \
+  geode-shell \
+  clearing_the_query_scrolls_back_to_the_top
+
+# Review round 1, Minor: a bare-only escape guard in normal mode sends
+# `shift+escape` to the claim-and-drop arm, where it does nothing at all
+# — `handle_key_down`'s own close never looked at modifiers. Nothing else
+# in the suite presses a modified escape.
+run_mutation "keybindings: escape only walks the ladder when unmodified" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        if ks.key == "escape" {' \
+  '        if ks.mods == Modifiers::NONE && ks.key == "escape" {' \
+  geode-shell \
+  a_modified_escape_walks_the_same_ladder_as_a_bare_one
+
+# ---- keybinding dialog: the two verbs (dialog interaction model task 4)
+#
+# The capability the whole model exists to prove. Every entry below breaks
+# one half of it; the two `is_user_layer` entries are the pair the spec's
+# own risk list singles out ("unbind lowering to remove where it should
+# shadow, which would delete a user's *other* binding rather than silence
+# a desk one") — and its mirror, which entombs the user's own entry under
+# a redundant `"none"` so the key stays dead with nothing in the file
+# saying why.
+
+run_mutation "keybindings: d never writes an unbind" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            NormalCommand::Verb('"'"'d'"'"') => {' \
+  '            NormalCommand::Verb('"'"'\0'"'"') => {' \
+  geode-shell \
+  d_unbinds_the_selected_binding
+
+run_mutation "keybindings: r never writes a reset" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            NormalCommand::Verb('"'"'r'"'"') => {' \
+  '            NormalCommand::Verb('"'"'\u{1}'"'"') => {' \
+  geode-shell \
+  r_resets_a_user_override_by_removing_it
+
+# `d` ignoring the row's layer, both directions. A `false` here shadows
+# the user's own key with `"none"` instead of removing it; a `true`
+# removes a key that lives in a layer this app never writes, so the
+# builtin binding is left live and the user's file gains nothing.
+run_mutation "keybindings: d shadows the user's own binding instead of removing it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: bound.layer == Layer::User,' \
+  '        is_user_layer: false,' \
+  geode-shell \
+  d_on_a_user_layer_binding_removes_it_rather_than_shadowing_it
+
+run_mutation "keybindings: d removes where it should shadow a lower layer" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: bound.layer == Layer::User,' \
+  '        is_user_layer: true,' \
+  geode-shell \
+  d_unbinds_the_selected_binding
+
+# Reset is the removal branch by definition — a shadow would bury the
+# very layer it was asked to uncover.
+run_mutation "keybindings: r shadows instead of removing the user's override" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: true,' \
+  '        is_user_layer: false,' \
+  geode-shell \
+  r_resets_a_user_override_by_removing_it
+
+# Without the user-layer guard, `r` on a builtin row reaches
+# `apply_unbind` with `is_user_layer: true` against a key that is not in
+# the user file — which writes an otherwise-empty keymap.toml and, worse,
+# lowers to a `"none"` shadow the moment the guard is relaxed the other
+# way. Only a test that asserts NO file was written can see it.
+# Re-anchored in fix round 1: the single `.filter(...)` refusal split
+# into two branches, an unbound row (which HAS an override — the `"none"`
+# shadow — and is told how to recover) and a live lower-layer binding
+# (which genuinely has none). This entry defends the second guard.
+run_mutation "keybindings: r writes on a row with no user override" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if bound.layer != Layer::User {' \
+  '    if false {' \
+  geode-shell \
+  r_on_a_row_with_no_user_override_says_so_and_writes_nothing
+
+# A notice reports on the keystroke (or click) that produced it. Left
+# standing, it points at a row the user has since moved off — the footer
+# lying about the current selection, which is worse than saying nothing.
+# Re-anchored in fix round 1: the clear moved out of the normal-mode
+# `match` and onto the two doors, because three other paths (the
+# ClearQuery rung, the claim-and-drop early return, and the click) all
+# changed the selection while leaving the complaint up.
+run_mutation "keybindings: a notice outlives the keystroke it reports on" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if state.notice.take().is_some() {
+        cx.notify();
+    }
+    let visible = visible_rows(state, &rows);
+
+    if let Some(pending)' \
+  '    let visible = visible_rows(state, &rows);
+
+    if let Some(pending)' \
+  geode-shell \
+  a_notice_clears_on_the_next_normal_mode_keystroke
+
+# The second door. A click never passes through `handle_key` at all, so
+# the keystroke test above cannot see this one — and every mouse-driven
+# selection change would leave the previous row's complaint standing.
+run_mutation "keybindings: a click leaves the previous row's notice standing" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    if state.notice.take().is_some() {
+        cx.notify();
+    }
+    let visible = visible_rows(state, &rows);
+    let Some(ix)' \
+  '    let visible = visible_rows(state, &rows);
+    let Some(ix)' \
+  geode-shell \
+  clicking_a_row_clears_a_standing_notice
+
+# Fix round 1, Important 1. A row silenced by the user's own `d` HAS a
+# user override — the `"none"` shadow is one — but derives as unbound, so
+# the old single-branch refusal called it "no user override to reset".
+# That is false, and it steers the user away from the one recovery that
+# works. Every other assertion in the file stays green with the lie
+# restored; only a test on the message itself sees it.
+run_mutation "keybindings: r denies the user's own none shadow" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        return Some(format!(
+            "{} is unbound — if you silenced it, {RECOVERY}, or undo it \
+             in keymap.toml if it was context-scoped",
+            row.title
+        ));' \
+  '        return Some(format!("{} has no user override to reset", row.title));' \
+  geode-shell \
+  r_on_a_silenced_row_names_the_recovery_instead_of_denying_the_override
+
+# Fix round 1, Important 3. `d` is one bare, unmodified key performing an
+# immediate destructive disk write, and the row does not relabel until
+# the ~500ms config watcher gets to it. Without the acknowledgement the
+# keystroke is silent for half a second and never names the way back —
+# and the file it wrote is identical either way, so only an assertion on
+# the notice BEFORE `run_until_parked` catches it.
+run_mutation "keybindings: d performs its write without acknowledging it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        .or_else(|| Some(format!("silencing {key} — {way_back}")))
+' \
+  '' \
+  geode-shell \
+  d_acknowledges_the_write_immediately_and_names_the_way_back
+
+# Whole-branch review, Important 1. The `tab`/`shift+tab` reclaim was
+# scoped to `"GeodeModal"`, which rides the modal PANEL and so is only on
+# the dispatch stack while focus is inside it. Normal mode — the resting
+# state this branch introduced — parks focus on the shell root, so
+# `Root`'s window-wide Tab won and `focus_next` walked focus off the
+# shell. This root-level context is the whole fix, and a green suite
+# could not see its absence: every dialog assertion (the modal is open,
+# the row is selected, the notice is right) survives a stray focus_next
+# untouched. Only a test asserting the FOCUS STATE across a `tab` sees
+# it.
+run_mutation "dialog: tab escapes the modal in normal mode" \
+  crates/geode-shell/src/shell/render.rs \
+  '            .when(self.modal.is_some(), |el| el.key_context("GeodeModalOpen"))
+' \
+  '' \
+  geode-shell \
+  tab_in_normal_mode_leaves_focus_on_the_shell_root
+
+# Whole-branch review, Important 2. `RECOVERY` ("press enter and type
+# that key again") is exact only for a binding with NO context; for a
+# contexted one `d`'s `"none"` lands in the contexted entry while the
+# recovery rebind writes the no-context entry, so the promise is false.
+# The mutation restores the single-sentence promise. Nothing about the
+# FILE the write produces changes, so only an assertion on the message
+# for a contexted row catches it.
+run_mutation "keybindings: d promises the retype recovery for a contexted binding" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        Some(_) => RECOVERY_CONTEXTED,' \
+  '        Some(_) => RECOVERY,' \
+  geode-shell \
+  d_on_a_contexted_binding_does_not_promise_the_retype_recovery
+
+# Whole-branch review, Minor 3, the `r` half. Its success path used to
+# say nothing at all, so a reset whose `apply_unbind` came back
+# `removed: false` looked exactly like one that worked — and even a
+# working reset is invisible until the ~500ms watcher relabels the row.
+# The disk write is identical either way; only an assertion on the notice
+# before `run_until_parked` sees the silence.
+run_mutation "keybindings: r resets without acknowledging it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        .or_else(|| Some(format!("removing your {key} override")))
+' \
+  '' \
+  geode-shell \
+  r_acknowledges_the_write_it_spawned
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \

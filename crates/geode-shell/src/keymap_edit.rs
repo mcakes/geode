@@ -99,7 +99,7 @@ use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
+use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, value};
 
 /// One rebind to apply to the user keymap document. See the module doc for
 /// the full write semantics.
@@ -162,10 +162,127 @@ pub struct RebindOutcome {
 /// `new_key` still gets bound either way.
 pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, String> {
     let path = user_dir.join("keymap.toml");
+    let mut doc = open_doc_with_bindings(&path)?;
+    let bindings = doc["bindings"]
+        .as_array_of_tables_mut()
+        .expect("open_doc_with_bindings just ensured this");
+
+    let keys = keys_table_for(bindings, rebind.context.as_deref());
+
+    set_key(keys, rebind.new_key.as_str(), value(rebind.action.as_str()));
+
+    // Same-key edge case (module doc): skip displacement entirely when it
+    // would touch the key `new_key` just wrote.
+    let displacement = match &rebind.old_key {
+        Some(old_key) if old_key != &rebind.new_key => {
+            if rebind.old_key_is_user_layer {
+                if keys.contains_key(old_key) {
+                    keys.remove(old_key);
+                    Displacement::Displaced
+                } else {
+                    Displacement::OldKeyNotFound
+                }
+            } else {
+                set_key(keys, old_key.as_str(), value("none"));
+                Displacement::Displaced
+            }
+        }
+        _ => Displacement::NotRequested,
+    };
+
+    write_atomic(user_dir, &path, &doc.to_string())?;
+    Ok(RebindOutcome { displacement })
+}
+
+/// One binding to silence, the displacement half of a [`Rebind`] performed
+/// on its own (`keybindings_view`'s `d`).
+#[derive(Debug, Clone)]
+pub struct Unbind {
+    /// The `[[bindings]]` entry's `context`, matched exactly as
+    /// [`Rebind::context`] is. `None` means the no-`context` entry.
+    pub context: Option<String>,
+    /// The rendered keystroke to silence, e.g. `"ctrl+k"`.
+    pub key: String,
+    /// Whether the binding being silenced was itself set by a user-layer
+    /// entry. `true` removes the key outright; `false` shadows a
+    /// builtin/desk binding by writing [`crate::keymap::UNBOUND_ACTION`].
+    ///
+    /// Getting this backwards is the dangerous case, not a cosmetic one: a
+    /// wrong `true` deletes whatever the user *did* have on that key, and a
+    /// wrong `false` leaves a redundant `"none"` shadowing the user's own
+    /// entry so the key stays dead. See [`Rebind::old_key_is_user_layer`]
+    /// for the identical rule stated the other way round.
+    pub is_user_layer: bool,
+}
+
+/// What [`apply_unbind`] did. `removed` is false for a shadow write, and
+/// also for a removal that found nothing to remove — the caller's belief
+/// about where the binding lives can be stale, which is a warning rather
+/// than a failure (the same contract [`Displacement::OldKeyNotFound`]
+/// keeps for a rebind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnbindOutcome {
+    pub removed: bool,
+}
+
+/// Silence one binding in `<user_dir>/keymap.toml`. `Err` only ever means
+/// the file read/parse/write itself failed; the file is left untouched on
+/// a parse error, exactly as [`apply_rebind`] leaves it.
+///
+/// This is precisely [`apply_rebind`]'s step 2 (displacement) performed on
+/// its own, with no step 1 new-binding write first: locate (or create) the
+/// `[[bindings]]` entry matching `unbind.context` via the same
+/// [`keys_table_for`] helper, then either remove `unbind.key` from its
+/// `keys` table (`is_user_layer: true`) or shadow it with
+/// [`crate::keymap::UNBOUND_ACTION`] (`is_user_layer: false`) — see the
+/// module doc's "Semantics" section and [`Unbind::is_user_layer`]'s own
+/// doc for why getting that branch backwards is the dangerous case.
+pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
+    let path = user_dir.join("keymap.toml");
+    let mut doc = open_doc_with_bindings(&path)?;
+    let bindings = doc["bindings"]
+        .as_array_of_tables_mut()
+        .expect("open_doc_with_bindings just ensured this");
+
+    let keys = keys_table_for(bindings, unbind.context.as_deref());
+
+    let removed = if unbind.is_user_layer {
+        if keys.contains_key(&unbind.key) {
+            keys.remove(&unbind.key);
+            true
+        } else {
+            false
+        }
+    } else {
+        set_key(keys, unbind.key.as_str(), value("none"));
+        false
+    };
+
+    write_atomic(user_dir, &path, &doc.to_string())?;
+    Ok(UnbindOutcome { removed })
+}
+
+/// Read `<user_dir>/keymap.toml` if it exists (or start a fresh document,
+/// stamped with `config_version = 1`, when it doesn't), then ensure
+/// `bindings` is ready to index into as an [`ArrayOfTables`]. Shared by
+/// [`apply_rebind`] and [`apply_unbind`], so this one check protects both.
+///
+/// `bindings = [ { ... } ]` is a *legal* keymap document —
+/// `keymap::build_keymap`/`build.rs` read `bindings` as a plain TOML array
+/// and don't care whether it round-trips through `toml_edit` as
+/// `ArrayOfTables` or as a bare `Value::Array` of inline tables — but only
+/// the former is exposed by `as_array_of_tables`/`as_array_of_tables_mut`.
+/// Treating "present but the wrong shape" the same as "missing entirely"
+/// would silently replace it with an empty `ArrayOfTables`, and the write
+/// that follows would then destroy every binding the file had — exactly
+/// the corruption the module doc's "Corrupt file / atomicity" guarantee
+/// promises never happens. So this case is `Err`, same as a parse failure,
+/// and the file is left byte-for-byte untouched.
+fn open_doc_with_bindings(path: &Path) -> Result<DocumentMut, String> {
     let existed = path.exists();
 
     let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
+        let text = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
         text.parse::<DocumentMut>().map_err(|e| {
             format!(
@@ -181,27 +298,49 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
         doc["config_version"] = value(1_i64);
     }
 
-    if doc
-        .get("bindings")
-        .and_then(Item::as_array_of_tables)
-        .is_none()
-    {
-        doc["bindings"] = Item::ArrayOfTables(ArrayOfTables::new());
+    match doc.get("bindings") {
+        None => doc["bindings"] = Item::ArrayOfTables(ArrayOfTables::new()),
+        Some(item) if item.as_array_of_tables().is_none() => {
+            return Err(format!(
+                "{}: 'bindings' exists but is not an array of tables (file left untouched)",
+                path.display()
+            ));
+        }
+        Some(_) => {}
     }
-    let bindings = doc["bindings"]
-        .as_array_of_tables_mut()
-        .expect("just ensured 'bindings' is an array of tables");
 
+    Ok(doc)
+}
+
+/// Find the `[[bindings]]` entry whose `context` exactly matches `context`
+/// (`None` matching the no-`context` entry — see the module doc's
+/// "Semantics" section), creating one if none exists, and return that
+/// entry's `keys` table as a [`TableLike`], creating it too if necessary.
+/// Shared by [`apply_rebind`] and [`apply_unbind`] — both only ever need to
+/// reach the same `keys` table before writing or removing one entry in it.
+///
+/// `TableLike`, not the concrete `Table`: `keys = { "ctrl+k" = "..." }` (an
+/// inline table) is just as legal a keymap document as `[bindings.keys]`
+/// — `Item::is_table_like` is true for both — but `Item::as_table_mut`
+/// returns `None` for the inline case, so returning `&mut Table` here
+/// forced every caller through an `.expect()` that could panic on a file
+/// this crate itself never writes but happily reads back. Only
+/// `as_table_like_mut` covers both shapes, so this is the one place that
+/// must.
+fn keys_table_for<'a>(
+    bindings: &'a mut ArrayOfTables,
+    context: Option<&str>,
+) -> &'a mut dyn TableLike {
     let match_ix = bindings
         .iter()
-        .position(|entry| entry.get("context").and_then(Item::as_str) == rebind.context.as_deref());
+        .position(|entry| entry.get("context").and_then(Item::as_str) == context);
 
     let entry = match match_ix {
         Some(ix) => bindings.get_mut(ix).expect("index came from position()"),
         None => {
             let mut new_entry = Table::new();
-            if let Some(ctx) = &rebind.context {
-                new_entry["context"] = value(ctx.as_str());
+            if let Some(ctx) = context {
+                new_entry["context"] = value(ctx);
             }
             new_entry["keys"] = Item::Table(Table::new());
             bindings.push(new_entry);
@@ -212,33 +351,28 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
     if !entry.get("keys").is_some_and(Item::is_table_like) {
         entry["keys"] = Item::Table(Table::new());
     }
-    let keys = entry["keys"]
-        .as_table_mut()
-        .expect("just ensured 'keys' is a table");
+    entry["keys"]
+        .as_table_like_mut()
+        .expect("just ensured 'keys' is table-like")
+}
 
-    keys[rebind.new_key.as_str()] = value(rebind.action.as_str());
-
-    // Same-key edge case (module doc): skip displacement entirely when it
-    // would touch the key `new_key` just wrote.
-    let displacement = match &rebind.old_key {
-        Some(old_key) if old_key != &rebind.new_key => {
-            if rebind.old_key_is_user_layer {
-                if keys.contains_key(old_key) {
-                    keys.remove(old_key);
-                    Displacement::Displaced
-                } else {
-                    Displacement::OldKeyNotFound
-                }
-            } else {
-                keys[old_key.as_str()] = value("none");
-                Displacement::Displaced
-            }
-        }
-        _ => Displacement::NotRequested,
-    };
-
-    write_atomic(user_dir, &path, &doc.to_string())?;
-    Ok(RebindOutcome { displacement })
+/// Set `keys[key] = item`, the way every write in this module needs to:
+/// preserving an already-present key's own comment and quoting, exactly
+/// as the module doc's comment-preserving promise requires.
+///
+/// `TableLike::insert`'s occupied-entry branch calls
+/// `entry.key_mut().fmt()`, which resets that key's own representation —
+/// stripping a leading comment and reverting custom quoting (e.g.
+/// `'mod+h'`) to a plain double-quoted key — even though only the *value*
+/// was meant to change. `get_mut` touches only the value slot when the
+/// key already exists, leaving its decor untouched; `insert` is used only
+/// on the vacant path, where there is no existing decor to lose.
+fn set_key(keys: &mut dyn TableLike, key: &str, item: Item) {
+    if let Some(existing) = keys.get_mut(key) {
+        *existing = item;
+    } else {
+        keys.insert(key, item);
+    }
 }
 
 /// Process-global counter for [`apply_rebind`]'s temp filenames — same
@@ -830,6 +964,204 @@ context = \"workspace\"
                 .bindings()
                 .iter()
                 .any(|b| b.action.0 == "palette::toggle")
+        );
+    }
+
+    /// A binding that comes from builtin or desk cannot be removed — this
+    /// module only ever writes the user layer — so it is silenced with the
+    /// documented `"none"` shadow instead.
+    #[test]
+    fn unbinding_a_lower_layer_binding_writes_a_none_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: false,
+            },
+        )
+        .expect("write");
+        assert!(!out.removed, "a shadow is not a removal");
+        let text = read(dir.path());
+        assert!(text.contains(r#""ctrl+k" = "none""#), "{text}");
+    }
+
+    /// The user's own binding is removed outright, leaving no redundant
+    /// `"none"` in a table this module owns.
+    #[test]
+    fn unbinding_a_user_layer_binding_removes_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\
+             \"ctrl+k\" = \"palette::toggle\"\n\"ctrl+j\" = \"tile::focus_down\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect("write");
+        assert!(out.removed);
+        let text = read(dir.path());
+        assert!(!text.contains("ctrl+k"), "the key is gone: {text}");
+        assert!(text.contains("ctrl+j"), "siblings survive: {text}");
+        assert!(!text.contains("none"), "no redundant shadow: {text}");
+    }
+
+    /// The caller's belief about where a binding lives can be stale. Removal
+    /// that finds nothing reports it rather than failing — the same
+    /// `Displacement::OldKeyNotFound` contract `apply_rebind` already keeps.
+    #[test]
+    fn a_removal_that_finds_nothing_reports_it_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect("a stale belief is not a write failure");
+        assert!(!out.removed);
+    }
+
+    /// Comments and unrelated tables survive, as they do for every other
+    /// keyed persist in this crate.
+    #[test]
+    fn unbinding_preserves_comments_and_unrelated_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "# my keymap\nconfig_version = 1\n\n[[bindings]]\ncontext = \"tile\"\n\n\
+             [bindings.keys]\n\"ctrl+k\" = \"tile::close\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: false,
+            },
+        )
+        .expect("write");
+        let text = read(dir.path());
+        assert!(text.contains("# my keymap"), "{text}");
+        assert!(
+            text.contains(r#"context = "tile""#),
+            "the tile entry is untouched: {text}"
+        );
+        assert!(text.contains(r#""ctrl+k" = "tile::close""#), "{text}");
+        assert!(
+            text.contains(r#""ctrl+k" = "none""#),
+            "the no-context entry got the shadow: {text}"
+        );
+    }
+
+    /// `bindings = [ { ... } ]` is a *legal* keymap document — `build.rs`
+    /// reads `bindings` as a plain TOML array and does not care whether it
+    /// round-trips through `toml_edit` as `ArrayOfTables` or as a bare
+    /// `Value::Array` of inline tables — but `toml_edit`'s own
+    /// `as_array_of_tables` only recognises the former. Treating "present
+    /// but the wrong shape" the same as "absent" would silently replace it
+    /// with an empty `ArrayOfTables` and then write that back out,
+    /// destroying every binding the file had. This must be `Err`, and the
+    /// file must come back byte-for-byte unchanged — "returned Err" and
+    /// "did not destroy the file" are different claims, so both are
+    /// checked.
+    #[test]
+    fn bindings_as_a_plain_array_is_rejected_without_touching_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let original =
+            "config_version = 1\nbindings = [ { keys = { \"ctrl+k\" = \"palette::toggle\" } } ]\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let err = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect_err("bindings as a plain array must be rejected, not silently replaced");
+        assert!(
+            err.contains("not an array of tables"),
+            "error should name the problem: {err}"
+        );
+
+        let text = read(dir.path());
+        assert_eq!(
+            text, original,
+            "a rejected write must leave the file byte-for-byte untouched"
+        );
+    }
+
+    /// `keys = { "ctrl+k" = "..." }` (an inline table) is just as legal a
+    /// keymap document as `[bindings.keys]` — `build.rs` reads through the
+    /// same generic TOML value either way — but `Item::is_table_like` is
+    /// true for an inline table while `Item::as_table_mut` returns `None`
+    /// for one, so the old `.expect("just ensured 'keys' is a table")`
+    /// panicked on exactly the input its own guard claimed to have
+    /// handled. A panic here is reachable from a keystroke once Task 4
+    /// wires `d` to `apply_unbind`, which PHILOSOPHY forbids outright.
+    #[test]
+    fn keys_as_an_inline_table_does_not_panic_and_stays_editable() {
+        let dir = tempfile::tempdir().unwrap();
+        let original =
+            "config_version = 1\n\n[[bindings]]\nkeys = { \"ctrl+k\" = \"palette::toggle\" }\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect("an inline keys table must not panic and must be editable");
+        assert!(out.removed);
+        let text = read(dir.path());
+        assert!(!text.contains("ctrl+k"), "{text}");
+    }
+
+    /// Overwriting an already-present key must preserve that key's own
+    /// comment and quoting. Round 1's index-to-insert conversion
+    /// regressed this: `TableLike::insert`'s occupied-entry branch calls
+    /// `entry.key_mut().fmt()`, which resets the key's own formatting —
+    /// stripping a leading comment and reverting custom quoting (e.g.
+    /// `'mod+h'`) to a plain double-quoted key — while indexing
+    /// assignment (what round 1 replaced) touched only the value slot.
+    /// This fires on real paths: overwriting a binding the user already
+    /// has, and the same-key rebind edge case.
+    #[test]
+    fn overwriting_an_existing_key_preserves_its_comment_and_quoting() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\
+             # my comment\n'mod+h' = \"workspace::focus_left\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        apply_rebind(dir.path(), &rebind(None, "mod+h", "workspace::focus_right")).unwrap();
+
+        let text = read(dir.path());
+        assert!(
+            text.contains("# my comment"),
+            "comment must survive: {text}"
+        );
+        assert!(
+            text.contains("'mod+h'"),
+            "custom quoting must survive: {text}"
+        );
+        assert!(
+            text.contains("workspace::focus_right"),
+            "the value must still be updated: {text}"
         );
     }
 }
