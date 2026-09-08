@@ -14,6 +14,7 @@ pub mod frame;
 pub mod keymap;
 pub mod keymap_edit;
 pub mod listfilter;
+pub mod log_persist;
 pub mod module;
 pub mod palette;
 pub mod perf;
