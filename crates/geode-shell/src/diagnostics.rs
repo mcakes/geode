@@ -20,6 +20,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use geode_core::config::{Diagnostic, Severity};
@@ -51,25 +52,32 @@ pub const SOURCE_HISTORY_CAP: usize = 16;
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceState {
     pub spec: Option<SourceSummary>,
-    pub health: Health,
+    /// `None` until the first real `note_health` call — a source that is
+    /// merely *configured* (`describe_source`) or has only been *polled*
+    /// (`note_polled`) has not yet reported anything, and must not be
+    /// counted in [`Diagnostics::summary`] or read as any particular
+    /// health (Phase 4b Task 4 fix round 1, CRIT-1: a healthy desk with
+    /// no `Health` event ever emitted for a cleanly loading source used
+    /// to show a permanent, warning-toned `sources N pending`). Task 5's
+    /// sources section reads `None` as "no report yet", not as
+    /// `Health::Pending`.
+    pub health: Option<Health>,
     pub detail: String,
     pub since: SystemTime,
     pub last_poll: Option<SystemTime>,
     pub next_poll: Option<SystemTime>,
     pub last_ready: usize,
     /// Capped at [`SOURCE_HISTORY_CAP`], oldest first (the newest
-    /// transition is always the tail).
+    /// transition is always the tail). Only real `note_health` calls
+    /// ever push — a source with `health: None` has an empty history.
     pub history: VecDeque<(SystemTime, Health)>,
 }
 
 impl Default for SourceState {
-    /// `Health::Pending` — a source with no health note yet is honestly
-    /// "hasn't reported", the same label a CSV whose sentinel hasn't
-    /// landed carries.
     fn default() -> SourceState {
         SourceState {
             spec: None,
-            health: Health::Pending,
+            health: None,
             detail: String::new(),
             since: SystemTime::UNIX_EPOCH,
             last_poll: None,
@@ -87,14 +95,27 @@ pub struct DatasetState {
     pub catalog: Option<DatasetCatalog>,
 }
 
+/// How many batches [`Diagnostics::config_history`] keeps, latest first.
+pub const CONFIG_HISTORY_CAP: usize = 16;
+
 /// The shell-owned diagnostics gatherer (spec §4.4). See the module doc
 /// for the version-bump discipline every mutator here follows.
 pub struct Diagnostics {
     pub sources: BTreeMap<String, SourceState>,
     pub datasets: BTreeMap<String, DatasetState>,
-    /// Every config diagnostic seen this session (load, then every
-    /// reload), latest batch first, capped at [`CONFIG_HISTORY_CAP`].
-    pub config: VecDeque<(SystemTime, Diagnostic)>,
+    /// The current config diagnostics — the latest load or reload's
+    /// batch, whole (Phase 4b Task 4 fix round 1, MAJ-5: was a capped,
+    /// ever-appending log; a reload that changed nothing used to
+    /// re-append its own unchanged batch, inflating
+    /// [`Self::summary`]'s error count every time `:level`'s own persist
+    /// triggered a reload). [`Self::note_config`] *replaces* this
+    /// wholesale; [`Self::config_history`] is the append-only log now.
+    pub config: Vec<Diagnostic>,
+    /// Every batch [`Self::note_config`] has ever installed into
+    /// [`Self::config`], latest first, capped at [`CONFIG_HISTORY_CAP`]
+    /// — an audit trail for Task 5's config section, distinct from the
+    /// "what's true right now" [`Self::config`] the summary counts.
+    pub config_history: VecDeque<(SystemTime, Vec<Diagnostic>)>,
     pub dropped_events: u64,
     pub restart_required: Option<String>,
     /// A copy of `ShellView::perf`, refreshed by [`Self::refresh_frame_hist`]
@@ -119,19 +140,22 @@ pub struct Diagnostics {
     /// status bar's render path every frame, and rebuilding the
     /// formatted string (iterating both maps) on every one of those
     /// calls when nothing changed would be exactly the per-frame heap
-    /// churn PHILOSOPHY.md forbids.
-    summary_cache: RefCell<(u64, String)>,
+    /// churn PHILOSOPHY.md forbids. `Rc<str>` (Phase 4b Task 4 fix
+    /// round 1, MAJ-1 — was `String`): a cache hit used to hand back a
+    /// freshly allocated `String` on every single paint (`.clone()` on
+    /// a `String` allocates); a hit here clones a refcount instead, the
+    /// same shape `Frame::bar_cache` already uses for its `Rc<
+    /// ScopeBarModel>`.
+    summary_cache: RefCell<(u64, Rc<str>)>,
 }
-
-/// How many config diagnostics [`Diagnostics::config`] keeps.
-pub const CONFIG_HISTORY_CAP: usize = 256;
 
 impl Diagnostics {
     pub fn new(levels: LogLevels) -> Diagnostics {
         Diagnostics {
             sources: BTreeMap::new(),
             datasets: BTreeMap::new(),
-            config: VecDeque::new(),
+            config: Vec::new(),
+            config_history: VecDeque::new(),
             dropped_events: 0,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
@@ -142,7 +166,7 @@ impl Diagnostics {
             pending_level: None,
             pending_overlay_toggle: false,
             pending_catalog_request: false,
-            summary_cache: RefCell::new((u64::MAX, String::new())),
+            summary_cache: RefCell::new((u64::MAX, Rc::from(""))),
         }
     }
 
@@ -150,26 +174,39 @@ impl Diagnostics {
         self.version
     }
 
-    /// A source's static description (once, at bridge `attach`). Always
-    /// bumps — this only ever runs once per source at startup, so there
-    /// is no steady-state no-op case to guard against.
+    /// A source's static description (once, at bridge `attach`). A
+    /// no-op for an identical, already-recorded summary (Phase 4b Task
+    /// 4 fix round 1, MIN-2) — brief-sanctioned to bump unconditionally
+    /// since `attach` runs once per window, but a second `attach` (or a
+    /// future re-describe) must not bump for nothing.
     pub fn describe_source(&mut self, source: &str, summary: SourceSummary) {
         let state = self.sources.entry(source.to_string()).or_default();
+        if state.spec.as_ref() == Some(&summary) {
+            return;
+        }
         state.spec = Some(summary);
         self.version += 1;
     }
 
-    /// Record a source's worst health as of `at`. The *first* note for a
-    /// source is always a transition (nothing to compare against yet);
-    /// after that, reporting the same `(worst, detail)` again is a
-    /// no-op — see the module doc's version discipline.
+    /// Record a source's worst health as of `at`. The *first* real note
+    /// for a source is always a transition — guarded on `state.health`
+    /// being `None`, not on whether the map entry already exists (Phase
+    /// 4b Task 4 fix round 1, MAJ-2: `describe_source`/`note_polled`
+    /// both create the entry via `or_default()` before any health ever
+    /// arrives, so guarding on entry-existence swallowed the first real
+    /// note whenever either had already run — `since` stayed at the
+    /// epoch and `history` stayed empty for a perfectly healthy source
+    /// for the whole session). After the first real note, reporting the
+    /// same `(worst, detail)` again is a no-op.
     pub fn note_health(&mut self, source: &str, worst: Health, detail: String, at: SystemTime) {
-        let is_new = !self.sources.contains_key(source);
         let state = self.sources.entry(source.to_string()).or_default();
-        if !is_new && state.health == worst && state.detail == detail {
+        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+        {
             return;
         }
-        state.health = worst.clone();
+        state.health = Some(worst.clone());
         state.detail = detail;
         state.since = at;
         state.history.push_back((at, worst));
@@ -209,19 +246,27 @@ impl Diagnostics {
         self.version += 1;
     }
 
-    /// A batch of config diagnostics from a load or reload — dropped
-    /// straight through if empty (nothing changed). Pushed in original
-    /// order ahead of whatever was already there, so the batch's own
-    /// first diagnostic ends up frontmost (latest-first across batches).
+    /// The current config diagnostics batch, from a load or reload —
+    /// *replaces* [`Self::config`] wholesale (Phase 4b Task 4 fix round
+    /// 1, MAJ-5: used to append into a capped log unconditionally
+    /// except on an empty batch, so an unchanged reload — e.g. the one
+    /// `:level`'s own persist write triggers — re-appended the exact
+    /// same diagnostics and inflated `summary`'s error count every
+    /// time). A no-op when `diags` is byte-identical to the current
+    /// batch (this also covers the old "empty batch" guard: an empty
+    /// batch equal to an already-empty `self.config` is a no-op, but an
+    /// empty batch replacing a *non-empty* one now correctly clears it
+    /// — a clean reload after a run of config errors must be able to
+    /// zero the count). Every real change is also appended to
+    /// [`Self::config_history`], capped at [`CONFIG_HISTORY_CAP`].
     pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
-        if diags.is_empty() {
+        if self.config == diags {
             return;
         }
-        for d in diags.into_iter().rev() {
-            self.config.push_front((at, d));
-        }
-        while self.config.len() > CONFIG_HISTORY_CAP {
-            self.config.pop_back();
+        self.config = diags.clone();
+        self.config_history.push_front((at, diags));
+        while self.config_history.len() > CONFIG_HISTORY_CAP {
+            self.config_history.pop_back();
         }
         self.version += 1;
     }
@@ -248,10 +293,18 @@ impl Diagnostics {
 
     /// A fresh `Request::Catalog` outcome (spec §4.5): stored whole and
     /// folded per-dataset into `self.datasets`. A no-op (byte-identical
-    /// snapshot) does not bump.
+    /// snapshot) does not bump. Every dataset's `catalog` is cleared
+    /// before the new snapshot's datasets are folded back in (Phase 4b
+    /// Task 4 fix round 1, MIN-5): `self.datasets`' *keys* stay
+    /// monotonic (a dataset `note_published` has ever named keeps
+    /// existing as a map entry), but a dataset absent from a newer
+    /// snapshot must not keep showing a stale `DatasetCatalog` forever.
     pub fn set_catalog(&mut self, snapshot: CatalogSnapshot) {
         if self.catalog.as_ref() == Some(&snapshot) {
             return;
+        }
+        for state in self.datasets.values_mut() {
+            state.catalog = None;
         }
         for ds in &snapshot.datasets {
             self.datasets.entry(ds.name.clone()).or_default().catalog = Some(ds.clone());
@@ -263,10 +316,25 @@ impl Diagnostics {
     /// Copy `hist` into [`Self::frame_hist`] — only while at least one
     /// diagnostics tile is watching (open question 2's ruling: this is
     /// the one place a `FrameHistogram` is cloned, and it must cost
-    /// nothing when no tile could show it). `true` (and a bump) exactly
-    /// when the copy happened.
+    /// nothing when no tile could show it) AND only when it actually
+    /// changed (Phase 4b Task 4 fix round 1, MAJ-3: the watchers gate
+    /// alone still bumped on every ~500ms tick even when nothing was
+    /// recorded in between, which — through `ShellView::
+    /// on_diagnostics_changed`'s unconditional `cx.notify()` — repainted
+    /// the whole shell twice a second forever while a diagnostics tile
+    /// sat open and idle, exactly the "bumps unconditionally" failure
+    /// this module's own doc warns against). `FrameHistogram` has no
+    /// `PartialEq`; `count()` plus `max_micros()` is a cheap, sufficient
+    /// proxy — both are monotonically non-decreasing, so equal on both
+    /// means nothing new was recorded. `true` (and a bump) exactly when
+    /// the copy happened.
     pub fn refresh_frame_hist(&mut self, hist: &FrameHistogram) -> bool {
         if self.watchers == 0 {
+            return false;
+        }
+        if self.frame_hist.count() == hist.count()
+            && self.frame_hist.max_micros() == hist.max_micros()
+        {
             return false;
         }
         self.frame_hist = hist.clone();
@@ -293,8 +361,16 @@ impl Diagnostics {
 
     /// The counterpart of [`Self::watch`] — a diagnostics tile went
     /// invisible or was torn down. Saturating: never underflows past 0.
+    /// Clears a still-pending catalog request once the *last* watcher
+    /// leaves (Phase 4b Task 4 fix round 1, MIN-4): a tile that becomes
+    /// visible and immediately invisible again must not cost a database
+    /// round trip whose outcome nothing will ever show. A request stays
+    /// queued while at least one other tile is still watching.
     pub fn unwatch(&mut self) {
         self.watchers = self.watchers.saturating_sub(1);
+        if self.watchers == 0 {
+            self.pending_catalog_request = false;
+        }
     }
 
     pub fn watchers(&self) -> u32 {
@@ -305,8 +381,20 @@ impl Diagnostics {
     /// reload-driven `[log]` pickup: updates `self.levels` (via
     /// `LogLevels::with`, the same retain-then-push `[log]` parsing
     /// already uses) and queues one persist for
-    /// [`Self::take_pending_level`] to drain.
+    /// [`Self::take_pending_level`] to drain. A no-op when `target`
+    /// already carries `level` (Phase 4b Task 4 fix round 1, MIN-3):
+    /// otherwise `:level ingest debug` typed twice queued (and wrote)
+    /// two identical persists, and — per the MAJ-5 fix above — could
+    /// have tripped a reload each time.
     pub fn request_level(&mut self, target: &str, level: Level) {
+        if self
+            .levels
+            .targets
+            .iter()
+            .any(|(t, l)| t == target && *l == level)
+        {
+            return;
+        }
         self.levels = self.levels.with(target, level);
         self.pending_level = Some((target.to_string(), level));
         self.version += 1;
@@ -346,26 +434,31 @@ impl Diagnostics {
         std::mem::take(&mut self.pending_catalog_request)
     }
 
-    /// `"sources 3 ok · 1 degraded · config 2 errors · 5 dropped ·
-    /// restart required: …"` — every segment optional, omitted when its
-    /// count is zero / its value is `None`; `""` (never shown by the
-    /// status bar — `Some(str).filter(|s| !s.is_empty())`'s job at the
-    /// call site) when there is nothing to report at all. Cached (see
-    /// [`Self::summary_cache`]'s own doc comment) keyed on `version`.
+    /// `"sources 3 ok · 1 degraded · config 2 errors · 5 dropped"` —
+    /// every segment optional, omitted when its count is zero; `""`
+    /// (never shown by the status bar — `(!s.is_empty()).then_some(..)`'s
+    /// job at the call site) when there is nothing to report at all.
+    /// Cached (see [`Self::summary_cache`]'s own doc comment) keyed on
+    /// `version`; a hit clones an `Rc<str>` refcount, never a buffer.
     ///
-    /// The `config N error(s)` count is `self.config`'s
-    /// [`Severity::Error`] entries — everything currently held in the
-    /// capped history, not "currently unresolved" (nothing here models
-    /// resolution; a stale error from three reloads ago still counts
-    /// until it ages out of the 256-entry cap).
-    pub fn summary(&self) -> String {
+    /// The `sources` segment counts only sources with a *real* health
+    /// note (`SourceState.health.is_some()`) — a configured-but-not-yet-
+    /// reported source is not counted at all (Phase 4b Task 4 fix round
+    /// 1, CRIT-1; Task 5's sources section shows it as "no report yet"
+    /// instead). The `config N error(s)` count is `self.config`'s
+    /// [`Severity::Error`] entries — the *current* batch only (MAJ-5),
+    /// not the history. No `restart required: …` segment any more
+    /// (Phase 4b Task 4 fix round 1, MAJ-4): the status bar's own
+    /// `restart_required` segment (`shell/render.rs`) already shows that
+    /// message; embedding it here too duplicated it on screen.
+    pub fn summary(&self) -> Rc<str> {
         {
             let cache = self.summary_cache.borrow();
             if cache.0 == self.version {
                 return cache.1.clone();
             }
         }
-        let built = self.build_summary();
+        let built: Rc<str> = Rc::from(self.build_summary());
         *self.summary_cache.borrow_mut() = (self.version, built.clone());
         built
     }
@@ -374,7 +467,10 @@ impl Diagnostics {
         const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];
         let mut counts = [0usize; LABELS.len()];
         for s in self.sources.values() {
-            if let Some(idx) = LABELS.iter().position(|&l| l == s.health.label()) {
+            let Some(health) = &s.health else {
+                continue; // no report yet — not counted (CRIT-1)
+            };
+            if let Some(idx) = LABELS.iter().position(|&l| l == health.label()) {
                 counts[idx] += 1;
             }
         }
@@ -392,7 +488,7 @@ impl Diagnostics {
         let error_count = self
             .config
             .iter()
-            .filter(|(_, d)| d.severity == Severity::Error)
+            .filter(|d| d.severity == Severity::Error)
             .count();
         if error_count > 0 {
             let plural = if error_count == 1 { "" } else { "s" };
@@ -401,10 +497,6 @@ impl Diagnostics {
 
         if self.dropped_events > 0 {
             parts.push(format!("{} dropped", self.dropped_events));
-        }
-
-        if let Some(message) = &self.restart_required {
-            parts.push(format!("restart required: {message}"));
         }
 
         parts.join(" · ")
@@ -507,6 +599,51 @@ mod tests {
         assert_eq!(d.sources["risk"].since, t + Duration::from_secs(2));
     }
 
+    /// MAJ-2: `describe_source`/`note_polled` both create the entry
+    /// before any real health arrives; the first `note_health` call must
+    /// still be treated as a transition (`since` set, one history row)
+    /// rather than swallowed by comparing against the freshly created
+    /// default.
+    #[test]
+    fn the_first_real_health_note_transitions_even_after_describe_source_and_note_polled() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "risk",
+            SourceSummary {
+                paths: vec![],
+                priority: "".into(),
+                readiness: "".into(),
+            },
+        );
+        d.note_polled(
+            "risk",
+            3,
+            SystemTime::UNIX_EPOCH,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(30),
+        );
+        assert!(
+            d.sources["risk"].health.is_none(),
+            "no real health note yet"
+        );
+        let v0 = d.version();
+        d.note_health(
+            "risk",
+            Health::Ok,
+            "".into(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        assert!(d.version() > v0);
+        assert_eq!(
+            d.sources["risk"].since,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1)
+        );
+        assert_eq!(
+            d.sources["risk"].history.len(),
+            1,
+            "the first real note is a transition"
+        );
+    }
+
     #[test]
     fn history_is_capped_at_sixteen_transitions() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -545,9 +682,26 @@ mod tests {
         );
         d.note_dropped(5);
         assert_eq!(
-            d.summary(),
+            d.summary().as_ref(),
             "sources 1 ok · 1 degraded · config 1 error · 5 dropped"
         );
+    }
+
+    /// CRIT-1: a source that is configured (`describe_source`) but has
+    /// never reported a real health note must not appear in the
+    /// summary at all — not as "pending", not as anything.
+    #[test]
+    fn a_described_but_unreported_source_is_not_counted_in_the_summary() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "risk",
+            SourceSummary {
+                paths: vec!["/data/*.csv".into()],
+                priority: "latest_risk".into(),
+                readiness: "sentinel".into(),
+            },
+        );
+        assert_eq!(d.summary().as_ref(), "");
     }
 
     #[test]
@@ -578,6 +732,27 @@ mod tests {
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 
+    /// MIN-4: the *last* watcher leaving clears a still-pending request
+    /// nobody will see the outcome of.
+    #[test]
+    fn unwatch_to_zero_clears_a_pending_catalog_request() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        d.unwatch();
+        assert!(!d.take_pending_catalog_request());
+    }
+
+    /// MIN-4's other half: a request stays queued while at least one
+    /// other tile is still watching.
+    #[test]
+    fn unwatch_above_zero_keeps_a_pending_catalog_request() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.watch();
+        d.watch();
+        d.unwatch();
+        assert!(d.take_pending_catalog_request());
+    }
+
     #[test]
     fn the_frame_histogram_is_copied_only_while_watched() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -587,6 +762,24 @@ mod tests {
         d.watch();
         assert!(d.refresh_frame_hist(&h));
         assert_eq!(d.frame_hist.count(), 1);
+    }
+
+    /// MAJ-3: while watched, an *unchanged* histogram must not copy or
+    /// bump — the reload-poll tick calls this every ~500ms regardless
+    /// of whether any new frame was recorded in between.
+    #[test]
+    fn refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let mut h = FrameHistogram::new();
+        h.record_micros(1000);
+        d.watch();
+        assert!(d.refresh_frame_hist(&h));
+        let v = d.version();
+        assert!(
+            !d.refresh_frame_hist(&h),
+            "identical histogram, no copy, no bump"
+        );
+        assert_eq!(d.version(), v);
     }
 
     #[test]
@@ -599,6 +792,18 @@ mod tests {
             Some(("ingest".to_string(), Level::DEBUG))
         );
         assert_eq!(d.take_pending_level(), None);
+    }
+
+    /// MIN-3: the same target+level again must not re-queue a persist.
+    #[test]
+    fn request_level_is_a_no_op_when_the_target_already_has_that_level() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.request_level("ingest", Level::DEBUG);
+        d.take_pending_level();
+        let v = d.version();
+        d.request_level("ingest", Level::DEBUG);
+        assert_eq!(d.version(), v);
+        assert_eq!(d.take_pending_level(), None, "no new persist queued");
     }
 
     #[test]
@@ -634,6 +839,22 @@ mod tests {
         );
     }
 
+    /// MIN-2: re-describing a source with an identical summary must not
+    /// bump — only safe by luck today (`attach` runs once); made real.
+    #[test]
+    fn describe_source_is_a_no_op_for_an_identical_summary() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let summary = SourceSummary {
+            paths: vec!["/x".into()],
+            priority: "p".into(),
+            readiness: "r".into(),
+        };
+        d.describe_source("risk", summary.clone());
+        let v = d.version();
+        d.describe_source("risk", summary);
+        assert_eq!(d.version(), v);
+    }
+
     #[test]
     fn note_dropped_is_a_no_op_when_the_total_is_unchanged() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -666,6 +887,30 @@ mod tests {
         assert_eq!(d.version(), v, "identical snapshot, no rebuild");
     }
 
+    /// MIN-5: a dataset absent from a newer snapshot must not keep a
+    /// stale `DatasetCatalog` forever.
+    #[test]
+    fn set_catalog_drops_a_dataset_missing_from_a_newer_snapshot() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_catalog(CatalogSnapshot {
+            datasets: vec![DatasetCatalog {
+                name: "risk".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(d.datasets["risk"].catalog.is_some());
+        d.set_catalog(CatalogSnapshot {
+            datasets: vec![],
+            threads: 1,
+            ..Default::default()
+        });
+        assert!(
+            d.datasets["risk"].catalog.is_none(),
+            "a dataset missing from the newer snapshot is cleared"
+        );
+    }
+
     #[test]
     fn set_levels_is_a_no_op_when_unchanged() {
         let mut d = Diagnostics::new(LogLevels::default());
@@ -688,7 +933,7 @@ mod tests {
     #[test]
     fn an_empty_diagnostics_summary_is_empty() {
         let d = Diagnostics::new(LogLevels::default());
-        assert_eq!(d.summary(), "");
+        assert_eq!(d.summary().as_ref(), "");
     }
 
     #[test]
@@ -696,5 +941,100 @@ mod tests {
         let mut d = Diagnostics::new(LogLevels::default());
         d.unwatch();
         assert_eq!(d.watchers(), 0);
+    }
+
+    /// MAJ-4: `restart_required` is the status bar's own segment now
+    /// (`render.rs`'s `self.restart_required.as_deref()`); the summary
+    /// must not embed it too, or the message paints twice.
+    #[test]
+    fn set_restart_required_does_not_appear_in_the_summary() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.set_restart_required(Some("sources changed".into()));
+        assert_eq!(
+            d.summary().as_ref(),
+            "",
+            "restart_required is the status bar's own segment, not the summary's"
+        );
+    }
+
+    /// MAJ-1: a cache hit must clone the `Rc<str>` refcount, never
+    /// rebuild the string — pinned by pointer identity across two calls
+    /// with no mutation between them.
+    #[test]
+    fn summary_reuses_the_same_allocation_when_the_version_is_unchanged() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_dropped(1);
+        let a = d.summary();
+        let b = d.summary();
+        assert!(
+            Rc::ptr_eq(&a, &b),
+            "a cache hit must clone a refcount, not rebuild"
+        );
+    }
+
+    // --- MAJ-5: note_config replaces rather than appends ---------------
+
+    #[test]
+    fn note_config_is_a_no_op_for_an_identical_batch() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let diags = vec![Diagnostic::error(Layer::User, PathBuf::new(), "bad")];
+        d.note_config(diags.clone(), SystemTime::UNIX_EPOCH);
+        let v = d.version();
+        d.note_config(diags, SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+        assert_eq!(d.version(), v, "identical batch, no rebuild, no re-append");
+        assert_eq!(d.config_history.len(), 1);
+    }
+
+    #[test]
+    fn note_config_replaces_the_current_batch_rather_than_appending() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_config(
+            vec![Diagnostic::error(Layer::User, PathBuf::new(), "a")],
+            SystemTime::UNIX_EPOCH,
+        );
+        d.note_config(
+            vec![Diagnostic::error(Layer::User, PathBuf::new(), "b")],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        assert_eq!(d.config.len(), 1, "current batch is the latest only");
+        assert_eq!(d.config[0].message, "b");
+        assert_eq!(d.config_history.len(), 2, "history keeps both batches");
+    }
+
+    /// A clean reload (empty batch) after standing errors must actually
+    /// clear the count — the old "empty batch is always a no-op" guard
+    /// used to make this impossible.
+    #[test]
+    fn note_config_with_an_empty_batch_clears_a_previously_nonempty_one() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_config(
+            vec![Diagnostic::error(Layer::User, PathBuf::new(), "a")],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(d.summary().as_ref(), "config 1 error");
+        d.note_config(Vec::new(), SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+        assert_eq!(d.config.len(), 0);
+        assert_eq!(d.summary().as_ref(), "");
+    }
+
+    #[test]
+    fn config_history_is_capped_at_sixteen_batches() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        for i in 0..20u64 {
+            d.note_config(
+                vec![Diagnostic::error(
+                    Layer::User,
+                    PathBuf::new(),
+                    format!("e{i}"),
+                )],
+                SystemTime::UNIX_EPOCH + Duration::from_secs(i),
+            );
+        }
+        assert_eq!(d.config_history.len(), 16);
+        assert_eq!(
+            d.config_history.front().unwrap().0,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(19),
+            "latest batch first"
+        );
     }
 }

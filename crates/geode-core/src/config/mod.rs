@@ -38,7 +38,13 @@ pub enum Severity {
 }
 
 /// A problem found while loading or interpreting config. Never fatal.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` (Phase 4b Task 4 fix round 1, MAJ-5): `Diagnostics::
+/// note_config` compares a freshly loaded batch against the one already
+/// held to decide whether a reload actually changed anything — `Severity`,
+/// `Layer`, `PathBuf`, `String` and `Option<String>` (`path`) all already
+/// support it, so this is a plain derive, not a new comparison to design.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub layer: Option<Layer>,

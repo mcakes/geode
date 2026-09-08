@@ -243,11 +243,25 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             let tag = catalog_tag.get() + 1;
             catalog_tag.set(tag);
             let as_of = shell.read(cx).frame().read(cx).as_of().clone();
-            handle.catalog(CatalogParams {
+            // MIN-7 (Phase 4b Task 4 fix round 1): a refused request
+            // (the service thread's queue is full or it's gone) used to
+            // vanish silently — unlike `ShellEvent::DistinctRequested`
+            // just above, which synthesises an error outcome so the
+            // picker never sits on `loading…` forever. There is no
+            // equivalent "loading" UI state for the catalog yet (Task 5
+            // hasn't built the tile), so this surfaces it the same way
+            // every other refusal in this file does: a `geode::query`
+            // warning, not a panic and not a swallow.
+            if !handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
                 as_of,
-            });
+            }) {
+                tracing::warn!(
+                    target: "geode::query",
+                    "catalog request refused — the data service is busy or gone"
+                );
+            }
         }
     })
     .detach();
@@ -507,6 +521,7 @@ mod tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::query::{CatalogOutcome, CatalogSnapshot};
+    use geode_data::source::{Priority, Readiness, SourceSpec};
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
     use geode_shell::keymap::build_keymap;
@@ -811,6 +826,70 @@ role = "key"
             diagnostics.read_with(&vcx, |d, _| d.catalog.clone()),
             Some(fresh),
             "the latest tag must be applied"
+        );
+    }
+
+    /// CRIT-1: a healthy desk — one configured source, no `Health`
+    /// event ever emitted for it (the honest steady state: `geode-data`
+    /// only sends `Health` when discovery has something worth reporting,
+    /// never a routine "still fine") — must not show anything in the
+    /// summary. Before the fix, `attach`'s `describe_source` alone
+    /// created a `SourceState` whose default health counted as
+    /// `pending`, so a perfectly healthy start showed a permanent,
+    /// warning-toned `sources 1 pending`.
+    #[gpui::test]
+    fn a_configured_source_with_no_health_event_reports_nothing(cx: &mut gpui::TestAppContext) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: vec![SourceSpec {
+                name: "risk".into(),
+                dataset: "risk".into(),
+                paths: vec!["/data/risk/*.csv".into()],
+                readiness: Readiness::Sentinel,
+                priority: Priority::LatestRisk,
+                poll_interval: Duration::from_secs(30),
+                pending_timeout: Duration::from_secs(120),
+                batch_pattern: None,
+            }],
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+        // `attach` already ran `describe_source` synchronously (it's not
+        // behind the async drain loop); no event was ever sent.
+        assert_eq!(
+            diagnostics.read_with(&vcx, |d, _| d.summary()).as_ref(),
+            "",
+            "a configured-but-unreported source must not appear in the summary"
+        );
+        assert!(
+            diagnostics
+                .read_with(&vcx, |d, _| d.sources["risk"].health.clone())
+                .is_none(),
+            "no report yet — not Health::Pending, not anything"
         );
     }
 

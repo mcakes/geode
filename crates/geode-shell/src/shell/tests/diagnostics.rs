@@ -6,6 +6,12 @@
 
 use super::*;
 use crate::diagnostics::Health;
+// Explicit: this file's sibling `mod reload;` declaration in
+// `tests/mod.rs` shadows the glob-imported `crate::reload` (same
+// shadowing `shell/tests/reload.rs` documents on its own copy of this
+// import), so `reload::load_config` below needs this to resolve to the
+// real module rather than to the test module `shell::tests::reload`.
+use crate::reload;
 use geode_core::config::ConfigSources;
 use geode_core::log::{Level, LogLevels, Ring};
 use std::sync::{Arc, Mutex};
@@ -56,7 +62,7 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
     });
 
     assert_eq!(
-        diagnostics.read_with(&cx, |d, _| d.summary()),
+        diagnostics.read_with(&cx, |d, _| d.summary()).as_ref(),
         "sources 1 degraded"
     );
     assert!(
@@ -70,6 +76,13 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
 /// table applies it through `LevelControl::set` exactly once, and
 /// updates `Diagnostics.levels` to match — never re-persisted (this
 /// only ever *applies* what was already on disk).
+///
+/// MAJ-6 (Phase 4b Task 4 fix round 1): `user_dir` is now a real
+/// tempdir (was `None`, which made "never re-persisted" true only
+/// because nothing *could* persist) — this test now proves
+/// `apply_reload`'s `[log]` handling calls `Diagnostics::set_levels`,
+/// not `request_level`, by asserting `app.toml` still does not exist
+/// after the reload.
 #[gpui::test]
 fn a_log_table_change_on_reload_applies_it_through_level_control_once(
     cx: &mut gpui::TestAppContext,
@@ -85,10 +98,14 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
         levels: LogLevels::default(),
     });
 
+    let dir = tempfile::tempdir().unwrap();
+    let user_dir = dir.path().to_path_buf();
+
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view =
+                    cx.new(|cx| ShellView::new(services, None, Some(user_dir.clone()), window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -117,6 +134,10 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
         vec![("ingest".to_string(), Level::DEBUG)],
         "the entity's own levels reflect the reload"
     );
+    assert!(
+        !user_dir.join("app.toml").exists(),
+        "a reload-driven [log] change must not write app.toml — that's request_level's job, not set_levels'"
+    );
 
     // A second reload with the exact same `[log]` table must not call
     // `LevelControl::set` again — `Diagnostics::set_levels`'s no-op
@@ -131,6 +152,31 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
         control.calls.lock().unwrap().len(),
         1,
         "an unchanged [log] table calls LevelControl::set no further times"
+    );
+    assert!(!user_dir.join("app.toml").exists());
+}
+
+/// MIN-9: `Diagnostics.levels` must track a reload's `[log]` table even
+/// when `ShellServices.log` is `None` (every test fixture that doesn't
+/// opt in, and — in principle — a real run where `install_logging`
+/// somehow never wired up `LogServices`) — only `LevelControl::set`
+/// needs a real subscriber to call.
+#[gpui::test]
+fn a_log_table_change_updates_the_entity_even_without_log_services(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services()); // services.log is None
+    let shell = shell_of(&window, &mut cx);
+
+    let new_config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[log]\ningest = \"debug\"\n").unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+    assert_eq!(
+        diagnostics.read_with(&cx, |d, _| d.levels.targets.clone()),
+        vec![("ingest".to_string(), Level::DEBUG)],
+        "the entity updates even with no LogServices to apply through"
     );
 }
 
@@ -211,4 +257,102 @@ fn request_level_persists_into_the_tempdirs_app_toml(cx: &mut gpui::TestAppConte
     let text = std::fs::read_to_string(user_dir.join("app.toml")).unwrap();
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     assert_eq!(doc["log"]["ingest"].as_str(), Some("debug"));
+}
+
+/// MAJ-5's exact amplification path, end to end: a standing
+/// `config_version` error (reproduced by every load from this desk
+/// dir, independent of anything `:level` touches) must not inflate when
+/// `request_level`'s own persist write triggers a reload that hands
+/// `note_config` the *same* diagnostics batch again.
+#[gpui::test]
+fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+    cx.update(crate::shell::dialog::init_reclaimed_keybindings);
+
+    let desk_dir = tempfile::tempdir().unwrap();
+    let user_dir = tempfile::tempdir().unwrap();
+    // A config_version error every load from this desk dir reproduces.
+    std::fs::write(desk_dir.path().join("app.toml"), "config_version = 99\n").unwrap();
+    let desk_path = desk_dir.path().to_path_buf();
+    let user_path = user_dir.path().to_path_buf();
+
+    let config = reload::load_config(Some(desk_path.clone()), Some(user_path.clone()));
+    let mut registry = ActionRegistry::default();
+    register_builtin_actions(&mut registry);
+    let mod_alias = default_mod();
+    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    let (theme, warnings) = crate::theme::load_bundled();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let services = ShellServices {
+        config,
+        registry,
+        keymap,
+        mod_alias,
+        workspaces: Workspaces::new(),
+        theme,
+        session_path: None,
+        roster: crate::module::ModuleRoster::default(),
+        restored_tiles: crate::session::TileRecords::new(),
+        restored_frame: None,
+        log: None,
+    };
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| {
+                    ShellView::new(
+                        services,
+                        Some(desk_path.clone()),
+                        Some(user_path.clone()),
+                        window,
+                        cx,
+                    )
+                });
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
+
+    let error_count = |cx: &gpui::VisualTestContext| {
+        diagnostics.read_with(cx, |d, _| {
+            d.config
+                .iter()
+                .filter(|diag| diag.severity == geode_core::config::Severity::Error)
+                .count()
+        })
+    };
+    let before = error_count(&cx);
+    assert!(
+        before > 0,
+        "the config_version error must be present to start"
+    );
+    let history_len_before = diagnostics.read_with(&cx, |d, _| d.config_history.len());
+
+    diagnostics.update(&mut cx, |d, cx| {
+        d.request_level("ingest", Level::DEBUG);
+        cx.notify();
+    });
+    cx.run_until_parked();
+
+    let new_config = reload::load_config(Some(desk_path.clone()), Some(user_path.clone()));
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    cx.run_until_parked();
+
+    assert_eq!(error_count(&cx), before, "the error count must not inflate");
+    assert_eq!(
+        diagnostics.read_with(&cx, |d, _| d.config_history.len()),
+        history_len_before,
+        "an identical diagnostics batch must not grow the history either"
+    );
 }

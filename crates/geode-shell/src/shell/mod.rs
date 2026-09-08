@@ -894,22 +894,32 @@ impl ShellView {
                 // Copy the frame-time histogram into `Diagnostics`
                 // (Phase 4b open question 2's ruling), same tick — a
                 // no-op, allocation-free, unless a diagnostics tile is
-                // actually watching (`refresh_frame_hist`'s own doc
-                // comment). `this.perf` itself lives on `ShellView`, so
-                // it's read out through a plain `this.update` clone —
-                // same shape as `frame` two lines up — rather than
-                // reached from inside the diagnostics entity's own
-                // update closure.
-                let Ok((diagnostics, perf)) = this.update(cx, |view, _cx| {
-                    (view.diagnostics.clone(), view.perf.clone())
+                // actually watching. `refresh_frame_hist` itself also
+                // compares before copying (Task 4 fix round 1, MAJ-3),
+                // but the `~176`-byte `view.perf.clone()` (`FrameHistogram`
+                // is `[u32; 36]` plus four scalars) that used to happen
+                // unconditionally right here, every ~500ms tick,
+                // regardless of `watchers()`, is gated on it too now
+                // (Task 4 fix round 1, MIN-1 — the comment used to claim
+                // this whole thing was already "allocation-free unless
+                // watching" while the clone ran every tick regardless;
+                // now it's actually true, not just documented that way).
+                let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {
+                    let watched = view.diagnostics.read(cx).watchers() > 0;
+                    (view.diagnostics.clone(), watched)
                 }) else {
                     return; // window/entity gone; stop polling
                 };
-                diagnostics.update(cx, |d, cx| {
-                    if d.refresh_frame_hist(&perf) {
-                        cx.notify();
-                    }
-                });
+                if watched {
+                    let Ok(perf) = this.update(cx, |view, _cx| view.perf.clone()) else {
+                        return; // window/entity gone; stop polling
+                    };
+                    diagnostics.update(cx, |d, cx| {
+                        if d.refresh_frame_hist(&perf) {
+                            cx.notify();
+                        }
+                    });
+                }
 
                 // Refresh `today` (Phase 4b Task 1 fix round 1, MIN-9),
                 // same tick, same "cheap no-op unless it actually

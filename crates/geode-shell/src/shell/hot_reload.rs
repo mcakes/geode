@@ -271,10 +271,20 @@ impl ShellView {
                 for d in &log_diags {
                     tracing::warn!(target: "geode::config", "{d}");
                 }
-                if let Some(log) = &self.services.log
-                    && new_levels != self.diagnostics.read(cx).levels
-                {
-                    if let Err(e) = log.control.set(&new_levels) {
+                // Phase 4b Task 4 fix round 1, MIN-9: `set_levels` runs
+                // whenever the levels actually changed, regardless of
+                // whether `self.services.log` is wired up — only
+                // `LevelControl::set` (the real subscriber) needs a real
+                // `LogServices` to call. Before this fix both were
+                // guarded by the same `if let Some(log) = ..`, so every
+                // test setup that opts out of logging (`log: None`,
+                // every fixture that doesn't build one explicitly) let
+                // `Diagnostics.levels` silently drift from what's on
+                // disk on every reload.
+                if new_levels != self.diagnostics.read(cx).levels {
+                    if let Some(log) = &self.services.log
+                        && let Err(e) = log.control.set(&new_levels)
+                    {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
                     }
                     self.diagnostics.update(cx, |d, cx| {

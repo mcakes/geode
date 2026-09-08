@@ -301,6 +301,12 @@ impl LogLevels {
             levels.targets.retain(|(k, _)| k != key);
             levels.targets.push((key.clone(), level));
         }
+        // Phase 4b Task 4 fix round 1, MIN-10: sorted so `LogLevels`'
+        // derived `PartialEq` compares order-insensitively — `Diagnostics::
+        // set_levels`'s no-op guard otherwise reads two `[log]` tables with
+        // the same keys in a different file order as "changed" and
+        // re-applies `LevelControl::set` for nothing.
+        levels.targets.sort();
         (levels, diags)
     }
 
@@ -330,6 +336,7 @@ impl LogLevels {
         let mut out = self.clone();
         out.targets.retain(|(k, _)| k != target);
         out.targets.push((target.to_string(), level));
+        out.targets.sort(); // MIN-10 — see the same sort in `from_doc`
         out
     }
 }
@@ -470,6 +477,33 @@ mod tests {
         );
         assert_eq!(diags.len(), 1);
         assert!(diags[0].message.contains("bogus"));
+    }
+
+    /// Phase 4b Task 4 fix round 1, MIN-10: two `[log]` tables naming the
+    /// same targets at the same levels in a different key order must
+    /// compare equal — `Diagnostics::set_levels`'s no-op guard relies on
+    /// `LogLevels`'s derived `PartialEq`, and `targets` is a `Vec`
+    /// (order-sensitive by construction) unless both `from_doc` and
+    /// `with` canonicalise it.
+    #[test]
+    fn targets_in_a_different_file_order_compare_equal() {
+        let a = crate::config::test_support::config_from(
+            "app",
+            "config_version = 1\n[log]\ningest = \"debug\"\nquery = \"trace\"\n",
+        );
+        let b = crate::config::test_support::config_from(
+            "app",
+            "config_version = 1\n[log]\nquery = \"trace\"\ningest = \"debug\"\n",
+        );
+        let (levels_a, _) = LogLevels::from_doc(&a);
+        let (levels_b, _) = LogLevels::from_doc(&b);
+        assert_eq!(levels_a, levels_b);
+
+        // `with` must preserve the same canonical order too.
+        let via_with = LogLevels::default()
+            .with("query", Level::TRACE)
+            .with("ingest", Level::DEBUG);
+        assert_eq!(via_with, levels_a);
     }
 
     // ---- Fix round 1 --------------------------------------------------

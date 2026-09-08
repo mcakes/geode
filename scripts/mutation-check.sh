@@ -1970,21 +1970,36 @@ run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted d
 # it's what the covering test below already sends after closing the
 # window, and neither arm is one a later Phase 4a task is expected to
 # touch the way `Distinct`/`Published` were.
+#
+# Phase 4b Task 4 fix round 1: re-anchored again — `ShellView::
+# set_data_status` (what the replacement text called) no longer exists,
+# deleted by Task 4 in favour of the `Diagnostics` entity. The
+# replacement now routes the `Health` arm through `shell_direct`'s own
+# `diagnostics().update(..)` (a real, still-live call: `note_health`),
+# keeping the exact same shape — bypass the shared `window.update`, do
+# real work through a window-independent clone, `continue` before the
+# window check ever runs.
 run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
   crates/geode-app/src/bridge.rs \
   '    cx.spawn(async move |cx: &mut AsyncApp| {
+        let diagnostics = diagnostics_for_drain;
+        let catalog_tag = catalog_tag_for_drain;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);' \
   '    let shell_direct = shell.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
+        let diagnostics = diagnostics_for_drain;
+        let catalog_tag = catalog_tag_for_drain;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
             if let DataEvent::Health { source, worst, detail } = &event {
-                eprintln!("[data] health {source}: {} — {detail}", worst.label());
                 shell_direct.update(cx, |s, cx| {
-                    s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                    s.diagnostics().update(cx, |d, cx| {
+                        d.note_health(source, worst.clone(), detail.clone(), std::time::SystemTime::now());
+                        cx.notify();
+                    });
                 });
                 last_dropped = now_dropped;
                 continue;
