@@ -81,7 +81,18 @@ pub enum DataEvent {
     Diagnostics(Vec<Diagnostic>),
 }
 
-/// Where events go. `false` means nobody is listening.
+/// Where events go. `false` means "this event was not delivered" — the
+/// caller's channel was full, or its receiver is gone. The two are the
+/// same answer here on purpose, because the rule is the same for both:
+/// **no producer inside the service may stop on a refusal** (Phase 4b
+/// follow-up, Task 1). The ingest runner carries on to its next item, the
+/// discovery scheduler re-arms its poll, and a query worker takes its next
+/// request; each logs the refusal once and drops the event. Nothing is
+/// retried — a health transition the caller missed is re-offered by
+/// `HealthTracker` on the next report, and a missed query result is
+/// requeried by the tile that wanted it. Shutdown is `IngestHandle::
+/// shutdown`, the scheduler's stop condvar, and the pool's `shutdown`,
+/// never a `false` from here.
 ///
 /// Called synchronously from inside the query pool's worker delivery
 /// site, which holds the pool's queue lock (see `pool::ResultSink`), so
@@ -708,7 +719,9 @@ impl DataService {
                     // health transition that did arrive. `&&` here also
                     // short-circuits, which would skip the send
                     // outright. The two are combined afterwards, for
-                    // the runner's own "is anyone listening" answer.
+                    // the runner's own "was this delivered" answer —
+                    // which, since Task 1, the runner logs rather than
+                    // exits on.
                     let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
