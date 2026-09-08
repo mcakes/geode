@@ -3154,10 +3154,38 @@ run_mutation "reload: a view_presentation change triggers the same reload a view
 # user-ONLY object separates the two.
 run_mutation "objectdialog: overridden is computed from the winning layer alone" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  'layers.contains(&Layer::User) && layers.iter().any(|l| *l < Layer::User);' \
-  'layers.contains(&Layer::User);' \
+  '            row.overridden = mine && layers.iter().any(|l| *l < Layer::User);' \
+  '            row.overridden = mine;' \
   geode-shell \
   a_user_only_object_is_not_marked_overridden
+
+# The other half of the same line, and the fix for a Critical the browse
+# fixtures could not reach: `mine` has to span the PRESENTATION doc too.
+# §4.1's split guarantees that hiding a column writes
+# `view_presentation.toml` and leaves the domain's own user layer empty,
+# so a marker read off `doc` alone is green against every fixture where a
+# user override shadows something and wrong on the commonest edit there
+# is — `r` answered "no user override to revert" about a file sitting on
+# disk. Only a fixture with a user-layer presentation entry and NO
+# user-layer views entry separates the two.
+run_mutation "objectdialog: overridden ignores a presentation-only override" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());' \
+  '            let mine = layers.contains(&Layer::User);' \
+  geode-shell \
+  a_presentation_only_override_is_marked_overridden
+
+# And the notice `d` answers with once that marker is right. Dropping the
+# tail leaves every delete/revert test green — the gate is unchanged and
+# nothing is written either way — while the refusal goes back to telling a
+# trader who has a personalisation on disk that there is nothing of theirs,
+# and naming no verb that would undo it.
+run_mutation "objectdialog: d denies an override it can see" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                " — but r reverts your changes to it"' \
+  '                ""' \
+  geode-shell \
+  revert_undoes_a_presentation_only_override
 
 # The opening mode is one line, and it silently restores the pre-modal
 # model: every filter test still passes with the dialog opening
@@ -3268,6 +3296,49 @@ run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
   '' \
   geode-shell \
   an_object_opened_from_filter_mode_still_escapes_back_a_stage
+
+# ---- Phase 4c review wave: hiding a column, and not freezing the desk
+#
+# THE headline capability of the presentation design (spec §1.3): "hiding
+# one … and the blotter reflects it without a restart". Nothing consumed
+# `ColumnPresentation.hidden` when Part 1 shipped, and the end-to-end test
+# could not see it because it asserted the WRITE, not the effect — the
+# dialog wrote `view_presentation.toml` correctly, the watcher reloaded,
+# the merge applied, and the column was still on screen. Every link in
+# that chain has its own green test. Only a test asserting the column is
+# absent from what the blotter PLANS to paint can see this one.
+run_mutation "plan: a hidden column is planned anyway" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            if presentation.hidden.unwrap_or(false) {' \
+  '            if false {' \
+  geode-blotter \
+  a_hidden_column_is_not_planned
+
+# The freeze `Destination` exists to prevent, one field-granularity down.
+# `order` arrives from the EFFECTIVE view, so writing it unconditionally
+# pins the desk's own column order into the trader's personal file the
+# first time they hide anything — and every assertion about what the file
+# contains stays green, because the order written is the right order
+# TODAY. Only a test asserting the key is ABSENT when nothing was
+# reordered can see it.
+run_mutation "views: a presentation save pins the desk's column order" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if names != doc_order {' \
+  '    if true {' \
+  geode-shell \
+  a_presentation_save_writes_only_what_the_trader_changed
+
+# The same freeze for `width`, and the half that is latent today: nothing
+# in Geode can set a width yet, so a suite that only ever sees widths the
+# desk declared cannot tell "kept the trader's" from "copied the desk's".
+# The fixture has to declare a width in `views.toml` and change something
+# else entirely.
+run_mutation "views: a presentation save copies the desk's widths into the user's file" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if doc_widths.get(item.name.as_str()) == Some(&width) {' \
+  '        if false {' \
+  geode-shell \
+  a_presentation_save_writes_only_what_the_trader_changed
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

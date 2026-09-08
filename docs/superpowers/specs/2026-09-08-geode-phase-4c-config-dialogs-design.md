@@ -216,12 +216,22 @@ frees every letter. Verbs are now keys *and* buttons.
 | Browse | `/` filter · `j`/`k` move · `enter` open · `n` new · `escape` close |
 | Edit | `/` filter · `j`/`k` move · `space` include · `shift+j`/`shift+k` reorder · `i` edit text · `s` save · `d` delete · `r` revert · `escape` back |
 
-Every verb is **also a button** in a bar pinned below the row list,
-labelled with its own key. That is what makes a letter verb
-discoverable and mouse-reachable — a key alone has no clickable target,
-and every other verb in Geode's dialogs has one. `Save changes` appears
-in the bar only while the draft is dirty, and `Revert to desk` only when
-the object is overridden.
+Every verb that acts on the **object** is also a button in a bar pinned
+below the row list, labelled with its own key: `s`, `d`, `r`. That is
+what makes a letter verb discoverable and mouse-reachable — a key alone
+has no clickable target, and every other verb in Geode's dialogs has
+one. `Save changes` appears in the bar only while the draft is dirty,
+and `Revert to desk` only when the object is overridden.
+
+As built, the verbs that act on a **row** — `space` (include) and
+`shift+j`/`shift+k` (reorder) — have no button. An earlier draft of this
+paragraph claimed every verb in the table above has one; it does not.
+Nothing is unreachable by mouse as a result: the bar is about actions,
+and PHILOSOPHY's requirement runs the other way (every action must be
+keyboard-reachable). A row verb's natural mouse gesture is the row
+itself — a click on the tick, a drag on the handle — not a bar button
+that would have to ask which row it meant, so the honest statement is
+the one above rather than three more buttons.
 
 `Copy to user layer` is a **label**, not a fourth verb. It replaces
 `Save changes`'s own label on `s` — the key and the write it performs
@@ -716,9 +726,40 @@ folded into that section directly rather than repeated here.
   the same way `format`/`label` already did. A hidden column deliberately
   stays in `ViewSpec.columns` — the compiler still selects it — so
   unhiding is free and no query changes shape when a column is hidden.
+  It is dropped in exactly one place instead: `ColumnPlan::build`
+  (`geode-blotter/src/core/plan.rs`), which is what the blotter paints.
+  That one `continue` is the whole of §1.3's "hiding one … and the
+  blotter reflects it without a restart" — without it every other part
+  of the chain (the dialog, the file, the reader, the merge) works and
+  the column is still on screen.
 - **`width` is `f32`**, matching `ColumnPresentation::width`
   (`view.rs:148`), not §3.1's `Option<u32>` sketch. `ListItem.width`
   follows suit.
+- **A presentation save writes only what the trader changed.** §4.1
+  splits by *field*; that is not fine enough for `columns`, whose
+  `order` and `width` both arrive from the **effective** view — the one
+  `views.toml`'s own widths and column order are already merged into. A
+  save that wrote every column's position and every declared width back
+  would pin the desk's layout for that trader against the desk's later
+  changes: the same freeze `Destination` exists to prevent, one
+  field-granularity down, fired by the commonest edit there is.
+  `views::presentation_table` therefore compares both against
+  `doc_baseline` — the order and widths this same save leaves in
+  `views.toml` — and omits what still matches. `hidden` needs no such
+  comparison: nothing but `view_presentation.toml` can set it.
+- **`overridden` counts a user-layer `view_presentation.toml` entry**,
+  not just a user-layer entry in the domain's own doc. §5.3 assumed
+  presentation always accompanies a doc override; §4.1's split
+  guarantees the opposite — hiding a column writes presentation and
+  forks nothing — so markers read off the `views` doc alone answered `r`
+  with "*tree* has no user override to revert" while the file `r` would
+  have removed sat on disk. `derive_rows` takes the presentation doc
+  too; the "some earlier layer defines it" half is still read off the
+  domain's own doc, because that is the half guaranteeing a revert
+  leaves an object behind. `d` is unchanged and still gated on the
+  winning layer — presentation forks nothing, so there is no *view* of
+  the trader's to delete — but its refusal now names `r` rather than
+  claiming they have nothing.
 - **`drifted` is present on every `ObjectRow` but is always `false`.**
   §5.2's `overrides.toml` — the sidecar the scaffold would read to
   compare an override against what it shadowed — is not built in Part 1,
@@ -737,6 +778,26 @@ folded into that section directly rather than repeated here.
   `geode-core` plus every reader that would need to fill it in, none of
   which Part 1's tasks built. Validation still runs (§7.2 steps 1–2); its
   diagnostics render against the object header instead.
+- **The write door takes a `user_dir`, has no `read`, and returns
+  `Result<(), String>`.** §6's signature block is a sketch and all three
+  of its details are false as built (`geode-shell/src/config_write.rs`):
+
+  ```rust
+  pub fn write(user_dir: &Path, layer: Layer, doc: &str, text: &str) -> Result<(), String>;
+  pub fn edit(user_dir: &Path, layer: Layer, doc: &str,
+              f: impl FnOnce(&mut DocumentMut)) -> Result<(), String>;
+  ```
+
+  `read` was cut by ruling: nothing needs it. Every caller either has a
+  `Config` already (which holds the parsed doc) or wants `edit`'s
+  read-modify-write, and a `read` beside them would be a second way to
+  get a doc's text with no reader to keep it honest. `&ShellServices`
+  became `&Path` because the path is all the door uses and a write runs
+  on the background executor, where a whole services struct cannot
+  follow. `io::Result` became `Result<(), String>`: two of the three
+  implementations this replaced already returned messages naming the
+  path and the failing step, and `edit`'s parse refusal is not an
+  `io::Error` at all.
 - **There is no `/` in the edit stage**, though §3.2's key table lists
   one. Filtering field rows would need a second cursor space — a
   filtered position beside the draft's own row index — and would make
@@ -784,3 +845,27 @@ specific prerequisite no task in this plan built:
    that can be raised and never lowered. Views exercises `Choice` but
    never needs to step it backward, and has no `Number` field at all, so
    nothing in Part 1 forced either half into view.
+
+### Deferred, and not blocked on anything
+
+**`ShellEvent::ReloadRejected(Vec<Diagnostic>)` (§2, amendment 3) is not
+built.** §7.1 and §8.5 both rely on it — it is how a dialog says
+`saved · rejected: n errors` about a write the *merge* refused, which
+last-good semantics leave on disk and not live. No Part 1 task named it,
+so it fell through both the plan's task list and its "deliberately out"
+list. It is not blocked on a prerequisite: `ShellEvent` already carries
+`ConfigReloaded`, and `hot_reload::apply_reload` already has the
+diagnostics in hand at the point it decides to keep the last good
+config.
+
+Its cost has risen since the sketch. `bridge.rs:209` discards the
+presentation diagnostics on the reload path — `let (views, _) =
+load_views(config)` — exactly as `data_setup` does at startup, where
+they *are* reported. So a `view_presentation.toml` entry naming a view
+that no longer exists warns once at startup and is silent through every
+reload afterwards, including the reload the Views dialog's own write
+triggers. With no `ReloadRejected` and no `Diagnostic.path`, a stale
+presentation name is silent in every path after startup: the trader
+renames a view, their personal order and hidden columns quietly stop
+applying, and nothing anywhere says so. Whichever of the two is built
+first should carry the other's fix with it.
