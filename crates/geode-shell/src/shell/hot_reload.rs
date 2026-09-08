@@ -5,7 +5,7 @@
 //! `shell/mod.rs` (Phase 3c Task 0) as the one seam that reacts to a
 //! config change after startup.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::Context;
 
@@ -17,6 +17,7 @@ use crate::vimfind::FindStyle;
 use geode_core::config::Config;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
+use geode_core::log::LogLevels;
 use geode_core::schema::SchemaSpec;
 
 use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
@@ -176,6 +177,19 @@ impl ShellView {
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
+        // Phase 4b §4.4: every diagnostic this load produced (config
+        // parse/merge problems, the mod-alias/keymap-build diagnostics
+        // just extended in above) reaches the entity's "config" section
+        // regardless of whether `decide` applies or rejects the reload —
+        // a rejected reload's own fatal diagnostic is exactly the kind of
+        // thing a trader watching the diagnostics tile needs to see.
+        self.diagnostics.update(cx, |d, cx| {
+            let before = d.version();
+            d.note_config(new_config.diagnostics.clone(), SystemTime::now());
+            if d.version() != before {
+                cx.notify();
+            }
+        });
         if let reload::ReloadOutcome::Applied { warnings } = &outcome {
             // Fix wave, Fix 4: `decide` folds warning-severity diagnostics
             // (config + keymap-build) into `Applied { warnings }` rather
@@ -244,6 +258,32 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+
+            // Phase 4b §4.3: an `[log]` change applies through the same
+            // `LevelControl` door `:level` (a later task) uses, and
+            // updates the entity so the diagnostics tile's own log
+            // section reflects it — never re-persisted here (this
+            // *picked up* a change already on disk; re-writing it back
+            // would be pointless, and `Diagnostics::set_levels` is
+            // deliberately the no-persist twin of `request_level`).
+            if changed("app") {
+                let (new_levels, log_diags) = LogLevels::from_doc(&new_config);
+                for d in &log_diags {
+                    tracing::warn!(target: "geode::config", "{d}");
+                }
+                if let Some(log) = &self.services.log
+                    && new_levels != self.diagnostics.read(cx).levels
+                {
+                    if let Err(e) = log.control.set(&new_levels) {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
 
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
@@ -343,15 +383,29 @@ impl ShellView {
                     cx.notify();
                 });
             }
-            if !restart.is_empty() {
-                let message = format!("{} changed — restart to apply", restart.join(" and "));
-                self.restart_required = Some(message.clone());
-                cx.emit(ShellEvent::RestartRequired(message));
+            let restart_message = if !restart.is_empty() {
+                Some(format!(
+                    "{} changed — restart to apply",
+                    restart.join(" and ")
+                ))
             } else {
                 // M8: both docs are back at the baseline the running data
                 // engine was built from — the on-disk config no longer
                 // disagrees with what's running, so the message is stale.
-                self.restart_required = None;
+                None
+            };
+            self.restart_required = restart_message.clone();
+            // Phase 4b §4.4: the entity's own copy, so the diagnostics
+            // tile can show it without reaching back into `ShellView`.
+            self.diagnostics.update(cx, |d, cx| {
+                let before = d.version();
+                d.set_restart_required(restart_message.clone());
+                if d.version() != before {
+                    cx.notify();
+                }
+            });
+            if let Some(message) = restart_message {
+                cx.emit(ShellEvent::RestartRequired(message));
             }
         }
 

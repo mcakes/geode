@@ -781,12 +781,18 @@ impl Render for ShellView {
         // clock read moved to the ~500ms reload-poll tick, so a held key
         // no longer pays it on every repaint.
         let bar_model = self.frame.read(cx).bar_model(self.today);
+        // Phase 4b §4.4: the status bar's diagnostics indicator now reads
+        // `Diagnostics::summary()` (cached there, keyed on its own
+        // version) rather than the deleted `data_status` field — an empty
+        // summary means nothing to report, same "`None` clears it"
+        // contract `data_status` had.
+        let diagnostics_summary = self.diagnostics.read(cx).summary();
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
             reload_message.as_deref(),
             self.restart_required.as_deref(),
-            self.data_status.as_deref(),
+            (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_str()),
             bar_model.as_of.as_deref(),
             self.services.theme.active_name(),
             cx,

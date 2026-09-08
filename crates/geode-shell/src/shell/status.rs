@@ -39,11 +39,11 @@ pub const HEIGHT: f32 = 26.0;
 /// `None` when config is healthy), then the restart indicator when
 /// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
 /// reload the frame cannot pick up live, so this asks for a restart in the
-/// same `warning` token the readout's AS OF badge uses), then the data
-/// status indicator when `data_status_message` is `Some` (Phase 3 §5.1:
-/// a source's degraded health, or events the app bridge's bounded
-/// channel had to refuse — same `warning` token, same reasoning), then
-/// the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
+/// same `warning` token the readout's AS OF badge uses), then the
+/// diagnostics summary when `diagnostics_summary` is `Some` (Phase 4b
+/// §4.4: `Diagnostics::summary()` — source health, config errors and
+/// dropped events, in one terse line — same `warning` token, same
+/// reasoning), then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
 /// is scoped to a past instant — an unmissable `AS OF {t} · :live to
 /// return` segment in the same warning tokens the toolbar's own AS OF
 /// badge uses, since spec §4.5 says nothing on screen may look live when
@@ -65,7 +65,7 @@ pub fn status_bar(
     count: Option<u32>,
     reload_message: Option<&str>,
     restart_message: Option<&str>,
-    data_status_message: Option<&str>,
+    diagnostics_summary: Option<&str>,
     as_of: Option<&str>,
     theme_name: &str,
     cx: &App,
@@ -104,11 +104,11 @@ pub fn status_bar(
                 .child(message.to_string()),
         );
     }
-    if let Some(message) = data_status_message {
+    if let Some(message) = diagnostics_summary {
         bar = bar.left(
             div()
                 .text_color(theme.warning)
-                .debug_selector(|| "data-status".to_string())
+                .debug_selector(|| "diagnostics-summary".to_string())
                 .child(message.to_string()),
         );
     }

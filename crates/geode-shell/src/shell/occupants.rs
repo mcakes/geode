@@ -54,18 +54,6 @@ impl ShellView {
         }
     }
 
-    /// A data-layer diagnostic to show in the status bar (Phase 3 §5.1):
-    /// a source's worst health on its last poll, or events dropped
-    /// because the app bridge's bounded channel refused a `try_send`.
-    /// `None` clears it. The shell cannot query for itself — it does not
-    /// depend on `geode-data` (CLAUDE.md) — so `geode-app` is the only
-    /// caller. Notifies unconditionally: a status the user cannot see is
-    /// not surfaced.
-    pub fn set_data_status(&mut self, status: Option<String>, cx: &mut Context<Self>) {
-        self.data_status = status;
-        cx.notify();
-    }
-
     /// Every tile id in every workspace, main trees and docks, written
     /// into `out` (cleared first). A method rather than a `HashSet`
     /// return so `ensure_occupants` can reuse a scratch allocation across
@@ -182,11 +170,19 @@ impl ShellView {
             let state = matched.and(restored.as_ref()).map(|r| &r.state);
             let factory = matched.or_else(|| self.services.roster.default_factory());
             let occupant = match factory {
-                Some(f) => f.create(*id, state, self.frame.clone(), window, cx),
+                Some(f) => f.create(
+                    *id,
+                    state,
+                    self.frame.clone(),
+                    self.diagnostics.clone(),
+                    window,
+                    cx,
+                ),
                 None => crate::module::placeholder::PlaceholderFactory.create(
                     *id,
                     None,
                     self.frame.clone(),
+                    self.diagnostics.clone(),
                     window,
                     cx,
                 ),

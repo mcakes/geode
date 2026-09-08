@@ -10,6 +10,7 @@
 //! to the tile whose id is the outcome's key.
 
 use crate::actions::{ActionId, ActionRegistry};
+use crate::diagnostics::Diagnostics;
 use crate::frame::Frame;
 use crate::keymap::KeyContext;
 use crate::tiling::TileId;
@@ -85,6 +86,7 @@ pub trait ModuleFactory {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant;
@@ -208,6 +210,7 @@ pub mod placeholder {
             tile: TileId,
             _: Option<&toml::Table>,
             _: Entity<Frame>,
+            _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {
@@ -348,6 +351,7 @@ pub mod recording {
             tile: TileId,
             restored: Option<&toml::Table>,
             _: Entity<Frame>,
+            _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {

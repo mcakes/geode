@@ -6,20 +6,22 @@
 use geode_blotter::BlotterFactory;
 use geode_core::config::{Config, Diagnostic};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::DistinctOutcome;
+use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
-use geode_shell::shell::{ShellEvent, ShellView};
+use geode_shell::diagnostics::SourceSummary;
+use geode_shell::shell::{DIAGNOSTICS_KEY, ShellEvent, ShellView};
 use geode_shell::vimfind::FindStyle;
 use gpui::{App, AsyncApp, WindowHandle};
 use gpui_component::Root;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Outbound events queued before the sink refuses (§7.3). Tiles × a
 /// small burst; a full channel is counted by the bridge's own
@@ -136,6 +138,12 @@ pub struct Bridge {
     pub factory: Rc<BlotterFactory>,
     events: async_channel::Receiver<DataEvent>,
     dropped: Arc<AtomicU64>,
+    /// The sources the running service was actually built from (Phase 4b
+    /// §4.4) — `attach` describes each one to the `Diagnostics` entity
+    /// once. Cloned out of `setup.config.sources` before that config
+    /// moves into `DataService::spawn` below, same reasoning as `schema`/
+    /// `dimensions` two lines up.
+    sources: Vec<SourceSpec>,
 }
 
 pub fn start(
@@ -155,6 +163,7 @@ pub fn start(
     // dimensions the service itself was built from (spec §3.7).
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
+    let sources = setup.config.sources.clone();
     let handle = DataService::spawn(setup.config, sink);
     let factory = Rc::new(BlotterFactory::new(
         handle.clone(),
@@ -169,6 +178,7 @@ pub fn start(
         factory,
         events: rx,
         dropped,
+        sources,
     }
 }
 
@@ -186,6 +196,60 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         .ok()
         .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
         .expect("the window's root view is the shell");
+    let diagnostics = shell.read(cx).diagnostics().clone();
+
+    // Every configured source's static description (Phase 4b §4.4),
+    // once — plain strings so `geode_shell::diagnostics` never names
+    // `geode_data::source::{Priority, Readiness}` themselves (CLAUDE.md:
+    // shell and data never depend on each other).
+    diagnostics.update(cx, |d, cx| {
+        for source in &bridge.sources {
+            d.describe_source(
+                &source.name,
+                SourceSummary {
+                    paths: source.paths.clone(),
+                    priority: format!("{:?}", source.priority),
+                    readiness: format!("{:?}", source.readiness),
+                },
+            );
+        }
+        cx.notify();
+    });
+
+    // The diagnostics tile's `Request::Catalog` drain (Phase 4b §4.5):
+    // fires on every notify from the entity, regardless of what queued
+    // the request — `Diagnostics::note_published` (below, on a fresh
+    // publish while watched) and the diagnostics tile's own
+    // `set_visible(true)` (Task 5, `Diagnostics::watch`) both go through
+    // this one door, so a tile becoming visible gets its first catalog
+    // the same way a publish refreshes an already-visible one.
+    // `catalog_tag` is a plain `Rc<Cell<u64>>`, not `Arc<AtomicU64>`:
+    // both this observer and the drain loop below run on the UI thread's
+    // single-threaded async executor (the loop already captures a
+    // non-`Send` `Rc<BlotterFactory>`), so there is no real concurrency
+    // to guard against.
+    let catalog_tag = Rc::new(Cell::new(0u64));
+    cx.observe(&diagnostics, {
+        let handle = handle.clone();
+        let diagnostics = diagnostics.clone();
+        let shell = shell.clone();
+        let catalog_tag = catalog_tag.clone();
+        move |_entity, cx| {
+            let requested = diagnostics.update(cx, |d, _cx| d.take_pending_catalog_request());
+            if !requested {
+                return;
+            }
+            let tag = catalog_tag.get() + 1;
+            catalog_tag.set(tag);
+            let as_of = shell.read(cx).frame().read(cx).as_of().clone();
+            handle.catalog(CatalogParams {
+                key: DIAGNOSTICS_KEY,
+                tag,
+                as_of,
+            });
+        }
+    })
+    .detach();
 
     // Reloads: new views to the data thread and to the factory.
     cx.subscribe(&shell, {
@@ -258,7 +322,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     })
     .detach();
 
+    let diagnostics_for_drain = diagnostics.clone();
+    let catalog_tag_for_drain = catalog_tag.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
+        let diagnostics = diagnostics_for_drain;
+        let catalog_tag = catalog_tag_for_drain;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
@@ -276,8 +344,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     return;
                 };
                 if now_dropped != last_dropped {
-                    shell.update(cx, |s, cx| {
-                        s.set_data_status(Some(format!("data: {now_dropped} event(s) dropped")), cx)
+                    diagnostics.update(cx, |d, cx| {
+                        let before = d.version();
+                        d.note_dropped(now_dropped);
+                        if d.version() != before {
+                            cx.notify();
+                        }
                     });
                 }
                 match event {
@@ -306,6 +378,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         // reason to exist at all — there's nothing this
                         // arm could say that the engine-side line
                         // doesn't already say better.
+                        //
+                        // `Diagnostics::note_published` (Phase 4b §4.4)
+                        // borrows `dataset` ahead of the move into
+                        // `Publish` below — it also sets
+                        // `pending_catalog_request` while a diagnostics
+                        // tile is watching, which the `cx.observe`
+                        // registered in `attach` drains.
+                        diagnostics.update(cx, |d, cx| {
+                            d.note_published(&dataset);
+                            cx.notify();
+                        });
                         let frame = shell.read(cx).frame().clone();
                         // The event carries no timestamp of its own; the
                         // arrival instant is what a "recent publishes"
@@ -321,7 +404,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             cx.notify();
                         });
                     }
-                    DataEvent::Health { source, worst, .. } => {
+                    DataEvent::Health {
+                        source,
+                        worst,
+                        detail,
+                    } => {
                         // Not logged here either, same reasoning as
                         // `Published` just above (MAJ-2): `geode-data`'s
                         // `log_health_event` already logs this at the
@@ -329,17 +416,29 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         // `Failed`, `warn` for `Degraded`/
                         // `PendingTooLong`, `info`/`debug` otherwise) the
                         // moment the event is constructed. This arm keeps
-                        // only the real UI state change — the status bar
-                        // — which is not logging and so isn't subject to
+                        // only the real state change — the `Diagnostics`
+                        // entity, which the status bar's summary reads —
+                        // which is not logging and so isn't subject to
                         // the UI-thread level constraint at all.
-                        shell.update(cx, |s, cx| {
-                            s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_health(&source, worst, detail, SystemTime::now());
+                            if d.version() != before {
+                                cx.notify();
+                            }
                         });
                     }
                     DataEvent::Diagnostics(diags) => {
-                        for d in diags {
+                        for d in &diags {
                             tracing::warn!(target: "geode::query", "{d}");
                         }
+                        diagnostics.update(cx, |dg, cx| {
+                            let before = dg.version();
+                            dg.note_config(diags, SystemTime::now());
+                            if dg.version() != before {
+                                cx.notify();
+                            }
+                        });
                     }
                     // The dimension picker's own outcome (spec §3.4),
                     // paired with the `DistinctRequested` submission
@@ -349,13 +448,48 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     DataEvent::Distinct(outcome) => {
                         shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
                     }
-                    // Phase 4b Task 3 adds these two events; Task 4 routes
-                    // both into the `Diagnostics` entity (source health's
-                    // last/next poll, and the catalog tile's own data).
-                    // Nothing reads either yet, so there is nothing to do
-                    // here — deliberately not `_ => {}`, so the next
-                    // `DataEvent` variant added still fails this match.
-                    DataEvent::Catalog(_) | DataEvent::Polled { .. } => {}
+                    // The diagnostics tile's "what does the database
+                    // hold" result (Phase 4b §4.5), requested by the
+                    // `cx.observe` registered in `attach`. Tag-checked
+                    // against `catalog_tag` — that observer is the only
+                    // submitter, so an outcome whose tag doesn't match
+                    // the latest one it handed out is answering a
+                    // request a newer one has already superseded, and is
+                    // dropped rather than applied (spec §7.3: a stale
+                    // result is never rendered).
+                    DataEvent::Catalog(outcome) => {
+                        if outcome.tag != catalog_tag.get() {
+                            return;
+                        }
+                        match outcome.snapshot {
+                            Ok(snapshot) => {
+                                diagnostics.update(cx, |d, cx| {
+                                    let before = d.version();
+                                    d.set_catalog(snapshot);
+                                    if d.version() != before {
+                                        cx.notify();
+                                    }
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(target: "geode::query", "catalog request failed: {e}")
+                            }
+                        }
+                    }
+                    DataEvent::Polled {
+                        source,
+                        ready,
+                        at,
+                        next,
+                    } => {
+                        diagnostics.update(cx, |d, cx| {
+                            let before = d.version();
+                            d.note_polled(&source, ready, at, next);
+                            if d.version() != before {
+                                cx.notify();
+                            }
+                        });
+                    }
                 }
             });
             if handled.is_err() {
@@ -493,6 +627,7 @@ role = "key"
             factory,
             events: rx,
             dropped: dropped.clone(),
+            sources: Vec::new(),
         };
 
         cx.update(|cx| attach(&bridge, window, cx));
@@ -561,6 +696,7 @@ role = "key"
             factory,
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
         };
         cx.update(|cx| attach(&bridge, window, cx));
 

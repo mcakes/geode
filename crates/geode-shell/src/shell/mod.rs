@@ -44,9 +44,11 @@ use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
+use crate::diagnostics::Diagnostics;
 use crate::fontsize::FontSize;
 use crate::frame::{Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
+use crate::log_persist;
 use crate::module::{ModuleRoster, TileOccupant};
 use crate::palette::PaletteState;
 use crate::perf::FrameHistogram;
@@ -154,6 +156,12 @@ impl EventEmitter<ShellEvent> for ShellView {}
 /// instead and is routed to [`ShellView::deliver_distinct`], a separate
 /// method with its own stale-tag/stale-column guard.
 pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
+
+/// The coalescing key the diagnostics tile's `Request::Catalog` submits
+/// under (Phase 4b §4.5) — same reservation reasoning as [`PICKER_KEY`]
+/// just above, one lower so the two can never collide with each other or
+/// with a real tile's `TileId`-derived key.
+pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 
 /// One column a dimension picker can open (spec §3.3): every categorical
 /// column of every dataset, plus every derived dimension. `role` is
@@ -531,6 +539,13 @@ pub struct ShellView {
     perf_overlay: bool,
     /// The shared frame (§4), created here so every occupant can hold it.
     frame: Entity<Frame>,
+    /// The shell-owned diagnostics gatherer (Phase 4b §4.4), created
+    /// alongside the frame so every occupant can hold it too. Fed by
+    /// the app bridge and by config load/reload (`hot_reload::
+    /// apply_reload`); drained by the `cx.observe` set up in `new` for
+    /// `:level` persistence, the overlay toggle, and the catalog
+    /// request.
+    diagnostics: Entity<Diagnostics>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -584,14 +599,6 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
-    /// The latest data-layer diagnostic the app bridge wants shown (Phase
-    /// 3 §5.1) — a source's health degrading, or events refused because
-    /// the bridge's bounded channel filled up. `None` means nothing to
-    /// report. The shell cannot query for itself (CLAUDE.md: it does not
-    /// depend on `geode-data`), so `geode-app` is the only writer, via
-    /// [`set_data_status`](Self::set_data_status); this field is plain
-    /// display state, same as `restart_required` two fields up.
-    data_status: Option<String>,
     /// Every column a dimension picker can open (Phase 4a §3.3),
     /// [`pickable_columns`] over the current config — computed once at
     /// construction and rebuilt by `hot_reload::apply_reload` whenever
@@ -884,6 +891,26 @@ impl ShellView {
                     }
                 });
 
+                // Copy the frame-time histogram into `Diagnostics`
+                // (Phase 4b open question 2's ruling), same tick — a
+                // no-op, allocation-free, unless a diagnostics tile is
+                // actually watching (`refresh_frame_hist`'s own doc
+                // comment). `this.perf` itself lives on `ShellView`, so
+                // it's read out through a plain `this.update` clone —
+                // same shape as `frame` two lines up — rather than
+                // reached from inside the diagnostics entity's own
+                // update closure.
+                let Ok((diagnostics, perf)) = this.update(cx, |view, _cx| {
+                    (view.diagnostics.clone(), view.perf.clone())
+                }) else {
+                    return; // window/entity gone; stop polling
+                };
+                diagnostics.update(cx, |d, cx| {
+                    if d.refresh_frame_hist(&perf) {
+                        cx.notify();
+                    }
+                });
+
                 // Refresh `today` (Phase 4b Task 1 fix round 1, MIN-9),
                 // same tick, same "cheap no-op unless it actually
                 // changed" shape as the sweep just above — this is the
@@ -1031,6 +1058,39 @@ impl ShellView {
         })
         .detach();
 
+        // The shell-owned diagnostics gatherer (Phase 4b §4.4), created
+        // alongside the frame — see the field's own doc comment. Seeded
+        // from `services.log`'s levels when logging is wired up (`None`
+        // in every test setup that doesn't opt in, mirroring `log`
+        // itself), `LogLevels::default()` otherwise.
+        let diagnostics = {
+            let levels = services
+                .log
+                .as_ref()
+                .map(|l| l.levels.clone())
+                .unwrap_or_default();
+            cx.new(|_| Diagnostics::new(levels))
+        };
+        // The config this window started with already carries whatever
+        // `Config::load` diagnosed — `main.rs`'s own startup
+        // `print_diagnostic` loop logs the same list to `geode::config`;
+        // recorded here too so the diagnostics tile's "config" section
+        // has it from the very first frame, not only from the first live
+        // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
+        diagnostics.update(cx, |d, _cx| {
+            d.note_config(
+                services.config.diagnostics.clone(),
+                std::time::SystemTime::now(),
+            );
+        });
+        // Same drain-only shape as the frame's own observer above, minus
+        // the `Window` — none of `on_diagnostics_changed`'s three drains
+        // need one.
+        cx.observe(&diagnostics, |view, diagnostics, cx| {
+            view.on_diagnostics_changed(diagnostics, cx);
+        })
+        .detach();
+
         // Restore a saved session's scope/slot/as-of (Task 3, spec §3.6
         // "state-as-config"), applied directly to the just-built frame
         // rather than threaded through `Frame::new` — `main.rs` restores
@@ -1093,6 +1153,7 @@ impl ShellView {
             last_render_started: None,
             perf_overlay: false,
             frame,
+            diagnostics,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
@@ -1102,7 +1163,6 @@ impl ShellView {
             restart_required: None,
             sources_baseline,
             datasets_baseline,
-            data_status: None,
             pickable,
             picker: None,
             next_picker_tag: 0,
@@ -1239,6 +1299,42 @@ impl ShellView {
         cx.notify();
     }
 
+    /// Fired by the `cx.observe(&diagnostics, ..)` set up in `new`
+    /// whenever the entity notifies: drains the two pending requests a
+    /// module can queue but never reach `ShellView` to act on directly
+    /// (spec ruling — modules never reach `ShellView`) — `request_level`'s
+    /// runtime apply + persist, and `request_overlay_toggle`. The catalog
+    /// request drain lives in the app bridge (`geode-app` is the only
+    /// crate allowed to touch `geode-data`), not here.
+    fn on_diagnostics_changed(&mut self, diagnostics: Entity<Diagnostics>, cx: &mut Context<Self>) {
+        let (pending_level, pending_overlay) = diagnostics.update(cx, |d, _cx| {
+            (d.take_pending_level(), d.take_pending_overlay_toggle())
+        });
+        if let Some((target, level)) = pending_level {
+            let levels = diagnostics.read(cx).levels.clone();
+            if let Some(log) = &self.services.log
+                && let Err(e) = log.control.set(&levels)
+            {
+                tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+            }
+            if let Some(dir) = self.user_dir.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) =
+                            log_persist::persist_log_level_to_user_config(&dir, &target, level)
+                        {
+                            tracing::warn!(target: "geode::config", "failed to persist [log]: {e}");
+                        }
+                    })
+                    .detach();
+            }
+        }
+        if pending_overlay {
+            self.perf_overlay = !self.perf_overlay;
+        }
+        cx.notify();
+    }
+
     /// Set a grouping slot in memory (`:group save N`, a module command —
     /// modules hold no config/file access, so this is the seam they call
     /// through). The write to the user layer's `groupings.toml` happens
@@ -1271,6 +1367,12 @@ impl ShellView {
     /// The shared frame entity every occupant holds (§4).
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
+    }
+
+    /// The shell-owned diagnostics entity every occupant can hold too
+    /// (Phase 4b §4.4).
+    pub fn diagnostics(&self) -> &Entity<Diagnostics> {
+        &self.diagnostics
     }
 
     /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —

@@ -18,6 +18,7 @@ use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
     register_scope_actions,
 };
+use geode_shell::diagnostics::Diagnostics;
 use geode_shell::fonts;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::build_keymap;
@@ -283,10 +284,12 @@ impl ModuleFactory for BlotterFactoryHandle {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
-        self.0.create(tile, restored, frame, window, cx)
+        self.0
+            .create(tile, restored, frame, diagnostics, window, cx)
     }
 }
 

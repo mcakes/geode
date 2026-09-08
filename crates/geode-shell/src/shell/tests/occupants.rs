@@ -302,34 +302,7 @@ fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
     );
 }
 
-/// `set_data_status` (Phase 3 §5.1): the app bridge's only way to tell
-/// the shell about a data-layer diagnostic, since the shell does not
-/// depend on `geode-data` (CLAUDE.md). Same rendering contract as
-/// `restart_required` — `warning`-toned, debug-selectable — and clears
-/// cleanly.
-#[gpui::test]
-fn set_data_status_shows_and_clears_the_status_bar_indicator(cx: &mut gpui::TestAppContext) {
-    let (services, _log) = services_with_recorder();
-    let (window, mut cx) = open_shell(cx, services);
-    let shell = shell_of(&window, &mut cx);
-
-    shell.update(&mut cx, |s, cx| {
-        s.set_data_status(Some("risk: degraded".into()), cx)
-    });
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
-    assert!(
-        cx.debug_bounds("data-status").is_some(),
-        "the status bar shows the data diagnostic"
-    );
-
-    shell.update(&mut cx, |s, cx| s.set_data_status(None, cx));
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
-    assert!(
-        cx.debug_bounds("data-status").is_none(),
-        "clearing the status removes the indicator"
-    );
-}
+// The status bar's diagnostics-summary indicator (Phase 3 §5.1's
+// data-status contract, replaced by Phase 4b's `Diagnostics` entity) is
+// covered in `shell/tests/diagnostics.rs` now — `set_data_status` no
+// longer exists; `Diagnostics::note_health` is the door.
