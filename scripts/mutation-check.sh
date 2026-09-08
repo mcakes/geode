@@ -1290,6 +1290,24 @@ run_mutation "matcher: the count is capped" \
   geode-shell \
   the_count_is_capped
 
+# ---- keymap_edit: unbind (dialog interaction model task 2) --------------
+#
+# The dangerous branch: a wrong `true` deletes the user's own binding on
+# that key instead of shadowing a desk one.
+run_mutation "keymap_edit: unbind always removes instead of shadowing" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    let removed = if unbind.is_user_layer {' \
+  '    let removed = if true {' \
+  geode-shell \
+  unbinding_a_lower_layer_binding_writes_a_none_shadow
+
+run_mutation "keymap_edit: unbind always shadows instead of removing" \
+  crates/geode-shell/src/keymap_edit.rs \
+  '    let removed = if unbind.is_user_layer {' \
+  '    let removed = if false {' \
+  geode-shell \
+  unbinding_a_user_layer_binding_removes_the_key
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \

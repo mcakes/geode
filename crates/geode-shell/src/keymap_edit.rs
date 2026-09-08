@@ -219,11 +219,104 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
     Ok(RebindOutcome { displacement })
 }
 
+/// One binding to silence, the displacement half of a [`Rebind`] performed
+/// on its own (`keybindings_view`'s `d`).
+#[derive(Debug, Clone)]
+pub struct Unbind {
+    /// The `[[bindings]]` entry's `context`, matched exactly as
+    /// [`Rebind::context`] is. `None` means the no-`context` entry.
+    pub context: Option<String>,
+    /// The rendered keystroke to silence, e.g. `"ctrl+k"`.
+    pub key: String,
+    /// Whether the binding being silenced was itself set by a user-layer
+    /// entry. `true` removes the key outright; `false` shadows a
+    /// builtin/desk binding by writing [`crate::keymap::UNBOUND_ACTION`].
+    ///
+    /// Getting this backwards is the dangerous case, not a cosmetic one: a
+    /// wrong `true` deletes whatever the user *did* have on that key, and a
+    /// wrong `false` leaves a redundant `"none"` shadowing the user's own
+    /// entry so the key stays dead. See [`Rebind::old_key_is_user_layer`]
+    /// for the identical rule stated the other way round.
+    pub is_user_layer: bool,
+}
+
+/// What [`apply_unbind`] did. `removed` is false for a shadow write, and
+/// also for a removal that found nothing to remove — the caller's belief
+/// about where the binding lives can be stale, which is a warning rather
+/// than a failure (the same contract [`Displacement::OldKeyNotFound`]
+/// keeps for a rebind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnbindOutcome {
+    pub removed: bool,
+}
+
+/// Silence one binding in `<user_dir>/keymap.toml`. `Err` only ever means
+/// the file read/parse/write itself failed; the file is left untouched on
+/// a parse error, exactly as [`apply_rebind`] leaves it.
+///
+/// This is precisely [`apply_rebind`]'s step 2 (displacement) performed on
+/// its own, with no step 1 new-binding write first: locate (or create) the
+/// `[[bindings]]` entry matching `unbind.context` via the same
+/// [`keys_table_for`] helper, then either remove `unbind.key` from its
+/// `keys` table (`is_user_layer: true`) or shadow it with
+/// [`crate::keymap::UNBOUND_ACTION`] (`is_user_layer: false`) — see the
+/// module doc's "Semantics" section and [`Unbind::is_user_layer`]'s own
+/// doc for why getting that branch backwards is the dangerous case.
+pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
+    let path = user_dir.join("keymap.toml");
+    let existed = path.exists();
+
+    let mut doc = if existed {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?
+    } else {
+        DocumentMut::new()
+    };
+
+    if !existed {
+        doc["config_version"] = value(1_i64);
+    }
+
+    if doc
+        .get("bindings")
+        .and_then(Item::as_array_of_tables)
+        .is_none()
+    {
+        doc["bindings"] = Item::ArrayOfTables(ArrayOfTables::new());
+    }
+    let bindings = doc["bindings"]
+        .as_array_of_tables_mut()
+        .expect("just ensured 'bindings' is an array of tables");
+
+    let keys = keys_table_for(bindings, unbind.context.as_deref());
+
+    let removed = if unbind.is_user_layer {
+        if keys.contains_key(&unbind.key) {
+            keys.remove(&unbind.key);
+            true
+        } else {
+            false
+        }
+    } else {
+        keys[unbind.key.as_str()] = value("none");
+        false
+    };
+
+    write_atomic(user_dir, &path, &doc.to_string())?;
+    Ok(UnbindOutcome { removed })
+}
+
 /// Find the `[[bindings]]` entry whose `context` exactly matches `context`
 /// (`None` matching the no-`context` entry — see the module doc's
 /// "Semantics" section), creating one if none exists, and return that
 /// entry's `keys` table, creating it too if necessary. Shared by
-/// [`apply_rebind`] and `apply_unbind` — both only ever need to reach the
+/// [`apply_rebind`] and [`apply_unbind`] — both only ever need to reach the
 /// same `keys` table before writing or removing one entry in it.
 fn keys_table_for<'a>(bindings: &'a mut ArrayOfTables, context: Option<&str>) -> &'a mut Table {
     let match_ix = bindings
@@ -840,6 +933,103 @@ context = \"workspace\"
                 .bindings()
                 .iter()
                 .any(|b| b.action.0 == "palette::toggle")
+        );
+    }
+
+    /// A binding that comes from builtin or desk cannot be removed — this
+    /// module only ever writes the user layer — so it is silenced with the
+    /// documented `"none"` shadow instead.
+    #[test]
+    fn unbinding_a_lower_layer_binding_writes_a_none_shadow() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: false,
+            },
+        )
+        .expect("write");
+        assert!(!out.removed, "a shadow is not a removal");
+        let text = read(dir.path());
+        assert!(text.contains(r#""ctrl+k" = "none""#), "{text}");
+    }
+
+    /// The user's own binding is removed outright, leaving no redundant
+    /// `"none"` in a table this module owns.
+    #[test]
+    fn unbinding_a_user_layer_binding_removes_the_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\
+             \"ctrl+k\" = \"palette::toggle\"\n\"ctrl+j\" = \"tile::focus_down\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect("write");
+        assert!(out.removed);
+        let text = read(dir.path());
+        assert!(!text.contains("ctrl+k"), "the key is gone: {text}");
+        assert!(text.contains("ctrl+j"), "siblings survive: {text}");
+        assert!(!text.contains("none"), "no redundant shadow: {text}");
+    }
+
+    /// The caller's belief about where a binding lives can be stale. Removal
+    /// that finds nothing reports it rather than failing — the same
+    /// `Displacement::OldKeyNotFound` contract `apply_rebind` already keeps.
+    #[test]
+    fn a_removal_that_finds_nothing_reports_it_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        let out = apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: true,
+            },
+        )
+        .expect("a stale belief is not a write failure");
+        assert!(!out.removed);
+    }
+
+    /// Comments and unrelated tables survive, as they do for every other
+    /// keyed persist in this crate.
+    #[test]
+    fn unbinding_preserves_comments_and_unrelated_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = "# my keymap\nconfig_version = 1\n\n[[bindings]]\ncontext = \"tile\"\n\n\
+             [bindings.keys]\n\"ctrl+k\" = \"tile::close\"\n";
+        std::fs::write(dir.path().join("keymap.toml"), original).unwrap();
+
+        apply_unbind(
+            dir.path(),
+            &Unbind {
+                context: None,
+                key: "ctrl+k".into(),
+                is_user_layer: false,
+            },
+        )
+        .expect("write");
+        let text = read(dir.path());
+        assert!(text.contains("# my keymap"), "{text}");
+        assert!(
+            text.contains(r#"context = "tile""#),
+            "the tile entry is untouched: {text}"
+        );
+        assert!(text.contains(r#""ctrl+k" = "tile::close""#), "{text}");
+        assert!(
+            text.contains(r#""ctrl+k" = "none""#),
+            "the no-context entry got the shadow: {text}"
         );
     }
 }
