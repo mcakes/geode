@@ -16,9 +16,9 @@
 //! **Persistence**: `[ui] font_size = "small" | "medium" | "large"` in the
 //! user `app.toml` — its own table, not `[theme]`, because font size is
 //! not part of a theme family (switching themes must never change it).
-//! Written by [`persist_to_user_config`] with the same toml_edit
-//! format-preserving atomic write the theme persist uses
-//! ([`crate::theme::write_atomic`]); read back through the layered
+//! Written by [`persist_to_user_config`] through the one write door
+//! ([`crate::config_write::edit`]), which is where the format-preserving
+//! toml_edit round trip and the atomic write live; read back through the layered
 //! [`Config`] by [`FontSize::from_config`], so desk/user layers and hot
 //! reload behave exactly like every other config key.
 

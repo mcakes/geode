@@ -69,7 +69,7 @@ use toml_edit::{DocumentMut, value};
 /// from inside the running app (spec §3.1): the builtin layer is
 /// compiled in, and the desk layer is shared state a single trader's
 /// running app has no business rewriting.
-pub fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathBuf, String> {
+pub(crate) fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathBuf, String> {
     if layer != Layer::User {
         return Err(format!(
             "refusing to write the {} layer's {doc}.toml: only the user layer is writable \
@@ -80,23 +80,17 @@ pub fn doc_path(user_dir: &Path, layer: Layer, doc: &str) -> Result<PathBuf, Str
     Ok(user_dir.join(format!("{doc}.toml")))
 }
 
-/// Read one layered config document's raw text.
-///
-/// A missing file is `Ok("")`, not an error: every caller here treats
-/// "no file yet" as "an empty document" (a fresh install has none of
-/// these files), and collapsing the two at the door means no caller
-/// re-implements that decision. A file that exists but cannot be *read*
-/// (permissions, a directory in its place) is still an `Err` — that is a
-/// real failure, not an absence.
-pub fn read(user_dir: &Path, layer: Layer, doc: &str) -> Result<String, String> {
-    let path = doc_path(user_dir, layer, doc)?;
-    if !path.exists() {
-        return Ok(String::new());
-    }
-    std::fs::read_to_string(&path).map_err(|e| format!("failed to read {}: {e}", path.display()))
-}
-
 /// Atomically replace one layered config document with `text`.
+///
+/// **This is a whole-file replacement and deliberately bypasses
+/// [`edit`]'s untouched-on-parse-failure refusal**: nothing here reads,
+/// parses, or preserves whatever is on disk, so a user's comments, key
+/// order and unrelated tables are gone the moment it succeeds. That is
+/// right only when the caller already holds the complete document it
+/// means to write — [`open`] plus a mutation, which is how `keymap_edit`
+/// uses it. A caller setting one key wants [`edit`] instead; picking
+/// this one there silently discards hand-edits, with no failure to
+/// notice.
 pub fn write(user_dir: &Path, layer: Layer, doc: &str, text: &str) -> Result<(), String> {
     let path = doc_path(user_dir, layer, doc)?;
     write_file(&path, text)
@@ -137,7 +131,7 @@ pub fn edit(
 /// `edit`'s infallible `FnOnce(&mut DocumentMut)`. Keeping it on this
 /// side of the door means the parse-refusal contract still has exactly
 /// one implementation.
-pub fn open(user_dir: &Path, layer: Layer, doc: &str) -> Result<DocumentMut, String> {
+pub(crate) fn open(user_dir: &Path, layer: Layer, doc: &str) -> Result<DocumentMut, String> {
     let path = doc_path(user_dir, layer, doc)?;
     open_at(&path)
 }
@@ -340,23 +334,6 @@ mod tests {
             assert!(edit(dir.path(), layer, "app", |_| {}).is_err(), "{layer:?}");
         }
         assert!(!dir.path().join("app.toml").exists(), "nothing was written");
-    }
-
-    /// `read` collapses "no file yet" to an empty document rather than an
-    /// error: a fresh install has none of these files, and a caller that
-    /// had to tell the two apart would re-implement that decision (badly)
-    /// on its own.
-    #[test]
-    fn read_returns_an_empty_document_for_a_missing_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(read(dir.path(), Layer::User, "app").unwrap(), "");
-        std::fs::write(dir.path().join("app.toml"), "# mine\nx = 1\n").unwrap();
-        assert_eq!(
-            read(dir.path(), Layer::User, "app").unwrap(),
-            "# mine\nx = 1\n",
-            "an existing file comes back byte-for-byte, comments included"
-        );
-        assert!(read(dir.path(), Layer::Desk, "app").is_err());
     }
 
     /// `edit` on a doc that does not exist yet creates it — every keyed
