@@ -3700,6 +3700,40 @@ run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)
   '    for old in &files[..files.len() - keep - 1] {' \
   geode-app trim_deletes_the_oldest_files_beyond_the_cap
 
+# ---- Task 6 fix round 1: panic containment (MAJ-1), the runner's -------
+# ---- panic log extracted and tested (MAJ-2) -----------------------------
+
+run_mutation "geode_core::panic: contained never marks the thread as inside a boundary" \
+  crates/geode-core/src/panic.rs \
+  '    DEPTH.with(|d| d.set(d.get() + 1));' \
+  '    DEPTH.with(|d| d.set(d.get()));' \
+  geode-core contained_reports_true_only_for_its_own_extent
+
+run_mutation "geode_core::panic: the guard's drop never clears the marker" \
+  crates/geode-core/src/panic.rs \
+  '            DEPTH.with(|d| d.set(d.get().saturating_sub(1)));' \
+  '            let _ = DEPTH.with(|d| d.get());' \
+  geode-core contained_reports_true_only_for_its_own_extent
+
+run_mutation "ingest runner: log_ingest_panic never logs (its error! call is dropped)" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    tracing::error!(target: "geode::ingest", file = %path.display(), "ingest task panicked: {message}");' \
+  '    let _ = (path, message);' \
+  geode-data log_ingest_panic_logs_the_file_and_payload_at_error
+
+run_mutation "crash file: write_crash_file truncates a same-instant collision instead of suffixing it" \
+  crates/geode-app/src/crash.rs \
+  '.create_new(true)' \
+  '.create(true).truncate(true)' \
+  geode-app a_second_write_at_the_same_instant_gets_a_suffixed_name_not_a_truncation
+
+run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
+  crates/geode-app/src/crash.rs \
+  '    prune_files(dir, "crash-", ".log", CRASH_FILES_KEPT);
+    Ok(path)' \
+  '    Ok(path)' \
+  geode-app write_crash_file_prunes_to_the_newest_ten
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
