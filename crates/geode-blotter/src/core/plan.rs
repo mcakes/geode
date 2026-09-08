@@ -63,6 +63,15 @@ impl ColumnPlan {
         }];
         for column in &view.columns {
             let name = column.name();
+            let presentation = view.presentation_of(name);
+            // Hiding is presentation, not the column set (spec §5.6): the
+            // column stays in `view.columns` and the compiler still
+            // selects it, so unhiding costs no requery — but the plan is
+            // what the blotter paints, so this is the one place a hidden
+            // column has to disappear.
+            if presentation.hidden.unwrap_or(false) {
+                continue;
+            }
             let kind = match column {
                 ViewColumn::Dimension { .. } => {
                     if grouping.iter().any(|g| g == name) {
@@ -72,7 +81,6 @@ impl ColumnPlan {
                 }
                 ViewColumn::Measure { .. } | ViewColumn::Derived { .. } => ColumnKind::Measure,
             };
-            let presentation = view.presentation_of(name);
             let format = match kind {
                 ColumnKind::Measure => ColumnFormat::MEASURE,
                 _ => ColumnFormat::TEXT,
@@ -165,7 +173,7 @@ mod tests {
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
-    use geode_core::view::ViewSpec;
+    use geode_core::view::{ViewPresentationSpec, ViewSpec};
 
     fn view() -> ViewSpec {
         let text = r#"
@@ -286,6 +294,46 @@ name = "missing_in_snapshot"
         assert_eq!(plan.columns[1].kind, ColumnKind::Dimension);
         assert_eq!(plan.columns[1].width, TEXT_WIDTH);
         assert_eq!(plan.grouping_indices, vec![Some(0), Some(1)]);
+    }
+
+    /// A column the trader hid in `view_presentation.toml` is not planned,
+    /// so the blotter cannot paint it (spec §5.6, §1.3).
+    ///
+    /// Built through `ViewPresentationSpec::apply` rather than by poking
+    /// `ViewSpec.presentation` directly, because the whole chain is what
+    /// is under test: the doc reader, the merge over the view, and the
+    /// plan. A hidden column deliberately stays in `ViewSpec::columns` —
+    /// the compiler still selects it, so unhiding costs no requery — which
+    /// is exactly why dropping it has to happen here and nowhere else.
+    #[test]
+    fn a_hidden_column_is_not_planned() {
+        let mut views = vec![view()];
+        let doc = merge_docs(
+            "view_presentation",
+            &[
+                LayerDoc::builtin("view_presentation", "[tree]\nhidden = [\"model_code\"]\n")
+                    .unwrap(),
+            ],
+        );
+        let (presentation, diags) = ViewPresentationSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(presentation.apply(&mut views).is_empty());
+        assert!(
+            views[0].columns.iter().any(|c| c.name() == "model_code"),
+            "the hidden column stays in the view — the compiler still selects it"
+        );
+
+        let snap = snapshot();
+        let plan = ColumnPlan::build(&views[0], snap.grouping(), &snap);
+        let names: Vec<&str> = plan.columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            !names.contains(&"model_code"),
+            "a hidden column must not be planned, got {names:?}"
+        );
+        assert!(
+            names.contains(&"delta01"),
+            "and hiding one column must not drop the rest, got {names:?}"
+        );
     }
 
     #[test]
