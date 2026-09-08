@@ -67,6 +67,7 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
+use crate::dialogmode::DialogMode;
 use crate::keymap::Keystroke;
 
 /// A modal's content builder, called as `build(shell, window, cx)` — see
@@ -164,8 +165,8 @@ pub struct ShellModal {
 /// the raw `KeyDownEvent` reaches our key listeners instead
 /// (`gpui::Keymap::bindings_for_input`, `crates/gpui/src/keymap.rs`, pinned
 /// checkout, sorts candidate bindings by context depth — deepest wins —
-/// before applying `NoAction` suppression). Two reclaims live here today,
-/// scoped differently on purpose:
+/// before applying `NoAction` suppression). Each reclaim below is scoped
+/// differently, on purpose:
 ///
 /// 1. **`tab`/`shift-tab`**, scoped to `"GeodeModal"`. `Root` binds bare
 ///    `tab`/`shift-tab` (unconditionally, no `cx.propagate()`) to its own
@@ -187,6 +188,11 @@ pub struct ShellModal {
 ///    `Root`'s Tab/TabPrev only then; outside a Geode modal `"GeodeModal"`
 ///    is absent from the context stack, this binding is not enabled at
 ///    all, and `Root`'s focus cycling is untouched.
+///
+///    **This bullet alone does not cover a modal in normal mode.**
+///    `"GeodeModal"` rides the modal PANEL, so it is on the dispatch
+///    stack only while something *inside* that panel holds focus — an
+///    `Input` in filter mode, say. Bullet 5 covers the other half.
 ///
 /// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
 ///    gpui-component binds `ctrl-f` to its editor `Search` action in the
@@ -273,6 +279,36 @@ pub struct ShellModal {
 ///    action, `Root`'s Tab cycling is a real affordance the palette's and
 ///    dialogs' own inputs still leave alone, so this must not reach them.
 ///
+/// 5. **`tab`/`shift-tab`**, scoped to `"GeodeModalOpen"` (whole-branch
+///    review, Important 1) — bullet 1's other half, for the state bullet
+///    1 cannot see. `"GeodeModal"` rides the modal PANEL, so it joins the
+///    dispatch stack only while focus is *inside* the panel; the dialog
+///    interaction model (`crate::dialogmode`) made **normal mode** the
+///    default state of every modal list dialog, and normal mode parks
+///    focus on `ShellView::focus_handle` — the window root, deliberately,
+///    so bare letters arrive as verbs at `handle_key` instead of being
+///    eaten by an `Input`. In that state the panel's context is absent,
+///    `Root`'s `Tab` wins on its own, and `window.focus_next` walks focus
+///    off the shell root onto whatever focusable sits behind the modal,
+///    where `Input`-context bindings go live. This was invisible while
+///    normal mode was momentary (rebind capture only); Task 3 made it the
+///    resting state.
+///
+///    `"GeodeModalOpen"` is `ShellView::render`'s own key context on the
+///    root element, present exactly while `self.modal.is_some()` — the
+///    one context guaranteed to be on the stack whenever a Geode modal is
+///    up, whatever holds focus. A raw-key-listener check could not fix
+///    this: `Root`'s action has already fired by the time
+///    `finish_dispatch_key_event` runs (bullet 1's own mechanism), so the
+///    suppression has to be a keymap binding. It is a *separate* context
+///    from `"GeodeModal"`, not the same name reused on the root, so that
+///    bullet 3's `"GeodeModal > Input"` reclaim keeps meaning "an `Input`
+///    inside the modal panel" rather than silently widening to every
+///    `Input` in the window while a modal happens to be open. Both
+///    contexts are live together in filter mode — two `NoAction`s at
+///    different depths, same outcome — and neither is enabled with no
+///    modal open, so `Root`'s cycling is untouched everywhere else.
+///
 /// Called once from `geode-app`'s `main` (after `gpui_component::init`,
 /// same ordering requirement — later registrations outrank earlier ones)
 /// AND from every test that opens a real modal window
@@ -296,6 +332,8 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
         gpui::KeyBinding::new("ctrl-a", gpui::NoAction, Some("GeodeModal > Input")),
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModalOpen")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModalOpen")),
     ]);
 }
 
@@ -332,13 +370,21 @@ pub fn open_shell_dialog<F>(
 /// this is the one place that constructs a [`ShellModal`],
 /// `open_shell_dialog` included.
 ///
-/// `focus_filter` focuses [`ShellView::dialog_input`] on open — every list
-/// dialog passes `true` (the filter-first dialog UX: the first character
-/// typed must reach the filter, not fall on the floor);
-/// `open_shell_dialog` passes `false`. A modal that passes `true` must
-/// actually render that input — [`filter_row`] — since gpui dispatches
-/// keys down the *rendered* focus path and would otherwise route them to
-/// the window root, past `ShellView`'s own key listener.
+/// [`ShellView::dialog_input`] is emptied on every open, whatever
+/// `focus_filter` says: the field is shared between dialogs and outlives
+/// each one, so a dialog whose own fresh state starts with an empty query
+/// would otherwise be ranked against the *previous* dialog's leftover
+/// text the moment anything focused the field.
+///
+/// `focus_filter` additionally focuses it — a *filter-first* dialog passes
+/// `true` (the first character typed must reach the filter, not fall on
+/// the floor), and `open_shell_dialog` passes `false`, as does the
+/// keybinding dialog since it went modal (`crate::dialogmode`): it opens
+/// in normal mode, where bare letters are verbs and the filter must not
+/// own them until `/` says so. A modal that passes `true` must actually
+/// render that input — [`filter_row`] — since gpui dispatches keys down
+/// the *rendered* focus path and would otherwise route them to the window
+/// root, past `ShellView`'s own key listener.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -377,16 +423,19 @@ pub fn open_shell_dialog_with_key<F>(
         on_key,
     });
 
+    // Reset by value, not by rebuilding the entity — the same lifecycle
+    // `toggle_palette` gives `palette_input` (see `ShellView::
+    // dialog_input`'s own doc comment). `set_value` does not emit
+    // `InputEvent::Change` (checked against the pinned checkout, same as
+    // `toggle_palette`'s own comment records), so this reset never
+    // reaches the subscription; each dialog's fresh state already starts
+    // with an empty query. Unconditional since the keybinding dialog went
+    // modal: a dialog that opens *unfocused* can still focus this field
+    // later (`/`), and it would then inherit whatever the last dialog
+    // left in it while its own `state.query` said empty.
+    view.dialog_input
+        .update(cx, |input, cx| input.set_value("", window, cx));
     if focus_filter {
-        // Reset by value, not by rebuilding the entity — the same
-        // lifecycle `toggle_palette` gives `palette_input` (see
-        // `ShellView::dialog_input`'s own doc comment). `set_value` does
-        // not emit `InputEvent::Change` (checked against the pinned
-        // checkout, same as `toggle_palette`'s own comment records), so
-        // this reset never reaches the subscription; each dialog's fresh
-        // state already starts with an empty query.
-        view.dialog_input
-            .update(cx, |input, cx| input.set_value("", window, cx));
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
@@ -436,9 +485,10 @@ pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
 /// (`crates/ui/src/input/input.rs:578-584`), never the prefix child.
 ///
 /// `frozen` renders a muted, static copy of the query *instead of* the
-/// live input: the keybinding dialog passes `Some(query)` while it is
-/// listening for a binding, when the input is blurred and a caret would
-/// be a lie about where keystrokes are going. It keeps the icon, and
+/// live input: the keybinding dialog passes `Some(query)` whenever the
+/// input is blurred — while listening for a binding, and (since it went
+/// modal, `crate::dialogmode`) throughout normal mode — because a caret
+/// would be a lie about where keystrokes are going. It keeps the icon, and
 /// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
 /// `input.rs:504-508`), so entering and leaving capture doesn't shift the
 /// query text sideways.
@@ -467,6 +517,54 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
             )
             .into_any_element(),
     }
+}
+
+/// The small pill naming a modal dialog's current mode
+/// (`crate::dialogmode`), for the top-right of its content.
+///
+/// A modal surface has no caret in normal mode and a caret in filter
+/// mode, which is a real but easily-missed difference — the pill is what
+/// makes "your letters are verbs right now" legible without the user
+/// having to type one and find out. It lives here rather than in
+/// `keybindings_view` because the 4c surfaces adopt the same vocabulary
+/// and must wear the same badge; a second copy would drift.
+///
+/// Colours are `cx.theme()` tokens (house rule: never a raw colour).
+/// Filter mode takes `primary`, the same token the fuzzy-match highlight
+/// and the selected row use — it is the "you are typing into something"
+/// state; normal mode takes the muted pair every other inert chip in
+/// these dialogs wears ([`super::keybindings_view::key_chip`]'s own
+/// `muted`/`muted_foreground`), because normal is the resting state, not
+/// an alert.
+///
+/// The labels are lowercase where the spec writes `NORMAL`/`FILTER`:
+/// deliberate, and a user ruling — lowercase is what this crate's key
+/// rendering already uses everywhere (`palette::render_keystroke`'s
+/// `ctrl+k`), and a shouted badge beside those chips would read as a
+/// different design system.
+///
+/// The label rides in the `debug_selector` too, so a test can assert
+/// *which* mode painted rather than only that something did — a pill
+/// showing the same label in both modes is exactly the failure a
+/// non-zero-bounds assertion cannot see.
+pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    let (label, fg, bg) = match mode {
+        DialogMode::Normal => ("normal", theme.muted_foreground, theme.muted),
+        DialogMode::Filter => ("filter", theme.primary_foreground, theme.primary),
+    };
+    div()
+        .font_family(crate::fonts::MONO)
+        .text_xs()
+        .text_color(fg)
+        .bg(bg)
+        .px_1p5()
+        .py_0p5()
+        .rounded(px(4.))
+        .flex_shrink_0()
+        .debug_selector(move || format!("dialog-mode-pill-{label}"))
+        .child(label)
+        .into_any_element()
 }
 
 /// Cap on the modal panel's height, as a fraction of the window's viewport

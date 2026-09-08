@@ -8,6 +8,7 @@ pub mod actions;
 pub mod commandline;
 pub mod defaults;
 pub mod diagnostics;
+pub mod dialogmode;
 pub mod fonts;
 pub mod fontsize;
 pub mod frame;

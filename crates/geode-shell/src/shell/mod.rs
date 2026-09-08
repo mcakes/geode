@@ -416,11 +416,23 @@ pub struct ShellView {
     /// close/reopen, and one `InputEvent::Change` subscription for the
     /// life of the window instead of one per open.
     ///
-    /// Deliberately blurred while the keybinding dialog is listening for
-    /// a new binding: a focused `Input` consumes bare letters as text
-    /// before any raw key listener sees them, so capture would be
-    /// impossible otherwise (see `keybindings_view`'s module doc,
-    /// "Rebind capture").
+    /// **Focused or blurred is per-dialog state, not a constant.** A
+    /// focused `Input` consumes bare letters as text before any raw key
+    /// listener sees them, so every surface that wants letters as verbs
+    /// must blur this field first. Three states, all live today:
+    ///
+    /// - the settings dialog is filter-first — it opens with this
+    ///   focused (`open_shell_dialog_with_key`'s `focus_filter: true`)
+    ///   and keeps it that way for the life of the dialog;
+    /// - the keybinding dialog opens BLURRED and stays that way in
+    ///   `DialogMode::Normal`, where bare letters are its verbs
+    ///   (`crate::dialogmode`, the dialog interaction model); `/` focuses
+    ///   it to enter `DialogMode::Filter`, and `escape` blurs it again.
+    ///   Focus parks on `ShellView::focus_handle` whenever it is blurred;
+    /// - it is blurred for the duration of a rebind capture in either
+    ///   mode, for the same letters-as-input reason (see
+    ///   `keybindings_view`'s module doc, "Rebind capture"), and focus is
+    ///   restored to whichever mode started the capture when it ends.
     dialog_input: Entity<InputState>,
     /// Desk and user config directories the reload watcher polls (Task
     /// 1c-1). Owned here (not just captured by the background task) so the

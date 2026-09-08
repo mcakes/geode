@@ -62,11 +62,11 @@
 //! ## Filter
 //!
 //! `docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md`
-//! replaced this dialog's vim motions and `/` find (both styles) with the
-//! keybinding dialog's own always-focused fuzzy filter: opening the
-//! dialog focuses `ShellView::dialog_input`, so the first character typed
-//! narrows the list ([`visible_rows`] over [`searchable_text`]) rather
-//! than falling on the floor, and what this dialog itself still claims is
+//! replaced this dialog's vim motions and `/` find (both styles) with a
+//! focused fuzzy filter: opening the dialog focuses
+//! `ShellView::dialog_input`, so the first character typed narrows the
+//! list ([`visible_rows`] over [`searchable_text`]) rather than falling
+//! on the floor, and what this dialog itself still claims is
 //! the short vocabulary a focused `Input` leaves free
 //! ([`crate::listfilter::nav_command`]: `up`/`down`/`ctrl+p`/`ctrl+n` ∓1,
 //! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus
@@ -78,6 +78,18 @@
 //! rendered and still steppable like any other row (spec §8) — this
 //! dialog (and the keybinding dialog) simply stop *reading* it to steer
 //! their own navigation.
+//!
+//! **This dialog is still filter-first; the keybinding dialog no longer
+//! is.** The dialog interaction model
+//! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
+//! `crate::dialogmode`) gave that dialog a normal mode where bare letters
+//! are verbs and `/` enters filter mode, so it now opens with
+//! `dialog_input` BLURRED (`open_shell_dialog_with_key`'s `focus_filter:
+//! false`). Settings kept the filter-first shape — it has no verbs to
+//! collide with — so it still passes `focus_filter: true` and its filter
+//! still holds focus for the life of the dialog. Two dialogs, one shared
+//! `dialog_input`, two different opening states: do not read either
+//! one's behaviour off the other.
 
 use std::rc::Rc;
 

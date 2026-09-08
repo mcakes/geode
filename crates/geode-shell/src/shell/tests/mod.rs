@@ -92,12 +92,35 @@ pub(super) fn open_shell(
     cx: &mut gpui::TestAppContext,
     services: ShellServices,
 ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+    open_shell_inner(cx, services, None)
+}
+
+/// [`open_shell`] with a real, writable user config directory — the one
+/// thing a test of a *persisting* action needs, since every persist path
+/// in this crate (`persist_theme`, `keybindings_view::spawn_unbind`, …)
+/// silently no-ops when `ShellView::user_dir` is `None`. Pass a
+/// `tempfile::TempDir`'s path and keep the `TempDir` alive for the whole
+/// test: the file is read back from it after `run_until_parked` drives
+/// the background write to completion.
+pub(super) fn open_shell_with_user_dir(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: &std::path::Path,
+) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+    open_shell_inner(cx, services, Some(user_dir.to_path_buf()))
+}
+
+fn open_shell_inner(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: Option<PathBuf>,
+) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     cx.update(crate::shell::dialog::init_reclaimed_keybindings);
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = cx.new(|cx| ShellView::new(services, None, user_dir, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
