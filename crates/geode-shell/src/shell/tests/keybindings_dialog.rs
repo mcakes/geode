@@ -1051,14 +1051,12 @@ fn r_resets_a_user_override_by_removing_it(cx: &mut gpui::TestAppContext) {
         "reset must never write a shadow — that would bury the layer it \
          is meant to uncover: {text}"
     );
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r acknowledges the write it spawned (whole-branch review, Minor 3)");
     assert!(
-        shell.read_with(&vcx, |s, _| s
-            .keybindings
-            .as_ref()
-            .unwrap()
-            .notice
-            .is_none()),
-        "a reset that had something to reset reports no complaint"
+        !notice.contains("no user override"),
+        "a reset that had something to reset reports no complaint: {notice}"
     );
 }
 
@@ -1283,6 +1281,115 @@ fn d_acknowledges_the_write_immediately_and_names_the_way_back(cx: &mut gpui::Te
     vcx.run_until_parked();
 }
 
+/// Whole-branch review, Important 2. The `enter`-then-retype recovery is
+/// exact only for a binding with NO context. Roughly 60 of the ~80
+/// builtin bindings carry one, and for those `d` writes `"none"` into the
+/// *contexted* entry while the recovery rebind — whose row is unbound by
+/// then, so it passes `context: None` — writes the no-context entry
+/// instead. Different table, not an overwrite: recovery is silently
+/// defeated when array order puts the new entry first, and escalates the
+/// binding from contexted to global even when it appears to work.
+///
+/// The ruling was to fix the HONESTY, not the mechanism (making contexted
+/// recovery work needs the row to carry its pre-shadow context — the same
+/// row-vocabulary change as the parked `suppressed_by` follow-up). So the
+/// contract this pins is negative: on a contexted row the message must
+/// not promise the retype.
+#[gpui::test]
+fn d_on_a_contexted_binding_does_not_promise_the_retype_recovery(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    vcx.simulate_keystrokes("/ f o c u s l e f t");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("escape");
+    let (action, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        action.0, "workspace::focus_left",
+        "sanity: the filter must land on a row whose builtin binding \
+         carries a context (`context = \"workspace\"` in defaults.rs)"
+    );
+    let (key, _) = bound.expect("sanity: that row is bound");
+
+    vcx.simulate_keystrokes("d");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d must acknowledge the write it just spawned");
+    assert!(
+        notice.contains(&key),
+        "it must still name the key: {notice}"
+    );
+    assert!(
+        !notice.contains("type that key again"),
+        "the retype recovery does not hold for a contexted binding — it \
+         writes the no-context entry, leaving the `\"none\"` shadow \
+         standing in the contexted one: {notice}"
+    );
+    assert!(
+        notice.contains("keymap.toml"),
+        "so the message must point at the one way back that does work: \
+         {notice}"
+    );
+    vcx.run_until_parked();
+}
+
+/// Whole-branch review, Minor 3. `d`'s acknowledgement was past tense
+/// ("silenced") while the write it describes is still on the background
+/// executor and can come back `removed: false` — a stale row, or a key
+/// the user file spells differently from `render_binding` — in which case
+/// only stderr ever says otherwise. The footer must not assert an outcome
+/// it has not confirmed.
+#[gpui::test]
+fn d_does_not_claim_a_write_it_has_not_confirmed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("d");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("d must acknowledge");
+    assert!(
+        !notice.contains("silenced"),
+        "the write has not reported yet, so the completed tense is a \
+         claim the dialog cannot back: {notice}"
+    );
+    vcx.run_until_parked();
+}
+
+/// Whole-branch review, Minor 3, the other half: `r`'s success path said
+/// nothing at all, so a reset whose `apply_unbind` came back
+/// `removed: false` looked exactly like one that worked — and even a
+/// reset that DID work is invisible until the ~500ms watcher relabels the
+/// row. It acknowledges, in the same unconfirmed tense `d` uses.
+#[gpui::test]
+fn r_acknowledges_the_write_it_spawned(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_TEXT).unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(
+        cx,
+        services_with_a_user_binding_for_the_palette(),
+        dir.path(),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("r");
+    let notice = shell
+        .read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone())
+        .expect("r must acknowledge the write it just spawned");
+    assert!(
+        notice.contains("ctrl+alt+y"),
+        "and name the override it is removing: {notice}"
+    );
+    vcx.run_until_parked();
+}
+
 /// Fix round 1, Important 2 (path 1 of 2): the `EscapeStep::ClearQuery`
 /// rung resets the selection to row 0, so a notice about the row the
 /// user *was* on becomes a complaint pointing at a different row.
@@ -1374,5 +1481,51 @@ fn clicking_a_row_clears_a_standing_notice(cx: &mut gpui::TestAppContext) {
             .is_none()),
         "the complaint was about row 0; leaving it up under row 1 is the \
          stale-notice lie in its plainest form"
+    );
+}
+
+/// Whole-branch review, Important 1: `tab` must not walk focus off the
+/// shell root while a modal is open in **normal mode**.
+///
+/// The `tab`/`shift+tab` → `NoAction` reclaim
+/// (`dialog::init_reclaimed_keybindings`, bullet 1) was scoped to
+/// `"GeodeModal"`, the context the modal *panel* carries — which is only
+/// on the dispatch stack when something inside that panel holds focus.
+/// Normal mode focuses `shell.focus_handle` (the window root) precisely
+/// so bare letters reach `handle_key` as verbs, so `"GeodeModal"` was
+/// absent from the stack, gpui-component `Root`'s own window-wide `Tab`
+/// binding won, and `window.focus_next` moved focus off the shell root —
+/// onto whatever focusable sits behind the modal, where `Input`-context
+/// bindings go live and the dialog's own vocabulary stops arriving. The
+/// fix is `render`'s `"GeodeModalOpen"` context on the shell root itself
+/// (see `init_reclaimed_keybindings`'s bullet 5).
+///
+/// Asserts the focus state itself, not merely that the modal survived: a
+/// stray `focus_next` leaves the modal untouched, so "still open" is
+/// exactly the assertion that could not see this bug.
+#[gpui::test]
+fn tab_in_normal_mode_leaves_focus_on_the_shell_root(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    let shell_focus = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+
+    assert!(
+        cx.update(|window, _| shell_focus.is_focused(window)),
+        "sanity: the keybinding dialog opens in normal mode, which parks \
+         focus on the shell root"
+    );
+
+    cx.simulate_keystrokes("tab");
+    assert!(
+        cx.update(|window, _| shell_focus.is_focused(window)),
+        "tab in normal mode must leave focus on the shell root: focus \
+         walking off it is how a caret lands on a field behind an open \
+         modal"
+    );
+
+    cx.simulate_keystrokes("shift-tab");
+    assert!(
+        cx.update(|window, _| shell_focus.is_focused(window)),
+        "shift+tab is the same affordance by another name and must be \
+         reclaimed with it"
     );
 }

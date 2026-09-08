@@ -157,8 +157,20 @@ A correction to an earlier claim made in discussion:
 `dialog::init_reclaimed_keybindings` does **not** largely dissolve.
 
 - Its `tab`/`shift+tab` → `NoAction` binding exists to suppress
-  gpui-component `Root`'s window-wide focus cycling, which applies
-  whether or not an input is focused. It stays exactly as it is.
+  gpui-component `Root`'s window-wide focus cycling. `Root`'s *binding*
+  applies whether or not an input is focused — but **the reclaim did
+  not**, and the claim that it "stays exactly as it is" was wrong. The
+  reclaim was scoped to `"GeodeModal"`, a key context that rides the
+  modal *panel*, so it is on the dispatch stack only while something
+  inside the panel holds focus. Normal mode focuses the shell root, so
+  `"GeodeModal"` was absent, `Root`'s `Tab` won, and `window.focus_next`
+  walked focus off the shell root onto whatever sits behind the modal.
+  Making normal mode the resting state (§2) is precisely what exposed
+  this: while normal mode was momentary — rebind capture only — nothing
+  pressed `tab` there. The reclaim therefore had to *grow*, not stay
+  still: a second `"GeodeModalOpen"` scope, the shell root's own key
+  context while `modal.is_some()`, carrying the same
+  `tab`/`shift+tab` → `NoAction`. See §15.
 - Its `ctrl+a`/`ctrl+x`/`ctrl+f` reclaims exist because gpui-component's
   `Input` binds them. Filter mode still focuses that `Input`, so they
   stay too.
@@ -344,6 +356,58 @@ design above:
   pre-existing `keymap_edit` bugs this task's new caller happened to
   reach first.
 
+- **§7's `tab` reclaim had to grow, and §7 has been corrected above.**
+  The `tab`/`shift+tab` → `NoAction` reclaim was scoped to
+  `"GeodeModal"` — the modal panel's own key context, on the dispatch
+  stack only while focus is inside the panel. Normal mode parks focus on
+  the shell root, so in the state this branch made the default, the
+  reclaim was not enabled at all: `Root`'s window-wide `Tab` binding won
+  and `window.focus_next` moved focus off the shell root, where a caret
+  can land on a field behind the modal and `Input`-context bindings go
+  live. A raw-key-listener check cannot fix it (the action has already
+  fired by the time raw listeners run), so the fix is a second keymap
+  scope: `ShellView::render` puts a `"GeodeModalOpen"` key context on the
+  shell root while `modal.is_some()`, and
+  `dialog::init_reclaimed_keybindings` binds `tab`/`shift+tab` to
+  `NoAction` there too. Kept as a separate context rather than reusing
+  `"GeodeModal"` on the root, so the existing `"GeodeModal > Input"`
+  `ctrl+a` reclaim keeps meaning "an `Input` inside the modal panel".
+  Covered by `tab_in_normal_mode_leaves_focus_on_the_shell_root`, which
+  asserts the focus state itself — "the modal is still open" is exactly
+  the assertion that could not see this — and by a mutation-harness
+  entry, since a green suite plainly could not see it before.
+- **`d`'s recovery promise is honest per row, and contexted recovery is
+  NOT made to work.** `RECOVERY` ("press enter and type that key again
+  to restore it") holds only for a binding with no context. Roughly 60
+  of the ~80 builtin bindings carry one, and for those `d` writes
+  `"none"` into the *contexted* `[[bindings]]` entry while the recovery
+  rebind — running on a row that is unbound by then, so passing
+  `context: None` — writes the *no-context* entry: a different table,
+  not an overwrite. The shadow survives, so whether the key works again
+  is decided by array order (the matcher is last-wins), and even when it
+  appears to work the binding is escalated from contexted to global.
+  Making it work needs `derive_rows` to carry the row's pre-shadow
+  context — the same row-vocabulary change as the parked `r`-cannot-
+  lift-a-shadow follow-up above — and landing that on this branch's last
+  commit was ruled out. So the *honesty* is fixed instead: `recovery()`
+  picks per row between `RECOVERY` and `RECOVERY_CONTEXTED` ("undo that
+  in keymap.toml — retyping the key would rebind it globally instead of
+  in that context"), which is cheap because `d` already holds
+  `bound.context_source`. `r`'s unbound-row message, which has no
+  `context_source` left to read, names both doors rather than picking
+  one.
+- **`d` and `r` acknowledge in the present tense.** `d` said "silenced"
+  before its background `apply_unbind` reported, and `r`'s success path
+  said nothing at all — so an `apply_unbind` returning `removed: false`
+  (a stale row, or a key the user file spells differently from
+  `render_binding`) left the footer asserting something that did not
+  happen, with only stderr disagreeing. Both now acknowledge what is
+  actually known — that the write was dispatched — as "silencing …" and
+  "removing your … override". Confirming the outcome for real would mean
+  reporting the background result back into `KeybindingsState`, which is
+  a structural change to `spawn_unbind`'s deliberately state-free
+  contract; not built here.
+
 Everything else — the pure `dialogmode` core, the escape ladder, the
 modal vocabulary, which surfaces are modal (§3), and §7's reclaim-count
-observation — was built as specified.
+observation (as corrected) — was built as specified.

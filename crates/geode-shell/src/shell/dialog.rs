@@ -165,8 +165,8 @@ pub struct ShellModal {
 /// the raw `KeyDownEvent` reaches our key listeners instead
 /// (`gpui::Keymap::bindings_for_input`, `crates/gpui/src/keymap.rs`, pinned
 /// checkout, sorts candidate bindings by context depth — deepest wins —
-/// before applying `NoAction` suppression). Two reclaims live here today,
-/// scoped differently on purpose:
+/// before applying `NoAction` suppression). Each reclaim below is scoped
+/// differently, on purpose:
 ///
 /// 1. **`tab`/`shift-tab`**, scoped to `"GeodeModal"`. `Root` binds bare
 ///    `tab`/`shift-tab` (unconditionally, no `cx.propagate()`) to its own
@@ -188,6 +188,11 @@ pub struct ShellModal {
 ///    `Root`'s Tab/TabPrev only then; outside a Geode modal `"GeodeModal"`
 ///    is absent from the context stack, this binding is not enabled at
 ///    all, and `Root`'s focus cycling is untouched.
+///
+///    **This bullet alone does not cover a modal in normal mode.**
+///    `"GeodeModal"` rides the modal PANEL, so it is on the dispatch
+///    stack only while something *inside* that panel holds focus — an
+///    `Input` in filter mode, say. Bullet 5 covers the other half.
 ///
 /// 2. **`ctrl-f`**, scoped to `"Input"` and app-wide (not `"GeodeModal"`).
 ///    gpui-component binds `ctrl-f` to its editor `Search` action in the
@@ -274,6 +279,36 @@ pub struct ShellModal {
 ///    action, `Root`'s Tab cycling is a real affordance the palette's and
 ///    dialogs' own inputs still leave alone, so this must not reach them.
 ///
+/// 5. **`tab`/`shift-tab`**, scoped to `"GeodeModalOpen"` (whole-branch
+///    review, Important 1) — bullet 1's other half, for the state bullet
+///    1 cannot see. `"GeodeModal"` rides the modal PANEL, so it joins the
+///    dispatch stack only while focus is *inside* the panel; the dialog
+///    interaction model (`crate::dialogmode`) made **normal mode** the
+///    default state of every modal list dialog, and normal mode parks
+///    focus on `ShellView::focus_handle` — the window root, deliberately,
+///    so bare letters arrive as verbs at `handle_key` instead of being
+///    eaten by an `Input`. In that state the panel's context is absent,
+///    `Root`'s `Tab` wins on its own, and `window.focus_next` walks focus
+///    off the shell root onto whatever focusable sits behind the modal,
+///    where `Input`-context bindings go live. This was invisible while
+///    normal mode was momentary (rebind capture only); Task 3 made it the
+///    resting state.
+///
+///    `"GeodeModalOpen"` is `ShellView::render`'s own key context on the
+///    root element, present exactly while `self.modal.is_some()` — the
+///    one context guaranteed to be on the stack whenever a Geode modal is
+///    up, whatever holds focus. A raw-key-listener check could not fix
+///    this: `Root`'s action has already fired by the time
+///    `finish_dispatch_key_event` runs (bullet 1's own mechanism), so the
+///    suppression has to be a keymap binding. It is a *separate* context
+///    from `"GeodeModal"`, not the same name reused on the root, so that
+///    bullet 3's `"GeodeModal > Input"` reclaim keeps meaning "an `Input`
+///    inside the modal panel" rather than silently widening to every
+///    `Input` in the window while a modal happens to be open. Both
+///    contexts are live together in filter mode — two `NoAction`s at
+///    different depths, same outcome — and neither is enabled with no
+///    modal open, so `Root`'s cycling is untouched everywhere else.
+///
 /// Called once from `geode-app`'s `main` (after `gpui_component::init`,
 /// same ordering requirement — later registrations outrank earlier ones)
 /// AND from every test that opens a real modal window
@@ -297,6 +332,8 @@ pub fn init_reclaimed_keybindings(cx: &mut App) {
         gpui::KeyBinding::new("ctrl-f", gpui::NoAction, Some("Input")),
         gpui::KeyBinding::new("ctrl-a", gpui::NoAction, Some("GeodeModal > Input")),
         gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeCommandLine")),
+        gpui::KeyBinding::new("tab", gpui::NoAction, Some("GeodeModalOpen")),
+        gpui::KeyBinding::new("shift-tab", gpui::NoAction, Some("GeodeModalOpen")),
     ]);
 }
 

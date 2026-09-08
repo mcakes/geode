@@ -889,6 +889,17 @@ impl Render for ShellView {
             .size_full()
             .relative()
             .track_focus(&self.focus_handle)
+            // "A Geode modal is open", carried by the shell ROOT rather
+            // than the modal panel — the one context that is on the
+            // dispatch stack in normal mode, where focus is this very
+            // handle and the panel's own `"GeodeModal"` context is
+            // therefore absent. `init_reclaimed_keybindings`' bullet 5
+            // binds `tab`/`shift-tab` to `NoAction` here so `Root`'s
+            // window-wide focus cycling cannot walk focus off the shell
+            // while a modal is up. Conditional, not permanent: outside a
+            // modal that cycling is a live affordance nothing here has
+            // any business removing (bullet 1's own scoping argument).
+            .when(self.modal.is_some(), |el| el.key_context("GeodeModalOpen"))
             .on_key_down(cx.listener(Self::handle_key_down))
             // Root-level left-release fallback (post-merge review BUG 1,
             // extended to divider drags by the fix-round should-fix):

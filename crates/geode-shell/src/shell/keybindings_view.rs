@@ -50,19 +50,24 @@
 //! two different directions.
 //!
 //! Both verbs report in [`KeybindingsState::notice`], a line painted in
-//! the footer and dropped at the next keystroke or click. `d` uses it to
-//! acknowledge the write *immediately*, naming the key it silenced and
-//! [`RECOVERY`] — one bare, unmodified key performing a disk write needs
-//! an acknowledgement that does not wait on the ~500ms reload before the
-//! row relabels. A verb that finds nothing to do writes nothing and says
-//! that instead. A key that visibly does nothing is the defect class
-//! this interaction model exists to remove, so "nothing happened" is
-//! stated in the footer rather than left to be inferred from an
-//! unchanged screen.
+//! the footer and dropped at the next keystroke or click. Both use it to
+//! acknowledge the write *immediately*, naming the key and the way back
+//! ([`recovery`]) — one bare, unmodified key performing a disk write
+//! needs an acknowledgement that does not wait on the ~500ms reload
+//! before the row relabels. Those acknowledgements are in the present
+//! tense ("silencing …", "removing …") on purpose: the write is on the
+//! background executor and can still come back `removed: false`, so a
+//! completed tense would assert an outcome the dialog has not confirmed.
+//! A verb that finds nothing to do writes nothing and says that instead.
+//! A key that visibly does nothing is the defect class this interaction
+//! model exists to remove, so "nothing happened" is stated in the footer
+//! rather than left to be inferred from an unchanged screen.
 //!
-//! Neither verb prompts for confirmation. `d` is recoverable in the
-//! dialog itself ([`RECOVERY`]), so a confirm step would tax every
-//! deliberate unbind to guard against a mistake that can be undone.
+//! Neither verb prompts for confirmation. `d` is recoverable — in the
+//! dialog itself for a binding with no context ([`RECOVERY`]), by hand
+//! in `keymap.toml` for a contexted one ([`RECOVERY_CONTEXTED`], the
+//! common case) — so a confirm step would tax every deliberate unbind to
+//! guard against a mistake that can be undone.
 //!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
 //! visible change per press: filter → normal (keeping the query
@@ -815,8 +820,9 @@ fn handle_key(
     // rather than left unhandled, because leaving them unhandled would
     // NOT make them inert: an unclaimed key continues past this handler
     // to the filter's own text-input phase (see this function's own doc
-    // comment, item 4), and a literal tab character in the query would
-    // collapse the list to "no matches".
+    // comment, item 7 — Task 3's renumbering moved that reasoning off
+    // item 4, which is now bare `enter`), and a literal tab character in
+    // the query would collapse the list to "no matches".
     if ks.mods == Modifiers::NONE && ks.key == "tab" {
         return true;
     }
@@ -966,17 +972,59 @@ fn spawn_rebind(
         .detach();
 }
 
-/// How a silenced binding comes back, in the one sentence both verbs
-/// point at. Not a guess: `begin_capture` starts a capture on any row
-/// including an unbound one (it only checks that the list is non-empty),
-/// and `apply_rebind`'s step 1 writes through `set_key`, which
-/// *overwrites* an existing `keys` entry in place — so retyping the
-/// original keystroke replaces the `"none"` this dialog just wrote,
-/// rather than appending beside it. `d` is therefore not a one-way door,
-/// which is why fix round 1 ruled for an acknowledgement here instead of
-/// a confirmation prompt: taxing every deliberate unbind to guard
-/// against a recoverable mistake is the worse trade.
+/// How a silenced binding comes back when the binding carried **no
+/// context**. Exact, not a guess, for exactly that case: `begin_capture`
+/// starts a capture on any row including an unbound one (it only checks
+/// that the list is non-empty), and `apply_rebind`'s step 1 writes
+/// through `set_key`, which *overwrites* an existing `keys` entry in
+/// place — and with no context on either side, both writes land in the
+/// same no-`context` `[[bindings]]` entry, so retyping the original
+/// keystroke replaces the `"none"` this dialog just wrote rather than
+/// appending beside it. `d` is therefore not a one-way door there, which
+/// is why fix round 1 ruled for an acknowledgement instead of a
+/// confirmation prompt: taxing every deliberate unbind to guard against
+/// a recoverable mistake is the worse trade.
+///
+/// Use [`recovery`], never this constant directly — most builtin
+/// bindings are contexted, and for those this sentence is false.
 const RECOVERY: &str = "press enter and type that key again to restore it";
+
+/// The way back for a **contexted** binding, which [`RECOVERY`] is not.
+///
+/// Whole-branch review, Important 2. `d` writes its `"none"` into the
+/// `[[bindings]]` entry whose `context` matches the row's
+/// ([`unbind_selected`] passes `bound.context_source`). A recovery
+/// rebind, though, runs on a row that is unbound by then, so
+/// `apply_rebind`'s `Rebind` takes `context: None`
+/// (`row.current.and_then(|b| b.context_source)`) and `set_key` writes
+/// the *no-`context`* entry — a different table, not an overwrite. Two
+/// consequences, both bad enough to stop promising the retype: the
+/// `"none"` shadow survives in the contexted entry, so whether the key
+/// works again is decided by array order (the matcher is last-wins), and
+/// even when it appears to work the binding has been escalated from
+/// contexted to global.
+///
+/// This is the common case, not a corner: roughly 60 of the ~80 builtin
+/// bindings carry a context (`workspace`, `tile`, `blotter && …` in
+/// `crate::defaults`).
+///
+/// Making contexted recovery actually work needs `derive_rows` to carry
+/// the row's pre-shadow context onto the row — the same row-vocabulary
+/// change as the parked "`r` cannot lift a `"none"` shadow" follow-up
+/// (spec §15), and deliberately not built here. Until then the honest
+/// thing is to name the door that does open: the file itself.
+const RECOVERY_CONTEXTED: &str = "undo that in keymap.toml — retyping the key would rebind it \
+                                  globally instead of in that context";
+
+/// Which of the two recovery sentences is true for a binding declared
+/// under `context`. The one place that choice is made, so no call site
+/// can quietly promise the wrong one.
+fn recovery(context: Option<&str>) -> &'static str {
+    match context {
+        None => RECOVERY,
+        Some(_) => RECOVERY_CONTEXTED,
+    }
+}
 
 /// `d`: silence the selected row's currently-effective binding.
 ///
@@ -1025,8 +1073,17 @@ fn unbind_selected(
         key: key.clone(),
         is_user_layer: bound.layer == Layer::User,
     };
+    let way_back = recovery(bound.context_source.as_deref());
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
-        .or_else(|| Some(format!("{key} silenced — {RECOVERY}")))
+        // Present tense on purpose (whole-branch review, Minor 3): the
+        // write is still on the background executor and can come back
+        // `removed: false` — a stale row, or a user file that spells the
+        // key differently from `render_binding` — in which case only
+        // stderr ever says so. "silenced" asserted an outcome this
+        // keystroke has not confirmed and cannot wait for (the row does
+        // not relabel until the ~500ms watcher); "silencing" says what
+        // is actually known, which is that the write was dispatched.
+        .or_else(|| Some(format!("silencing {key} — {way_back}")))
 }
 
 /// `r`: remove the user's own override on the selected row, so the layer
@@ -1057,6 +1114,12 @@ fn unbind_selected(
 /// not exist. Letting `r` lift a shadow directly would need
 /// `derive_rows` to carry the suppressing entry onto the row; it is
 /// recorded as a follow-up, deliberately not built here.
+///
+/// That same missing row vocabulary is why the unbound branch's message
+/// hedges rather than calling [`recovery`]: with `row.current` gone
+/// there is no `context_source` left to decide *which* recovery is true
+/// (whole-branch review, Important 2), so it names both doors instead of
+/// picking one it cannot justify.
 fn reset_selected(
     row: Option<&KeybindingRow>,
     user_dir: &Option<PathBuf>,
@@ -1070,10 +1133,13 @@ fn reset_selected(
         // action rather than this row's, so `effective_binding` reports
         // no binding and the row has nothing left to name the key with.
         // Claiming there is no override would be false AND would steer
-        // the user away from the one recovery that works, so this says
-        // what is actually true and points at it.
+        // the user away from the recovery, so this says what is actually
+        // true and points at it — at BOTH doors, because the row no
+        // longer carries the context that would say which one opens (see
+        // this function's own doc comment).
         return Some(format!(
-            "{} is unbound — if you silenced it, {RECOVERY}",
+            "{} is unbound — if you silenced it, {RECOVERY}, or undo it \
+             in keymap.toml if it was context-scoped",
             row.title
         ));
     };
@@ -1083,12 +1149,22 @@ fn reset_selected(
         // case where "no user override" is the honest sentence.
         return Some(format!("{} has no user override to reset", row.title));
     }
+    let key = palette::render_binding(&bound.keystrokes);
     let unbind = Unbind {
         context: bound.context_source.clone(),
-        key: palette::render_binding(&bound.keystrokes),
+        key: key.clone(),
         is_user_layer: true,
     };
     spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
+        // Whole-branch review, Minor 3: saying nothing was the worst of
+        // the three outcomes. A reset whose `apply_unbind` comes back
+        // `removed: false` looked identical to one that worked (only
+        // stderr knew), and even a reset that DID work is invisible
+        // until the ~500ms watcher relabels the row — so `r` read as
+        // inert, the defect class this interaction model exists to
+        // remove. Present tense for the same reason `d` uses it: the
+        // write is dispatched, not confirmed.
+        .or_else(|| Some(format!("removing your {key} override")))
 }
 
 /// Run one [`apply_unbind`] on the background executor — the unbind twin

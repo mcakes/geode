@@ -1506,7 +1506,8 @@ run_mutation "keybindings: a click leaves the previous row's notice standing" \
 run_mutation "keybindings: r denies the user's own none shadow" \
   crates/geode-shell/src/shell/keybindings_view.rs \
   '        return Some(format!(
-            "{} is unbound — if you silenced it, {RECOVERY}",
+            "{} is unbound — if you silenced it, {RECOVERY}, or undo it \
+             in keymap.toml if it was context-scoped",
             row.title
         ));' \
   '        return Some(format!("{} has no user override to reset", row.title));' \
@@ -1521,11 +1522,57 @@ run_mutation "keybindings: r denies the user's own none shadow" \
 # the notice BEFORE `run_until_parked` catches it.
 run_mutation "keybindings: d performs its write without acknowledging it" \
   crates/geode-shell/src/shell/keybindings_view.rs \
-  '        .or_else(|| Some(format!("{key} silenced — {RECOVERY}")))
+  '        .or_else(|| Some(format!("silencing {key} — {way_back}")))
 ' \
   '' \
   geode-shell \
   d_acknowledges_the_write_immediately_and_names_the_way_back
+
+# Whole-branch review, Important 1. The `tab`/`shift+tab` reclaim was
+# scoped to `"GeodeModal"`, which rides the modal PANEL and so is only on
+# the dispatch stack while focus is inside it. Normal mode — the resting
+# state this branch introduced — parks focus on the shell root, so
+# `Root`'s window-wide Tab won and `focus_next` walked focus off the
+# shell. This root-level context is the whole fix, and a green suite
+# could not see its absence: every dialog assertion (the modal is open,
+# the row is selected, the notice is right) survives a stray focus_next
+# untouched. Only a test asserting the FOCUS STATE across a `tab` sees
+# it.
+run_mutation "dialog: tab escapes the modal in normal mode" \
+  crates/geode-shell/src/shell/render.rs \
+  '            .when(self.modal.is_some(), |el| el.key_context("GeodeModalOpen"))
+' \
+  '' \
+  geode-shell \
+  tab_in_normal_mode_leaves_focus_on_the_shell_root
+
+# Whole-branch review, Important 2. `RECOVERY` ("press enter and type
+# that key again") is exact only for a binding with NO context; for a
+# contexted one `d`'s `"none"` lands in the contexted entry while the
+# recovery rebind writes the no-context entry, so the promise is false.
+# The mutation restores the single-sentence promise. Nothing about the
+# FILE the write produces changes, so only an assertion on the message
+# for a contexted row catches it.
+run_mutation "keybindings: d promises the retype recovery for a contexted binding" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        Some(_) => RECOVERY_CONTEXTED,' \
+  '        Some(_) => RECOVERY,' \
+  geode-shell \
+  d_on_a_contexted_binding_does_not_promise_the_retype_recovery
+
+# Whole-branch review, Minor 3, the `r` half. Its success path used to
+# say nothing at all, so a reset whose `apply_unbind` came back
+# `removed: false` looked exactly like one that worked — and even a
+# working reset is invisible until the ~500ms watcher relabels the row.
+# The disk write is identical either way; only an assertion on the notice
+# before `run_until_parked` sees the silence.
+run_mutation "keybindings: r resets without acknowledging it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        .or_else(|| Some(format!("removing your {key} override")))
+' \
+  '' \
+  geode-shell \
+  r_acknowledges_the_write_it_spawned
 
 # ---- grouping slots and the frame (Phase 3 §4)
 
