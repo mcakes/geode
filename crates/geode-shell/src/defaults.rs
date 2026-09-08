@@ -127,6 +127,7 @@ context = "workspace"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
 "mod+t" = "frame::as_of"
+"mod+shift+d" = "diagnostics::open"
 
 [[bindings]]
 context = "tile"
@@ -172,6 +173,20 @@ context = "blotter && mode == visual"
 "y" = "blotter::yank"
 "v" = "blotter::escape"
 "escape" = "blotter::escape"
+
+[[bindings]]
+context = "diagnostics"
+[bindings.keys]
+"j" = "diagnostics::down"
+"k" = "diagnostics::up"
+"g g" = "diagnostics::top"
+"shift+g" = "diagnostics::bottom"
+"ctrl+d" = "diagnostics::page_down"
+"ctrl+u" = "diagnostics::page_up"
+"[" = "diagnostics::prev_section"
+"]" = "diagnostics::next_section"
+"z o" = "diagnostics::expand"
+"z c" = "diagnostics::collapse"
 "#;
 
 /// Mirrors `geode_blotter::tile::ACTIONS` (id, title) exactly — the
@@ -236,6 +251,44 @@ pub const BLOTTER_ACTIONS: &[&str] = &[
     "blotter::find_next",
     "blotter::find_prev",
     "blotter::sort_cycle",
+];
+
+/// Mirrors `geode_diagnostics::ACTIONS` (id, title) exactly — same
+/// reasoning as [`BLOTTER_ACTION_DEFS`]'s own doc comment: `BUILTIN_KEYMAP`'s
+/// `diagnostics::*` bindings (including `mod+shift+d` = `diagnostics::open`
+/// in the general bindings block above) carry their own copy of the ids
+/// they name, registered here so `build_keymap` never drops them for want
+/// of a registered action even in a shell-only build that never loaded
+/// `geode-diagnostics` — `cargo check -p geode-shell --features
+/// test-support --all-targets` is exactly that build. `pub` for the same
+/// cross-crate mirror-test reason.
+pub const DIAGNOSTICS_ACTION_DEFS: &[(&str, &str)] = &[
+    ("diagnostics::open", "Open diagnostics"),
+    ("diagnostics::down", "Cursor down"),
+    ("diagnostics::up", "Cursor up"),
+    ("diagnostics::top", "Cursor to top"),
+    ("diagnostics::bottom", "Cursor to bottom"),
+    ("diagnostics::page_down", "Half page down"),
+    ("diagnostics::page_up", "Half page up"),
+    ("diagnostics::next_section", "Next section"),
+    ("diagnostics::prev_section", "Previous section"),
+    ("diagnostics::expand", "Expand"),
+    ("diagnostics::collapse", "Collapse"),
+];
+
+/// Just the ids from [`DIAGNOSTICS_ACTION_DEFS`], for the mirror test.
+pub const DIAGNOSTICS_ACTIONS: &[&str] = &[
+    "diagnostics::open",
+    "diagnostics::down",
+    "diagnostics::up",
+    "diagnostics::top",
+    "diagnostics::bottom",
+    "diagnostics::page_down",
+    "diagnostics::page_up",
+    "diagnostics::next_section",
+    "diagnostics::prev_section",
+    "diagnostics::expand",
+    "diagnostics::collapse",
 ];
 
 fn action(reg: &mut ActionRegistry, id: &str, title: &str, category: &str) {
@@ -472,6 +525,13 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // unregistered — see `BLOTTER_ACTION_DEFS`'s doc comment.
     for (id, title) in BLOTTER_ACTION_DEFS {
         action(reg, id, title, "Blotter");
+    }
+    // The diagnostics module's own actions (Phase 4b Task 5), reserved
+    // here so BUILTIN_KEYMAP's `diagnostics::*` bindings (including
+    // `mod+shift+d`) never get dropped as unregistered — see
+    // `DIAGNOSTICS_ACTION_DEFS`'s doc comment.
+    for (id, title) in DIAGNOSTICS_ACTION_DEFS {
+        action(reg, id, title, "Diagnostics");
     }
 }
 
@@ -712,6 +772,29 @@ mod tests {
         let mut reg = ActionRegistry::default();
         register_builtin_actions(&mut reg);
         for id in BLOTTER_ACTIONS {
+            assert!(
+                reg.contains(&ActionId((*id).to_string())),
+                "{id} must be reserved by register_builtin_actions"
+            );
+        }
+    }
+
+    /// Same drift guard as [`the_two_blotter_action_lists_in_this_file_agree`],
+    /// for the diagnostics pair.
+    #[test]
+    fn the_two_diagnostics_action_lists_in_this_file_agree() {
+        let ids: Vec<&str> = DIAGNOSTICS_ACTION_DEFS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, DIAGNOSTICS_ACTIONS.to_vec());
+    }
+
+    /// Every `diagnostics::*` id the builtin keymap binds (`mod+shift+d`
+    /// plus the `diagnostics` context block) must be registered here —
+    /// same reasoning as [`every_blotter_binding_target_is_reserved`].
+    #[test]
+    fn every_diagnostics_binding_target_is_reserved() {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        for id in DIAGNOSTICS_ACTIONS {
             assert!(
                 reg.contains(&ActionId((*id).to_string())),
                 "{id} must be reserved by register_builtin_actions"

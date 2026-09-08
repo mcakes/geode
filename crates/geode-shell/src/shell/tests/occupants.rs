@@ -306,3 +306,117 @@ fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
 // data-status contract, replaced by Phase 4b's `Diagnostics` entity) is
 // covered in `shell/tests/diagnostics.rs` now — `set_data_status` no
 // longer exists; `Diagnostics::note_health` is the door.
+
+/// `open_module` (Phase 4b Task 5): the first call splits a fresh tile and
+/// hands it to the requested kind's factory; a second call with nothing
+/// else changed must focus that same tile rather than splitting again —
+/// "opening by kind" means at most one occupant of that kind per
+/// workspace, focused, not one per press.
+#[gpui::test]
+fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestAppContext) {
+    let (mut services, log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.simulate_keystrokes("alt-shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let first_tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(first_tile)),
+        Some("diagnostics")
+    );
+
+    // Focus something else, then ask for diagnostics again — it must
+    // focus the tile that already exists rather than splitting a second
+    // one.
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let second_split_tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(second_split_tile, first_tile);
+
+    cx.simulate_keystrokes("alt-shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let refocused = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        refocused, first_tile,
+        "the second open_module call must focus the existing diagnostics \
+         tile, not create another"
+    );
+    let diagnostics_tiles: Vec<TileId> = shell
+        .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+        .into_iter()
+        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("diagnostics"))
+        .collect();
+    assert_eq!(
+        diagnostics_tiles.len(),
+        1,
+        "exactly one diagnostics tile ever exists: {:?}",
+        log.borrow()
+    );
+}
+
+/// The other half of `open_module`'s contract: a kind with no registered
+/// factory (`services_with_recorder`'s roster only knows "rec") falls back
+/// to the roster's default kind rather than leaving the split tile
+/// occupant-less, and logs a warning naming the requested kind.
+#[gpui::test]
+fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns(
+    cx: &mut gpui::TestAppContext,
+) {
+    use geode_core::log::{Ring, RingLayer};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let ring = Arc::new(Ring::new(64));
+    let sub = tracing_subscriber::registry().with(RingLayer::new(ring.clone()));
+
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    tracing::subscriber::with_default(sub, || {
+        cx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                s.open_module("diagnostics", window, cx);
+            });
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    });
+
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        Some("rec"),
+        "no 'diagnostics' factory is registered, so the default kind hosts the tile"
+    );
+
+    let mut records = Vec::new();
+    ring.drain_since(0, &mut records);
+    assert!(
+        records
+            .iter()
+            .any(|r| r.level == tracing::Level::WARN && r.message.contains("diagnostics")),
+        "expected a warning naming the unmatched kind: {records:?}"
+    );
+}

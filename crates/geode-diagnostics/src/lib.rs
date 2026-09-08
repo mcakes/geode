@@ -147,3 +147,27 @@ impl ModuleFactory for DiagnosticsFactory {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shell cannot depend on `geode-diagnostics` (layering: shell
+    /// never depends on a module), so `geode_shell::defaults` carries its
+    /// own copy of these ids and titles to reserve, ahead of
+    /// `DiagnosticsFactory::register_actions`, so `BUILTIN_KEYMAP`'s
+    /// `diagnostics::*` bindings (including `mod+shift+d`) are never
+    /// dropped as unregistered and the palette shows the same title
+    /// either way — same shape as `geode_blotter::tile::tests::
+    /// the_shells_reserved_blotter_actions_match_ours`.
+    #[test]
+    fn the_shells_reserved_diagnostics_actions_match_ours() {
+        let ours: Vec<&str> = ACTIONS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ours, geode_shell::defaults::DIAGNOSTICS_ACTIONS.to_vec());
+        assert_eq!(
+            ACTIONS,
+            geode_shell::defaults::DIAGNOSTICS_ACTION_DEFS,
+            "titles must match too, not just ids"
+        );
+    }
+}

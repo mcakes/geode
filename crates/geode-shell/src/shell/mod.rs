@@ -55,7 +55,7 @@ use crate::perf::FrameHistogram;
 use crate::reload;
 use crate::session;
 use crate::theme::ThemeService;
-use crate::tiling::{TileId, Workspaces};
+use crate::tiling::{DockSide, Orientation, TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
@@ -546,6 +546,15 @@ pub struct ShellView {
     /// `:level` persistence, the overlay toggle, and the catalog
     /// request.
     diagnostics: Entity<Diagnostics>,
+    /// Set by [`Self::open_module`] right after it splits a fresh tile for
+    /// a kind with no existing occupant in the focused workspace (Phase 4b
+    /// Task 5): `ensure_occupants` (`shell/occupants.rs`) consumes this —
+    /// the ONE new tile it finds with no restored record gets this kind's
+    /// factory instead of the roster's default — and clears it, whether or
+    /// not a matching factory existed (falling back to the default kind
+    /// with a `warn!` when it didn't, same "never a blank, never a panic"
+    /// contract `placeholder` upholds for an unknown session kind).
+    pending_kind_for_new_tile: Option<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -1164,6 +1173,7 @@ impl ShellView {
             perf_overlay: false,
             frame,
             diagnostics,
+            pending_kind_for_new_tile: None,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
@@ -1383,6 +1393,55 @@ impl ShellView {
     /// (Phase 4b §4.4).
     pub fn diagnostics(&self) -> &Entity<Diagnostics> {
         &self.diagnostics
+    }
+
+    /// Open a module tile of `kind` in the focused workspace (Phase 4b
+    /// Task 5, spec ruling: "`diagnostics::open` opens by kind through the
+    /// shell, not through the module"): focus an existing occupant of that
+    /// kind wherever it lives (the main tree or a dock) if one exists,
+    /// else split the focused tile (the same path `ctrl+v`/`workspace::
+    /// split_right` takes — `Tree::split` always focuses the new tile) and
+    /// set [`Self::pending_kind_for_new_tile`], which `ensure_occupants`
+    /// (`shell/occupants.rs`) consumes on its very next call — the same
+    /// render pass, since `ensure_occupants` runs at the top of every
+    /// `render` and this always `cx.notify()`s.
+    pub fn open_module(&mut self, kind: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.services.workspaces.active();
+        let found: Option<(TileId, Option<DockSide>)> = ws
+            .tree()
+            .tiles()
+            .into_iter()
+            .find(|id| self.occupant_kind(*id) == Some(kind))
+            .map(|id| (id, None))
+            .or_else(|| {
+                ws.docks().iter().find_map(|(side, dock)| {
+                    dock.tree()
+                        .tiles()
+                        .into_iter()
+                        .find(|id| self.occupant_kind(*id) == Some(kind))
+                        .map(|id| (id, Some(side)))
+                })
+            });
+        if let Some((tile, side)) = found {
+            let ws = self.services.workspaces.active_mut();
+            match side {
+                Some(side) => {
+                    ws.focus_dock_tile(side, tile);
+                }
+                None => {
+                    ws.focus_main_tile(tile);
+                }
+            }
+            self.session_dirty = true;
+            cx.notify();
+            return;
+        }
+        self.services
+            .workspaces
+            .split_active(Orientation::Horizontal);
+        self.pending_kind_for_new_tile = Some(kind.to_string());
+        self.session_dirty = true;
+        cx.notify();
     }
 
     /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —

@@ -153,6 +153,18 @@ impl ShellView {
         let mut active = std::mem::take(&mut self.scratch_active_tiles);
         self.fill_active_tiles(&mut active);
 
+        // Phase 4b Task 5: `open_module` sets this right after splitting a
+        // fresh tile for a kind with no existing occupant. Consumed by the
+        // ONE tile below that both lacks an occupant already AND carries
+        // no restored record — a restored tile's kind always comes from
+        // the session file instead (see `matched` just below), and any
+        // other tile without a restored record already got an occupant on
+        // an earlier render (this loop only ever sees a tile once). `take`
+        // here, not read: whether or not a matching factory turns up, the
+        // request is spent the moment this render's creation loop looks
+        // for a candidate to spend it on.
+        let mut pending_kind = self.pending_kind_for_new_tile.take();
+
         for id in &all {
             if self.occupants.contains_key(id) {
                 continue;
@@ -168,7 +180,21 @@ impl ShellView {
                 .as_ref()
                 .and_then(|r| self.services.roster.factory(&r.kind));
             let state = matched.and(restored.as_ref()).map(|r| &r.state);
-            let factory = matched.or_else(|| self.services.roster.default_factory());
+            let pending_kind_for_this_tile =
+                restored.is_none().then(|| pending_kind.take()).flatten();
+            let pending_factory = pending_kind_for_this_tile.as_deref().and_then(|kind| {
+                let f = self.services.roster.factory(kind);
+                if f.is_none() {
+                    tracing::warn!(
+                        target: "geode::shell",
+                        "diagnostics::open (or another open_module caller) asked for kind '{kind}', which has no registered factory — falling back to the default kind"
+                    );
+                }
+                f
+            });
+            let factory = matched
+                .or(pending_factory)
+                .or_else(|| self.services.roster.default_factory());
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,

@@ -44,6 +44,10 @@ tempfile = "3.27.0"
 geode-core = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
+# `open_module`'s no-matching-factory test scopes a real `RingLayer`
+# subscriber to assert on the warning it logs (Phase 4b Task 5) — the same
+# pattern `geode_core::log`'s own `RingLayer`/`MessageVisitor` tests use.
+tracing-subscriber.workspace = true
 
 # Criterion benches over the pure shell cores (spec §7.4). Kept in this
 # crate rather than a dedicated bench crate: criterion is a dev-dependency
