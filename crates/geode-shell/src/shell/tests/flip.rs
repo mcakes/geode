@@ -122,6 +122,61 @@ fn a_data_bump_opens_no_barrier(cx: &mut gpui::TestAppContext) {
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
 }
 
+/// Phase 4b M7: `on_frame_changed` used to spawn a fresh detached
+/// `cx.spawn` timer per scope/grouping/as-of mutation just to sweep this
+/// same barrier's deadline — a burst of keystrokes spawned a burst of
+/// timers. The existing ~500ms reload-poll loop (`ShellView::new`) now
+/// sweeps on every tick instead, so advancing the test clock past one
+/// tick — comfortably past `FLIP_DEADLINE` (250ms), with nothing else
+/// ever arriving (the recorder submits no query) — must release the
+/// barrier exactly the way the old per-mutation timer used to.
+#[gpui::test]
+fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    // Backdated directly through `open_flip`'s own explicit `Instant`
+    // rather than driven through a real scope mutation + a real wait:
+    // gpui's test dispatcher fast-forwards its own *virtual* clock (what
+    // `cx.background_executor().timer(..)` waits on) but never touches
+    // real `std::time::Instant::now()`, which is what `Frame::sweep`
+    // compares against — the same reason the existing `a_scope_change_
+    // opens_a_barrier_...` test above hands `sweep` a manufactured later
+    // `Instant` instead of actually waiting.
+    let past = std::time::Instant::now()
+        - crate::frame::FLIP_DEADLINE
+        - std::time::Duration::from_millis(1);
+    frame.update(&mut vcx, |f, _| {
+        f.open_flip([QueryKey(1)], past);
+    });
+    assert!(frame.read_with(&vcx, |f, _| f.barrier_open()));
+    let flip_before = frame.read_with(&vcx, |f, _| f.versions().flip);
+
+    // `run_until_parked` first so the reload-poll loop (spawned in
+    // `ShellView::new`) actually reaches its `.timer(..).await` and
+    // registers with the test dispatcher before the clock advances past
+    // it — otherwise there is nothing yet for `advance_clock` to fire.
+    // The advance itself only needs to cross one tick of the *virtual*
+    // clock; the barrier is already past its (real) deadline the moment
+    // the tick's own sweep call runs.
+    vcx.run_until_parked();
+    vcx.executor().advance_clock(
+        crate::shell::hot_reload::RELOAD_POLL_INTERVAL + std::time::Duration::from_millis(1),
+    );
+    vcx.run_until_parked();
+
+    assert!(
+        !frame.read_with(&vcx, |f, _| f.barrier_open()),
+        "one reload-poll tick must sweep a barrier already past its deadline"
+    );
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.versions().flip),
+        flip_before + 1
+    );
+}
+
 /// F2 (final fix wave): the observer-order invariant stated in
 /// `ShellView::new`'s `cx.observe_in` comment, `on_frame_changed`'s
 /// `open_flip` branch, and `Frame::open_flip`'s own doc — the shell's

@@ -45,7 +45,7 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
 use crate::fontsize::FontSize;
-use crate::frame::{FLIP_DEADLINE, Frame, FrameVersions};
+use crate::frame::{Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::module::{ModuleRoster, TileOccupant};
 use crate::palette::PaletteState;
@@ -838,6 +838,28 @@ impl ShellView {
                     .timer(hot_reload::RELOAD_POLL_INTERVAL)
                     .await;
 
+                // Sweep the flip barrier's deadline (Phase 4b M7),
+                // unconditionally on every tick just like the session
+                // flush right below — one always-running timer rather
+                // than a fresh detached one per scope/grouping/as-of
+                // mutation (`on_frame_changed` used to spawn one on every
+                // such change; a burst of keystrokes spawned a burst of
+                // timers, all racing to sweep the same barrier). `sweep`
+                // itself is a cheap no-op once nothing is open or the
+                // deadline hasn't passed, so this costs nothing on a
+                // quiet tick. The tradeoff: a barrier now releases "on
+                // the next tick after `FLIP_DEADLINE`" rather than
+                // exactly at it — up to ~500ms rather than exactly
+                // 250ms — spec §3.10's as-built note records this.
+                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
+                    return; // window/entity gone; stop polling
+                };
+                frame.update(cx, |f, cx| {
+                    if f.sweep(Instant::now()) {
+                        cx.notify();
+                    }
+                });
+
                 // Flush a dirty session (Task 3 fix round 1), coalesced
                 // onto this same ~500ms tick rather than writing per
                 // dispatch. `take_dirty_session_write` does the cheap part
@@ -1104,16 +1126,13 @@ impl ShellView {
             self.visible_tile_keys(&mut keys);
             frame.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
             self.scratch_visible_keys = keys;
-            let deadline_frame = frame.clone();
-            cx.spawn(async move |_this, cx| {
-                cx.background_executor().timer(FLIP_DEADLINE).await;
-                deadline_frame.update(cx, |f, cx| {
-                    if f.sweep(Instant::now()) {
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+            // Phase 4b M7: no detached per-mutation timer here any more —
+            // a burst of keystrokes used to spawn one `FLIP_DEADLINE`
+            // timer each, all racing to sweep the same barrier. The
+            // reload-poll loop (`ShellView::new`, ~500ms) sweeps every
+            // tick instead, so the deadline is "released on the next
+            // tick after `FLIP_DEADLINE`" rather than exactly on it —
+            // see that loop's own comment and spec §3.10's as-built note.
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
