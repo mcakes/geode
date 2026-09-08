@@ -427,6 +427,133 @@ fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
     );
 }
 
+/// The single-value flow, end to end through the real key pipeline:
+/// `alt+p`, a column, arrow to a value, `enter` — no `tab` anywhere. This
+/// used to close the modal having changed nothing, because `apply` read
+/// an empty tick set as "select nothing" (see `PickerState::
+/// ticks_touched`). Driven from `frame::pick` at the `Columns` stage
+/// rather than `frame::pick_book`, since the columns stage's own `enter`
+/// had no end-to-end coverage at all.
+#[gpui::test]
+fn arrowing_to_a_value_and_pressing_enter_commits_it_without_tab(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    let v0 = frame.read_with(&vcx, |f, _| f.versions().scope);
+
+    dispatch_action(&shell, "frame::pick", &mut vcx);
+    vcx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone())),
+        Some(crate::shell::picker::Stage::Columns),
+    );
+    assert!(
+        vcx.debug_bounds("picker-hints").is_some(),
+        "the footer hint must actually paint, not merely exist as data"
+    );
+
+    // `enter` at the columns stage commits the highlighted column.
+    vcx.simulate_keystrokes("enter");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.picker.as_ref().map(|p| p.stage.clone())),
+        Some(crate::shell::picker::Stage::Values {
+            column: "book".into()
+        }),
+        "enter at the columns stage must open that column's values"
+    );
+
+    let tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![
+                    ("BK000".into(), 1),
+                    ("BK001".into(), 2),
+                    ("BK002".into(), 3),
+                ]),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    assert!(
+        vcx.debug_bounds("picker-hints").is_some(),
+        "the values stage paints its own hint row too"
+    );
+
+    // Arrow to the second value and apply — no `tab`, nothing ticked.
+    vcx.simulate_keystrokes("down enter");
+
+    assert!(shell.read_with(&vcx, |s, _| s.modal.is_none()));
+    assert_eq!(
+        frame.read_with(&vcx, |f, _| f.versions().scope),
+        v0 + 1,
+        "the highlighted value must land as one real scope change"
+    );
+    let books = frame.read_with(&vcx, |f, _| {
+        f.scope()
+            .dimensions
+            .iter()
+            .find(|d| d.column == "book")
+            .expect("a book selection")
+            .values
+            .clone()
+    });
+    assert_eq!(books, vec!["BK001".to_string()]);
+}
+
+/// The other half of `ticks_touched`: an empty tick set the user *made*
+/// empty still drops the column, so `ctrl+x` then `enter` remains the
+/// keyboard route to clearing one dimension (PHILOSOPHY: every action
+/// keyboard-reachable — the chip's close glyph is mouse-only).
+#[gpui::test]
+fn ctrl_x_then_enter_clears_the_columns_selection(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+
+    frame.update(&mut vcx, |f, cx| {
+        f.set_scope(Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".into(),
+                values: vec!["BK000".into()],
+            }],
+            ..Scope::default()
+        });
+        cx.notify();
+    });
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    let tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
+    shell.update(&mut vcx, |s, cx| {
+        s.deliver_distinct(
+            DistinctOutcome {
+                key: PICKER_KEY,
+                tag,
+                column: "book".into(),
+                values: Ok(vec![("BK000".into(), 1), ("BK001".into(), 2)]),
+            },
+            cx,
+        )
+    });
+    vcx.run_until_parked();
+
+    vcx.simulate_keystrokes("ctrl-x enter");
+
+    assert!(
+        frame.read_with(&vcx, |f, _| f
+            .scope()
+            .dimensions
+            .iter()
+            .all(|d| d.column != "book")),
+        "an explicitly cleared tick set drops the column, not commits the highlight"
+    );
+}
+
 /// Fix round 1, Finding 1: keyboard navigation past `palette::
 /// VISIBLE_ROWS` (12) must scroll the values `uniform_list`'s viewport
 /// to follow `selected` (`ShellView::picker_scroll`, driven by

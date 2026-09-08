@@ -2451,11 +2451,123 @@ run_mutation "picker: a stale outcome is dropped" \
   '        if *column != outcome.column || false {' \
   geode-shell a_stale_distinct_outcome_is_dropped
 
+# Re-anchored: `apply` now decides its value list before this guard
+# (`ticks_touched`, below), so the old `if !self.ticked.is_empty()`
+# anchor is gone. Same behaviour under test: an emptied selection must
+# drop the column rather than write an empty `DimensionSelection`, which
+# `Scope` reads as "no constraint".
 run_mutation "picker: an empty tick set drops the chip" \
   crates/geode-shell/src/shell/picker.rs \
-  '        if !self.ticked.is_empty() {' \
+  '        if !values.is_empty() {' \
   '        if true {' \
   geode-shell apply_replaces_the_columns_selection_and_an_empty_tick_set_drops_it
+
+# The single-value flow. Collapse the untouched branch so an empty tick
+# set always means "select nothing" again — the exact defect this fixed:
+# arrow to a value, press enter, and the modal closes having changed
+# nothing (the scope equals itself, so `Frame::set_scope` returns false).
+run_mutation "picker: enter on an untouched tick set commits nothing" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        let values: Vec<String> = if self.ticked.is_empty() && !self.ticks_touched {' \
+  '        let values: Vec<String> = if false {' \
+  geode-shell enter_on_an_untouched_tick_set_commits_the_highlighted_value
+
+# The other half of the same distinction, and the one that matters for
+# PHILOSOPHY's keyboard-reach rule: drop `clear`'s flag write and
+# `ctrl+x` then `enter` stops clearing a dimension — it commits the
+# highlighted value instead, leaving no keyboard route to clearing one
+# (the chip's close glyph is mouse-only).
+run_mutation "picker: ctrl+x no longer counts as touching the tick set" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    pub fn clear(&mut self) {
+        self.ticks_touched = true;' \
+  '    pub fn clear(&mut self) {' \
+  geode-shell an_explicit_clear_makes_enter_drop_the_selection
+
+# "Nothing is configured to pick" and "your filter matched nothing" must
+# not print the same string: the first is why an unconfigured `alt+p`
+# reads as a broken picker rather than an empty one. Collapse the
+# columns stage's empty-pickable arms back onto "no matches".
+run_mutation "picker: the columns stage's empty states print the same string" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        (false, _) => "no matches",' \
+  '        (false, _) | (true, _) => "no matches",' \
+  geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: the two reasons `pickable` comes out empty are
+# unrelated — no `datasets` doc, or a doc declaring no categorical
+# columns — and blaming a missing file for the second sends the reader
+# to the wrong place. Serve the missing-file message for both.
+run_mutation "picker: a loaded schema is reported as a missing file" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        (true, true) => "nothing to pick — this schema declares no categorical columns",' \
+  '        (true, true) => "nothing to pick — no datasets config is loaded",' \
+  geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: the values stage's own branch had no entry of its
+# own, only the columns stage's. A distinct query that returned no rows
+# at all is a fact about the data under the current scope, not about the
+# filter the user typed.
+run_mutation "picker: the values stage's empty states print the same string" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    if values_is_empty {
+        "no values in scope"' \
+  '    if false {
+        "no values in scope"' \
+  geode-shell the_empty_states_say_which_emptiness_it_is
+
+# Review finding: `tab`/`ctrl+a` set `ticks_touched` ahead of their own
+# guards, so a keystroke that visibly ticked nothing (a filter matching
+# nothing, or values not yet delivered) permanently disarmed the
+# highlight-commit path — the original defect by another route. Hoist
+# the flag back above the guard.
+run_mutation "picker: a tab that ticks nothing still counts as a touch" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    pub fn toggle_selected(&mut self) {
+        let shown = self.shown();' \
+  '    pub fn toggle_selected(&mut self) {
+        self.ticks_touched = true;
+        let shown = self.shown();' \
+  geode-shell a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching
+
+run_mutation "picker: a ctrl+a over nothing still counts as a touch" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        if shown.is_empty() {
+            return; // see `toggle_selected` on why this is not a touch
+        }' \
+  '' \
+  geode-shell a_tick_keystroke_that_ticks_nothing_does_not_count_as_touching
+
+# `tab` is the only key that selects a value, and the footer is the only
+# place that says so. Serve the columns stage's vocabulary to both.
+run_mutation "picker: the values stage stops advertising tab" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        Stage::Values { .. } => &[
+            Hint::Text("type to filter ·"),
+            Hint::Key("up"),
+            Hint::Key("down"),
+            Hint::Text("move ·"),
+            Hint::Key("tab"),' \
+  '        Stage::Values { .. } => &[
+            Hint::Text("type to filter ·"),
+            Hint::Key("up"),
+            Hint::Key("down"),
+            Hint::Text("move ·"),
+            Hint::Key("enter"),' \
+  geode-shell each_stage_advertises_its_own_vocabulary
+
+# The hint row must actually paint. Drop it from `build` and the covering
+# test's `debug_bounds("picker-hints")` must go `None` at both stages.
+run_mutation "picker: the footer hint never paints" \
+  crates/geode-shell/src/shell/picker.rs \
+  '        .child(hint_row(
+            &picker.stage,
+            theme.muted_foreground,
+            theme.muted,
+            theme.border,
+        ))' \
+  '' \
+  geode-shell arrowing_to_a_value_and_pressing_enter_commits_it_without_tab
 
 run_mutation "pickable: keys are not pickable" \
   crates/geode-shell/src/shell/mod.rs \
