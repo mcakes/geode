@@ -113,7 +113,10 @@ pub struct ObjectRow {
 
 impl Domain {
     /// The config doc this domain's objects live in — the file stem, as
-    /// `Config::layered_docs` keys them.
+    /// `Config::layered_docs` keys them. The one spelling of that fact:
+    /// [`objects`](Self::objects) reads the doc name from here rather
+    /// than naming the adapter's own constant a second time, so the two
+    /// cannot drift as adapters are added.
     pub fn doc(self) -> &'static str {
         match self {
             Domain::Views => views::DOC,
@@ -127,17 +130,30 @@ impl Domain {
         }
     }
 
+    /// How this domain describes one object on its browse row — the only
+    /// genuinely domain-specific part of a row, and therefore the only
+    /// part an adapter gets to supply.
+    fn summary_fn(self) -> fn(&toml::Value) -> String {
+        match self {
+            Domain::Views => views::summary,
+        }
+    }
+
     /// Every named object in this domain, with its provenance markers.
     ///
-    /// The walk itself is [`derive_rows`], shared by every domain: the
-    /// `layer`/`overridden` derivation is the dangerous part (see
-    /// [`ObjectRow::overridden`]) and belongs in one tested place, not
-    /// copied into each adapter. An adapter supplies only the summary
-    /// line, which is the only part that is actually domain-specific.
+    /// **Deliberately not a `match`.** The `layer`/`overridden`
+    /// derivation is the dangerous computation on this whole surface
+    /// (see [`ObjectRow::overridden`]: a wrong `overridden` makes the
+    /// edit stage offer a destructive `Revert to desk`), so every domain
+    /// must share the one tested walk. A per-domain `match` here would
+    /// merely *discourage* an adapter from doing its own walk and
+    /// diverging; an unconditional call makes that unrepresentable — the
+    /// only two things a domain decides are its doc name and its summary
+    /// line, and both arrive through the two small matches above. Part 2
+    /// adds three more adapters onto this exact seam, which is why the
+    /// hole is closed while there is still only one.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
-        match self {
-            Domain::Views => derive_rows(config, views::DOC, views::summary),
-        }
+        derive_rows(config, self.doc(), self.summary_fn())
     }
 }
 

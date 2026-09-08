@@ -102,13 +102,16 @@ pub fn open(
 /// 2. in [`DialogMode::Filter`] the behaviour is the filter-first one
 ///    every other dialog has, with `escape` leaving filter mode (keeping
 ///    the query) instead of closing the dialog;
-/// 3. bare `tab`/`shift+tab` are claimed and dropped. Claiming them is
+/// 3. bare `enter` is claimed in both modes and does nothing yet — the
+///    key that opens the edit stage in Task 5, claimed now so the two
+///    modes route it identically;
+/// 4. bare `tab`/`shift+tab` are claimed and dropped. Claiming them is
 ///    what makes them inert: with the filter focused, an unclaimed key
 ///    continues to the window's own text-input phase, and
 ///    `InputState::normalize_input` strips `\n`/`\r` but not `\t`, so an
 ///    unclaimed `tab` would land in the query as a literal tab and
 ///    collapse the list to "no matches";
-/// 4. in filter mode everything else returns `false`, unhandled — which
+/// 5. in filter mode everything else returns `false`, unhandled — which
 ///    for a printable key is exactly right: the modal branch in
 ///    `handle_key_down` only stops propagation for keys this handler
 ///    claims, so an unclaimed character goes on to the focused `Input`'s
@@ -225,6 +228,22 @@ fn handle_key(
         return true;
     }
 
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        // `enter` is `NormalCommand::Commit`, and normal mode already
+        // claims it (the catch-all arm above). Claimed here too so the
+        // two modes route the same key the same way — the keybinding
+        // dialog's own `enter` branch is what this mirrors, and a
+        // routing difference between the two dialogs is a difference
+        // somebody eventually has to debug. It does nothing yet: Task 5
+        // opens the edit stage from exactly this branch and its
+        // normal-mode twin. Today it is inert either way — an unclaimed
+        // `enter` reaches the focused `Input`, whose
+        // `normalize_input` strips `\n`/`\r` — so claiming it changes
+        // no behaviour, and there is deliberately no mutation entry for
+        // a line no test can distinguish.
+        return true;
+    }
+
     if let Some(cmd) = listfilter::nav_command(ks) {
         state.selected = vimnav::apply(state.selected, visible.len(), cmd);
         let selected = state.selected;
@@ -234,7 +253,7 @@ fn handle_key(
     }
 
     // `tab`/`shift+tab`: reserved and inert, claimed rather than left
-    // unhandled — see this function's own doc comment, item 3.
+    // unhandled — see this function's own doc comment, item 4.
     if ks.mods == Modifiers::NONE && ks.key == "tab" {
         return true;
     }
