@@ -414,6 +414,61 @@ run_mutation "generations: the publish insert removed from the normal branch" \
         summary = String::new(),' \
   geode-data a_normal_publish_records_the_generation_in_the_summary
 
+# Review round 1 (MAJ-1): pins the summary insert's *placement*, not just
+# its presence -- reordering `{summary}` and `commit;` within the same
+# SQL string, alone, is unobservable (`execute_batch` stops at the first
+# failing statement regardless of the order of the ones after it, and on
+# success both orderings eventually land the same rows), verified by hand
+# before adding this. The mutation that actually reproduces the "phantom
+# row" the review named runs the summary insert unconditionally, outside
+# the transaction's own success/failure, after the main statement --
+# leaving a summary row for a generation whose data never committed.
+run_mutation "generations: the publish insert survives a rolled-back transaction" \
+  crates/geode-data/src/store/publish.rs \
+  '    let sql = format!(
+        "begin;
+         insert into {archive} select * from {live} where {predicate};
+         delete from {live} where {predicate};
+         insert into {live}
+             select *, {gen}, '"'"'{time}'"'"'::timestamptz from {staging};
+         {summary}
+         commit;",
+        gen = req.gen_id,
+        time = req.source_time.to_rfc3339(),
+        staging = req.staging_table,
+        summary = generation_summary_insert(req),
+    );
+    if let Err(source) = conn.execute_batch(&sql) {
+        let _ = conn.execute_batch("rollback;");
+        return Err(StoreError::Sql {
+            statement: sql,
+            source,
+        });
+    }' \
+  '    let sql = format!(
+        "begin;
+         insert into {archive} select * from {live} where {predicate};
+         delete from {live} where {predicate};
+         insert into {live}
+             select *, {gen}, '"'"'{time}'"'"'::timestamptz from {staging};
+         commit;",
+        gen = req.gen_id,
+        time = req.source_time.to_rfc3339(),
+        staging = req.staging_table,
+    );
+    let result = conn.execute_batch(&sql);
+    if result.is_err() {
+        let _ = conn.execute_batch("rollback;");
+    }
+    let _ = conn.execute_batch(&generation_summary_insert(req));
+    if let Err(source) = result {
+        return Err(StoreError::Sql {
+            statement: sql,
+            source,
+        });
+    }' \
+  geode-data a_failed_publish_leaves_no_summary_row
+
 run_mutation "generations: the publish insert removed from the archived-only branch" \
   crates/geode-data/src/store/publish.rs \
   '            req.staging_table,
@@ -443,6 +498,19 @@ run_mutation "generations: reconciliation covers only the first grain" \
         .take(1)' \
   geode-data a_generation_present_at_only_one_grain_survives_the_reconciliation
 
+# Review round 1 (MAJ-2): `reconcile_generations` must derive its grain
+# list from `ds.grains()` itself, never from whatever subset `sweep`'s
+# caller happened to evict -- the entry above mutates the SQL builder's
+# own truncation; this one mutates the call site that used to be (and
+# must never again be) the caller-supplied `grains` parameter.
+run_mutation "generations: reconciliation derives grains from the caller again, not the dataset" \
+  crates/geode-data/src/store/retention.rs \
+  'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
+    let grains = ds.grains();' \
+  'fn reconcile_generations(conn: &Connection, ds: &DatasetSpec) -> Result<(), StoreError> {
+    let grains = vec![Grain::Position];' \
+  geode-data reconciliation_covers_every_grain_the_dataset_has_not_just_the_swept_subset
+
 run_mutation "generations: the open-time migration rebuild is skipped" \
   crates/geode-data/src/service.rs \
   '            if has_data {' \
@@ -454,6 +522,17 @@ run_mutation "generations: resolve drops the dataset filter" \
   'from generations where dataset = ? and source_time <= ?' \
   'from generations where (dataset = ? or true) and source_time <= ?' \
   geode-data resolve_reads_only_the_named_dataset
+
+# Review round 1 (MIN-1): the outer `distinct` this branch added beyond
+# the brief (`generations_union_sql` collapses one generation seen at N
+# grains to one row, not just N per-table distincts unioned) had no
+# entry, though the behaviour is real and the covering test already
+# exists.
+run_mutation "generations: the union across tables no longer collapses a generation seen at every grain" \
+  crates/geode-data/src/store/ddl.rs \
+  'format!("select distinct batch, book, gen_id, source_time from ({union})")' \
+  'format!("select batch, book, gen_id, source_time from ({union})")' \
+  geode-data rebuild_deduplicates_a_generation_shared_by_every_grains_tables
 
 # Re-anchored (generations-table change): `resolve_generations` reads
 # `generations`, not the raw archive, so the covering test needed to move
@@ -470,10 +549,37 @@ run_mutation "as-of: error propagation" \
   'Ok(rows.filter_map(|r| r.ok()).collect())' \
   geode-data a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer
 
+# Repaired (review round 1, MIN-7): the previous replacement here
+# (`'as_of: None.or(compiled'`, no closing paren) never compiled, so
+# `cargo test` failed at *compile* time and `run_mutation` reported
+# "caught" on that non-zero exit -- not because any test saw the mutated
+# behaviour. Verified pre-existing and identical on base commit
+# `1046b0f` before this fix. The replacement below compiles and actually
+# substitutes the requested instant for the resolved one -- exactly the
+# defect this entry's name claims to guard against -- and is caught on
+# *value* by the existing `a_historical_result_is_labelled_with_the_data_it_actually_read`
+# (`left: Some("2026-08-30T00:00:00+00:00")` -- the request --
+# `right: Some("2026-07-01T00:00:00+00:00")` -- the generation actually
+# read), verified by hand.
 run_mutation "provenance: resolved vs requested time" \
   crates/geode-data/src/service.rs \
-  'as_of: compiled' \
-  'as_of: None.or(compiled'
+  'AsOf::At(_) => Freshness {
+                    dataset: dataset.clone(),
+                    // The newest generation actually resolved, not the
+                    // instant requested. Labelling every dataset with the
+                    // request makes them all equal, and `stalest()` then
+                    // cannot show that one side of a join is a month
+                    // behind the other — which is all §5.4 is for.
+                    as_of: compiled.resolved_as_of.get(dataset).map(|t| t.to_rfc3339()),
+                    // Per-partition, so no single number describes it.
+                    generation: 0,
+                },' \
+  'AsOf::At(t) => Freshness {
+                    dataset: dataset.clone(),
+                    as_of: Some(t.to_rfc3339()),
+                    generation: 0,
+                },' \
+  geode-data a_historical_result_is_labelled_with_the_data_it_actually_read
 
 run_mutation "provenance: a join is labelled with its own instant" \
   crates/geode-data/src/query/compile.rs \
@@ -2201,10 +2307,16 @@ run_mutation "cache: compile_distinct's per-dataset call uses the shared cache" 
   '        let scope = crate::query::scope_sql::compile_scope(conn, &params.scope, ds, grain, dims, era.era())?;' \
   geode-data distinct_with_a_text_scope_over_two_datasets_resolves_each_dictionary_once
 
+# Re-anchored (generations-table change): `era_for` dropped its unused
+# `ds: &DatasetSpec` parameter once it stopped building a table list
+# itself (`resolve_generations` now reads the summary by dataset name
+# alone), so this call site's arity changed underneath the old anchor --
+# a scoped run reported ANCHOR-MISSING rather than silently mutating the
+# wrong thing.
 run_mutation "distinct: as-of reads the archive era" \
   crates/geode-data/src/query/distinct.rs \
-  '        let era = era_for(conn, &ds.name, ds, &params.as_of)?;' \
-  '        let era = era_for(conn, &ds.name, ds, &geode_core::query::AsOf::Live)?;' \
+  '        let era = era_for(conn, &ds.name, &params.as_of)?;' \
+  '        let era = era_for(conn, &ds.name, &geode_core::query::AsOf::Live)?;' \
   geode-data distinct_under_as_of_reads_the_archive_era
 
 # D2 (final fix wave, T2 deferred): a derived dimension's own branch of
