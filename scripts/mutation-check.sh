@@ -4244,6 +4244,12 @@ run_mutation "sections: a source's path, priority and readiness are separate row
     ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
+run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
+  crates/geode-diagnostics/src/commands.rs \
+  '        ["level"] => known_targets().map(str::to_string).collect(),' \
+  '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
+  geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
