@@ -2227,8 +2227,8 @@ run_mutation "tile: completions offer dataset dimensions, not just displayed col
 run_mutation "bridge: dropped_events counted on a refused try_send" \
   crates/geode-app/src/bridge.rs \
   '            dropped.fetch_add(1, Ordering::Relaxed);
-            false' \
-  '            false' \
+            if err.is_closed()' \
+  '            if err.is_closed()' \
   geode-app \
   a_refused_event_is_counted_as_dropped_rather_than_lost_silently
 
