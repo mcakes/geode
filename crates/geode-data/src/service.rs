@@ -331,15 +331,14 @@ impl Lanes {
         })
     }
 
-    /// The worst slot across both lanes, returned as its own
-    /// `(health, detail)` pair — and only when that pair differs from
-    /// the one last forwarded.
-    fn recombine(&mut self) -> Option<(Health, String)> {
+    /// The worst slot across both lanes, as its own `(health, detail)`
+    /// pair. Pure — it decides nothing about what has been reported.
+    fn combined(&self) -> Option<(Health, String)> {
         let load = self
             .load
             .values()
             .fold(None, |worst, v| worse_of(worst, Some(v)));
-        let combined = worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {
+        worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {
             // An `Ok` has no problem to explain, and its slot's detail
             // is decoration ("BK1: " from a publish, "" from a poll).
             // Normalised away so that WHICH clean slot happens to be
@@ -348,12 +347,41 @@ impl Lanes {
             // publishing cleanly would otherwise send ten `Ok`s.
             Health::Ok => (Health::Ok, String::new()),
             _ => (v.health.clone(), v.detail.clone()),
-        });
+        })
+    }
+
+    /// Offer the combined value to `emit` — `Some(pair)` when it
+    /// differs from the one last forwarded, `None` when it does not —
+    /// and record it as reported ONLY if `emit` says it was delivered.
+    ///
+    /// The conditional commit is round 5, re-review finding 2. Round 4
+    /// removed the `delivered &&` short-circuit that could skip the
+    /// send outright, on the reasoning that a transition recorded as
+    /// reported but never sent is lost for good: nothing re-reports it,
+    /// because an identical later report keeps its stamp and combines
+    /// to the same pair, so `combined == last_reported` from then on
+    /// and the entity keeps the PRE-transition value. A refused
+    /// `try_send` — the event channel momentarily full — loses it the
+    /// same way, so the commit waits on delivery too. `emit`'s verdict
+    /// must be the HEALTH send's alone: the ingest sink's own return
+    /// value also carries whether the paired `Published` event landed,
+    /// and conflating the two would withhold a health transition that
+    /// did arrive.
+    fn offer(&mut self, emit: impl FnOnce(Option<(Health, String)>) -> bool) -> bool {
+        let combined = self.combined();
         if combined == self.last_reported {
-            return None;
+            return emit(None);
         }
-        self.last_reported = combined.clone();
-        combined
+        // `combined` is always `Some` here: every door writes a slot
+        // before offering, so `combined()` can only be `None` while
+        // both lanes are empty, which is also the only time
+        // `last_reported` is `None` — the two are equal in that case
+        // and returned above.
+        let delivered = emit(combined.clone());
+        if delivered {
+            self.last_reported = combined;
+        }
+        delivered
     }
 }
 
@@ -374,7 +402,7 @@ impl HealthTracker {
     /// Test-only, because production must not be able to hold a
     /// decision without emitting it — see
     /// [`HealthTracker::report_discovery_and_emit`], which this is the
-    /// identity-`emit` case of, so every deciding line below is the
+    /// always-delivered case of, so every deciding line below is the
     /// same code either door runs.
     #[cfg(test)]
     fn report_discovery(
@@ -383,7 +411,12 @@ impl HealthTracker {
         health: Health,
         detail: String,
     ) -> Option<(Health, String)> {
-        self.report_discovery_and_emit(source, health, detail, |reported| reported)
+        let mut reported = None;
+        self.report_discovery_and_emit(source, health, detail, |pair| {
+            reported = pair;
+            true
+        });
+        reported
     }
 
     /// The scheduler sink's real door: decide, then emit inside `emit`,
@@ -401,18 +434,28 @@ impl HealthTracker {
     /// and nothing re-reports, so it would stay wrong until the next
     /// real transition, in either direction including false-clean.
     ///
-    /// `emit` runs with the tracker's own lock held. That is safe
-    /// because an [`EventSink`] may not block and may not call back
-    /// into `DataService` (see that type's doc), so nothing reachable
-    /// from here can take this lock: the callback does a `try_send` and
-    /// a `tracing` macro, both non-blocking.
-    fn report_discovery_and_emit<R>(
+    /// `emit` runs with the tracker's own lock held, and returns
+    /// whether its `DataEvent::Health` was DELIVERED — the commit waits
+    /// on that (see [`Lanes::offer`]).
+    ///
+    /// Holding the lock across `emit` is safe because an [`EventSink`]
+    /// may not call back into `DataService` (see that type's doc), so
+    /// nothing reachable from the callback can take this lock. Note
+    /// that this is a NON-REENTRANCY argument, not a non-blocking one
+    /// (round 5, re-review finding 5): the callback's `try_send` is
+    /// indeed non-blocking, but it also calls `log_health_event`, and
+    /// production installs a synchronous stderr writer, so a slow log
+    /// write can serialise the two reporter threads here. Accepted —
+    /// neither of them is the render thread, and the alternative
+    /// (releasing the lock to log) is the reordering this door exists
+    /// to prevent.
+    fn report_discovery_and_emit(
         &self,
         source: &str,
         health: Health,
         detail: String,
-        emit: impl FnOnce(Option<(Health, String)>) -> R,
-    ) -> R {
+        emit: impl FnOnce(Option<(Health, String)>) -> bool,
+    ) -> bool {
         let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
         let lanes = sources.entry(source.to_string()).or_default();
         let kept = unchanged_stamp(lanes.discovery.as_ref(), &health, &detail);
@@ -422,7 +465,7 @@ impl HealthTracker {
             detail,
             changed,
         });
-        emit(lanes.recombine())
+        lanes.offer(emit)
     }
 
     /// The ingest sink's door: every publish's health (`Ok` included)
@@ -439,19 +482,24 @@ impl HealthTracker {
         health: Health,
         detail: String,
     ) -> Option<(Health, String)> {
-        self.report_load_and_emit(source, batch, health, detail, |reported| reported)
+        let mut reported = None;
+        self.report_load_and_emit(source, batch, health, detail, |pair| {
+            reported = pair;
+            true
+        });
+        reported
     }
 
     /// The ingest sink's real door — decide and emit as one step, for
     /// the reason [`HealthTracker::report_discovery_and_emit`] gives.
-    fn report_load_and_emit<R>(
+    fn report_load_and_emit(
         &self,
         source: &str,
         batch: &str,
         health: Health,
         detail: String,
-        emit: impl FnOnce(Option<(Health, String)>) -> R,
-    ) -> R {
+        emit: impl FnOnce(Option<(Health, String)>) -> bool,
+    ) -> bool {
         let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
         let lanes = sources.entry(source.to_string()).or_default();
         let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);
@@ -464,7 +512,7 @@ impl HealthTracker {
                 changed,
             },
         );
-        emit(lanes.recombine())
+        lanes.offer(emit)
     }
 }
 
@@ -653,7 +701,15 @@ impl DataService {
                         Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
                         _ => String::new(),
                     };
-                    health_tracker.report_load_and_emit(
+                    // The closure's verdict is the HEALTH send's alone,
+                    // never `delivered && …` (round 5, finding 2): the
+                    // tracker commits on it, and folding in whether the
+                    // paired `Published` event landed would withhold a
+                    // health transition that did arrive. `&&` here also
+                    // short-circuits, which would skip the send
+                    // outright. The two are combined afterwards, for
+                    // the runner's own "is anyone listening" answer.
+                    let health_delivered = health_tracker.report_load_and_emit(
                         &source,
                         &batch,
                         health,
@@ -661,22 +717,16 @@ impl DataService {
                         |reported| match reported {
                             Some((worst, detail)) => {
                                 log_health_event(&source, &worst, &detail);
-                                // Not `delivered && sink(...)`: `&&`
-                                // short-circuits, and skipping the send
-                                // while the tracker has already recorded
-                                // the state as reported would lose this
-                                // transition for good (it never
-                                // re-reports).
-                                let health_delivered = sink(DataEvent::Health {
+                                sink(DataEvent::Health {
                                     source: source.clone(),
                                     worst,
                                     detail,
-                                });
-                                delivered && health_delivered
+                                })
                             }
-                            None => delivered,
+                            None => true,
                         },
-                    )
+                    );
+                    delivered && health_delivered
                 }
                 IngestEvent::Failed {
                     source,
@@ -2357,79 +2407,124 @@ source_name = "NPV"
             );
         }
 
-        /// Round 4's adversarial pass — a publish and a poll
-        /// INTERLEAVING. The scheduler thread and the ingest runner
-        /// thread report independently (the runner drains its queue
-        /// while the scheduler polls on), so if a decision and its
-        /// emission were separable, the two could reach the entity in
-        /// the opposite order to the one they were decided in.
-        /// `Diagnostics::note_health` is last-write-wins, so the entity
-        /// would latch the OLDER value while this tracker believed the
-        /// newer one had been reported — and nothing re-reports it.
-        ///
-        /// The check: while one reporter is inside its emit, a second
-        /// reporter cannot get its own emit in first. (A `sleep` here
-        /// can only ever make this test pass spuriously, never fail
-        /// spuriously — the second thread not having run yet looks the
-        /// same as it being correctly blocked.)
+        /// Round 5, re-review finding 2: a transition is recorded as
+        /// reported only once the emit says it was DELIVERED. A refused
+        /// `DataEvent::Health` — a momentarily full 256-slot event
+        /// channel — must be offered again on the next report rather
+        /// than silently counted as shown, or the entity keeps the
+        /// pre-transition value for good (nothing re-reports; an
+        /// identical later poll keeps its stamp and combines to the
+        /// same pair). This is the other half of the reasoning that
+        /// removed the `delivered &&` short-circuit in round 4: that
+        /// closed one of the two ways the send can fail to happen.
         #[test]
-        fn a_second_reporter_cannot_emit_between_a_decision_and_its_emission() {
-            let t = Arc::new(HealthTracker::default());
-            let order = Arc::new(std::sync::Mutex::new(Vec::<&'static str>::new()));
-            let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-            let (release_tx, release_rx) = std::sync::mpsc::channel();
+        fn a_refused_health_event_is_offered_again_not_recorded_as_reported() {
+            let t = HealthTracker::default();
+            let degraded = Health::Degraded { reason: "x".into() };
+            let pair = Some((degraded.clone(), "BK0: x".to_string()));
 
-            let poller = {
-                let (t, order) = (Arc::clone(&t), Arc::clone(&order));
-                std::thread::spawn(move || {
-                    t.report_discovery_and_emit(
-                        "a",
-                        Health::PendingTooLong,
-                        "pending_too_long: stray.csv".into(),
-                        |reported| {
-                            assert!(reported.is_some(), "setup: a first report transitions");
-                            entered_tx.send(()).unwrap();
-                            release_rx.recv().unwrap();
-                            order.lock().unwrap().push("discovery");
-                        },
-                    );
-                })
-            };
-            entered_rx.recv().unwrap();
+            let mut first = None;
+            let delivered =
+                t.report_load_and_emit("a", "BK0", degraded.clone(), "BK0: x".into(), |reported| {
+                    first = reported;
+                    false
+                });
+            assert!(!delivered, "the door reports the emit's own verdict");
+            assert_eq!(first, pair, "setup: the transition is offered once");
 
-            let publisher = {
-                let (t, order) = (Arc::clone(&t), Arc::clone(&order));
-                std::thread::spawn(move || {
-                    t.report_load_and_emit(
-                        "a",
-                        "BK0",
-                        Health::Failed {
-                            reason: "bad header".into(),
-                        },
-                        "BK0: bad header".into(),
-                        |reported| {
-                            assert!(reported.is_some(), "setup: Failed outranks PendingTooLong");
-                            order.lock().unwrap().push("load");
-                        },
-                    );
-                })
-            };
-            std::thread::sleep(Duration::from_millis(50));
-            assert!(
-                order.lock().unwrap().is_empty(),
-                "the publisher must not emit while the poller is mid-emit — \
-                 its decision was made later and must not reach the entity \
-                 first"
-            );
-
-            release_tx.send(()).unwrap();
-            poller.join().unwrap();
-            publisher.join().unwrap();
+            let mut second = None;
+            let delivered =
+                t.report_load_and_emit("a", "BK0", degraded.clone(), "BK0: x".into(), |reported| {
+                    second = reported;
+                    true
+                });
+            assert!(delivered);
             assert_eq!(
-                *order.lock().unwrap(),
-                vec!["discovery", "load"],
-                "decided first, emitted first"
+                second, pair,
+                "a refused Health event must be offered again — the \
+                 tracker may not record as reported what never reached \
+                 the entity"
             );
+
+            let mut third = Some(pair.clone());
+            t.report_load_and_emit("a", "BK0", degraded, "BK0: x".into(), |reported| {
+                third = Some(reported);
+                true
+            });
+            assert_eq!(
+                third,
+                Some(None),
+                "once it has actually landed, repeating it is not a \
+                 transition again"
+            );
+        }
+
+        /// Round 4's adversarial pass, pinned deterministically (round
+        /// 5, on the re-review's recommendation). The scheduler thread
+        /// and the ingest runner thread report independently (the
+        /// runner drains its queue while the scheduler polls on), so if
+        /// a decision and its emission were separable the two could
+        /// reach the entity in the opposite order to the one they were
+        /// decided in — and `Diagnostics::note_health` is
+        /// last-write-wins, so the entity would latch the OLDER value
+        /// while this tracker believed the newer one had been reported,
+        /// with nothing to re-report it.
+        ///
+        /// What makes that impossible is the invariant asserted here
+        /// directly: `emit` runs with the tracker's lock HELD, so no
+        /// second reporter can decide (let alone emit) in between.
+        /// `try_lock` returns `Err(WouldBlock)` for a lock held by any
+        /// thread, this one included.
+        ///
+        /// This replaces round 4's two-thread, 50 ms-sleep version.
+        /// That one could only fail honestly, but it could pass
+        /// spuriously — on a loaded CI box the second thread simply not
+        /// having been scheduled looks exactly like it being correctly
+        /// blocked, which would hide the regression while the harness
+        /// reported the mutation caught.
+        #[test]
+        fn emit_runs_with_the_tracker_lock_held() {
+            let t = HealthTracker::default();
+            let mut ran = false;
+            t.report_discovery_and_emit(
+                "a",
+                Health::PendingTooLong,
+                "pending_too_long: stray.csv".into(),
+                |reported| {
+                    assert!(reported.is_some(), "setup: a first report transitions");
+                    assert!(
+                        t.sources.try_lock().is_err(),
+                        "emit must run with the tracker lock held — a second \
+                         reporter that could take it here would decide and \
+                         emit out of order"
+                    );
+                    ran = true;
+                    true
+                },
+            );
+            assert!(ran, "setup: the emit closure ran at all");
+
+            // And the same for the ingest door, which has its own copy
+            // of the lock/emit sequence.
+            let mut ran = false;
+            t.report_load_and_emit(
+                "a",
+                "BK0",
+                Health::Failed {
+                    reason: "bad header".into(),
+                },
+                "BK0: bad header".into(),
+                |reported| {
+                    assert!(reported.is_some(), "setup: Failed outranks PendingTooLong");
+                    assert!(
+                        t.sources.try_lock().is_err(),
+                        "the ingest door must hold the lock across its emit too"
+                    );
+                    ran = true;
+                    true
+                },
+            );
+            assert!(ran, "setup: the emit closure ran at all");
         }
 
         /// Two sources are wholly independent: nothing either lane of
