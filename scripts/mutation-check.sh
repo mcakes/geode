@@ -3575,12 +3575,6 @@ run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_c
                     f.note_config_reloaded();' \
   geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
 
-run_mutation "diagnostics module: MAJ-4 — render deep-clones the row Vec every paint" \
-  crates/geode-diagnostics/src/tile.rs \
-  '        let rows = self.rows.clone();' \
-  '        let rows = Rc::new((*self.rows).clone());' \
-  geode-diagnostics two_paints_with_no_rebuild_share_the_same_row_allocation
-
 run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh buffer instead of reusing drain_buf" \
   crates/geode-diagnostics/src/tile.rs \
   '                self.ring.drain_since(self.since, &mut self.drain_buf);' \

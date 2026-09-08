@@ -1038,12 +1038,27 @@ mod tests {
         assert_eq!(target, row_count - 1, "G must scroll to the last row");
     }
 
-    /// MAJ-4: `render` must clone the `Rc<Vec<Row>>` itself, never the
-    /// `Vec` — two paints with no rebuild between them must share one
-    /// allocation. `Rc::ptr_eq`, not a content comparison: a full `Vec`
-    /// clone would still compare equal.
+    /// MAJ-4 (partial coverage — see caveat below): `self.rows` itself
+    /// must not be reallocated by anything except a real `rebuild` —
+    /// pinned here via `Rc::ptr_eq` across two paints with no rebuild
+    /// between them (a full `Vec` clone stored back into `self.rows`
+    /// would still compare equal by content, which is why this needs
+    /// pointer identity, not `rows()`'s slice).
+    ///
+    /// **What this does NOT prove**: that `render`'s own `let rows =
+    /// self.rows.clone();` clones the `Rc` (cheap) rather than the `Vec`
+    /// behind it (`Rc::new((*self.rows).clone())`, a full reallocation +
+    /// per-row `SharedString` bump) — `render`'s local `rows` binding is
+    /// captured by the `uniform_list` closure and lives only for the
+    /// duration of one `window.draw()`, with no hook this test harness
+    /// can observe from outside that call to tell the two apart (both
+    /// produce a type-identical `Rc<Vec<Row>>`; the difference is only in
+    /// whether `self.rows`'s own refcount rises during the draw, which
+    /// nothing here can inspect mid-call). Verified by reading instead:
+    /// `render` at the marked line clones `self.rows` directly with no
+    /// intervening `(*...).clone()`.
     #[gpui::test]
-    fn two_paints_with_no_rebuild_share_the_same_row_allocation(cx: &mut gpui::TestAppContext) {
+    fn rebuilding_does_not_reallocate_rows_between_paints(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
         let before_count = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
         let a = h.tile.read_with(&vcx, |t, _| t.rows_rc());
@@ -1109,17 +1124,25 @@ mod tests {
         // The other half of MAJ-5's claim — reuse, not just "a no-op
         // costs nothing" (which held even before the fix, since the old
         // `let mut drained = Vec::new()` sat *inside* the `if latest >
-        // since` branch too): a SECOND real drain must not have reset
-        // `drain_buf` back to a fresh, zero-capacity `Vec` — its capacity
-        // must not have shrunk from what the first real drain already
-        // grew it to.
-        h.ring.push(Record {
-            at: SystemTime::UNIX_EPOCH,
-            level: Level::INFO,
-            target: "geode::shell",
-            message: "m2".into(),
-            seq: 0,
-        });
+        // since` branch too): a big real drain (forcing `drain_buf` to
+        // grow well past a single-record capacity) followed by a tiny
+        // real drain must not show the tiny drain collapsing the
+        // capacity back down — that only happens if the tiny drain
+        // allocated its OWN fresh `Vec` instead of reusing the grown one.
+        // A single-record-at-a-time version of this assertion is too
+        // weak: `Vec`'s own growth policy can size a fresh one-record
+        // `Vec` identically to a reused one that only ever held one
+        // record, so the two cases would coincidentally read the same
+        // capacity either way.
+        for i in 0..64 {
+            h.ring.push(Record {
+                at: SystemTime::UNIX_EPOCH,
+                level: Level::INFO,
+                target: "geode::shell",
+                message: format!("big{i}"),
+                seq: 0,
+            });
+        }
         h.diagnostics.update(&mut vcx, |d, cx| {
             d.note_dropped(3);
             cx.notify();
@@ -1127,11 +1150,32 @@ mod tests {
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
         });
-        let cap_after_second_real_drain = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
+        let cap_after_big_drain = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
         assert!(
-            cap_after_second_real_drain >= cap,
-            "a second real drain must reuse drain_buf's capacity, not reset it \
-             (first drain: {cap}, second: {cap_after_second_real_drain})"
+            cap_after_big_drain >= 64,
+            "a 64-record drain must grow drain_buf's capacity to at least 64, got {cap_after_big_drain}"
+        );
+
+        h.ring.push(Record {
+            at: SystemTime::UNIX_EPOCH,
+            level: Level::INFO,
+            target: "geode::shell",
+            message: "tiny".into(),
+            seq: 0,
+        });
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(4);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let cap_after_tiny_drain = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
+        assert!(
+            cap_after_tiny_drain >= cap_after_big_drain,
+            "a tiny drain right after a big one must reuse drain_buf's grown \
+             capacity, not replace it with a fresh, small Vec \
+             (after big drain: {cap_after_big_drain}, after tiny: {cap_after_tiny_drain})"
         );
     }
 
