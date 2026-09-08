@@ -20,7 +20,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime};
 
 /// Outbound events queued before the sink refuses (§7.3). Tiles × a
@@ -123,12 +123,28 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
 /// refusal bumps `dropped` rather than being lost silently (§7.3).
 /// Factored out of `start` so it's unit-testable without a real
 /// service thread.
+/// The sink handed to `DataService::spawn`. `false` is "this event was
+/// not delivered", never "stop producing" — no producer inside the
+/// service exits on one (Phase 4b follow-up, Task 1).
+///
+/// Both refusals are counted, because both lose an event, but they are
+/// different facts: a FULL channel means the UI is momentarily behind a
+/// burst and is already surfaced through `Diagnostics::note_dropped`,
+/// while a CLOSED one means the receiver really is gone — worth one
+/// line in the log, latched so a busy producer cannot fill the ring
+/// with it.
 fn make_sink(tx: async_channel::Sender<DataEvent>, dropped: Arc<AtomicU64>) -> EventSink {
-    Arc::new(move |e| {
-        if tx.try_send(e).is_ok() {
-            true
-        } else {
+    let warned_closed = Arc::new(AtomicBool::new(false));
+    Arc::new(move |e| match tx.try_send(e) {
+        Ok(()) => true,
+        Err(err) => {
             dropped.fetch_add(1, Ordering::Relaxed);
+            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    target: "geode::shell",
+                    "the data event receiver is gone; further events are dropped",
+                );
+            }
             false
         }
     })
@@ -542,6 +558,71 @@ mod tests {
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
+
+    /// Records logged while `f` runs, on this thread only — the same
+    /// scoped-subscriber pattern `geode-data`'s own test modules use.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(Ring::new(16));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_full_channel_is_counted_but_not_reported_as_a_gone_receiver() {
+        // A momentarily full channel and a closed one both refuse, but
+        // only one of them means the receiver is gone (Phase 4b
+        // follow-up, Task 1). A full one is already surfaced through
+        // `Diagnostics::note_dropped`; claiming the receiver had gone
+        // would be a lie in the log.
+        let (tx, _rx) = async_channel::bounded::<DataEvent>(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let sink = make_sink(tx, dropped.clone());
+        let records = logged(|| {
+            assert!(sink(DataEvent::Diagnostics(Vec::new())), "the first fits");
+            assert!(
+                !sink(DataEvent::Diagnostics(Vec::new())),
+                "the second finds it full"
+            );
+        });
+        assert_eq!(dropped.load(Ordering::Relaxed), 1, "the refusal is counted");
+        assert!(
+            !records.iter().any(|r| r.message.contains("receiver")),
+            "a full channel must not be logged as a gone receiver: {records:?}"
+        );
+    }
+
+    #[test]
+    fn a_closed_channel_is_counted_and_logged_once() {
+        let (tx, rx) = async_channel::bounded::<DataEvent>(4);
+        drop(rx);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let sink = make_sink(tx, dropped.clone());
+        let records = logged(|| {
+            assert!(!sink(DataEvent::Diagnostics(Vec::new())));
+            assert!(!sink(DataEvent::Diagnostics(Vec::new())));
+        });
+        assert_eq!(
+            dropped.load(Ordering::Relaxed),
+            2,
+            "every refusal is counted, closed or full"
+        );
+        let gone: Vec<_> = records
+            .iter()
+            .filter(|r| r.message.contains("receiver"))
+            .collect();
+        assert_eq!(
+            gone.len(),
+            1,
+            "a gone receiver is worth one line, not one per event: {records:?}"
+        );
+        assert_eq!(gone[0].target, "geode::shell");
+        assert_eq!(gone[0].level, tracing::Level::WARN);
+    }
 
     /// The minimal real `ShellServices` a window needs to open — same
     /// shape as `geode-shell`'s own `test_services()` (not reachable
