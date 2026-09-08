@@ -4072,6 +4072,12 @@ run_mutation "diagnostics tile: the diagnostics observer compares the current se
   '                true' \
   geode-diagnostics refresh_frame_hist_does_not_rebuild_the_config_section
 
+run_mutation "sections: the perf section shows database/memory bytes and threads once a catalog arrives" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                "database {} (checkpointed) · memory {} · threads {}",' \
+  '                "db {} (checkpointed) · mem {} · thr {}",' \
+  geode-diagnostics perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
