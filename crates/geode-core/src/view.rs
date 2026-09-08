@@ -293,14 +293,37 @@ impl ViewSpec {
         // view a tile with nothing restored should open on — captured
         // ahead of the main loop below since (unlike every view itself)
         // its value is a bare string, not a table.
-        let default_name = doc
-            .value
-            .get("default")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+        //
+        // Phase 4b Task 1 fix round 1, MIN-3: the main loop below must
+        // only skip a `default` entry that is either the string header
+        // or a malformed non-table value already warned about here — a
+        // view literally named `default` (a natural name for the view a
+        // desk wants opened first) is a TABLE, not a string, so it must
+        // still reach the loop and parse as an ordinary `ViewSpec`. A
+        // non-string, non-table `default` value (a typo like
+        // `default = 3`) is neither a valid header nor a valid view — it
+        // warns here and is skipped below rather than tripping the main
+        // loop's own "not a table" diagnostic under the confusing name
+        // "view 'default'".
+        let default_value = doc.value.get("default");
+        let default_name = default_value.and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(v) = default_value
+            && v.as_str().is_none()
+            && v.as_table().is_none()
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: "top-level 'default' must be a string naming a view".to_string(),
+            });
+        }
 
         for (name, value) in &doc.value {
-            if name == "config_version" || name == "default" {
+            if name == "config_version" {
+                continue;
+            }
+            if name == "default" && value.as_table().is_none() {
                 continue;
             }
             let bad = |m: String| Diagnostic {
@@ -663,6 +686,49 @@ dataset = "risk_snapshot"
         assert!(b.is_default);
         let a = views.iter().find(|v| v.name == "a").expect("view a");
         assert!(!a.is_default);
+    }
+
+    #[test]
+    fn a_view_literally_named_default_is_not_silently_dropped() {
+        // Phase 4b Task 1 fix round 1, MIN-3: the top-level `default`
+        // key skip used to fire unconditionally on any doc entry named
+        // "default", table or not — a desk whose `[default]` view is a
+        // perfectly natural name for the view it wants opened first lost
+        // it outright, with no diagnostic and `default_name` staying
+        // `None` (a table is not a `str`).
+        let text = r#"
+[default]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            views.iter().any(|v| v.name == "default"),
+            "a view named 'default' must still become a ViewSpec: {views:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_string_default_value_warns_instead_of_being_silently_ignored() {
+        // Phase 4b Task 1 fix round 1, MIN-3: `default = 3` (a typo, or
+        // any non-string value) used to be silently skipped by the same
+        // unconditional `name == "default"` check — no warning, and the
+        // remaining views were sorted as if no `default` key existed at
+        // all.
+        let text = r#"
+default = 3
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Warning && d.message.contains("default")),
+            "a non-string `default` must warn: {diags:?}"
+        );
+        assert!(views.iter().all(|v| !v.is_default));
     }
 
     #[test]
