@@ -220,10 +220,29 @@ Every verb is **also a button** in a bar pinned below the row list,
 labelled with its own key. That is what makes a letter verb
 discoverable and mouse-reachable — a key alone has no clickable target,
 and every other verb in Geode's dialogs has one. `Save changes` appears
-in the bar only while the draft is dirty, `Revert to desk` only when the
-object is overridden, and `Copy to user layer` replaces both when the
-winning layer is builtin or desk. The bar sits outside the scrolling
-list, so **the row list never changes length as you edit**.
+in the bar only while the draft is dirty, and `Revert to desk` only when
+the object is overridden.
+
+`Copy to user layer` is a **label**, not a fourth verb. It replaces
+`Save changes`'s own label on `s` — the key and the write it performs
+are unchanged — and only when saving would actually fork the object: a
+dirty draft containing a `Doc`-destined field (§4.1) on an object whose
+winning layer is builtin or desk. An earlier draft of this section said
+the label *replaces* `Save changes` and `Revert to desk` outright
+whenever the winning layer is builtin or desk. That was wrong: taken
+literally, it makes `s` unavailable — or a no-op — for a
+presentation-only edit (a dragged width, a hidden column) on a desk
+view, which is exactly the edit §4.1 exists to make free, and it fails
+the Views task's own end-to-end test, which drags a desk view's column
+width and asserts the save neither touches `views.toml` nor marks the
+row `overridden`. `s` is always the save verb, and it always saves
+whatever the draft's grouping-by-destination sends where; only its
+*label* changes, to tell the user a fork is about to happen before it
+happens rather than leaving them to discover a new whole-object override
+in `views.toml` after what felt like a width drag.
+
+The bar sits outside the scrolling list, so **the row list never changes
+length as you edit**.
 
 Field edits **stage into the draft and do not write**. This is the one
 place these dialogs deliberately differ from `settings_view`, where a
@@ -679,3 +698,79 @@ None block the plans. Recorded so they are not rediscovered.
    merged over the view rather than replacing it, so it does not fork
    and cannot drift in the §5.2 sense. If a desk ever ships its own
    presentation layer, this needs revisiting.
+
+## 16. As built — Part 1
+
+Tasks 1–5 built the write door, the `SourceSpec::from_doc` move,
+`ViewPresentationSpec`, and the scaffold's browse and edit stages over
+`Domain::Views`. Where the sketch above and the shipped code disagree,
+this section is the correction — beyond §3.2's amendment, which is
+folded into that section directly rather than repeated here.
+
+- **`hidden` lives on `ColumnPresentation`, not on `ViewColumn`.** §3's
+  `ListItem` sketch implied a field shared with the view's own column
+  type; `ViewColumn` (`geode-core::view`) is an enum
+  (`Dimension`/`Measure`/`Derived`) with no struct fields to add one to.
+  `hidden: Option<bool>` sits on `ColumnPresentation` instead, beside the
+  `width` it already carried, and both merge into `ViewSpec.presentation`
+  the same way `format`/`label` already did. A hidden column deliberately
+  stays in `ViewSpec.columns` — the compiler still selects it — so
+  unhiding is free and no query changes shape when a column is hidden.
+- **`width` is `f32`**, matching `ColumnPresentation::width`
+  (`view.rs:148`), not §3.1's `Option<u32>` sketch. `ListItem.width`
+  follows suit.
+- **`drifted` is present on every `ObjectRow` but is always `false`.**
+  §5.2's `overrides.toml` — the sidecar the scaffold would read to
+  compare an override against what it shadowed — is not built in Part 1,
+  so there is no honest way to compute drift yet; a stand-in derived from
+  the live config would mark every deliberate customisation as drifted.
+  It is a Part 2 item, below.
+- **`d` (delete) and `r` (revert) both confirm**, not only leaving a
+  dirty `Edit` stage. §3.2 mandates a confirm for discarding a dirty
+  draft and does not forbid extending that to other unrecoverable
+  actions; delete and revert both remove a file's table outright, neither
+  is undoable from inside the dialog, and both share the one `Confirm`
+  row the discard case already needed.
+- **Diagnostics attach to the object, not to the field whose `key`
+  matches `path`** (§7.2 step 3, §8.5). `Diagnostic` has no `path` field
+  yet — adding one touches all of its construction sites across
+  `geode-core` plus every reader that would need to fill it in, none of
+  which Part 1's tasks built. Validation still runs (§7.2 steps 1–2); its
+  diagnostics render against the object header instead.
+- **There is no `/` in the edit stage**, though §3.2's key table lists
+  one. Filtering field rows would need a second cursor space — a
+  filtered position beside the draft's own row index — and would make
+  `shift+j`/`shift+k` reordering ambiguous, since the visible neighbour
+  would not be the underlying one. Entering the stage clears the query
+  instead, which is also what makes the escape ladder land on
+  `PreviousStage`: with no query to clear, `escape` has nothing to spend
+  on `ClearQuery` first. `/` in the edit stage is claimed and says so (a
+  notice naming the key) rather than reading as dead.
+
+### Unmet done-state items, named for Part 2
+
+§1.3 claims three things Part 1 does not deliver. Each is blocked on a
+specific prerequisite no task in this plan built:
+
+1. **A field's diagnostic shows on that field's row.** Blocked on
+   `Diagnostic.path` (§8.5) — see above. Needs every reader
+   (`ViewSpec::from_doc` and its siblings) to fill it in before the
+   object dialog can match a diagnostic to the field it names instead of
+   showing it against the object header.
+2. **Setting a width.** `width` is displayed and preserved across a save
+   — read from `ColumnPresentation::width`, written back to
+   `view_presentation.toml`, surviving an edit that was about something
+   else — but nothing in Geode can *set* it: the blotter reads
+   `presentation.width` and nothing writes it, and old 4c's `:cols save`
+   command, the only other thing that ever set it, was deleted with that
+   design. Needs the `Number` sub-row §3.3 describes under an included
+   `OrderedList` item, made writable.
+3. **`FieldKind::Number` stepping down.** §3.3 steps a `Number` with
+   `space` forward and `shift+space` back; `dialogmode::normal_command`
+   has no `shift+space` today, and `Number` as built steps forward only,
+   clamping at `max` with no way back down. Whichever adapter builds the
+   first real `Number` field — Groupings' `slot` (§8.2) is the obvious
+   candidate — would otherwise inherit a field that can be raised and
+   never lowered. Needs both the interaction-model addition and the
+   `FieldKind::Number` step fix; Views has no `Number` field, so nothing
+   in Part 1 forced this.
