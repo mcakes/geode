@@ -54,6 +54,17 @@ fn main() {
         Ok(rows) => rows,
         Err(message) => {
             tracing::error!(target: "geode::config", "{message}");
+            // NEW-2 (final review round 2): `process::exit` runs no
+            // destructors, so `_log_guard` bound above would otherwise
+            // never drop and `tracing_appender`'s non-blocking worker
+            // thread would never flush — this line (and any log line
+            // still in its channel) could be missing from `logs/geode.
+            // YYYY-MM-DD.log` entirely, even though the appender was
+            // sent it. `drop` here runs the guard's flush-then-exit
+            // logic before the process actually ends; the stderr layer
+            // and the ring are both synchronous already and unaffected
+            // either way.
+            drop(_log_guard);
             std::process::exit(2);
         }
     };
@@ -68,6 +79,8 @@ fn main() {
         && let Err(e) = demo::ensure_emitted(root, rows)
     {
         tracing::error!(target: "geode::ingest", "failed to emit sample data into {root:?}: {e}");
+        // NEW-2: see the other `process::exit` call's own comment above.
+        drop(_log_guard);
         std::process::exit(1);
     }
 
