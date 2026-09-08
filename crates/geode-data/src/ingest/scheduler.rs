@@ -37,6 +37,11 @@ pub enum SchedulerEvent {
     },
 }
 
+/// Where discovery's events go. `false` means "this event was not
+/// delivered" — the caller's bounded channel was full, or its receiver is
+/// gone — and is never a shutdown signal: the scheduler re-arms and polls
+/// on regardless (Phase 4b follow-up, Task 1; its only stop is the `stop`
+/// condvar `Scheduler::shutdown` sets). A sink must not block.
 pub type SchedulerSink = Arc<dyn Fn(SchedulerEvent) -> bool + Send + Sync>;
 
 pub struct Scheduler {
@@ -193,7 +198,15 @@ fn run(
             }),
         };
         if !delivered {
-            return;
+            // One refused event is one dropped diagnostic, not the end of
+            // discovery for every source (Phase 4b follow-up, Task 1).
+            // Not retried: the health transition the tracker cares about
+            // is re-offered on the next report.
+            tracing::warn!(
+                target: "geode::ingest",
+                "event channel refused a discovery event for source '{}': dropped, polling continues",
+                spec.name,
+            );
         }
         // Re-arm from *now*, not from `when`: a slow share must not make
         // the next poll immediately due and spin.
@@ -278,6 +291,75 @@ mod tests {
     fn events_sink() -> (SchedulerSink, Receiver<SchedulerEvent>) {
         let (tx, rx) = channel();
         (Arc::new(move |e| tx.send(e).is_ok()), rx)
+    }
+
+    /// `events_sink`, but REFUSING the first event matching `refuse` —
+    /// returning `false` without sending it. `false` means "not
+    /// delivered", never "stop polling" (Phase 4b follow-up, Task 1).
+    /// The counter lets a test wait for the refusal instead of racing it.
+    fn refusing_events_sink(
+        refuse: fn(&SchedulerEvent) -> bool,
+    ) -> (
+        SchedulerSink,
+        Receiver<SchedulerEvent>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (tx, rx) = channel();
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&refusals);
+        let sink: SchedulerSink = Arc::new(move |e: SchedulerEvent| {
+            if refuse(&e) && counter.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return false;
+            }
+            tx.send(e).is_ok()
+        });
+        (sink, rx, refusals)
+    }
+
+    #[test]
+    fn a_refused_event_does_not_stop_the_scheduler() {
+        // One full outbound channel used to end discovery for EVERY
+        // source for the rest of the session. The scheduler's only stop
+        // is its `stop` condvar (Phase 4b follow-up, Task 1).
+        let poll = Duration::from_millis(20);
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(poll, Duration::from_secs(3600));
+        let (sink, sched_rx, refusals) =
+            refusing_events_sink(|e| matches!(e, SchedulerEvent::Polled { .. }));
+        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && refusals.load(std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            refusals.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the first Polled event must have been refused"
+        );
+
+        // A later poll must still arrive: the refusal cost one event, not
+        // the whole thread.
+        let mut later = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            match sched_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(e @ SchedulerEvent::Polled { .. }) => {
+                    later = Some(e);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        sched.shutdown();
+        assert!(
+            later.is_some(),
+            "the source must be polled again after a refused event"
+        );
     }
 
     #[test]
