@@ -158,6 +158,17 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
 /// generation the current `as_of` resolves to marked `Tone::Marked`. A
 /// dataset in `collapsed` shows only its own header row.
 pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) -> Vec<Row> {
+    // MIN-5 (final review): the whole `CatalogSnapshot` carries the
+    // `AsOf` it was resolved under (each `DatasetState::catalog` here is
+    // only the per-dataset slice of that same snapshot, with no `as_of`
+    // of its own) — a resolved-generation marker is trustworthy only
+    // while the two agree. Between an `At(T1) -> At(T2)` frame change
+    // and the new catalog's arrival, the held snapshot is still T1's;
+    // `request_catalog` (Task 5 fix round 1, MAJ-7) makes the mismatch
+    // self-correcting within one round trip, but until then the marker
+    // must not paint at all rather than momentarily mark the wrong
+    // generation next to a scope bar already reading T2.
+    let snapshot_matches_as_of = d.catalog.as_ref().is_some_and(|c| &c.as_of == as_of);
     let mut out = Vec::new();
     for (name, state) in &d.datasets {
         let open = !collapsed.contains(name);
@@ -184,7 +195,9 @@ pub fn data_rows(d: &Diagnostics, as_of: &AsOf, collapsed: &BTreeSet<String>) ->
             let book = part.book.as_deref().unwrap_or("(bookless)");
             out.push(row(format!("{} · {book}", part.batch), 1, Tone::Muted));
             for generation in &part.generations {
-                let marked = !as_of.is_live() && part.resolved_gen == Some(generation.gen_id);
+                let marked = !as_of.is_live()
+                    && snapshot_matches_as_of
+                    && part.resolved_gen == Some(generation.gen_id);
                 let tone = if marked { Tone::Marked } else { Tone::Normal };
                 let loaded = generation
                     .loaded_at
@@ -613,16 +626,47 @@ mod tests {
     #[test]
     fn data_rows_mark_the_resolved_generation_under_an_as_of() {
         let mut d = Diagnostics::new(LogLevels::default());
+        let as_of = AsOf::At(chrono::DateTime::UNIX_EPOCH);
+        // MIN-5 (final review): the snapshot's own `as_of` must match the
+        // frame's current `as_of` for the marker to show at all — a
+        // catalog fetched under the same as-of the frame is currently
+        // scoped to, the ordinary case.
         d.set_catalog(CatalogSnapshot {
+            as_of: as_of.clone(),
             datasets: vec![dataset_catalog()],
             ..Default::default()
         });
-        let as_of = AsOf::At(chrono::DateTime::UNIX_EPOCH);
         let rows = data_rows(&d, &as_of, &BTreeSet::new());
         let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
         assert_eq!(gen1.tone, Tone::Marked);
         let gen2 = rows.iter().find(|r| r.text.contains("gen 2")).unwrap();
         assert_eq!(gen2.tone, Tone::Normal);
+    }
+
+    /// MIN-5 (final review): between an `At(T1) -> At(T2)` frame change
+    /// and the new catalog's arrival, the tile rebuilds under T2 with a
+    /// `CatalogSnapshot` still resolved under T1 — `resolved_gen` names
+    /// the generation T1 resolves to, which T2 might not. The marker
+    /// must not paint at all until a snapshot resolved under the
+    /// frame's CURRENT as-of arrives, rather than momentarily marking
+    /// the wrong generation next to a scope bar reading T2.
+    #[test]
+    fn data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let stale = AsOf::At(chrono::DateTime::UNIX_EPOCH);
+        d.set_catalog(CatalogSnapshot {
+            as_of: stale,
+            datasets: vec![dataset_catalog()],
+            ..Default::default()
+        });
+        let current = AsOf::At(chrono::DateTime::UNIX_EPOCH + chrono::Duration::hours(1));
+        let rows = data_rows(&d, &current, &BTreeSet::new());
+        let gen1 = rows.iter().find(|r| r.text.contains("gen 1")).unwrap();
+        assert_eq!(
+            gen1.tone,
+            Tone::Normal,
+            "a snapshot resolved under a DIFFERENT as-of must not mark a generation"
+        );
     }
 
     #[test]
@@ -883,6 +927,7 @@ mod tests {
             block_size: 262_144,
             memory_bytes: 987_654,
             threads: 8,
+            ..Default::default()
         });
         let rows = perf_rows(&d, &requery);
         let joined: String = rows

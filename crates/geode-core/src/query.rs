@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Which point in time a query reads (foundation §4.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AsOf {
+    #[default]
     Live,
     At(DateTime<Utc>),
 }
@@ -99,6 +100,13 @@ pub struct CatalogOutcome {
 /// What the database holds, as of the moment it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CatalogSnapshot {
+    /// The `AsOf` this snapshot's `resolved_gen` markers were resolved
+    /// under (MIN-5, final review) — carried so a reader can tell a
+    /// snapshot built under a stale as-of apart from the frame's current
+    /// one, rather than trusting `resolved_gen` at face value the moment
+    /// the frame's as-of has moved on but a fresh `CatalogSnapshot`
+    /// hasn't arrived yet.
+    pub as_of: AsOf,
     pub datasets: Vec<DatasetCatalog>,
     /// `sum(block_size * total_blocks)` from `pragma_database_size()`.
     ///

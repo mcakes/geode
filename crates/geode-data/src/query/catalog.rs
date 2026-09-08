@@ -33,6 +33,7 @@ pub fn build_catalog(
     let memory_bytes = memory_bytes(conn)?;
     let threads = threads(conn)?;
     Ok(CatalogSnapshot {
+        as_of: as_of.clone(),
         datasets,
         database_bytes,
         used_blocks,

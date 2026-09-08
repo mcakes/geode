@@ -1121,11 +1121,19 @@ for a trader typing into `/`. The data section's resolved-generation
 marker refreshes on an as-of change while the tile is visible through
 `Diagnostics::request_catalog()` (MAJ-7, a new method sharing `watch`'s
 own caller-must-notify contract, §4.4); the tile's own frame-relevance
-comparison (`frame_versions_relevant_eq`) is narrowed to exactly the
-two `FrameVersions` fields any section reads — `as_of` and `config` —
-so a scope- or grouping-only frame change does not rebuild it, and
-`FrameVersions.flip` was never among the fields compared (see
-CLAUDE.md's own maintainer note on `flip`). Closing a tile now unwatches
+comparison is narrowed to exactly the two `FrameVersions` fields any
+section reads — `as_of` and `config` — so a scope- or grouping-only
+frame change does not rebuild it (further narrowed per-section by the
+final review's MAJ-4: `as_of` only matters while showing `Data`,
+`config` only while showing `Config`), and `FrameVersions.flip` was
+never among the fields compared (see CLAUDE.md's own maintainer note on
+`flip`). `CatalogSnapshot` also now carries the `AsOf` it was resolved
+under (final review, MIN-5): the marker requires that to equal the
+frame's *current* `as_of`, not just `resolved_gen == gen_id`, so the
+brief window between an `At(T1) -> At(T2)` change and the fresher
+catalog's arrival shows no marker at all rather than momentarily
+marking the generation `T1` resolved to next to a scope bar already
+reading `T2`. Closing a tile now unwatches
 the entity generically, in `ensure_occupants`, for every module kind —
 not a diagnostics-specific fix — closing what had been a real watcher
 leak (MAJ-2). `rows: Rc<Vec<Row>>` on the tile means `render` clones a
