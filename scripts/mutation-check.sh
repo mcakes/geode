@@ -1139,16 +1139,21 @@ run_mutation "scheduler: pending-too-long surfaces as health" \
   geode-data \
   a_csv_pending_past_its_timeout_is_a_health_event
 
+# Re-anchored, Phase 4b Task 2 fix round 1: the Published arm grew an
+# `info!` call and a `rows` binding around the same `sink(...)` call this
+# entry has always been about; the anchor now targets just that inner
+# call so it's independent of the tracing addition (which has its own
+# coverage — geode-data's own `service::tests` module).
 run_mutation "service: a publish becomes a Published event" \
   crates/geode-data/src/service.rs \
-  '                } => sink(DataEvent::Published {
-                    dataset,
-                    batch,
-                    gen_id,
-                    books,
-                }),' \
-  '                } => {
-                    let _ = (dataset, batch, gen_id, books);
+  '                    sink(DataEvent::Published {
+                        dataset,
+                        batch,
+                        gen_id,
+                        books,
+                    })
+                }' \
+  '                    let _ = (dataset, batch, gen_id, books);
                     true
                 }' \
   geode-data \
@@ -2864,6 +2869,102 @@ run_mutation "[log] rejects a key that names no known target" \
             levels.targets.retain(|(k, _)| k != key);' \
   '            levels.targets.retain(|(k, _)| k != key);' \
   geode-core an_unknown_target_key_is_a_warning
+
+# ---- Phase 4b Task 2 fix round 1 ---------------------------------------
+
+run_mutation "log_health_event: Health::Failed logs at warn, not error" \
+  crates/geode-data/src/service.rs \
+  '        Health::Failed { .. } => {
+            tracing::error!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }' \
+  '        Health::Failed { .. } => {
+            tracing::warn!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }' \
+  geode-data a_failed_health_logs_at_error_through_the_service_sink
+
+run_mutation "log_ingest_failure: an IngestEvent::Failed logs at warn, not error" \
+  crates/geode-data/src/service.rs \
+  'fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
+    tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
+}' \
+  'fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
+    tracing::warn!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
+}' \
+  geode-data a_load_failure_logs_dataset_batch_and_reason_at_error
+
+run_mutation "MessageVisitor::record_str drops a non-message field instead of appending it" \
+  crates/geode-core/src/log/mod.rs \
+  '    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            self.0.push_str(value);
+        } else {
+            if !self.0.is_empty() {
+                self.0.push('"'"' '"'"');
+            }
+            let _ = write!(self.0, "{}={value}", field.name());
+        }
+    }' \
+  '    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }' \
+  geode-core a_non_message_str_field_is_not_dropped
+
+run_mutation "trim_log_files deletes the newest files beyond the cap, not the oldest" \
+  crates/geode-app/src/crash.rs \
+  '    for old in &files[..files.len() - keep] {' \
+  '    for old in &files[keep..] {' \
+  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+
+run_mutation "[log] present but not a table is silently accepted, not a warning" \
+  crates/geode-core/src/log/mod.rs \
+  '        let Some(table) = value.as_table() else {
+            diags.push(warn(
+                "[log]: expected a table, e.g. [log]\\ndefault = \"info\"".to_string(),
+            ));
+            return (levels, diags);
+        };' \
+  '        let Some(table) = value.as_table() else {
+            return (levels, diags);
+        };' \
+  geode-core log_present_but_not_a_table_is_a_warning
+
+run_mutation "to_targets: every crate follows [log] default, not just geode" \
+  crates/geode-core/src/log/mod.rs \
+  '        let mut t = Targets::new()
+            .with_default(Level::WARN)
+            .with_target("geode", self.default);' \
+  '        let mut t = Targets::new().with_default(self.default);' \
+  geode-core to_targets_caps_non_geode_targets_at_warn_regardless_of_default
+
+run_mutation "drain_since's backward scan never stops early, always visiting every slot" \
+  crates/geode-core/src/log/mod.rs \
+  '                Some(r) if r.seq > since => out.push(r.clone()),
+                // Either an empty slot (the ring hasn'"'"'t wrapped yet, and
+                // we'"'"'ve walked past its oldest write) or a record at or
+                // before `since` — descending order means nothing
+                // further back can be newer than `since` either.
+                _ => break,' \
+  '                Some(r) if r.seq > since => out.push(r.clone()),
+                _ => continue,' \
+  geode-core drain_since_stops_scanning_once_it_reaches_records_at_or_before_since
+
+run_mutation "oldest_seq ignores the wrap and always reads slot 0" \
+  crates/geode-core/src/log/mod.rs \
+  '    pub fn oldest_seq(&self) -> Option<u64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match &g.records[g.head] {
+            Some(r) => Some(r.seq),
+            None => g.records[0].as_ref().map(|r| r.seq),
+        }
+    }' \
+  '    pub fn oldest_seq(&self) -> Option<u64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.records[0].as_ref().map(|r| r.seq)
+    }' \
+  geode-core oldest_seq_is_none_when_empty_then_tracks_the_surviving_floor_through_a_wrap
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
