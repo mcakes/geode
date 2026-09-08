@@ -622,6 +622,16 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
+    /// refreshed once per reload-poll tick (~500ms, alongside the flip
+    /// sweep and the dirty-session flush) rather than read fresh on
+    /// every paint. Before this, `render`'s own `chrono::Local::now()`
+    /// call (feeding `Frame::bar_model`'s `(versions, today)` cache key,
+    /// M12) ran on every single render — including every one of the
+    /// ~100% of frames that hit the cache — new per-frame clock-read
+    /// work on the render path for a value that only meaningfully
+    /// changes once a day.
+    pub(super) today: chrono::NaiveDate,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -839,10 +849,14 @@ impl ShellView {
                 // timers, all racing to sweep the same barrier). `sweep`
                 // itself is a cheap no-op once nothing is open or the
                 // deadline hasn't passed, so this costs nothing on a
-                // quiet tick. The tradeoff: a barrier now releases "on
-                // the next tick after `FLIP_DEADLINE`" rather than
-                // exactly at it — up to ~500ms rather than exactly
-                // 250ms — spec §3.10's as-built note records this.
+                // quiet tick. The tradeoff (spec §3.10's as-built note,
+                // corrected in Task 1 fix round 1 MIN-5): a barrier now
+                // releases on the poll loop's next iteration after
+                // `FLIP_DEADLINE`, not exactly at it — bounded by that
+                // whole iteration (this timer, then the session flush
+                // below, then the `reload::scan` further down), not by
+                // the timer interval alone, since nothing sweeps again
+                // until the loop comes back around to this line.
                 let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
                     return; // window/entity gone; stop polling
                 };
@@ -851,6 +865,29 @@ impl ShellView {
                         cx.notify();
                     }
                 });
+
+                // Refresh `today` (Phase 4b Task 1 fix round 1, MIN-9),
+                // same tick, same "cheap no-op unless it actually
+                // changed" shape as the sweep just above — this is the
+                // one clock read the whole ~500ms tick needs; `render`
+                // (and therefore `Frame::bar_model`'s cache key) reads
+                // `self.today` rather than calling `chrono::Local::now()`
+                // itself, so a held key no longer pays a clock read on
+                // every repaint for a value that only changes once a
+                // day. Only notifies when the date actually moved on —
+                // any other trigger repaints "for free" with the fresh
+                // value already in place.
+                let Ok(changed) = this.update(cx, |view, _cx| {
+                    let today = chrono::Local::now().date_naive();
+                    let changed = view.today != today;
+                    view.today = today;
+                    changed
+                }) else {
+                    return; // window/entity gone; stop polling
+                };
+                if changed {
+                    let _ = this.update(cx, |_view, cx| cx.notify());
+                }
 
                 // Flush a dirty session (Task 3 fix round 1), coalesced
                 // onto this same ~500ms tick rather than writing per
@@ -945,7 +982,12 @@ impl ShellView {
         // rebuilds.
         let frame = {
             let slots = hot_reload::rebuild_slots(&services.config);
-            let saved = hot_reload::rebuild_saved_scopes(&services.config);
+            // `true` (Phase 4b Task 1 fix round 1, MIN-8): the frame's
+            // own initial load is the one startup caller that reports —
+            // `main.rs`'s `saved_scopes(&config)` call (action
+            // registration, before this even runs) passes `false`, so a
+            // malformed `scopes.toml` entry doesn't print twice.
+            let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
             cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
         };
         // A slot or scope saved by a module (`:group save N`, `:scope
@@ -1048,6 +1090,7 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            today: chrono::Local::now().date_naive(),
         }
     }
 

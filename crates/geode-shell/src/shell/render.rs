@@ -776,8 +776,11 @@ impl Render for ShellView {
         // is the one place `render` already has `cx` in hand to read it.
         // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
         // its `as_of` segment reads `bar_model.as_of`, the same formatted
-        // text the toolbar's own AS OF badge shows.
-        let bar_model = self.frame.read(cx).bar_model(chrono::Local::now());
+        // text the toolbar's own AS OF badge shows. `self.today` (Phase 4b
+        // Task 1 fix round 1, MIN-9), not `chrono::Local::now()` — the
+        // clock read moved to the ~500ms reload-poll tick, so a held key
+        // no longer pays it on every repaint.
+        let bar_model = self.frame.read(cx).bar_model(self.today);
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),

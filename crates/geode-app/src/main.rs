@@ -267,7 +267,11 @@ fn build_shell_services(
     // One `scope::<name>` action per saved scope (Phase 4a §3.11), same
     // ordering rationale as `register_pick_actions` just above — a scope
     // added by a live reload is not registered until restart (spec §1.3).
-    register_scope_actions(&mut registry, &saved_scopes(&config));
+    // `false` (Phase 4b Task 1 fix round 1, MIN-8): `ShellView::new`'s own
+    // load of the same doc, right after this, is the one startup caller
+    // that reports diagnostics — this one printing too would show a
+    // malformed `scopes.toml` entry twice on every launch.
+    register_scope_actions(&mut registry, &saved_scopes(&config, false));
 
     // The default kind is read from `[app] modules.default`, "blotter"
     // when unset.

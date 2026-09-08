@@ -268,7 +268,7 @@ fn services_with_saved_scope() -> ShellServices {
     });
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
-    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config));
+    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
     let mod_alias = default_mod();
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);

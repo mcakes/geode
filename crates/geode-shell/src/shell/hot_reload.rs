@@ -58,6 +58,17 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
     slots
 }
 
+// Test-only counter (Phase 4b Task 1 fix round 1, MIN-8): incremented
+// once per `rebuild_saved_scopes` call that actually prints its
+// diagnostics (`report_diagnostics: true`), so a test can pin "the two
+// startup callers together print at most once" without capturing
+// `stderr` — see `shell/tests/reload.rs`'s
+// `rebuild_saved_scopes_prints_only_when_asked`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SAVED_SCOPES_REPORT_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Rebuild [`SavedScopes`](geode_core::scopes::SavedScopes) from whatever
 /// `[scopes]` (plus the `datasets`/`dimensions` docs a scope validates
 /// against) a `Config` resolves to — same shape as [`rebuild_slots`], and
@@ -72,7 +83,22 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
 /// crate. `hot_reload` the *module* stays private either way (`mod
 /// hot_reload;`, no `pub`), so this doesn't otherwise widen what's
 /// reachable — only the one re-exported name is.
-pub fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
+///
+/// `report_diagnostics` (Phase 4b Task 1 fix round 1, MIN-8): M15's
+/// re-export gave `main.rs` a second startup caller of this function
+/// (`register_scope_actions(&mut registry, &saved_scopes(&config))`)
+/// alongside `ShellView::new`'s own — before M15, `main.rs`'s copy
+/// printed nothing at all (the bug M15 fixed), but printing from both
+/// unconditionally means a single malformed `scopes.toml` entry prints
+/// twice at every launch, reading as two distinct problems. `ShellView::
+/// new` passes `true` (the frame's own load is the one that reports);
+/// `main.rs` passes `false`; `apply_reload`'s live-reload call also
+/// passes `true` — a config change actually happening is exactly when a
+/// fresh diagnostic should surface.
+pub fn rebuild_saved_scopes(
+    config: &Config,
+    report_diagnostics: bool,
+) -> geode_core::scopes::SavedScopes {
     let (schema, _) = config
         .doc("datasets")
         .map(SchemaSpec::from_doc)
@@ -85,8 +111,12 @@ pub fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes 
         .doc("scopes")
         .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims))
         .unwrap_or_default();
-    for d in &diags {
-        eprintln!("[scopes] {d}");
+    if report_diagnostics {
+        #[cfg(test)]
+        SAVED_SCOPES_REPORT_CALLS.with(|c| c.set(c.get() + 1));
+        for d in &diags {
+            eprintln!("[scopes] {d}");
+        }
     }
     saved
 }
@@ -297,7 +327,11 @@ impl ShellView {
                 });
             }
             if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
+                // `true` (Phase 4b Task 1 fix round 1, MIN-8): a live
+                // reload actually changing `scopes.toml` is exactly when
+                // a fresh diagnostic should surface, unlike `main.rs`'s
+                // one-shot startup call for action registration.
+                let saved = rebuild_saved_scopes(&self.services.config, true);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_saved_scopes(saved) {
                         cx.notify();

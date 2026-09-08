@@ -36,7 +36,7 @@ pub(super) fn test_services() -> ShellServices {
     // saved_scopes` returns empty and the loop is a no-op, but the
     // startup-ordering path itself still runs on every test built from
     // this fixture.
-    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config));
+    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
     let mod_alias = default_mod();
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
