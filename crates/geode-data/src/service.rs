@@ -167,47 +167,102 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
     }
 }
 
-/// One source's last REPORTED health, shared between the ingest sink and
-/// the scheduler sink (final review round 2, NEW-1) — MAJ-3 added a
-/// second writer of source health (a publish) that MAJ-2's
-/// scheduler-only transition tracker knew nothing about: a degraded
-/// publish set `SourceState.health` to `Degraded`, but the scheduler's
-/// own `last_reported` (keyed and consulted only inside `ingest::
-/// scheduler::run`) had no idea a publish had happened, so its next
-/// clean poll saw its own state as already `Some(Ok)` and suppressed the
-/// event that would have cleared it — and the publish path's own guard
-/// (`health == Health::Ok` never sent) meant a later clean republish
-/// couldn't clear it either. `Health::Ok` was reachable in general
-/// (MAJ-2), but a source that had ever had one degraded publish stayed
-/// latched at `degraded` for the rest of the session — MAJ-2's exact
-/// failure mode, through the path MAJ-3 opened.
+/// One source's health along two independent lanes (final review round
+/// 3, NEW-4) — round 2's fix (`HealthTracker` as a single shared
+/// last-value map, keyed only by source) closed MAJ-2's original latch
+/// but opened a worse one: a routine, CONTENT-BLIND discovery poll
+/// (`Health::Ok` whenever nothing is currently stuck or malformed on
+/// disk) could overwrite a real, unfixed `Degraded`/`Failed` a PUBLISH
+/// had set, within about one poll interval, with nothing actually
+/// corrected. `CandidateState::Unchanged` is assigned to an
+/// already-loaded file regardless of whether that load degraded
+/// (`source::discovery::is_unchanged`'s own doc comment says so), and
+/// `worst_health` skips `Unchanged`/`Ready`/`Pending` candidates
+/// entirely — so "nothing looks stuck on the file system" is not
+/// evidence "the last publish was clean", and a single shared map could
+/// not tell the two apart. A false-`Ok` on the one surface whose job is
+/// to be right about state — worse than round 2's own defect (a real
+/// problem that stayed visibly flagged, if permanently).
 ///
-/// One tracker, owned by the service and shared by both sinks, closes
-/// the gap: every report from EITHER path goes through the same
-/// `report`, so whichever next reports `Ok` — a scheduler poll or a
-/// publish — is the one that clears it, and a report that repeats the
-/// last one recorded (from either path) is suppressed regardless of
-/// which path sent it.
+/// Two lanes fix it: `discovery`, written only by the scheduler sink
+/// (content-blind — "is anything currently stuck or malformed on
+/// disk"), and `load`, written only by the ingest sink (content-aware —
+/// "did the last publish or load attempt succeed cleanly"). Neither
+/// lane can be written by the other producer. The value this module
+/// actually reports is always the WORSE of the two —
+/// [`geode_core::health::Health`]'s own derived `Ord` is severity order
+/// (`Ok < Pending < PendingTooLong < Degraded < Failed`, per that type's
+/// own doc comment), so a clean discovery poll can never override a
+/// load-set `Degraded`/`Failed`: only writing the `load` lane back to
+/// `Ok` (a corrected republish) can, because that is the only way to
+/// bring the combined maximum back down.
+#[derive(Debug, Clone, Default)]
+struct Lanes {
+    /// What discovery alone currently believes. `None` until the first
+    /// discovery report for this source.
+    discovery: Option<Health>,
+    /// What the last publish (or load failure) reported. `None` until
+    /// the first load report for this source.
+    load: Option<Health>,
+    /// The combined value last actually forwarded — distinct from
+    /// either lane on its own, so `report_discovery`/`report_load` can
+    /// tell a real change in the COMBINED (worse-of-two) value apart
+    /// from a lane merely being overwritten with an equally-severe one.
+    last_reported: Option<Health>,
+}
+
 #[derive(Default)]
 struct HealthTracker {
-    last: std::sync::Mutex<std::collections::HashMap<String, Health>>,
+    sources: std::sync::Mutex<std::collections::HashMap<String, Lanes>>,
 }
 
 impl HealthTracker {
-    /// `Some(health)` exactly on a transition for `source` — the first
-    /// report ever, or one that differs from the last reported (`Health`
-    /// derives `PartialEq` down to `Degraded`/`Failed`'s own `reason`, so
-    /// a changed reason at the same severity still counts as a
-    /// transition). `None` when it repeats the last reported state,
-    /// meaning the caller must not forward it.
-    fn report(&self, source: &str, health: Health) -> Option<Health> {
-        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
-        if last.get(source) == Some(&health) {
+    /// The scheduler sink's door: `Ok` on a clean poll, the worst
+    /// pending/orphaned state discovery found otherwise. `Some(health)`
+    /// exactly when the COMBINED (worse-of-both-lanes) value changes —
+    /// which is not the same as this lane's own value changing; see the
+    /// type's own doc comment.
+    fn report_discovery(&self, source: &str, health: Health) -> Option<Health> {
+        self.report(source, health, Lane::Discovery)
+    }
+
+    /// The ingest sink's door: every publish's health (`Ok` included)
+    /// and every load failure. `Some(health)` exactly when the COMBINED
+    /// value changes.
+    fn report_load(&self, source: &str, health: Health) -> Option<Health> {
+        self.report(source, health, Lane::Load)
+    }
+
+    fn report(&self, source: &str, health: Health, lane: Lane) -> Option<Health> {
+        let mut sources = self.sources.lock().unwrap_or_else(|e| e.into_inner());
+        let lanes = sources.entry(source.to_string()).or_default();
+        match lane {
+            Lane::Discovery => lanes.discovery = Some(health),
+            Lane::Load => lanes.load = Some(health),
+        }
+        let combined = match (&lanes.discovery, &lanes.load) {
+            (None, None) => None,
+            (Some(d), None) => Some(d.clone()),
+            (None, Some(l)) => Some(l.clone()),
+            // The WORSE of the two — `Health`'s own severity `Ord`. On an
+            // exact tie (equal severity, e.g. two different `Degraded`
+            // reasons landing at once) the choice is otherwise arbitrary;
+            // `>=` prefers `load`, the content-aware lane, when neither
+            // outranks the other.
+            (Some(d), Some(l)) => Some(if l >= d { l.clone() } else { d.clone() }),
+        };
+        if combined == lanes.last_reported {
             return None;
         }
-        last.insert(source.to_string(), health.clone());
-        Some(health)
+        lanes.last_reported = combined.clone();
+        combined
     }
+}
+
+#[derive(Clone, Copy)]
+enum Lane {
+    Discovery,
+    Load,
 }
 
 pub struct DataService {
@@ -379,11 +434,16 @@ impl DataService {
                     // degraded publish had marked. The tracker decides
                     // whether this is a real transition; only then is it
                     // forwarded.
+                    //
+                    // NEW-4 (final review round 3): the LOAD lane
+                    // specifically — see `HealthTracker`'s own doc for
+                    // why a publish's clean `Ok` and a discovery poll's
+                    // clean `Ok` are no longer interchangeable.
                     let reason = match &health {
                         Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
                         _ => String::new(),
                     };
-                    match health_tracker.report(&source, health) {
+                    match health_tracker.report_load(&source, health) {
                         Some(reported) => {
                             log_health_event(&source, &reported, &reason);
                             delivered
@@ -425,8 +485,10 @@ impl DataService {
                     // shared tracker like every other health report, so
                     // a repeated identical failure (a permanently
                     // unreachable share, polled forever) does not
-                    // re-send.
-                    let Some(reported) = health_tracker.report(
+                    // re-send. NEW-4 (round 3): the LOAD lane — a load
+                    // failure is content-aware, the same as any other
+                    // publish outcome, never discovery's concern.
+                    let Some(reported) = health_tracker.report_load(
                         &source,
                         Health::Failed {
                             reason: reason.clone(),
@@ -472,7 +534,14 @@ impl DataService {
                     // is the one place that decides whether it is a real
                     // transition, through the SAME tracker the ingest
                     // sink above reports through.
-                    match health_tracker.report(&source, worst) {
+                    //
+                    // NEW-4 (final review round 3): the DISCOVERY lane —
+                    // a clean poll here says only "nothing looks stuck or
+                    // malformed on disk right now", never "the last
+                    // publish was clean". Writing this lane can never by
+                    // itself clear a load-set `Degraded`/`Failed`; see
+                    // `HealthTracker`'s own doc comment.
+                    match health_tracker.report_discovery(&source, worst) {
                         Some(reported) => {
                             log_health_event(&source, &reported, &detail);
                             sink(DataEvent::Health {
@@ -1552,36 +1621,258 @@ source_name = "NPV"
         svc.shutdown();
     }
 
+    /// NEW-4 (final review round 3) — the specific gap the round-2
+    /// re-review named: every round-2 integration test held
+    /// `poll_interval` at 3600s (so only the cold-start poll ever ran)
+    /// or used a stray file discovery alone could never clear, which
+    /// meant none of them ever let a SECOND, genuinely clean scheduler
+    /// poll fire after a degraded publish — exactly the path that let a
+    /// content-blind "nothing looks stuck" poll silently overwrite a
+    /// real, unfixed `Degraded` back to `Ok`. This test deliberately
+    /// lets several more polls fire (a short `poll_interval`) after the
+    /// degraded publish, with the bad file never replaced, and asserts
+    /// the entity never reads `Ok` again.
+    #[test]
+    fn a_degraded_publish_survives_several_more_clean_discovery_polls() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(
+            &csv_path,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P1,C,I1,EUR,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                // Short, and deliberately so — several more polls MUST
+                // fire during this test's run, each one discovering the
+                // same still-bad file as `Unchanged` (not `Ready`, not
+                // `Pending`) and reporting a content-blind `Ok`.
+                poll_interval: Duration::from_millis(30),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_degraded = false;
+        while Instant::now() < deadline && !saw_degraded {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Degraded { .. },
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_degraded = true;
+            }
+        }
+        assert!(saw_degraded, "setup: the file must degrade");
+
+        // ~20 more poll intervals' worth of wall time: several more
+        // clean discovery polls WILL fire (nothing about the bad file
+        // changed, so it is `Unchanged`, not stuck) — none of them may
+        // ever read as Health::Ok for this source.
+        let mut saw_ok = false;
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_millis(100))
+                && source == "eod_risk"
+            {
+                saw_ok = true;
+            }
+        }
+        assert!(
+            !saw_ok,
+            "a routine, content-blind discovery poll must never clear a \
+             real, unfixed degraded publish back to Ok"
+        );
+        svc.shutdown();
+    }
+
     #[test]
     fn health_tracker_reports_a_transition_only() {
         let t = HealthTracker::default();
         assert_eq!(
-            t.report("a", Health::Ok),
+            t.report_load("a", Health::Ok),
             Some(Health::Ok),
             "the first report for a source is always a transition"
         );
         assert_eq!(
-            t.report("a", Health::Ok),
+            t.report_load("a", Health::Ok),
             None,
             "a repeated identical report is not a transition"
         );
         let degraded = Health::Degraded { reason: "x".into() };
         assert_eq!(
-            t.report("a", degraded.clone()),
+            t.report_load("a", degraded.clone()),
             Some(degraded.clone()),
             "a changed report is a transition"
         );
         assert_eq!(
-            t.report("a", degraded),
+            t.report_load("a", degraded),
             None,
             "repeating the new state again is not a transition"
         );
         assert_eq!(
-            t.report("b", Health::Ok),
+            t.report_load("b", Health::Ok),
             Some(Health::Ok),
             "a different source's first report is its own transition, \
              independent of source \"a\""
         );
+    }
+
+    /// NEW-4 (final review round 3): the six consequences the ruling
+    /// asks to be pinned directly against `HealthTracker`'s two-lane
+    /// combine logic — fast and precise, ahead of the slower
+    /// integration-level coverage below (which still exists for the
+    /// scenario the review specifically flagged as untested at the
+    /// `DataService` level: a real second scheduler poll).
+    mod health_tracker_lanes {
+        use super::*;
+
+        /// A degraded LOAD, then a CLEAN DISCOVERY poll: the combined
+        /// value must stay `Degraded` — a routine, content-blind poll
+        /// (`worst_health` sees no stuck/malformed file) is not evidence
+        /// the last publish was corrected, and must not clear it.
+        #[test]
+        fn a_degraded_load_survives_a_clean_discovery_poll() {
+            let t = HealthTracker::default();
+            let degraded = Health::Degraded { reason: "x".into() };
+            assert_eq!(t.report_load("a", degraded.clone()), Some(degraded));
+            assert_eq!(
+                t.report_discovery("a", Health::Ok),
+                None,
+                "a clean discovery poll must not clear a load-set Degraded"
+            );
+        }
+
+        /// A degraded LOAD, then a CLEAN LOAD (a corrected republish):
+        /// only a clean load may clear a load-set Degraded.
+        #[test]
+        fn a_degraded_load_is_cleared_by_a_clean_load() {
+            let t = HealthTracker::default();
+            let degraded = Health::Degraded { reason: "x".into() };
+            assert_eq!(
+                t.report_load("a", degraded),
+                Some(Health::Degraded { reason: "x".into() })
+            );
+            assert_eq!(
+                t.report_load("a", Health::Ok),
+                Some(Health::Ok),
+                "a clean republish must clear the earlier degraded load"
+            );
+        }
+
+        /// Discovery reports `PendingTooLong` while the load lane is
+        /// clean: the combined value is the WORSE of the two, so
+        /// `PendingTooLong` (discovery's own domain) must still surface
+        /// even though nothing about the last publish was wrong.
+        #[test]
+        fn discovery_pending_too_long_surfaces_over_a_clean_load() {
+            let t = HealthTracker::default();
+            assert_eq!(t.report_load("a", Health::Ok), Some(Health::Ok));
+            assert_eq!(
+                t.report_discovery("a", Health::PendingTooLong),
+                Some(Health::PendingTooLong),
+                "PendingTooLong is discovery's own domain and must surface"
+            );
+        }
+
+        /// The mirror of the first test, worded as the ruling states it:
+        /// discovery clearing (a clean poll) while the load lane is
+        /// Degraded must leave the combined value at Degraded.
+        #[test]
+        fn discovery_clearing_does_not_override_a_degraded_load() {
+            let t = HealthTracker::default();
+            // Discovery starts PendingTooLong (a stuck file), independent
+            // of the load lane going Degraded from an unrelated earlier
+            // publish for the same source.
+            assert_eq!(
+                t.report_discovery("a", Health::PendingTooLong),
+                Some(Health::PendingTooLong)
+            );
+            let degraded = Health::Degraded {
+                reason: "carried-dimension violation".into(),
+            };
+            assert_eq!(
+                t.report_load("a", degraded.clone()),
+                Some(degraded),
+                "Degraded outranks PendingTooLong, so the load report is \
+                 itself a transition"
+            );
+            assert_eq!(
+                t.report_discovery("a", Health::Ok),
+                None,
+                "discovery clearing to Ok must not override the load-set \
+                 Degraded — Degraded still outranks Ok"
+            );
+        }
+
+        /// A FAILED load, then a clean discovery poll: `Failed` is the
+        /// worst state and must survive a content-blind clean poll the
+        /// same way `Degraded` does.
+        #[test]
+        fn a_failed_load_survives_a_clean_discovery_poll() {
+            let t = HealthTracker::default();
+            let failed = Health::Failed {
+                reason: "bad header".into(),
+            };
+            assert_eq!(t.report_load("a", failed.clone()), Some(failed));
+            assert_eq!(
+                t.report_discovery("a", Health::Ok),
+                None,
+                "a clean discovery poll must not clear a load-set Failed"
+            );
+        }
+
+        /// Both lanes steadily `Ok`: exactly one `Ok` is ever reported,
+        /// across many discovery polls AND publishes, in either order.
+        #[test]
+        fn both_lanes_ok_report_exactly_one_ok() {
+            let t = HealthTracker::default();
+            let mut ok_count = 0;
+            for i in 0..10 {
+                if t.report_discovery("a", Health::Ok).is_some() {
+                    ok_count += 1;
+                }
+                if i % 3 == 0 && t.report_load("a", Health::Ok).is_some() {
+                    ok_count += 1;
+                }
+            }
+            assert_eq!(
+                ok_count, 1,
+                "only the very first report (whichever lane) is a \
+                 transition; every later Ok from either lane repeats the \
+                 same combined value"
+            );
+        }
     }
 
     /// NEW-1 (final review round 2): a degraded PUBLISH is cleared by a
@@ -1700,12 +1991,19 @@ source_name = "NPV"
         svc.shutdown();
     }
 
-    /// NEW-1's other direction: a source the SCHEDULER reported
-    /// `PendingTooLong` (discovery alone, no load involved) is cleared by
-    /// a later CLEAN PUBLISH for the same source — proving the tracker is
-    /// genuinely shared, not just consulted one-way.
+    /// NEW-4 (final review round 3), superseding round 2's version of
+    /// this test (which asserted the OPPOSITE — that a clean publish
+    /// clears a scheduler-set `PendingTooLong` — an assertion round 3's
+    /// ruling explicitly overturns): a source the SCHEDULER reports
+    /// `PendingTooLong` for (a permanently stuck stray file, discovery
+    /// alone, no load involved) is NOT cleared by an unrelated CLEAN
+    /// PUBLISH for the same source. The stray file is still genuinely
+    /// stuck — nothing about it changed — so the combined (worse-of-two)
+    /// value must stay `PendingTooLong`; only discovery itself observing
+    /// the stray file resolve (or vanish) could clear discovery's own
+    /// lane.
     #[test]
-    fn a_clean_publish_clears_source_health_left_pending_too_long_by_the_scheduler() {
+    fn discovery_pending_too_long_is_not_cleared_by_an_unrelated_clean_publish() {
         let db = tempfile::tempdir().unwrap();
         let src = tempfile::tempdir().unwrap();
 
@@ -1755,7 +2053,8 @@ source_name = "NPV"
             "setup: the stray file must report PendingTooLong"
         );
 
-        // A real, ready file for the same source lands and loads cleanly.
+        // A real, ready file for the same source lands and loads cleanly
+        // — but the stray file is still there, still stuck.
         let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
             rows: 50,
             seed: 13,
@@ -1765,22 +2064,29 @@ source_name = "NPV"
         opts.leave_one_pending = false;
         geode_demo_data::emit_directory(&batch, &opts).unwrap();
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // Collect everything for several poll intervals: the clean
+        // publish itself must still arrive (the load succeeds), but no
+        // Health::Ok for this source may ever follow it, since the
+        // stray file keeps discovery's own lane at PendingTooLong.
+        let mut saw_published = false;
         let mut saw_ok = false;
-        while Instant::now() < deadline && !saw_ok {
-            if let Ok(DataEvent::Health {
-                source,
-                worst: Health::Ok,
-                ..
-            }) = rx.recv_timeout(Duration::from_secs(5))
-            {
-                assert_eq!(source, "eod_risk");
-                saw_ok = true;
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(DataEvent::Published { .. }) => saw_published = true,
+                Ok(DataEvent::Health {
+                    source,
+                    worst: Health::Ok,
+                    ..
+                }) if source == "eod_risk" => saw_ok = true,
+                _ => {}
             }
         }
+        assert!(saw_published, "setup: the clean file must still load");
         assert!(
-            saw_ok,
-            "a clean publish must clear health the scheduler alone set"
+            !saw_ok,
+            "an unrelated clean publish must not clear a stray file's \
+             still-genuine PendingTooLong"
         );
         svc.shutdown();
     }
