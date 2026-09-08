@@ -274,12 +274,21 @@ impl Diagnostics {
         true
     }
 
-    /// A diagnostics tile became visible. Does not itself bump — it
-    /// changes nothing about the diagnostic data, only what future
+    /// A diagnostics tile became visible: also queues a catalog request
+    /// (Task 5's `set_visible(true)` is the one caller — "visibility
+    /// triggers the first request through the same drain" the plan's
+    /// Step 6 describes, so a freshly opened tile does not sit on
+    /// whatever `self.catalog` happened to hold, or nothing, until the
+    /// next publish happens to arrive). Does not itself bump `version` —
+    /// it changes nothing about the diagnostic *data*, only what future
     /// mutators are allowed to do (spend a catalog request, copy the
-    /// frame histogram).
+    /// frame histogram) and what the bridge's drain will act on once the
+    /// caller's own `cx.notify()` runs (same two-step contract every
+    /// other entity mutation in this codebase follows: mutate, then
+    /// notify at the call site).
     pub fn watch(&mut self) {
         self.watchers += 1;
+        self.pending_catalog_request = true;
     }
 
     /// The counterpart of [`Self::watch`] — a diagnostics tile went
@@ -547,8 +556,25 @@ mod tests {
         d.note_published("risk");
         assert!(!d.take_pending_catalog_request());
         d.watch();
+        d.take_pending_catalog_request(); // drain watch()'s own request first
         d.note_published("risk");
         assert!(d.take_pending_catalog_request());
+        assert!(!d.take_pending_catalog_request(), "drained");
+    }
+
+    /// `watch()` itself queues a catalog request (Phase 4b §4.5, plan
+    /// Step 6: "visibility triggers the first request through the same
+    /// drain") — a freshly visible tile gets its first catalog without
+    /// waiting for the next publish.
+    #[test]
+    fn watching_itself_also_requests_the_first_catalog() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        assert!(!d.take_pending_catalog_request());
+        d.watch();
+        assert!(
+            d.take_pending_catalog_request(),
+            "becoming watched requests the first catalog"
+        );
         assert!(!d.take_pending_catalog_request(), "drained");
     }
 
