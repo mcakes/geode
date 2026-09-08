@@ -9,6 +9,7 @@ use crate::health::Health;
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
+use crate::query::catalog::build_catalog;
 use crate::query::compile::compile_view;
 use crate::query::distinct::compile_distinct;
 use crate::query::pool::{
@@ -20,7 +21,9 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::{DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
+use geode_core::query::{
+    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, QueryKey, QueryOutcome,
+};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
 use geode_core::snapshot::{Freshness, Provenance};
@@ -28,7 +31,7 @@ use geode_core::view::ViewSpec;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 pub struct DataServiceConfig {
     pub db_path: PathBuf,
@@ -47,6 +50,9 @@ pub enum DataEvent {
     Query(QueryOutcome),
     /// The picker's distinct-values result (spec §3.4).
     Distinct(DistinctOutcome),
+    /// The diagnostics tile's "what does the database hold" result
+    /// (spec §4.5).
+    Catalog(CatalogOutcome),
     /// A file was published: the frame bumps its data generation and every
     /// visible tile requeries. A burst coalesces there.
     Published {
@@ -60,6 +66,16 @@ pub enum DataEvent {
         source: String,
         worst: Health,
         detail: String,
+    },
+    /// One source's poll finished — Phase 4b §4.4's "last and next poll"
+    /// diagnostic. `next` is `at + spec.poll_interval` at the moment of
+    /// this poll, not a live countdown; a later poll's own `Polled`
+    /// supersedes it.
+    Polled {
+        source: String,
+        ready: usize,
+        at: SystemTime,
+        next: SystemTime,
     },
     /// Config problems found at open or on a view reload (§10.1).
     Diagnostics(Vec<Diagnostic>),
@@ -310,9 +326,19 @@ impl DataService {
         let scheduler_sink: SchedulerSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |e: SchedulerEvent| match e {
-                SchedulerEvent::Polled { source, ready } => {
+                SchedulerEvent::Polled {
+                    source,
+                    ready,
+                    next_in,
+                } => {
                     tracing::debug!(target: "geode::ingest", "polled {source}: {ready} ready");
-                    true
+                    let at = SystemTime::now();
+                    sink(DataEvent::Polled {
+                        source,
+                        ready,
+                        at,
+                        next: at + next_in,
+                    })
                 }
                 SchedulerEvent::Health {
                     source,
@@ -539,6 +565,35 @@ impl DataService {
         self.pool.cancel(key);
     }
 
+    /// The diagnostics tile's "what does the database hold" request
+    /// (spec §4.5), answered directly here on the service thread rather
+    /// than submitted to the query pool — the plan's ruling: every query
+    /// `build_catalog` runs is catalog-sized (`generations`,
+    /// `file_generations`, DuckDB's own introspection functions), none
+    /// of them touch a data table's rows, and the pool exists to bound
+    /// concurrent *data* scans, not to serialize a synchronous,
+    /// millisecond-scale read.
+    pub fn catalog(&self, params: &CatalogParams) -> CatalogOutcome {
+        let snapshot = build_catalog(&self.conn, &self.config.schema, &params.as_of);
+        match &snapshot {
+            Ok(snap) => {
+                tracing::debug!(
+                    target: "geode::query",
+                    "catalog served: {} dataset(s)",
+                    snap.datasets.len(),
+                );
+            }
+            Err(e) => {
+                tracing::warn!(target: "geode::query", "catalog request failed: {e}");
+            }
+        }
+        CatalogOutcome {
+            key: params.key,
+            tag: params.tag,
+            snapshot: snapshot.map_err(|e| e.to_string()),
+        }
+    }
+
     /// Per-book freshness for a dataset (spec §4.5).
     ///
     /// Takes the era rather than assuming live. Reporting today's
@@ -747,6 +802,28 @@ mod tests {
                 _ => continue,
             }
         }
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_catalog_request_echoes_the_tag_and_lists_the_one_dataset() {
+        // `DataService::catalog` answers directly (the plan's ruling:
+        // catalog-sized queries run on the service thread, not the
+        // pool), so this checks the return value straight — the request
+        // loop that puts it on the sink as `DataEvent::Catalog` is
+        // `handle.rs`'s job, exercised end to end there.
+        let (_db, _src, svc, _rx) = service();
+        let params = CatalogParams {
+            key: QueryKey(11),
+            tag: 11,
+            as_of: AsOf::Live,
+        };
+        let outcome = svc.catalog(&params);
+        assert_eq!(outcome.key, QueryKey(11));
+        assert_eq!(outcome.tag, 11);
+        let snap = outcome.snapshot.expect("catalog request failed");
+        assert_eq!(snap.datasets.len(), 1);
+        assert_eq!(snap.datasets[0].name, "risk_snapshot");
         svc.shutdown();
     }
 

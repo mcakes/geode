@@ -349,6 +349,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     DataEvent::Distinct(outcome) => {
                         shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
                     }
+                    // Phase 4b Task 3 adds these two events; Task 4 routes
+                    // both into the `Diagnostics` entity (source health's
+                    // last/next poll, and the catalog tile's own data).
+                    // Nothing reads either yet, so there is nothing to do
+                    // here — deliberately not `_ => {}`, so the next
+                    // `DataEvent` variant added still fails this match.
+                    DataEvent::Catalog(_) | DataEvent::Polled { .. } => {}
                 }
             });
             if handled.is_err() {

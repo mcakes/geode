@@ -75,6 +75,79 @@ pub struct DistinctOutcome {
     pub values: Result<Vec<(String, u64)>, String>,
 }
 
+/// The diagnostics tile's request: what the database holds (Phase 4b
+/// §4.5). Built on the data service thread, from the `generations`
+/// summary table, `file_generations`, and DuckDB's own introspection
+/// functions — never a data-table scan (`geode_data::query::catalog::
+/// build_catalog`'s doc comment says why).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub as_of: AsOf,
+}
+
+/// The catalog request's result, addressed to the key that asked.
+#[derive(Debug)]
+pub struct CatalogOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    /// `Err` is the failure text.
+    pub snapshot: Result<CatalogSnapshot, String>,
+}
+
+/// What the database holds, as of the moment it was read.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CatalogSnapshot {
+    pub datasets: Vec<DatasetCatalog>,
+    /// `block_size * total_blocks` from `pragma_database_size()`.
+    pub database_bytes: u64,
+    /// `used_blocks` from the same.
+    pub used_blocks: u64,
+    /// `sum(memory_usage_bytes)` from `duckdb_memory()`.
+    pub memory_bytes: u64,
+    /// `current_setting('threads')`.
+    pub threads: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DatasetCatalog {
+    pub name: String,
+    pub partitions: Vec<PartitionCatalog>,
+    /// Summed `estimated_size` (spec: a row *estimate*, labelled
+    /// "rows (est.)") over the dataset's live tables at every grain.
+    pub live_rows: u64,
+    /// The same, over the archive tables.
+    pub archive_rows: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PartitionCatalog {
+    pub batch: String,
+    /// `None` is the bookless partition (spec §4.4) — a real partition,
+    /// not a missing one.
+    pub book: Option<String>,
+    pub generations: Vec<GenerationInfo>,
+    /// The generation `resolve_generations` names for this partition
+    /// under the request's `as_of`. `None` under `AsOf::Live` — nothing
+    /// is resolved, live is live.
+    pub resolved_gen: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationInfo {
+    pub gen_id: i64,
+    pub source_time: DateTime<Utc>,
+    /// From `file_generations`. `None` when the generation predates that
+    /// table's row (an older database) or was reconstructed rather than
+    /// loaded through the ordinary path.
+    pub loaded_at: Option<DateTime<Utc>>,
+    pub file_rows: Option<u64>,
+    /// The newest generation of this partition, per the same
+    /// `(source_time, gen_id)` tie-break `resolve_generations` uses.
+    pub live: bool,
+}
+
 /// `HH:MM` or `HH:MM:SS` means today at that time on the trader's LOCAL
 /// clock (the modal's presets, its preview, the scope bar and the status
 /// segment all display local time — one clock throughout, spec §3.6);

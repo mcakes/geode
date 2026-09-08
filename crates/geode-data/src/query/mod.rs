@@ -30,3 +30,6 @@ pub use as_of::{AsOf, generation_predicate, resolve_generations};
 pub mod pool;
 
 pub use pool::{QueryId, QueryPool, QueryRequest, QueryResult, RequestKind, ResultSink, ViewId};
+pub mod catalog;
+
+pub use catalog::build_catalog;

@@ -14,13 +14,21 @@ use crate::source::{CandidateState, SourceSpec, discover};
 use crate::store::Catalog;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerEvent {
     /// One poll finished; `ready` is how many files were handed to the
-    /// runner. Tests wait on this; the service ignores it.
-    Polled { source: String, ready: usize },
+    /// runner. Tests wait on this; the service maps it to
+    /// `DataEvent::Polled` (Phase 4b §4.4's last/next-poll diagnostic).
+    /// `next_in` is this source's `poll_interval` at the moment of this
+    /// poll — the service adds it to "now" to get the next poll's
+    /// estimated time.
+    Polled {
+        source: String,
+        ready: usize,
+        next_in: Duration,
+    },
     /// The worst thing discovery found. Never modal, never fatal.
     Health {
         source: String,
@@ -145,6 +153,7 @@ fn run(
                     && sink(SchedulerEvent::Polled {
                         source: spec.name.clone(),
                         ready,
+                        next_in: spec.poll_interval,
                     }))
             },
         ));
@@ -298,17 +307,19 @@ mod tests {
 
     #[test]
     fn an_unchanged_directory_submits_nothing_on_later_polls() {
+        let poll = Duration::from_millis(20);
         let (_db, _dir, ingest, ingest_rx, conn, spec, _ds) =
-            harness(Duration::from_millis(20), Duration::from_secs(3600));
+            harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
         let mut polls = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while polls < 5 && std::time::Instant::now() < deadline {
-            if let Ok(SchedulerEvent::Polled { ready, .. }) =
+            if let Ok(SchedulerEvent::Polled { ready, next_in, .. }) =
                 sched_rx.recv_timeout(Duration::from_secs(10))
             {
                 assert_eq!(ready, 0);
+                assert_eq!(next_in, poll, "next_in is this source's poll_interval");
                 polls += 1;
             }
         }
