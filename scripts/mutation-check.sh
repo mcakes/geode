@@ -1873,8 +1873,45 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
   geode-shell \
   the_bar_model_is_cached_on_versions_and_describes_the_scope
 
-run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
-  crates/geode-shell/src/theme.rs \
+# ---- config_write: the one write door (Phase 4c task 1)
+#
+# These three guard the door every config write in geode-shell now goes
+# through — the theme/fontsize/vimfind/frame/keymap persists and, from
+# Phase 4c on, the config dialogs. A green suite sees none of them: each
+# failure writes a file that parses fine and looks plausible, just to the
+# wrong layer or over the user's own hand-edits.
+#
+# The layer guard is the only thing standing between a UI toggle and the
+# shared desk layer. Defeating it makes every layer writable, which is
+# silent: the write succeeds and the desk file is now the user's.
+run_mutation "config_write: a non-user layer is writable" \
+  crates/geode-shell/src/config_write.rs \
+  '    if layer != Layer::User {' \
+  '    if false {' \
+  geode-shell \
+  only_the_user_layer_is_writable
+
+# The refusal a hand-edited-then-broken config depends on. Falling back to
+# a fresh document instead of returning Err does not fail, warn, or crash
+# — it silently replaces the user's file with an empty one on the next
+# theme toggle.
+run_mutation "config_write: an unparseable file is overwritten instead of refused" \
+  crates/geode-shell/src/config_write.rs \
+  '        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?' \
+  '        text.parse::<DocumentMut>().unwrap_or_default()' \
+  geode-shell \
+  edit_refuses_an_unparseable_file_without_touching_it
+
+# Re-anchored from theme.rs in Phase 4c task 1: `theme::write_atomic` and
+# its `tmp_file_name` moved into config_write when the three write_atomic
+# copies collapsed into one. Same M9 finding, same test, new home.
+run_mutation "config_write: the temp name derives from the target file, not a hardcoded app.toml (M9)" \
+  crates/geode-shell/src/config_write.rs \
   '    let file_name = path
         .file_name()
         .and_then(|n| n.to_str())

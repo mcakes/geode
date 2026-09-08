@@ -83,16 +83,14 @@
 //! theme choice is ordinary config, resolved by the same builtin → desk →
 //! user merge (`geode_core::config`) as everything else.
 
-use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::App;
 use gpui_component::{Theme, ThemeConfig, ThemeSet};
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Item, Table, value};
 
-use geode_core::config::Config;
+use geode_core::config::{Config, Layer};
 
 /// Re-exported so callers don't need a direct `gpui_component` dependency
 /// just to name a mode.
@@ -453,10 +451,15 @@ impl ThemeService {
 ///   `[theme] warning:` stderr line, same convention as every other
 ///   config-write failure in this codebase, never a crash.
 ///
-/// The write itself is atomic — a unique temp file in `user_dir`, an
-/// `fsync`, then a rename, mirroring `session.rs::write_atomic` — and the
-/// temp filename ends in `.tmp`, not `.toml`, so the reload watcher's
-/// `*.toml` glob (`reload::scan`) never sees a partial write mid-flight.
+/// All three of those behaviours are [`crate::config_write::edit`]'s, not
+/// this function's own: the missing-file stamp, the comment-preserving
+/// `toml_edit` round trip, and the untouched-on-parse-failure refusal now
+/// have exactly one implementation, shared with every other persist in
+/// this crate. This function is only the `[theme]` half. The write itself
+/// is atomic — a unique temp file in `user_dir`, an `fsync`, then a
+/// rename — and the temp filename ends in `.tmp`, not `.toml`, so the
+/// reload watcher's `*.toml` glob (`reload::scan`) never sees a partial
+/// write mid-flight.
 ///
 /// Hot-reload interplay (corrected, Finding 3 of review fix round 1 — the
 /// previous wording here overclaimed a guard that doesn't exist): this
@@ -478,105 +481,16 @@ impl ThemeService {
 /// deliberately no self-write suppression here, so this stays one plain
 /// write path with no special-casing of its own output.
 pub fn persist_to_user_config(user_dir: &Path, name: &str, mode: Mode) -> Result<(), String> {
-    let path = user_dir.join("app.toml");
-    let existed = path.exists();
-
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-
-    if !doc.get("theme").is_some_and(Item::is_table_like) {
-        doc["theme"] = Item::Table(Table::new());
-    }
-    let theme_table = doc["theme"]
-        .as_table_mut()
-        .expect("just ensured [theme] is a table");
-    theme_table["name"] = value(name);
-    theme_table["mode"] = value(if mode.is_dark() { "dark" } else { "light" });
-
-    write_atomic(user_dir, &path, &doc.to_string())
-}
-
-/// Process-global counter for [`persist_to_user_config`]'s temp filenames —
-/// same reasoning as `session.rs`'s `TMP_COUNTER`: a distinct name per
-/// call, on top of the pid, so concurrent writers in this process never
-/// interleave on one shared temp file.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Atomic write for [`persist_to_user_config`]: unique temp file in `dir`,
-/// `fsync`, rename over `path`. Mirrors `session.rs::write_atomic`'s
-/// pid+counter+`.tmp` scheme (this module keeps its own small copy rather
-/// than sharing that one, since it needs a `Result<(), String>` to match
-/// this module's own error convention instead of `std::io::Result`).
-pub(crate) fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-
-    let pid = std::process::id();
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = dir.join(tmp_file_name(path, pid, counter));
-    {
-        let mut file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("failed to create {}: {e}", tmp_path.display()))?;
-        file.write_all(text.as_bytes())
-            .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("failed to sync {}: {e}", tmp_path.display()))?;
-    }
-    std::fs::rename(&tmp_path, path).map_err(|e| {
-        format!(
-            "failed to rename {} to {}: {e}",
-            tmp_path.display(),
-            path.display()
-        )
+    crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
+        if !doc.get("theme").is_some_and(Item::is_table_like) {
+            doc["theme"] = Item::Table(Table::new());
+        }
+        let theme_table = doc["theme"]
+            .as_table_mut()
+            .expect("just ensured [theme] is a table");
+        theme_table["name"] = value(name);
+        theme_table["mode"] = value(if mode.is_dark() { "dark" } else { "light" });
     })
-}
-
-/// The temp file's name for one atomic write to `path` (M9, 3b final
-/// review): was hardcoded to `.app.toml.{pid}-{counter}.tmp` from when
-/// [`write_atomic`] only ever wrote `app.toml`; it now also writes
-/// `groupings.toml` (`frame.rs`'s slot-save path — see [`persist_slot_to_user_config`]),
-/// so a name naming the wrong file lied. Derived from `path`'s own file
-/// name instead, and kept as a separate pure function so the naming can
-/// be tested without touching a filesystem.
-fn tmp_file_name(path: &Path, pid: u32, counter: u64) -> String {
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("geode-write");
-    format!(".{file_name}.{pid}-{counter}.tmp")
-}
-
-#[cfg(test)]
-mod tmp_file_name_tests {
-    use super::*;
-
-    #[test]
-    fn the_temp_name_derives_from_the_target_file_not_a_hardcoded_app_toml() {
-        // M9: write_atomic now also writes groupings.toml
-        // (persist_slot_to_user_config), so a name hardcoded to
-        // `.app.toml.*` lied about what it was staging.
-        assert_eq!(
-            tmp_file_name(Path::new("/x/groupings.toml"), 7, 3),
-            ".groupings.toml.7-3.tmp"
-        );
-        assert_eq!(
-            tmp_file_name(Path::new("/x/app.toml"), 7, 4),
-            ".app.toml.7-4.tmp"
-        );
-    }
 }
 
 #[cfg(test)]

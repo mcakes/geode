@@ -81,25 +81,36 @@
 //! fresh with `config_version = 1` at the top, matching every other config
 //! document in this codebase.
 //!
-//! The write itself is atomic (unique temp file in `user_dir`, `fsync`,
-//! rename) with its own small copy of the pid+counter `.tmp`-suffixed
-//! scheme `session::write_atomic`/`theme::write_atomic` already use —
-//! deliberately *not* factored into a shared helper here: `theme.rs`'s own
-//! copy already declined to share with `session.rs`'s (different error
-//! type: `Result<(), String>` vs `std::io::Result`), and this module's copy
-//! matches `theme.rs`'s shape exactly, so extracting a shared helper now
-//! would mean editing an unrelated, already-reviewed module just to save a
-//! dozen lines in a new one — out of scope for this pass. Recorded here as
-//! a deliberate choice, not an oversight, per the same reasoning `theme.rs`
-//! already documents for itself. The temp filename ends in `.tmp`, not
+//! Both of those guarantees are now [`crate::config_write`]'s, not this
+//! module's: the read-or-create-and-parse half comes from
+//! `config_write::open` (which is also where the `config_version = 1`
+//! stamp and the untouched-on-parse-failure refusal live), and the write
+//! from `config_write::write`. This module keeps only the one refusal
+//! that is genuinely keymap-shaped — a `bindings` key of the wrong TOML
+//! shape, see [`open_doc_with_bindings`] — which is exactly why it uses
+//! `open`/`write` rather than `config_write::edit`: `edit`'s closure
+//! cannot fail, and this one must.
+//!
+//! Phase 4c collapsed the three `write_atomic` copies (this module's,
+//! `theme`'s and `session`'s) into that one door. The earlier note here
+//! recorded not sharing them as a deliberate scoping choice; the reason
+//! it gave — that a fourth copy was cheaper than editing reviewed
+//! modules — stopped holding once the config dialogs would have made it
+//! ten. The write is still atomic (unique temp file in `user_dir`,
+//! `fsync`, rename) and the temp filename still ends in `.tmp`, not
 //! `.toml`, so `reload::scan`'s `*.toml` glob never observes a partial
 //! write mid-flight.
 
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
+use geode_core::config::Layer;
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, TableLike, value};
+
+/// The layered config document this module writes: `<user_dir>/keymap.toml`
+/// — never `app.toml`, since key bindings are the keymap doc's own concern
+/// (spec §3.1/§3.4). Named once here so the write, the parse and the error
+/// messages can never drift onto different files.
+const KEYMAP_DOC: &str = "keymap";
 
 /// One rebind to apply to the user keymap document. See the module doc for
 /// the full write semantics.
@@ -161,8 +172,7 @@ pub struct RebindOutcome {
 /// [`RebindOutcome`] instead (see [`Displacement::OldKeyNotFound`]), since
 /// `new_key` still gets bound either way.
 pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, String> {
-    let path = user_dir.join("keymap.toml");
-    let mut doc = open_doc_with_bindings(&path)?;
+    let mut doc = open_doc_with_bindings(user_dir)?;
     let bindings = doc["bindings"]
         .as_array_of_tables_mut()
         .expect("open_doc_with_bindings just ensured this");
@@ -190,7 +200,7 @@ pub fn apply_rebind(user_dir: &Path, rebind: &Rebind) -> Result<RebindOutcome, S
         _ => Displacement::NotRequested,
     };
 
-    write_atomic(user_dir, &path, &doc.to_string())?;
+    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
     Ok(RebindOutcome { displacement })
 }
 
@@ -238,8 +248,7 @@ pub struct UnbindOutcome {
 /// module doc's "Semantics" section and [`Unbind::is_user_layer`]'s own
 /// doc for why getting that branch backwards is the dangerous case.
 pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, String> {
-    let path = user_dir.join("keymap.toml");
-    let mut doc = open_doc_with_bindings(&path)?;
+    let mut doc = open_doc_with_bindings(user_dir)?;
     let bindings = doc["bindings"]
         .as_array_of_tables_mut()
         .expect("open_doc_with_bindings just ensured this");
@@ -258,14 +267,16 @@ pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, S
         false
     };
 
-    write_atomic(user_dir, &path, &doc.to_string())?;
+    crate::config_write::write(user_dir, Layer::User, KEYMAP_DOC, &doc.to_string())?;
     Ok(UnbindOutcome { removed })
 }
 
-/// Read `<user_dir>/keymap.toml` if it exists (or start a fresh document,
-/// stamped with `config_version = 1`, when it doesn't), then ensure
-/// `bindings` is ready to index into as an [`ArrayOfTables`]. Shared by
-/// [`apply_rebind`] and [`apply_unbind`], so this one check protects both.
+/// Read `<user_dir>/keymap.toml` through [`crate::config_write::open`]
+/// (which reads it if it exists, or starts a fresh document stamped with
+/// `config_version = 1` when it doesn't, and refuses an unparseable one
+/// without touching it), then ensure `bindings` is ready to index into as
+/// an [`ArrayOfTables`]. Shared by [`apply_rebind`] and [`apply_unbind`],
+/// so this one check protects both.
 ///
 /// `bindings = [ { ... } ]` is a *legal* keymap document —
 /// `keymap::build_keymap`/`build.rs` read `bindings` as a plain TOML array
@@ -278,25 +289,9 @@ pub fn apply_unbind(user_dir: &Path, unbind: &Unbind) -> Result<UnbindOutcome, S
 /// the corruption the module doc's "Corrupt file / atomicity" guarantee
 /// promises never happens. So this case is `Err`, same as a parse failure,
 /// and the file is left byte-for-byte untouched.
-fn open_doc_with_bindings(path: &Path) -> Result<DocumentMut, String> {
-    let existed = path.exists();
-
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
+fn open_doc_with_bindings(user_dir: &Path) -> Result<DocumentMut, String> {
+    let path = crate::config_write::doc_path(user_dir, Layer::User, KEYMAP_DOC)?;
+    let mut doc = crate::config_write::open(user_dir, Layer::User, KEYMAP_DOC)?;
 
     match doc.get("bindings") {
         None => doc["bindings"] = Item::ArrayOfTables(ArrayOfTables::new()),
@@ -373,38 +368,6 @@ fn set_key(keys: &mut dyn TableLike, key: &str, item: Item) {
     } else {
         keys.insert(key, item);
     }
-}
-
-/// Process-global counter for [`apply_rebind`]'s temp filenames — same
-/// reasoning as `theme.rs`'s/`session.rs`'s own `TMP_COUNTER`: a distinct
-/// name per call, on top of the pid, so concurrent writers in this process
-/// never interleave on one shared temp file.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Atomic write for [`apply_rebind`]: unique temp file in `dir`, `fsync`,
-/// rename over `path`. See the module doc's "Corrupt file / atomicity"
-/// section for why this is its own small copy rather than a shared helper.
-fn write_atomic(dir: &Path, path: &Path, text: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-
-    let pid = std::process::id();
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = dir.join(format!(".keymap.toml.{pid}-{counter}.tmp"));
-    {
-        let mut file = std::fs::File::create(&tmp_path)
-            .map_err(|e| format!("failed to create {}: {e}", tmp_path.display()))?;
-        file.write_all(text.as_bytes())
-            .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("failed to sync {}: {e}", tmp_path.display()))?;
-    }
-    std::fs::rename(&tmp_path, path).map_err(|e| {
-        format!(
-            "failed to rename {} to {}: {e}",
-            tmp_path.display(),
-            path.display()
-        )
-    })
 }
 
 #[cfg(test)]

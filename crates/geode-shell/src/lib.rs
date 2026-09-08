@@ -6,6 +6,7 @@
 
 pub mod actions;
 pub mod commandline;
+pub mod config_write;
 pub mod defaults;
 pub mod dialogmode;
 pub mod fonts;
