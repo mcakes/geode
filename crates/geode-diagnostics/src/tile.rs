@@ -701,6 +701,26 @@ mod tests {
         let after = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
         assert_eq!(before, after, "no observed version change, no rebuild");
         assert_eq!(before, 1, "exactly the constructor's own initial rebuild");
+
+        // A `cx.notify()` with no real state change (the frame histogram
+        // refresh's own no-op path, `Diagnostics::refresh_frame_hist`'s
+        // "identical histogram" case, ends up calling `cx.notify()` this
+        // way in real usage) must not trigger a rebuild either — the
+        // guard inside the `cx.observe` closures, not just the absence of
+        // any notify at all, is what this test pins.
+        h.diagnostics.update(&mut vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        h.frame.update(&mut vcx, |_, cx| cx.notify());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let after_bare_notifies = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+        assert_eq!(
+            before, after_bare_notifies,
+            "a notify with no version change must not rebuild either"
+        );
     }
 
     #[gpui::test]
