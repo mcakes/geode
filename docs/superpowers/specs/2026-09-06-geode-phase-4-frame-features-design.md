@@ -359,6 +359,18 @@ would otherwise do nothing in `--demo`.
 The values list is a `VirtualList`: a real underlying dictionary runs to
 thousands of rows.
 
+**As built (2026-09-08, Phase 4b M14):** the values list is a gpui
+`uniform_list`, not a `VirtualList` (no such gpui-component primitive
+exists at the pinned rev) — the same self-virtualizing list the
+`Columns` stage would use too if it needed one at schema-sized row
+counts. `uniform_list` never lays out an off-screen row, which is what
+"a real underlying dictionary runs to thousands of rows" actually
+needs; `ShellView::picker_scroll` (a `gpui::UniformListScrollHandle`,
+distinct from the plain `ScrollHandle` the other three dialogs use) is
+what keeps keyboard navigation's `selected` index scrolled into view,
+since `uniform_list` only tracks scroll-follow through its own handle
+type.
+
 `frame::pick_<column>` opens stage two directly for that column. One is
 registered per pickable column at startup, so the palette lists
 `Pick: book`, `Pick: underlying_ref`, … and a keymap can bind any of
@@ -681,6 +693,19 @@ the notify traffic for nothing.
 The deadline is 250 ms: five times the §7.1 requery budget, so a
 healthy frame never hits it, and short enough that a single slow tile
 delays the rest by less than a beat.
+
+**As built (2026-09-08, Phase 4b M14):** the sweep is driven by the
+shell's existing ~500 ms reload-poll tick alone, not also by a fresh
+`cx.spawn` timer per scope/grouping/as-of mutation — an earlier version
+spawned one such detached timer on every mutation (on top of the tick),
+so a burst of keystrokes spawned a burst of timers all racing to sweep
+the same barrier. `on_frame_changed` no longer spawns anything; the
+reload-poll loop calls `Frame::sweep` unconditionally on every tick,
+the same way it already flushes a dirty session on every tick. The
+practical effect: a barrier is released "on the next tick after 250 ms
+have passed" rather than at exactly 250 ms — up to ~500 ms in the
+worst case (a mutation landing just after a tick) rather than exactly
+250 ms. A healthy frame still never gets near either number.
 
 ### 3.11 Actions and keys
 
