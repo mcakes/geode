@@ -1106,7 +1106,10 @@ fn a_configured_font_size_applies_from_the_first_render(cx: &mut gpui::TestAppCo
     cx.update(gpui_component::init);
 
     let mut services = test_services();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![LayerDoc::builtin("app", "[ui]\nfont_size = \"small\"\n").unwrap()],
         desk: None,
         user: None,
@@ -1188,7 +1191,10 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     cx.update(gpui_component::init);
 
     let mut services = test_services();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![LayerDoc::builtin("app", "[ui]\nfind_style = \"fzf\"\n").unwrap()],
         desk: None,
         user: None,

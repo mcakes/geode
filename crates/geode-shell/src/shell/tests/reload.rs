@@ -17,17 +17,15 @@ const BUILTIN_VIEWS_DOC: &str = "[risk]\ncolumns = [\"delta\"]\n";
 /// is observable at all, since every other one starts from an empty
 /// `ConfigSources`.
 fn services_with_a_builtin_views_doc() -> ShellServices {
-    let builtin = vec![
-        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
-        LayerDoc::builtin("views", BUILTIN_VIEWS_DOC).unwrap(),
-    ];
     let mut services = test_services();
-    services.config = Config::load(&ConfigSources {
-        builtin: builtin.clone(),
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("views", BUILTIN_VIEWS_DOC).unwrap(),
+        ],
         desk: None,
         user: None,
     });
-    services.builtin = builtin;
     services
 }
 
@@ -337,6 +335,11 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let mut services = test_services();
+                // `builtin` deliberately left at `test_services()`'s
+                // empty vec: this test drives `apply_reload` directly
+                // (below and via `new_config`), which only ever assigns
+                // `self.services.config` and never reads `builtin` — see
+                // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox", "dark");
                 let view = cx.new(|cx| {
                     // Mirrors what main.rs does before opening the
@@ -403,6 +406,11 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let mut services = test_services();
+                // `builtin` deliberately left at `test_services()`'s
+                // empty vec: this test drives `apply_reload` directly
+                // (below and via `new_config`), which only ever assigns
+                // `self.services.config` and never reads `builtin` — see
+                // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox", "dark");
                 let view = cx.new(|cx| {
                     services.theme.apply_from_config(&services.config, cx);
@@ -669,7 +677,10 @@ fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestApp
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
     )
     .unwrap();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
             groupings,
@@ -982,7 +993,10 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut services, _log) = services_with_recorder();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
             LayerDoc::builtin("groupings", "1 = [\"desk\"]\n").unwrap(),

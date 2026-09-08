@@ -33,17 +33,15 @@ fn services_with_views() -> ShellServices {
             .parse()
             .unwrap(),
     };
-    // `ShellServices::builtin` mirrors the `ConfigSources::builtin` the
-    // config was loaded from, exactly as `main.rs` does — a config hot
-    // reload re-merges these docs, so a fixture that set one without the
-    // other would model a shell whose reload deletes its own views.
-    let builtin = vec![builtin, user];
-    services.config = Config::load(&ConfigSources {
-        builtin: builtin.clone(),
+    // `ShellServices::config_and_builtin` keeps `config` and `builtin`
+    // paired, exactly as `main.rs` does — a config hot reload re-merges
+    // these docs, so a fixture that set one without the other would
+    // model a shell whose reload deletes its own views.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![builtin, user],
         desk: None,
         user: None,
     });
-    services.builtin = builtin;
     services
 }
 
@@ -301,13 +299,12 @@ fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
             table: text.parse().expect("fixture TOML parses"),
         });
     }
-    services.config = Config::load(&ConfigSources {
-        builtin: layered.clone(),
+    // See `services_with_views` on why the two travel together.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: layered,
         desk: None,
         user: None,
     });
-    // See `services_with_views` on why the two travel together.
-    services.builtin = layered;
     services
 }
 

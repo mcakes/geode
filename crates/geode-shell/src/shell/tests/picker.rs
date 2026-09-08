@@ -36,9 +36,8 @@ role = "key"
 /// point is an *empty* config — see that function's own comment on why
 /// it still calls `register_pick_actions` anyway, over nothing).
 fn services_with_pickable() -> ShellServices {
-    let builtin = vec![LayerDoc::builtin("datasets", DATASETS_DOC).unwrap()];
-    let config = Config::load(&ConfigSources {
-        builtin: builtin.clone(),
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![LayerDoc::builtin("datasets", DATASETS_DOC).unwrap()],
         desk: None,
         user: None,
     });

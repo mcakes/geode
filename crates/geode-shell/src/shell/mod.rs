@@ -56,7 +56,7 @@ use crate::session;
 use crate::theme::ThemeService;
 use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
-use geode_core::config::{Config, LayerDoc};
+use geode_core::config::{Config, ConfigSources, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{DistinctOutcome, QueryKey};
 use geode_core::schema::{ColumnRole, SchemaSpec};
@@ -106,6 +106,31 @@ pub struct ShellServices {
     /// fresh session (no file, or one with no `[frame]` table yet) and in
     /// every test setup that doesn't opt in.
     pub restored_frame: Option<crate::session::FrameRecord>,
+}
+
+impl ShellServices {
+    /// Loads `config` from `sources` and returns it paired with the exact
+    /// `builtin` docs it was loaded from — the one way to produce this
+    /// struct's `config`/`builtin` pair that cannot drift, because both
+    /// come out of the same `ConfigSources` value instead of two separate
+    /// call sites independently deciding what the builtin layer is.
+    ///
+    /// This is the field-level version of the bug fixed in 665be45: there
+    /// it was two independent *builders* of the builtin layer (`main.rs`
+    /// and `reload.rs`) disagreeing; here it would be two independent
+    /// *assignments* on the same struct (`services.config = ...` without
+    /// the matching `services.builtin = ...`) disagreeing instead. Every
+    /// other `ShellServices` field still has to be assembled by the
+    /// caller — most of them (the registry, the keymap) depend on
+    /// `config` itself, so they cannot be produced here too.
+    ///
+    /// A fixture that deliberately needs a `config`/`builtin` mismatch
+    /// (modelling a stale reload, say) can still set the two fields by
+    /// hand instead of calling this — just comment why at the call site.
+    pub fn config_and_builtin(sources: ConfigSources) -> (Config, Vec<LayerDoc>) {
+        let builtin = sources.builtin.clone();
+        (Config::load(&sources), builtin)
+    }
 }
 
 /// What `ShellView` tells the rest of the app about a config reload (§4.5)

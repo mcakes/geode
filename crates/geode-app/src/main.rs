@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use geode_blotter::BlotterFactory;
-use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
+use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
     BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
@@ -248,13 +248,13 @@ fn build_shell_services(
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
     }
-    // Cloned, not moved: these same docs go into `ShellServices::builtin`
-    // below so a config hot reload re-merges the layer this process
-    // actually started with (see that field's doc comment — rebuilding a
-    // guess at it silently deleted the demo desk on the first config
-    // write of a session).
-    let config = Config::load(&ConfigSources {
-        builtin: builtin.clone(),
+    // `ShellServices::config_and_builtin` derives `config` and `builtin`
+    // from one `ConfigSources`, so the two cannot disagree (see that
+    // function's doc comment — reconstructing `builtin` separately from
+    // what `config` was loaded from silently deleted the demo desk on the
+    // first config write of a session).
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin,
         desk: desk.clone(),
         user: user.clone(),
     });

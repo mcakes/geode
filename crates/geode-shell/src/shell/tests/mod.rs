@@ -21,11 +21,19 @@ use gpui_component::{Root, TITLE_BAR_HEIGHT};
 // respectively.
 
 pub(super) fn test_services() -> ShellServices {
-    let config = Config::load(&ConfigSources::default());
     // No compiled-in builtin layer in this fixture, so a reload has
-    // nothing to preserve — `ShellServices::builtin` always mirrors the
-    // `ConfigSources::builtin` the config beside it was loaded from.
-    let builtin = Vec::new();
+    // nothing to preserve. `ShellServices::config_and_builtin` is the
+    // constructor that keeps `config` and `builtin` from disagreeing
+    // (its doc comment has the full rationale) and every other fixture
+    // in this crate builds the pair through it — but that does NOT mean
+    // every `ShellServices` here mirrors the two: `reload.rs`'s
+    // `config_with_theme` call sites assign `services.config` directly,
+    // mid-test, to drive `apply_reload` alone, which never reads
+    // `builtin` — mirroring there would be inert, not wrong. Anyone
+    // adding a reload (`reload::load_config`) assertion at one of those
+    // sites must build a real pair first, or it would silently model a
+    // shell whose reload deletes its own config.
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     // The startup ordering `main.rs` uses (`register_pick_actions` right
@@ -287,8 +295,7 @@ pub(super) fn filter_is_focused(
 /// direct to `ctrl+alt+arrows`), so this isolated binding is the way
 /// tests exercise a pending keystroke at all.
 pub(super) fn test_services_with_gg_binding() -> ShellServices {
-    let config = Config::load(&ConfigSources::default());
-    let builtin = Vec::new();
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     registry

@@ -1098,8 +1098,7 @@ fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) 
 /// (last-exact-match-wins), this must fully shadow the builtin
 /// `palette::toggle` binding for that key.
 fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
-    let config = Config::load(&ConfigSources::default());
-    let builtin = Vec::new();
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     let mod_alias = default_mod();
@@ -1275,7 +1274,12 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
     .unwrap();
     let scopes =
         LayerDoc::builtin("scopes", "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n").unwrap();
-    services.config = Config::load(&ConfigSources {
+    // Finding 1 (post-display-fixes piece 1): this fixture used to load
+    // `config` from a non-empty builtin while leaving `test_services()`'s
+    // empty `builtin` in place — harmless today (nothing here reloads),
+    // but a false pairing all the same. `config_and_builtin` makes it
+    // impossible to get wrong.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
             datasets,
