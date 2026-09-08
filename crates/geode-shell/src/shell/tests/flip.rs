@@ -177,6 +177,52 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
     );
 }
 
+/// Phase 4b M8: a placeholder occupant (nothing has opened on that tile
+/// yet) never submits a query and never arrives — a barrier that waited
+/// on it would sit open until `FLIP_DEADLINE` on every single scope
+/// change, for a tile that was never going to answer. `visible_tile_keys`
+/// must skip any occupant whose `kind` is `"placeholder"`.
+#[gpui::test]
+fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+
+    // The first `ctrl-v` only creates the root tile (nothing exists yet
+    // to split); the second actually splits it in two, both real "rec"
+    // occupants (the recorder is this fixture's default kind) once
+    // `ensure_occupants` runs on the next render.
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let tiles: Vec<TileId> =
+        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 2, "one split makes two tiles");
+
+    // Downgrade the second tile's occupant to "placeholder" in place —
+    // `visible_tile_keys` only ever reads `TileOccupant::kind`, so this
+    // is exactly the state "nothing has opened on this tile yet" without
+    // needing to reconstruct a real `PlaceholderFactory` occupant.
+    let placeholder_tile = tiles[1];
+    shell.update(&mut vcx, |s, _cx| {
+        s.occupants.get_mut(&placeholder_tile).unwrap().kind = "placeholder";
+    });
+
+    let mut keys = Vec::new();
+    shell.read_with(&vcx, |s, _| s.visible_tile_keys(&mut keys));
+    assert_eq!(
+        keys,
+        vec![QueryKey(tiles[0].0)],
+        "the placeholder tile must not be in the barrier's key set"
+    );
+}
+
 /// F2 (final fix wave): the observer-order invariant stated in
 /// `ShellView::new`'s `cx.observe_in` comment, `on_frame_changed`'s
 /// `open_flip` branch, and `Frame::open_flip`'s own doc — the shell's

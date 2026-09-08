@@ -104,12 +104,22 @@ impl ShellView {
     /// fresh every time either (the caller passes its own scratch `Vec`).
     pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
         out.clear();
+        // Phase 4b M8: a placeholder occupant (nothing has opened on
+        // this tile yet) never submits a query and never arrives, so a
+        // barrier that waited on it would sit open until `FLIP_DEADLINE`
+        // every single time — the placeholder is filtered out here
+        // rather than counted as a tile the barrier should wait for.
+        let has_real_occupant = |id: &TileId| {
+            self.occupants
+                .get(id)
+                .is_some_and(|o| o.kind != "placeholder")
+        };
         let ws = self.services.workspaces.active();
         out.extend(
             ws.tree()
                 .tiles()
                 .into_iter()
-                .filter(|id| self.occupants.contains_key(id))
+                .filter(has_real_occupant)
                 .map(|id| QueryKey(id.0)),
         );
         for (_, dock) in ws.docks().iter() {
@@ -118,7 +128,7 @@ impl ShellView {
                     dock.tree()
                         .tiles()
                         .into_iter()
-                        .filter(|id| self.occupants.contains_key(id))
+                        .filter(has_real_occupant)
                         .map(|id| QueryKey(id.0)),
                 );
             }
