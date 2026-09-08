@@ -145,6 +145,17 @@ pub mod placeholder {
     use gpui::{Context, Render, div};
     use gpui_component::ActiveTheme as _;
 
+    /// The kind string a placeholder occupant's `TileOccupant::kind`
+    /// carries (Phase 4b Task 1 fix round 1, MIN-7) — named here, next
+    /// to the factory that is its one source of truth, so every other
+    /// site that must recognize a placeholder occupant (`PlaceholderFactory
+    /// ::kind`, `PlaceholderFactory::create`'s `TileOccupant`, and
+    /// `shell::occupants`'s two `visible_tile_keys`/`current_tiles`
+    /// filters) names this constant instead of repeating the bare string
+    /// literal `"placeholder"` — a rename of one becomes a compile error
+    /// everywhere else instead of a silent behaviour change.
+    pub const PLACEHOLDER_KIND: &str = "placeholder";
+
     pub struct PlaceholderFactory;
 
     struct PlaceholderView {
@@ -189,7 +200,7 @@ pub mod placeholder {
 
     impl ModuleFactory for PlaceholderFactory {
         fn kind(&self) -> &'static str {
-            "placeholder"
+            PLACEHOLDER_KIND
         }
         fn register_actions(&self, _: &mut ActionRegistry) {}
         fn create(
@@ -202,7 +213,7 @@ pub mod placeholder {
         ) -> TileOccupant {
             let view = cx.new(|_| PlaceholderView { tile });
             TileOccupant {
-                kind: "placeholder",
+                kind: PLACEHOLDER_KIND,
                 view: view.into(),
                 content: Box::new(PlaceholderContent),
             }

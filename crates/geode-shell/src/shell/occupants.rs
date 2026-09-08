@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use gpui::{App, Context, Window};
 
 use crate::module::ModuleFactory as _;
+use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::session;
 use crate::tiling::TileId;
 use geode_core::query::{QueryKey, QueryOutcome};
@@ -25,7 +26,7 @@ impl ShellView {
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
         self.occupants
             .iter()
-            .filter(|(_, o)| o.kind != "placeholder")
+            .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
             .map(|(id, o)| {
                 (
                     id.0,
@@ -112,7 +113,7 @@ impl ShellView {
         let has_real_occupant = |id: &TileId| {
             self.occupants
                 .get(id)
-                .is_some_and(|o| o.kind != "placeholder")
+                .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
         };
         let ws = self.services.workspaces.active();
         out.extend(

@@ -137,6 +137,23 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
 
+    // Phase 4b Task 1 fix round 1, MIN-6: `!barrier_open()` and
+    // `versions().flip` bumping both come straight out of `Frame::
+    // release` and hold whether or not the tick's `cx.notify()` actually
+    // runs — deleting that `cx.notify()` call left this test green while
+    // no tile's `on_frame_changed` would ever run, so nothing promotes
+    // its staged snapshot until some unrelated notify happens to come
+    // along. An observer registered on `frame` itself, counted here,
+    // pins the notification actually reaching someone.
+    let notified = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let n = notified.clone();
+    vcx.update(|_, cx| {
+        cx.observe(&frame, move |_frame, _cx| {
+            n.set(n.get() + 1);
+        })
+        .detach();
+    });
+
     // Backdated directly through `open_flip`'s own explicit `Instant`
     // rather than driven through a real scope mutation + a real wait:
     // gpui's test dispatcher fast-forwards its own *virtual* clock (what
@@ -174,6 +191,12 @@ fn the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline(cx: &mut gpui::
     assert_eq!(
         frame.read_with(&vcx, |f, _| f.versions().flip),
         flip_before + 1
+    );
+    assert_eq!(
+        notified.get(),
+        1,
+        "the sweep's own cx.notify() must reach a real frame observer, \
+         not just move Frame::release's own counters"
     );
 }
 
@@ -220,6 +243,71 @@ fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::T
         keys,
         vec![QueryKey(tiles[0].0)],
         "the placeholder tile must not be in the barrier's key set"
+    );
+}
+
+/// Phase 4b Task 1 fix round 1, MIN-7: `visible_tile_keys` filters the
+/// active *tree* and each visible *dock* with the same `has_real_
+/// occupant` closure — the test above only exercises the tree branch, so
+/// a change that duplicated the filter per call site (rather than
+/// sharing the one closure the way the code does today) and reverted
+/// only the dock branch's copy would survive it. This exercises the dock
+/// branch directly: one real tile in the main tree, one placeholder
+/// parked in the (now-visible) left dock.
+#[gpui::test]
+fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_set(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+
+    // Two real tiles in the main tree, same as the tree-branch test.
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let main_tile = shell.read_with(&vcx, |s, _| {
+        s.services.workspaces.active().tree().tiles()[0]
+    });
+
+    // Park the (focused, second) tile in the left dock — `dock::
+    // move_left` shows the dock and moves the focused tile into it in
+    // one action (`tiling::workspaces`'s own
+    // `move_from_main_parks_the_tile_shows_the_dock_and_focuses_it`).
+    vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.dispatch(&ActionId("dock::move_left".to_string()), None, window, cx);
+        });
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let (dock_visible, dock_tile) = shell.read_with(&vcx, |s, _| {
+        let ws = s.services.workspaces.active();
+        let dock = ws.docks().get(DockSide::Left);
+        (dock.visible(), dock.tree().tiles()[0])
+    });
+    assert!(dock_visible, "dock::move_left must show the dock");
+
+    // Downgrade the dock's occupant to "placeholder" in place — same
+    // trick the tree-branch test above uses.
+    shell.update(&mut vcx, |s, _cx| {
+        s.occupants.get_mut(&dock_tile).unwrap().kind = "placeholder";
+    });
+
+    let mut keys = Vec::new();
+    shell.read_with(&vcx, |s, _| s.visible_tile_keys(&mut keys));
+    assert_eq!(
+        keys,
+        vec![QueryKey(main_tile.0)],
+        "a placeholder occupant parked in a visible dock must not be in \
+         the barrier's key set either"
     );
 }
 
