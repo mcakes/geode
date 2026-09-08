@@ -3393,12 +3393,10 @@ run_mutation "hot_reload: MAJ-6 — the reload path persists through request_lev
 
 run_mutation "diagnostics: MAJ-6 — watch() no longer requests the first catalog" \
   crates/geode-shell/src/diagnostics.rs \
-  '    pub fn watch(&mut self) {
-        self.watchers += 1;
-        self.pending_catalog_request = true;
+  '        self.pending_catalog_request = true;
+        true
     }' \
-  '    pub fn watch(&mut self) {
-        self.watchers += 1;
+  '        false
     }' \
   geode-shell watching_itself_also_requests_the_first_catalog
 
