@@ -158,6 +158,13 @@ pub struct ViewSpec {
     pub grouping: Vec<String>,
     pub sort: Vec<SortKey>,
     pub presentation: BTreeMap<String, ColumnPresentation>,
+    /// Set by a top-level `default = "<name>"` key in the views doc
+    /// (Phase 4b M6) — at most one view carries `true`. A tile that
+    /// doesn't restore a `view` from its session record picks this one;
+    /// with no `default` key at all, `from_doc` instead sorts every view
+    /// by name so "the first one" is at least deterministic across a
+    /// `toml` `preserve_order` file's own author-chosen order.
+    pub is_default: bool,
 }
 
 impl ViewSpec {
@@ -282,9 +289,18 @@ impl ViewSpec {
     pub fn from_doc(doc: &MergedDoc) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
         let mut diags = Vec::new();
+        // Phase 4b M6: a top-level `default = "<name>"` key names which
+        // view a tile with nothing restored should open on — captured
+        // ahead of the main loop below since (unlike every view itself)
+        // its value is a bare string, not a table.
+        let default_name = doc
+            .value
+            .get("default")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
 
         for (name, value) in &doc.value {
-            if name == "config_version" {
+            if name == "config_version" || name == "default" {
                 continue;
             }
             let bad = |m: String| Diagnostic {
@@ -471,6 +487,26 @@ impl ViewSpec {
             out.push(view);
         }
 
+        // Phase 4b M6: with no `default` key, sort by name so "the first
+        // view" (`BlotterTile::new`'s fallback when nothing is restored)
+        // is deterministic regardless of file order — `toml`'s
+        // `preserve_order` feature means that would otherwise be
+        // whatever order the author happened to write the views in. A
+        // `default` key makes that ordering moot (the fallback finds the
+        // flagged view directly), so file order is left alone instead.
+        match &default_name {
+            Some(default_name) => match out.iter_mut().find(|v| &v.name == default_name) {
+                Some(v) => v.is_default = true,
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!("default view '{default_name}' does not exist"),
+                }),
+            },
+            None => out.sort_by(|a, b| a.name.cmp(&b.name)),
+        }
+
         (out, diags)
     }
 }
@@ -587,6 +623,46 @@ grain = "instrument"
         let (views, diags) = ViewSpec::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
         assert!(diags.is_empty(), "{diags:?}");
         assert!(views.iter().any(|v| v.name == "desk_risk"));
+    }
+
+    #[test]
+    fn views_with_no_default_key_come_out_sorted_by_name() {
+        // Phase 4b M6: file order is `b` then `a` — with `toml`'s
+        // `preserve_order` feature on, that would otherwise be the order
+        // `from_doc` returns them in, making "the first view" (a fresh
+        // tile's default) depend on where the author happened to write
+        // each view rather than on anything deliberate.
+        let text = r#"
+[b]
+dataset = "risk_snapshot"
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(views.iter().all(|v| !v.is_default));
+    }
+
+    #[test]
+    fn a_top_level_default_key_flags_that_view_and_leaves_file_order_alone() {
+        let text = r#"
+default = "b"
+
+[b]
+dataset = "risk_snapshot"
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let b = views.iter().find(|v| v.name == "b").expect("view b");
+        assert!(b.is_default);
+        let a = views.iter().find(|v| v.name == "a").expect("view a");
+        assert!(!a.is_default);
     }
 
     #[test]

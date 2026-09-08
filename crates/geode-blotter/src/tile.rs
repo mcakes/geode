@@ -148,7 +148,20 @@ impl BlotterTile {
         let view_name = restored
             .and_then(|t| t.get("view").and_then(|v| v.as_str()).map(str::to_string))
             .filter(|n| views.borrow().iter().any(|v| &v.name == n))
-            .or_else(|| views.borrow().first().map(|v| v.name.clone()))
+            .or_else(|| {
+                // Phase 4b M6: the view flagged `default` (a top-level
+                // `default = "<name>"` key in the views doc) wins over
+                // "just take the first one" — `ViewSpec::from_doc` only
+                // sorts by name when no view carries the flag, so this
+                // is deterministic either way, but an explicit default
+                // must win when the author bothered to name one.
+                let views = views.borrow();
+                views
+                    .iter()
+                    .find(|v| v.is_default)
+                    .or_else(|| views.first())
+                    .map(|v| v.name.clone())
+            })
             .unwrap_or_default();
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
