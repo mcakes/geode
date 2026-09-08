@@ -715,7 +715,7 @@ mod rebuild_generations_tests {
     }
 
     #[test]
-    #[should_panic]
+    #[should_panic(expected = "must equal a rebuild")]
     fn assert_generations_match_tables_catches_a_duplicate_row() {
         let (_d, store) = store_with_generations_table();
         store

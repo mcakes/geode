@@ -94,6 +94,16 @@ fn partition_predicate(partitions: &[Partition]) -> String {
 /// it. Literals are quoted the same way `partition_predicate` quotes
 /// them: these values come from the catalog and the sentinel, not user
 /// input.
+///
+/// `select distinct v.*`, not `select v.*`: the `where not exists` guard
+/// is correlated against `generations` as of statement start, so two
+/// identical rows *within* one `values` list both pass it and both
+/// insert. `PublishRequest::partitions` is a public field on a public
+/// type, so a caller repeating a partition is not this crate's to rule
+/// out by construction -- `distinct` closes it instead. Unreachable
+/// through `load_file` today (`partitions` derives from
+/// `distinct_books`), which is exactly why nothing here would have
+/// caught it.
 fn generation_summary_insert(req: &PublishRequest) -> String {
     let dataset = req.dataset.replace('\'', "''");
     let time = req.source_time.to_rfc3339();
@@ -115,7 +125,7 @@ fn generation_summary_insert(req: &PublishRequest) -> String {
         .join(", ");
     format!(
         "insert into generations
-         select v.* from (values {rows}) v(dataset, batch, book, gen_id, source_time)
+         select distinct v.* from (values {rows}) v(dataset, batch, book, gen_id, source_time)
          where not exists (
              select 1 from generations g
              where g.dataset = v.dataset and g.batch = v.batch
@@ -288,6 +298,40 @@ mod tests {
                 duckdb::params![book, pnl, batch, file_id],
             )
             .unwrap();
+    }
+
+    /// A staging table shaped like `staging_position` plus one extra
+    /// column, so `insert into {live or archive} select *, {gen}, '{time}'
+    /// from {staging}` fails with a column-count mismatch -- the "table
+    /// has N columns but N+1 values were supplied" class `CLAUDE.md`
+    /// warns about after a schema change -- *inside* the publish
+    /// transaction, after `begin`. `staging_table = "no_such_table"`
+    /// fails at the row-count query that runs before any `begin`, which
+    /// proves nothing about whether the summary insert is covered by the
+    /// rollback; this fails at the statement immediately before it.
+    fn stage_with_a_mismatched_column_count(
+        store: &Store,
+        book: &str,
+        pnl: f64,
+        batch: &str,
+        file_id: i64,
+    ) -> &'static str {
+        store
+            .writer()
+            .execute_batch(
+                "create table if not exists staging_position_bad(
+                     book varchar, position_ref varchar, daily_trading_pnl double,
+                     batch varchar, source_file_id bigint, extra_col double);",
+            )
+            .unwrap();
+        store
+            .writer()
+            .execute(
+                "insert into staging_position_bad values (?, 'POS1', ?, ?, ?, 0.0)",
+                duckdb::params![book, pnl, batch, file_id],
+            )
+            .unwrap();
+        "staging_position_bad"
     }
 
     fn request(batch: &str, book: &str, generation: i64, t: DateTime<Utc>) -> PublishRequest {
@@ -550,6 +594,12 @@ mod tests {
 
     #[test]
     fn a_failed_publish_leaves_live_untouched() {
+        // Review round 1 (MAJ-1): `staging_table = "no_such_table"` fails
+        // at the row-count query that runs *before* `begin`, so this used
+        // to prove nothing about the transaction at all -- the publish
+        // never even reached it. A column-count mismatch fails at the
+        // `insert into {live} select *, …` statement itself, the one
+        // inside `begin; … commit;`.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(
@@ -559,7 +609,8 @@ mod tests {
         .unwrap();
 
         let mut bad = request("BK000", "BK000", 2, ts("2026-08-31T07:00:00Z"));
-        bad.staging_table = "no_such_table".into();
+        bad.staging_table =
+            stage_with_a_mismatched_column_count(&store, "BK000", 42.0, "BK000", 2).into();
         bad.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
         assert!(publish_file(store.writer(), &bad).is_err());
 
@@ -651,6 +702,12 @@ mod tests {
 
     #[test]
     fn a_failed_publish_leaves_no_summary_row() {
+        // Review round 1 (MAJ-1): the mutation must fail *inside* the
+        // transaction (the `insert into {live} select *, …` statement),
+        // not before `begin` at the staging-table row-count query --
+        // `staging_table = "no_such_table"` proved nothing about the
+        // rollback covering the summary insert, since the publish never
+        // reached the transaction at all.
         let (_d, store) = fixture();
         stage(&store, "BK000", 10.0, "BK000", 1);
         publish_file(
@@ -660,7 +717,8 @@ mod tests {
         .unwrap();
 
         let mut bad = request("BK000", "BK000", 2, ts("2026-08-31T07:00:00Z"));
-        bad.staging_table = "no_such_table".into();
+        bad.staging_table =
+            stage_with_a_mismatched_column_count(&store, "BK000", 42.0, "BK000", 2).into();
         bad.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
         assert!(publish_file(store.writer(), &bad).is_err());
 
@@ -669,6 +727,43 @@ mod tests {
             generation_row_count(&store),
             1,
             "the failed publish's rollback must cover the summary insert too"
+        );
+    }
+
+    #[test]
+    fn a_failed_archived_only_publish_leaves_no_summary_row() {
+        // The archived-only branch has its own `begin; … commit;` now
+        // (review round 1, MAJ-1) and had no failure test at all: a
+        // column-count mismatch on the `insert into {archive} select *,
+        // …` statement must roll back the archive insert and never reach
+        // the summary insert that follows it in the same `execute_batch`.
+        let (_d, store) = fixture();
+        stage(&store, "BK000", 10.0, "BK000", 1);
+        publish_file(
+            store.writer(),
+            &request("BK000", "BK000", 1, ts("2026-08-30T07:00:00Z")),
+        )
+        .unwrap();
+        let before_archive = count(&store, "risk_snapshot_position_archive");
+
+        // Older than live, so this takes the `superseded` (archived-only)
+        // branch rather than the normal one.
+        let mut bad = request("BK000", "BK000", 2, ts("2026-08-25T07:00:00Z"));
+        bad.staging_table =
+            stage_with_a_mismatched_column_count(&store, "BK000", 42.0, "BK000", 2).into();
+        bad.live_source_time = Some(ts("2026-08-30T07:00:00Z"));
+        assert!(publish_file(store.writer(), &bad).is_err());
+
+        assert_eq!(
+            count(&store, "risk_snapshot_position_archive"),
+            before_archive,
+            "the failed archive insert must not partially land"
+        );
+        assert_summary_matches(&store);
+        assert_eq!(
+            generation_row_count(&store),
+            1,
+            "the failed generation 2 must not appear in the summary"
         );
     }
 
