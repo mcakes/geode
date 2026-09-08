@@ -4084,6 +4084,12 @@ run_mutation "diagnostics tile: set_section replaces the cached header text" \
   '        let _ = header_text_for(section);' \
   geode-diagnostics the_header_text_is_cached_across_paints_and_replaced_on_section_change
 
+run_mutation "diagnostics tile: since is seeded from the ring's current latest_seq, not 0" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            since: initial_since,' \
+  '            since: 0,' \
+  geode-diagnostics a_freshly_opened_tile_does_not_claim_records_it_never_had
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
