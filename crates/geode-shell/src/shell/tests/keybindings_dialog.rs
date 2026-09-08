@@ -567,22 +567,32 @@ fn the_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpui::TestAp
 /// built but never reached by the render tree would look identical to
 /// one that works, from the state assertions alone.
 #[gpui::test]
-fn the_mode_pill_paints_in_both_modes(cx: &mut gpui::TestAppContext) {
+fn the_mode_pill_paints_the_mode_it_is_actually_in(cx: &mut gpui::TestAppContext) {
     let (_shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
-    let normal = cx.debug_bounds("dialog-mode-pill");
+    let normal = cx.debug_bounds("dialog-mode-pill-normal");
     assert!(
         normal.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
-        "the mode pill should paint in normal mode, got {normal:?}"
+        "the pill should paint, labelled 'normal', in normal mode, got {normal:?}"
+    );
+    assert!(
+        cx.debug_bounds("dialog-mode-pill-filter").is_none(),
+        "and must not be labelled 'filter' there"
     );
 
     cx.simulate_keystrokes("/");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let filter = cx.debug_bounds("dialog-mode-pill");
+    let filter = cx.debug_bounds("dialog-mode-pill-filter");
     assert!(
         filter.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
-        "and in filter mode, got {filter:?}"
+        "and 'filter' in filter mode, got {filter:?}"
+    );
+    assert!(
+        cx.debug_bounds("dialog-mode-pill-normal").is_none(),
+        "with the 'normal' label gone — a pill that paints the same label \
+         in both modes, or swaps them, is the failure this catches and a \
+         non-zero-bounds assertion would not"
     );
 }
 
@@ -745,5 +755,120 @@ fn a_selecting_click_in_normal_mode_leaves_the_filter_blurred(cx: &mut gpui::Tes
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
         "a click in normal mode must not focus the filter behind the user's back"
+    );
+}
+
+/// Clearing the query re-expands the list under a viewport that is still
+/// parked wherever the filtered list left it, so the `ClearQuery` rung
+/// has to move the scroll as well as the index — the same pairing
+/// `ShellView::new`'s query-change subscription makes (`set_query` then
+/// `scroll_to_item(0)`), which cannot help here because `set_value` is
+/// deliberately silent and never fires `InputEvent::Change`. Asserting
+/// the index alone would pass with the viewport left behind and row 0
+/// off screen, so this checks the row actually painted inside the list —
+/// `picker`'s `keyboard_navigation_past_visible_rows_scrolls_the_
+/// selection_into_view` standard, in the non-virtualizing form the
+/// palette's own version uses (this list lays every row out, so bounds
+/// existing is not the proof; intersecting the viewport is).
+#[gpui::test]
+fn clearing_the_query_scrolls_back_to_the_top(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    // A query almost every row matches, so there is still far more than
+    // one screenful (VISIBLE_ROWS = 10) to scroll through under it.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("e");
+    cx.run_until_parked();
+    let matches = shell.read_with(&cx, |shell, _| {
+        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+        let state = shell.keybindings.as_ref().expect("dialog open");
+        keybindings_view::visible_rows(state, &rows).len()
+    });
+    assert!(
+        matches > 20,
+        "this test needs more than one screenful under the filter to \
+         scroll at all (got {matches})"
+    );
+
+    let downs = vec!["down"; 20].join(" ");
+    cx.simulate_keystrokes(&downs);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        20,
+        "sanity: the selection walked 20 rows down the filtered list"
+    );
+
+    // Escape twice: out of filter mode (query kept), then the
+    // `ClearQuery` rung.
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().selected),
+        0,
+        "sanity: clearing the query resets the selection to the top"
+    );
+
+    cx.update(|window, cx| {
+        window.refresh();
+        let _ = window.draw(cx);
+    });
+    let list_bounds = cx
+        .debug_bounds("keybindings-list")
+        .expect("the row list container should have painted");
+    let row_bounds = cx
+        .debug_bounds("keybindings-row-0")
+        .expect("row 0 should still be part of the layout tree (no virtualization)");
+    assert!(
+        list_bounds.intersects(&row_bounds),
+        "row 0 {row_bounds:?} should be scrolled back into the visible \
+         list viewport {list_bounds:?} when the query is cleared, not \
+         left above it with only the index having changed"
+    );
+}
+
+/// Escape means escape whatever else is held down. Normal mode claims
+/// every key it does not understand, so a `shift+escape` that only the
+/// *bare* guard recognised would be swallowed and do nothing at all —
+/// where before this dialog went modal it fell through to
+/// `handle_key_down`'s close, which never looked at modifiers
+/// (`input.rs`: `event.keystroke.key == "escape"`). A key that visibly
+/// does nothing is the defect class this whole interaction model exists
+/// to remove, so both rungs reachable from here take a modified escape
+/// exactly as they take a bare one.
+#[gpui::test]
+fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("theme");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("shift-escape");
+    let (mode, query) = shell.read_with(&cx, |s, _| {
+        let k = s.keybindings.as_ref().unwrap();
+        (k.mode, k.query.clone())
+    });
+    assert_eq!(
+        mode,
+        crate::dialogmode::DialogMode::Normal,
+        "shift+escape must leave filter mode, exactly as escape does"
+    );
+    assert_eq!(query, "theme", "and keep the query applied");
+
+    cx.simulate_keystrokes("ctrl-escape");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "",
+        "ctrl+escape must clear the query, exactly as escape does"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and not close on that rung"
+    );
+
+    cx.simulate_keystrokes("alt-escape");
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "alt+escape on the last rung must close the dialog, not be \
+         swallowed by normal mode's claim-and-drop"
     );
 }

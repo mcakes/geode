@@ -109,8 +109,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, FontWeight, HighlightStyle, Hsla,
-    MouseButton, StyledText, Window, div, px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, FontWeight, HighlightStyle,
+    Hsla, MouseButton, StyledText, Window, div, px,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -616,7 +616,15 @@ fn handle_key(
     }
 
     if state.mode == DialogMode::Normal {
-        if ks.mods == Modifiers::NONE && ks.key == "escape" {
+        // Modifiers are ignored on `escape` here and in filter mode
+        // below: `handle_key_down`'s own close never looked at them
+        // (`event.keystroke.key == "escape"`), so a bare-only guard would
+        // turn `shift+escape` from "close the dialog" into a key normal
+        // mode claims and drops — visibly nothing. The one place a
+        // modified escape still differs is rebind capture, which treats
+        // it as a capturable keystroke on purpose (see
+        // [`press_while_listening`]) and has already returned above.
+        if ks.key == "escape" {
             // `has_previous_stage: false` — this dialog is one flat list,
             // with no nested stage to step back into (the picker's own
             // two-stage shape is what that rung exists for). The
@@ -629,6 +637,17 @@ fn handle_key(
                 EscapeStep::ClearQuery => {
                     state.query.clear();
                     state.selected = 0;
+                    // The viewport has to follow the selection here for
+                    // the same reason it does on every motion: clearing a
+                    // filter re-expands the list under a scroll offset
+                    // that is still parked where the *filtered* list left
+                    // it, so row 0 would be above the top of the screen
+                    // with only the index having moved. `ShellView::new`'s
+                    // query-change subscription pairs `set_query` with
+                    // this same call for exactly that reason, and it
+                    // cannot cover this path: `set_value` deliberately
+                    // emits no `InputEvent::Change`.
+                    shell.keybindings_scroll.scroll_to_item(0);
                     // The `Input` owns the text; clearing only the
                     // mirrored copy would leave the old query waiting in
                     // the field for the next `/`.
@@ -658,16 +677,7 @@ fn handle_key(
                 input.read(cx).focus_handle(cx).focus(window, cx);
             }
             NormalCommand::Commit => {
-                if visible.is_empty() {
-                    return true;
-                }
-                state.listening = Some(Vec::new());
-                // Already blurred in normal mode; kept for the same
-                // reason the filter-mode path below does it — capture's
-                // contract is "the shell root owns the keys", stated at
-                // every entrance to it rather than inferred from where
-                // focus happened to be.
-                shell.focus_handle.focus(window, cx);
+                begin_capture(state, visible.len(), &shell.focus_handle, window, cx);
             }
             // The verbs Task 4 fills in (`d` unbind, `r` reset). Listed
             // rather than left to the catch-all so the seam is visible:
@@ -685,12 +695,14 @@ fn handle_key(
 
     // ---- Filter mode: the pre-modal behaviour, unchanged -------------
 
-    if ks.mods == Modifiers::NONE && ks.key == "escape" {
+    if ks.key == "escape" {
         // The ladder's first rung ([`EscapeStep::LeaveFilter`]), which
         // must be claimed (`true`) — falling through would close the
         // whole dialog on the escape that was only meant to leave the
         // search. The query stays applied; blurring is what makes the
-        // letters verbs again.
+        // letters verbs again. Modifier-agnostic for the reason given at
+        // the normal-mode guard above: a `shift+escape` that skipped
+        // straight to the close rung would lose the user's filter.
         state.mode = DialogMode::Normal;
         shell.focus_handle.focus(window, cx);
         cx.notify();
@@ -698,15 +710,7 @@ fn handle_key(
     }
 
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        if visible.is_empty() {
-            return true;
-        }
-        state.listening = Some(Vec::new());
-        // Hand focus back to the shell root so the capture sees raw
-        // keystrokes: with the filter focused, a bare letter would be
-        // consumed as text by gpui-component's `Input` before ever
-        // reaching this handler (see the module doc's "Rebind capture").
-        shell.focus_handle.focus(window, cx);
+        begin_capture(state, visible.len(), &shell.focus_handle, window, cx);
         cx.notify();
         return true;
     }
@@ -740,6 +744,41 @@ fn handle_key(
     }
 
     false
+}
+
+/// Start a rebind capture on the selected row: the body both modes'
+/// `enter` shares, and the one place the capture's focus contract is
+/// stated.
+///
+/// Hands focus to the shell root so the capture sees raw keystrokes —
+/// with the filter focused, a bare letter would be consumed as text by
+/// gpui-component's `Input` before ever reaching [`handle_key`] (see the
+/// module doc's "Rebind capture"). It does that even from normal mode,
+/// where the field is already blurred: the contract is "the shell root
+/// owns the keys while capturing", asserted at every entrance rather than
+/// inferred from wherever focus happened to be.
+///
+/// A no-op on an empty list — `enter` must not start listening on a row
+/// that is not there (the "no matches" line is not a row).
+///
+/// Extracted rather than inlined twice because Task 4 edits the
+/// normal-mode `match` this is called from: two copies of a body that
+/// must stay identical would be a drift risk at exactly the wrong
+/// moment. Takes `state` and the focus handle separately rather than
+/// `&mut ShellView`, because every caller is already holding a `&mut`
+/// borrow of `shell.keybindings` when it gets here.
+fn begin_capture(
+    state: &mut KeybindingsState,
+    visible_len: usize,
+    shell_focus: &FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    if visible_len == 0 {
+        return;
+    }
+    state.listening = Some(Vec::new());
+    shell_focus.focus(window, cx);
 }
 
 /// Selection/listening logic for a real mouse click on the row for

@@ -499,6 +499,17 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
 /// these dialogs wears ([`super::keybindings_view::key_chip`]'s own
 /// `muted`/`muted_foreground`), because normal is the resting state, not
 /// an alert.
+///
+/// The labels are lowercase where the spec writes `NORMAL`/`FILTER`:
+/// deliberate, and a user ruling — lowercase is what this crate's key
+/// rendering already uses everywhere (`palette::render_keystroke`'s
+/// `ctrl+k`), and a shouted badge beside those chips would read as a
+/// different design system.
+///
+/// The label rides in the `debug_selector` too, so a test can assert
+/// *which* mode painted rather than only that something did — a pill
+/// showing the same label in both modes is exactly the failure a
+/// non-zero-bounds assertion cannot see.
 pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let (label, fg, bg) = match mode {
@@ -514,7 +525,7 @@ pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
         .py_0p5()
         .rounded(px(4.))
         .flex_shrink_0()
-        .debug_selector(|| "dialog-mode-pill".to_string())
+        .debug_selector(move || format!("dialog-mode-pill-{label}"))
         .child(label)
         .into_any_element()
 }
