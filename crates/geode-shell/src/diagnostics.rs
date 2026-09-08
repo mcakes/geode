@@ -98,24 +98,51 @@ pub struct DatasetState {
 /// How many batches [`Diagnostics::config_history`] keeps, latest first.
 pub const CONFIG_HISTORY_CAP: usize = 16;
 
+/// How many entries [`Diagnostics::data_diagnostics`] keeps, oldest
+/// first (a plain append cap, not "batches" — see that field's doc).
+pub const DATA_DIAGNOSTICS_CAP: usize = 256;
+
 /// The shell-owned diagnostics gatherer (spec §4.4). See the module doc
 /// for the version-bump discipline every mutator here follows.
 pub struct Diagnostics {
     pub sources: BTreeMap<String, SourceState>,
     pub datasets: BTreeMap<String, DatasetState>,
-    /// The current config diagnostics — the latest load or reload's
+    /// The current CONFIG-LOAD diagnostics — the latest load or reload's
     /// batch, whole (Phase 4b Task 4 fix round 1, MAJ-5: was a capped,
     /// ever-appending log; a reload that changed nothing used to
     /// re-append its own unchanged batch, inflating
     /// [`Self::summary`]'s error count every time `:level`'s own persist
     /// triggered a reload). [`Self::note_config`] *replaces* this
     /// wholesale; [`Self::config_history`] is the append-only log now.
+    ///
+    /// Fed *only* by config load/reload (`ShellView::new`'s startup call
+    /// and `hot_reload::apply_reload`, every reload unconditionally) —
+    /// **not** by the data layer's own diagnostics, which is
+    /// [`Self::data_diagnostics`] (Phase 4b Task 4 fix round 2, NEW-1:
+    /// round 1 fed both populations through this one field via
+    /// `note_config`'s replace semantics, so a data-layer error and a
+    /// later config reload — including the one `:level`'s own persist
+    /// write triggers — silently erased each other from the summary,
+    /// the same false-signal class CRIT-1 was raised under, just the
+    /// opposite direction: a false *negative* instead of a false
+    /// positive). [`Self::summary`] counts errors from both fields.
     pub config: Vec<Diagnostic>,
     /// Every batch [`Self::note_config`] has ever installed into
     /// [`Self::config`], latest first, capped at [`CONFIG_HISTORY_CAP`]
     /// — an audit trail for Task 5's config section, distinct from the
     /// "what's true right now" [`Self::config`] the summary counts.
     pub config_history: VecDeque<(SystemTime, Vec<Diagnostic>)>,
+    /// The data layer's own diagnostics (Phase 4b Task 4 fix round 2,
+    /// NEW-1) — fed by [`Self::note_data_diagnostics`] from the app
+    /// bridge's `DataEvent::Diagnostics` arm (schema/dataset/view
+    /// validation errors at service open, a failed open, or after a
+    /// `Request::ReplaceViews`). A plain append log, oldest first,
+    /// capped at [`DATA_DIAGNOSTICS_CAP`] — unlike [`Self::config`],
+    /// there is no single "current batch" here: `geode-data` reports
+    /// once per condition, not a full snapshot on every event, so
+    /// nothing here would be safe to *replace*. A `Diagnostic` already
+    /// present (by equality) is not re-appended.
+    pub data_diagnostics: VecDeque<(SystemTime, Diagnostic)>,
     pub dropped_events: u64,
     pub restart_required: Option<String>,
     /// A copy of `ShellView::perf`, refreshed by [`Self::refresh_frame_hist`]
@@ -156,6 +183,7 @@ impl Diagnostics {
             datasets: BTreeMap::new(),
             config: Vec::new(),
             config_history: VecDeque::new(),
+            data_diagnostics: VecDeque::new(),
             dropped_events: 0,
             restart_required: None,
             frame_hist: FrameHistogram::new(),
@@ -271,6 +299,36 @@ impl Diagnostics {
         self.version += 1;
     }
 
+    /// The data layer's own diagnostics (Phase 4b Task 4 fix round 2,
+    /// NEW-1) — appended, not replaced: unlike a config load, `geode-data`
+    /// reports once per condition rather than a full snapshot each time,
+    /// so there is no "current batch" to replace here. A `Diagnostic`
+    /// already present (by equality, anywhere in the list) is not
+    /// re-appended and does not bump — the bridge's own `DataEvent::
+    /// Diagnostics` arm can otherwise re-report the same condition (e.g.
+    /// a `Request::ReplaceViews` after an unrelated reload). Capped at
+    /// [`DATA_DIAGNOSTICS_CAP`], oldest dropped first.
+    pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        let mut changed = false;
+        for d in diags {
+            if self
+                .data_diagnostics
+                .iter()
+                .any(|(_, existing)| existing == &d)
+            {
+                continue;
+            }
+            self.data_diagnostics.push_back((at, d));
+            changed = true;
+        }
+        while self.data_diagnostics.len() > DATA_DIAGNOSTICS_CAP {
+            self.data_diagnostics.pop_front();
+        }
+        if changed {
+            self.version += 1;
+        }
+    }
+
     /// The app bridge's running total of events its bounded channel
     /// refused. A no-op (the same total again) does not bump.
     pub fn note_dropped(&mut self, total: u64) {
@@ -328,6 +386,19 @@ impl Diagnostics {
     /// proxy — both are monotonically non-decreasing, so equal on both
     /// means nothing new was recorded. `true` (and a bump) exactly when
     /// the copy happened.
+    ///
+    /// **Known gap (Phase 4b Task 4 fix round 2, NEW-4), accepted as-is:**
+    /// a tick whose only change is a fresh `note_discarded_idle` (an
+    /// idle gap counted, no frame recorded — `perf.rs`) does not copy,
+    /// since that field bumps neither `count()` nor `max_micros()`.
+    /// `discarded_idle` is part of the copied `FrameHistogram` and is
+    /// surfaced by the profiling-gated `perf::dump`, not the default
+    /// overlay, so the practical cost is that Task 5's tile could show a
+    /// stale `discarded_idle` value between two ticks that were
+    /// otherwise identical. The proxy is sound for everything else: both
+    /// fields it does check are monotonic between resets, and a
+    /// `reset()` that leaves both at 0 also leaves nothing worth
+    /// showing.
     pub fn refresh_frame_hist(&mut self, hist: &FrameHistogram) -> bool {
         if self.watchers == 0 {
             return false;
@@ -354,9 +425,26 @@ impl Diagnostics {
     /// caller's own `cx.notify()` runs (same two-step contract every
     /// other entity mutation in this codebase follows: mutate, then
     /// notify at the call site).
-    pub fn watch(&mut self) {
+    ///
+    /// **Returns `true`, always today** (Phase 4b Task 4 fix round 2,
+    /// MIN-6): every call queues a request, so the return value carries
+    /// no information beyond "a request was queued" — its purpose is to
+    /// make that fact visible at the *type* level, not just in this
+    /// comment, so a caller reading the signature is reminded a
+    /// `cx.notify()` is now owed. **This method does not notify by
+    /// itself and cannot** — it has no `Context`. Task 5's `set_visible`
+    /// MUST call `cx.notify()` in the same `diagnostics.update(cx, |d,
+    /// cx| { d.watch(); cx.notify(); })` block, or the queued request
+    /// sits unseen by the bridge's `cx.observe(&diagnostics, ..)` drain
+    /// (registered in `geode-app::bridge::attach`) until some *other*
+    /// mutation happens to notify later. See
+    /// `watch_reaching_the_bridge_drain_requires_the_callers_own_notify`
+    /// (`shell/tests/diagnostics.rs`) for the contract exercised end to
+    /// end through a real bridge.
+    pub fn watch(&mut self) -> bool {
         self.watchers += 1;
         self.pending_catalog_request = true;
+        true
     }
 
     /// The counterpart of [`Self::watch`] — a diagnostics tile went
@@ -434,23 +522,29 @@ impl Diagnostics {
         std::mem::take(&mut self.pending_catalog_request)
     }
 
-    /// `"sources 3 ok · 1 degraded · config 2 errors · 5 dropped"` —
-    /// every segment optional, omitted when its count is zero; `""`
-    /// (never shown by the status bar — `(!s.is_empty()).then_some(..)`'s
-    /// job at the call site) when there is nothing to report at all.
-    /// Cached (see [`Self::summary_cache`]'s own doc comment) keyed on
-    /// `version`; a hit clones an `Rc<str>` refcount, never a buffer.
+    /// `"sources 3 ok · 1 degraded · config 2 errors · data 1 error ·
+    /// 5 dropped"` — every segment optional, omitted when its count is
+    /// zero; `""` (never shown by the status bar — `(!s.is_empty())
+    /// .then_some(..)`'s job at the call site) when there is nothing to
+    /// report at all. Cached (see [`Self::summary_cache`]'s own doc
+    /// comment) keyed on `version`; a hit clones an `Rc<str>` refcount,
+    /// never a buffer.
     ///
     /// The `sources` segment counts only sources with a *real* health
     /// note (`SourceState.health.is_some()`) — a configured-but-not-yet-
     /// reported source is not counted at all (Phase 4b Task 4 fix round
     /// 1, CRIT-1; Task 5's sources section shows it as "no report yet"
-    /// instead). The `config N error(s)` count is `self.config`'s
+    /// instead). `config N error(s)` counts `self.config`'s
     /// [`Severity::Error`] entries — the *current* batch only (MAJ-5),
-    /// not the history. No `restart required: …` segment any more
-    /// (Phase 4b Task 4 fix round 1, MAJ-4): the status bar's own
-    /// `restart_required` segment (`shell/render.rs`) already shows that
-    /// message; embedding it here too duplicated it on screen.
+    /// not the history — and `data N error(s)` counts
+    /// [`Self::data_diagnostics`]' [`Severity::Error`] entries
+    /// separately (Phase 4b Task 4 fix round 2, NEW-1: the two
+    /// populations must never share one count, or a config reload and a
+    /// data-layer error silently erase each other). No
+    /// `restart required: …` segment any more (Phase 4b Task 4 fix
+    /// round 1, MAJ-4): the status bar's own `restart_required` segment
+    /// (`shell/render.rs`) already shows that message; embedding it here
+    /// too duplicated it on screen.
     pub fn summary(&self) -> Rc<str> {
         {
             let cache = self.summary_cache.borrow();
@@ -485,14 +579,31 @@ impl Diagnostics {
             parts.push(format!("sources {}", source_parts.join(" · ")));
         }
 
-        let error_count = self
+        let plural = |n: usize| if n == 1 { "" } else { "s" };
+
+        let config_errors = self
             .config
             .iter()
             .filter(|d| d.severity == Severity::Error)
             .count();
-        if error_count > 0 {
-            let plural = if error_count == 1 { "" } else { "s" };
-            parts.push(format!("config {error_count} error{plural}"));
+        if config_errors > 0 {
+            parts.push(format!(
+                "config {config_errors} error{}",
+                plural(config_errors)
+            ));
+        }
+
+        // NEW-1 (Phase 4b Task 4 fix round 2): counted separately from
+        // `config_errors` above — the two populations are unrelated
+        // (config load vs. the data layer) and must not clobber each
+        // other's count, the exact bug this split fixes.
+        let data_errors = self
+            .data_diagnostics
+            .iter()
+            .filter(|(_, d)| d.severity == Severity::Error)
+            .count();
+        if data_errors > 0 {
+            parts.push(format!("data {data_errors} error{}", plural(data_errors)));
         }
 
         if self.dropped_events > 0 {
@@ -1035,6 +1146,114 @@ mod tests {
             d.config_history.front().unwrap().0,
             SystemTime::UNIX_EPOCH + Duration::from_secs(19),
             "latest batch first"
+        );
+    }
+
+    // --- NEW-1 (fix round 2): note_config and note_data_diagnostics ---
+    // ---                       are two producers, neither clobbers the
+    // ---                       other.
+
+    #[test]
+    fn a_config_reload_does_not_clobber_a_standing_data_diagnostic() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_data_diagnostics(
+            vec![Diagnostic::error(
+                Layer::Builtin,
+                PathBuf::new(),
+                "bad schema",
+            )],
+            SystemTime::UNIX_EPOCH,
+        );
+        d.note_config(
+            vec![Diagnostic::error(Layer::User, PathBuf::new(), "config bad")],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        assert_eq!(
+            d.data_diagnostics.len(),
+            1,
+            "the config-load producer must not touch data_diagnostics"
+        );
+        assert_eq!(d.config.len(), 1);
+        assert_eq!(
+            d.summary().as_ref(),
+            "config 1 error · data 1 error",
+            "both populations are counted, neither erases the other"
+        );
+    }
+
+    #[test]
+    fn a_data_diagnostic_does_not_clobber_a_standing_config_error() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_config(
+            vec![Diagnostic::error(Layer::User, PathBuf::new(), "config bad")],
+            SystemTime::UNIX_EPOCH,
+        );
+        d.note_data_diagnostics(
+            vec![Diagnostic::error(
+                Layer::Builtin,
+                PathBuf::new(),
+                "bad schema",
+            )],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+        );
+        assert_eq!(d.config.len(), 1, "the data producer must not touch config");
+        assert_eq!(d.data_diagnostics.len(), 1);
+    }
+
+    /// The exact NEW-1 scenario: a data-layer error is present, then an
+    /// unrelated config reload runs (e.g. the one `:level`'s own persist
+    /// triggers) — the data error must survive it.
+    #[test]
+    fn a_config_reload_after_a_data_layer_error_keeps_the_error_count() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.note_data_diagnostics(
+            vec![Diagnostic::error(
+                Layer::Builtin,
+                PathBuf::new(),
+                "bad schema",
+            )],
+            SystemTime::UNIX_EPOCH,
+        );
+        assert_eq!(d.summary().as_ref(), "data 1 error");
+        // An unrelated, clean config reload (empty batch — nothing wrong
+        // with the config itself).
+        d.note_config(Vec::new(), SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+        assert_eq!(
+            d.summary().as_ref(),
+            "data 1 error",
+            "the data-layer error must survive an unrelated config reload"
+        );
+    }
+
+    #[test]
+    fn note_data_diagnostics_does_not_reappend_an_identical_entry() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let diag = Diagnostic::error(Layer::Builtin, PathBuf::new(), "bad schema");
+        d.note_data_diagnostics(vec![diag.clone()], SystemTime::UNIX_EPOCH);
+        let v = d.version();
+        d.note_data_diagnostics(vec![diag], SystemTime::UNIX_EPOCH + Duration::from_secs(1));
+        assert_eq!(d.version(), v, "an identical entry is not re-appended");
+        assert_eq!(d.data_diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn data_diagnostics_is_capped_at_two_hundred_fifty_six() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        for i in 0..260u64 {
+            d.note_data_diagnostics(
+                vec![Diagnostic::error(
+                    Layer::Builtin,
+                    PathBuf::new(),
+                    format!("e{i}"),
+                )],
+                SystemTime::UNIX_EPOCH + Duration::from_secs(i),
+            );
+        }
+        assert_eq!(d.data_diagnostics.len(), 256);
+        assert_eq!(
+            d.data_diagnostics.back().unwrap().1.message,
+            "e259",
+            "newest kept at the back"
         );
     }
 }

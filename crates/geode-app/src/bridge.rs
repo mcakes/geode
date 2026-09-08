@@ -447,9 +447,18 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         for d in &diags {
                             tracing::warn!(target: "geode::query", "{d}");
                         }
+                        // NEW-1 (Phase 4b Task 4 fix round 2): the data
+                        // layer's own diagnostics — schema/dataset/view
+                        // validation errors, a failed open, or a
+                        // `Request::ReplaceViews` outcome — go through
+                        // `note_data_diagnostics`, never `note_config`.
+                        // Round 1 routed both through `note_config`,
+                        // whose replace semantics (MAJ-5) meant this and
+                        // a config load/reload silently erased each
+                        // other's diagnostics from the summary.
                         diagnostics.update(cx, |dg, cx| {
                             let before = dg.version();
-                            dg.note_config(diags, SystemTime::now());
+                            dg.note_data_diagnostics(diags, SystemTime::now());
                             if dg.version() != before {
                                 cx.notify();
                             }
@@ -827,6 +836,60 @@ role = "key"
             Some(fresh),
             "the latest tag must be applied"
         );
+    }
+
+    /// MIN-6 (Phase 4b Task 4 fix round 2): `watch()`'s own doc comment
+    /// states the contract — it queues a request but does not (cannot)
+    /// notify by itself, so the caller must `cx.notify()` in the same
+    /// update for the bridge's drain to see it. Exercised end to end
+    /// through the real `attach()`-installed observer and a real
+    /// `DataHandle::for_tests()` receiver: `watch()` + `cx.notify()`
+    /// must produce a `Request::Catalog` on the wire. This is the
+    /// contract Task 5's `set_visible(true)` has to follow.
+    #[gpui::test]
+    fn watch_reaching_the_bridge_drain_requires_the_callers_own_notify(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let window = open_test_window(cx, test_shell_services());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, request_rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+
+        diagnostics.update(&mut vcx, |d, cx| {
+            d.watch();
+            cx.notify();
+        });
+        vcx.run_until_parked();
+
+        match request_rx.try_recv() {
+            Ok(geode_data::Request::Catalog(_)) => {}
+            other => panic!("expected a Request::Catalog on the wire, got {other:?}"),
+        }
     }
 
     /// CRIT-1: a healthy desk — one configured source, no `Health`
