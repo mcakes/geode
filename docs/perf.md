@@ -1014,3 +1014,67 @@ back inside the §7.1 budget with the paint included. That is a
 one-generation database; the headless figures above (68 ms `zzz`,
 133 ms `spx`) were taken through the bench harness on a different
 process and needle, so the display reading is the one of record.
+
+### The generations summary table
+
+`resolve_generations` used to answer "which generation did each
+partition hold at T" by running `select distinct batch, book, gen_id,
+source_time` over **every** grain's archive and live table and
+windowing the union — a full scan of the whole database per as-of
+requery. Measured (§ above, "Phase 4a: the as-of baseline"): 6 ms of
+compile on a one-generation demo database, 15 ms at three generations,
+**543 ms at ~3000 generations** (265M archived rows). It scaled with
+the archive, and a real desk's archive grows all day.
+
+The set of generations is tiny — partitions × retained generations,
+hundreds to low thousands of rows — and every event that changes it is
+already a transaction this crate owns: `publish_file` adds a
+generation, `retention::sweep` removes them. So the generation set is
+now maintained as a table, `generations` (dataset, batch, book, gen_id,
+source_time), inside those same transactions, and `resolve_generations`
+reads it directly by dataset rather than scanning tables at all. The
+data tables stay the truth for *rows*; the summary is the truth for
+*which generations exist*, and it can never disagree with the tables
+because it changes in the same transaction they do.
+`store::ddl::rebuild_generations` rebuilds it from the data tables —
+the migration path for a database written before this table existed,
+and the tests' oracle.
+
+**`crates/geode-data/benches/query.rs`, new `resolve` group**
+(`resolve_generations_50_generations`: a fresh 20,000-row database
+ingested 50 times with the sentinel shifted one hour per pass, timed at
+an instant after every load; criterion, 20 samples, before = base
+commit `1046b0f` — where `resolve_generations` took the table list from
+`history_of` and scanned it — after = this change, same machine):
+
+| Case | before | after |
+|---|---|---|
+| `resolve_generations_50_generations` | 7.545 ms | **709.2 µs** (−90.6%) |
+
+Resolution no longer scales with the archive: at 50 generations the
+table-scan form already cost more than a millisecond of the §7.1
+budget on a 20,000-row database with no archived history to speak of
+beyond the generations themselves; the summary read is a lookup
+against a few-hundred-row table regardless of how large the archive
+behind it grows.
+
+**The two 1M-row as-of cases, re-run before/after** (`service_with_history`'s
+fixture — one archived generation per partition, ingested twice into a
+fresh 1M-row database, so only two generations are ever resolved; same
+before/after commits, same machine):
+
+| Case | before | after |
+|---|---|---|
+| `1000000_rows_text_none_depth_2_asof` | 12.70 ms | **4.82 ms** (−62.0%) |
+| `1000000_rows_scoped_depth_2_asof` | 27.13 ms | **19.57 ms** (−28.0%) |
+
+Both hold the §7.1 <50 ms contract with more room than before. This
+fixture only ever resolves two generations, so the win here is the
+compile share the old baseline section flagged as remaining ("The
+resolve itself... belongs in a small generations table maintained
+inside the publish and sweep transactions") — not the archive-scan
+cost the earlier IN-list fix targeted, which this fixture never paid
+either. The larger win from a real, high-generation-count archive (the
+543 ms case above) is exactly what the summary table exists for, and
+is no longer reachable through this crate's own benches: the compile
+that used to scale with 3000 generations is now a fixed-cost lookup.

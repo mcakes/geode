@@ -570,5 +570,73 @@ fn bench_requery(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_requery);
+/// Times `resolve_generations` alone, now that it reads the `generations`
+/// summary rather than scanning every grain's archive and live table
+/// (docs/perf.md, "the as-of baseline" and "the generations summary
+/// table"). A fresh 20,000-row database ingested 50 times, the sentinel
+/// shifted one hour per pass (the `service_with_history` pattern,
+/// looped), timed at an instant after every load — rows stay small on
+/// purpose; it is the *generation count*, not the row count, this
+/// isolates.
+fn bench_resolve(c: &mut Criterion) {
+    let mut group = c.benchmark_group("resolve");
+    group.sample_size(20);
+    let rows = 20_000usize;
+    let generations = 50usize;
+
+    let db = tempfile::tempdir().unwrap();
+    let src = tempfile::tempdir().unwrap();
+    let schema = schema();
+    let ds = schema.dataset("risk_snapshot").unwrap().clone();
+    let store = Store::open(db.path().join("geode.duckdb")).unwrap();
+    store.apply_schema(&ds).unwrap();
+    Catalog::new(store.writer()).ensure_tables().unwrap();
+
+    let batch = generate(&GeneratorConfig {
+        rows,
+        seed: 42,
+        business_dates: 1,
+    });
+    let emitted = emit_directory(&batch, &EmitOptions::new(src.path())).unwrap();
+    let ready: Vec<_> = emitted
+        .files
+        .iter()
+        .filter(|f| f.sentinel_path.is_some())
+        .collect();
+
+    let mut at = chrono::DateTime::<chrono::Utc>::MIN_UTC;
+    for pass in 0..generations {
+        for file in &ready {
+            let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+            let mut sentinel = parse_sentinel(&text).unwrap();
+            sentinel.as_of += chrono::Duration::hours(pass as i64);
+            let stem = file.csv_path.file_stem().unwrap().to_string_lossy();
+            let batch_id = stem.split('_').skip(2).collect::<Vec<_>>().join("_");
+            load_file(
+                &store,
+                &LoadRequest {
+                    dataset: &ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &file.csv_path,
+                    sentinel: &sentinel,
+                    batch: &batch_id,
+                },
+            )
+            .unwrap();
+            at = at.max(sentinel.as_of);
+        }
+    }
+
+    group.bench_function("resolve_generations_50_generations", |b| {
+        b.iter(|| {
+            black_box(
+                geode_data::query::resolve_generations(store.writer(), "risk_snapshot", at)
+                    .unwrap(),
+            )
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_requery, bench_resolve);
 criterion_main!(benches);
