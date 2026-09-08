@@ -12,6 +12,7 @@ use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
 use crate::source::{CandidateState, SourceSpec, discover};
 use crate::store::Catalog;
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -112,6 +113,14 @@ fn run(
     }
     // Everything is due now: the first sweep is the cold start.
     let mut due: Vec<(Instant, usize)> = (0..sources.len()).map(|i| (Instant::now(), i)).collect();
+    // MAJ-2 (final review): one entry per source, so `Health::Ok` goes out
+    // on a TRANSITION only — never per poll (the ring would otherwise be
+    // spammed twice a minute forever), and never omitted on a recovery
+    // (nothing else in the running system can ever clear a latched
+    // `Degraded`/`PendingTooLong`/`Failed`). `None` means "never reported
+    // anything for this source yet" — the first clean poll is itself a
+    // transition, into `Ok`.
+    let mut last_reported: HashMap<String, Option<Health>> = HashMap::new();
 
     loop {
         due.sort_by_key(|(t, _)| *t);
@@ -138,12 +147,32 @@ fn run(
                     let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
                     let health = worst_health(&candidates);
                     let ok = match health {
-                        Some((worst, detail)) => sink(SchedulerEvent::Health {
-                            source: spec.name.clone(),
-                            worst,
-                            detail,
-                        }),
-                        None => true,
+                        Some((worst, detail)) => {
+                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
+                            if last.as_ref() == Some(&worst) {
+                                true
+                            } else {
+                                *last = Some(worst.clone());
+                                sink(SchedulerEvent::Health {
+                                    source: spec.name.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                        }
+                        None => {
+                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
+                            if *last == Some(Health::Ok) {
+                                true
+                            } else {
+                                *last = Some(Health::Ok);
+                                sink(SchedulerEvent::Health {
+                                    source: spec.name.clone(),
+                                    worst: Health::Ok,
+                                    detail: String::new(),
+                                })
+                            }
+                        }
                     };
                     let plan = build_plan(&[(spec.clone(), candidates)]);
                     let ready = plan.items.len();
@@ -162,20 +191,36 @@ fn run(
 
         let delivered = match outcome {
             Ok(Ok(delivered)) => delivered,
-            Ok(Err(e)) => sink(SchedulerEvent::Health {
-                source: spec.name.clone(),
-                worst: Health::Failed {
-                    reason: e.to_string(),
-                },
-                detail: format!("discovery failed: {e}"),
-            }),
-            Err(_) => sink(SchedulerEvent::Health {
-                source: spec.name.clone(),
-                worst: Health::Failed {
-                    reason: "discovery panicked".into(),
-                },
-                detail: "discovery panicked".into(),
-            }),
+            Ok(Err(e)) => {
+                last_reported.insert(
+                    spec.name.clone(),
+                    Some(Health::Failed {
+                        reason: e.to_string(),
+                    }),
+                );
+                sink(SchedulerEvent::Health {
+                    source: spec.name.clone(),
+                    worst: Health::Failed {
+                        reason: e.to_string(),
+                    },
+                    detail: format!("discovery failed: {e}"),
+                })
+            }
+            Err(_) => {
+                last_reported.insert(
+                    spec.name.clone(),
+                    Some(Health::Failed {
+                        reason: "discovery panicked".into(),
+                    }),
+                );
+                sink(SchedulerEvent::Health {
+                    source: spec.name.clone(),
+                    worst: Health::Failed {
+                        reason: "discovery panicked".into(),
+                    },
+                    detail: "discovery panicked".into(),
+                })
+            }
         };
         if !delivered {
             return;
@@ -274,8 +319,19 @@ mod tests {
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
 
-        // First poll: nothing there.
-        let first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // First poll: nothing there. A clean source's first poll is now
+        // also a Health::Ok transition (MAJ-2, final review) — skip past
+        // it rather than assuming Polled arrives first.
+        let mut first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if matches!(
+            first,
+            SchedulerEvent::Health {
+                worst: Health::Ok,
+                ..
+            }
+        ) {
+            first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
         assert!(
             matches!(first, SchedulerEvent::Polled { ready: 0, .. }),
             "{first:?}"
@@ -357,6 +413,89 @@ mod tests {
         let (worst, detail) = seen.expect("a health event");
         assert_eq!(worst, Health::PendingTooLong);
         assert!(detail.contains("BK000"), "{detail}");
+        sched.shutdown();
+    }
+
+    /// MAJ-2 (final review): a source's health used to be latched for the
+    /// session — nothing ever emitted `Health::Ok`, so a source that
+    /// recovered from `PendingTooLong` kept reading as degraded forever.
+    #[test]
+    fn a_degraded_source_that_recovers_emits_an_ok_health_event() {
+        let (_db, dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::ZERO);
+        std::fs::write(
+            dir.path().join("risk_2026-09-03_BK000.csv"),
+            "Book\nBK000\n",
+        )
+        .unwrap();
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut degraded = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(SchedulerEvent::Health { worst, .. }) =
+                sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                if worst == Health::PendingTooLong {
+                    degraded = true;
+                    break;
+                }
+            }
+        }
+        assert!(degraded, "setup: the source must degrade first");
+
+        // The sentinel lands: the file becomes Ready, so the next poll's
+        // `worst_health` returns None.
+        std::fs::write(
+            dir.path().join("risk_2026-09-03_BK000.csv.done"),
+            r#"{"as_of":"2026-09-03T07:00:00Z","columns":["Book"],"books":["BK000"]}"#,
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut recovered = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(SchedulerEvent::Health { worst, .. }) =
+                sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                if worst == Health::Ok {
+                    recovered = true;
+                    break;
+                }
+            }
+        }
+        assert!(recovered, "a recovered source must report Health::Ok");
+        sched.shutdown();
+    }
+
+    /// MAJ-2's other half: a healthy source must not spam `Ok` every poll
+    /// (the transition guard's whole reason to exist — the ruling's stated
+    /// worry was "one event per poll" if this were unconditional).
+    #[test]
+    fn a_steadily_healthy_source_produces_exactly_one_ok_across_many_polls() {
+        let poll = Duration::from_millis(20);
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(poll, Duration::from_secs(3600));
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let mut polls = 0;
+        let mut ok_count = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while polls < 8 && std::time::Instant::now() < deadline {
+            match sched_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(SchedulerEvent::Polled { .. }) => polls += 1,
+                Ok(SchedulerEvent::Health {
+                    worst: Health::Ok, ..
+                }) => ok_count += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(polls, 8, "eight polls within 30s");
+        assert_eq!(
+            ok_count, 1,
+            "exactly one Ok across many clean polls, not one per poll"
+        );
         sched.shutdown();
     }
 

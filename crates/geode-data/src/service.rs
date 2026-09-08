@@ -1251,7 +1251,11 @@ mod tests {
                     assert_eq!(dataset, "risk_snapshot");
                     published += 1;
                 }
-                Ok(DataEvent::Health { detail, .. }) => panic!("{detail}"),
+                // MAJ-2 (final review): a clean source's first poll is
+                // now itself an `Ok` transition — expected, not a failure.
+                Ok(DataEvent::Health { worst, detail, .. }) if worst != Health::Ok => {
+                    panic!("{detail}")
+                }
                 _ => {}
             }
         }
@@ -1305,6 +1309,12 @@ mod tests {
         let mut seen = None;
         while Instant::now() < deadline {
             match rx.recv_timeout(Duration::from_secs(5)) {
+                // The discovery-level `Ok` transition (MAJ-2, final
+                // review) is expected on the first clean poll — the
+                // failure this test cares about is the *ingest* failure
+                // that follows once the runner tries to load the
+                // undeclared dataset.
+                Ok(DataEvent::Health { worst, .. }) if worst == Health::Ok => {}
                 Ok(DataEvent::Health { source, detail, .. }) => {
                     seen = Some((source, detail));
                     break;
@@ -1425,7 +1435,18 @@ source_name = "NPV"
         while Instant::now() < deadline && (!published || seen.is_none()) {
             match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(DataEvent::Published { .. }) => published = true,
-                Ok(DataEvent::Health { source, worst, detail }) => {
+                // The discovery scheduler's own `Ok` transition (MAJ-2,
+                // final review) runs on a separate thread and can
+                // interleave with the ingest runner's `Published`/
+                // `Health{Degraded}` pair in either order — it must not
+                // be mistaken for the degraded-publish event this test is
+                // watching for.
+                Ok(DataEvent::Health { worst, .. }) if worst == Health::Ok => {}
+                Ok(DataEvent::Health {
+                    source,
+                    worst,
+                    detail,
+                }) => {
                     seen = Some((source, worst, detail));
                 }
                 Ok(_) => {}

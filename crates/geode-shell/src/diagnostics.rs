@@ -732,6 +732,27 @@ mod tests {
         assert_eq!(d.sources["risk"].since, t + Duration::from_secs(2));
     }
 
+    /// MAJ-2 (final review, 2026-09-08): the entity's own transition
+    /// bookkeeping already supported a `Degraded -> Ok` note before this
+    /// fix — what was missing was the scheduler ever *sending* one
+    /// (`ingest::scheduler`'s `last_reported` guard, tested there). This
+    /// pins the entity half of the contract: a recovered source's health
+    /// reads `Ok`, not latched at its worst-ever state.
+    #[test]
+    fn a_degraded_source_that_recovers_shows_ok_in_the_entity() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        let t = SystemTime::UNIX_EPOCH;
+        d.note_health("risk", Health::PendingTooLong, "BK000".into(), t);
+        assert_eq!(d.sources["risk"].health, Some(Health::PendingTooLong));
+        d.note_health("risk", Health::Ok, "".into(), t + Duration::from_secs(120));
+        assert_eq!(
+            d.sources["risk"].health,
+            Some(Health::Ok),
+            "a recovered source must read Ok, not stay latched as degraded"
+        );
+        assert_eq!(d.summary().as_ref(), "sources 1 ok");
+    }
+
     /// MAJ-2: `describe_source`/`note_polled` both create the entry
     /// before any real health arrives; the first `note_health` call must
     /// still be treated as a transition (`since` set, one history row)
