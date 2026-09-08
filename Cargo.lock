@@ -2655,7 +2655,6 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "geode-core",
- "geode-data",
  "geode-shell",
  "gpui",
  "gpui-component",

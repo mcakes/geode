@@ -19,7 +19,8 @@ use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Entity, IntoElement, UniformListScrollHandle, Window, div, px, uniform_list,
+    App, Context, Entity, IntoElement, ScrollStrategy, UniformListScrollHandle, Window, div, px,
+    uniform_list,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -31,19 +32,26 @@ use crate::sections::{self, Row, Tone};
 /// capacity), oldest dropped first once full.
 const LOG_CAP: usize = 4_096;
 
-/// `FrameVersions` equality for "does this tile need to rebuild",
-/// deliberately excluding `flip` (CLAUDE.md: `flip` only tells a tile
-/// with an already-staged snapshot that it may promote — a tile that
-/// compares it rebuilds on every flip barrier release for no reason;
-/// this tile never stages anything, so comparing `flip` would just mean
-/// "rebuild on every OTHER tile's scope/grouping/as-of change too").
+/// `FrameVersions` equality for "does this tile need to rebuild" (Phase
+/// 4b Task 5 fix round 1, MAJ-6): narrowed to exactly the two counters any
+/// section actually reads — `as_of` (`sections::data_rows`) and `config`
+/// (the config section's explainer, now that `config` bumps on every
+/// applied reload rather than only a `views`/`dimensions` one — see
+/// `hot_reload::apply_reload`'s own comment on that call). `scope` and
+/// `grouping` used to be compared too, even though no section reads
+/// either — `Frame::set_scope_in_session` bumps `scope` on *every
+/// keystroke* in the toolbar's text field (Phase 4a requeries per
+/// keystroke by design), so this tile was rebuilding its full row list —
+/// MAJ-5's log-tail clone chief among the cost — inside the same <50ms
+/// window §7.1 gives the requery that keystroke just launched, for
+/// sections that had nothing to do with either counter. `data` is
+/// redundant for a different reason: a publish already reaches
+/// `Diagnostics::note_published`, which bumps the diagnostics version the
+/// other observer already watches. `flip` stays excluded — CLAUDE.md:
+/// `flip` only tells a tile with an already-staged snapshot that it may
+/// promote; this tile never stages anything.
 fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
-    a.scope == b.scope
-        && a.grouping == b.grouping
-        && a.as_of == b.as_of
-        && a.data == b.data
-        && a.config == b.config
-        && a.saved_scopes == b.saved_scopes
+    a.as_of == b.as_of && a.config == b.config
 }
 
 pub struct DiagnosticsTile {
@@ -71,8 +79,25 @@ pub struct DiagnosticsTile {
     /// gaps. Surfaced as a leading "N records lost" row (spec §4.6's log
     /// section) when nonzero.
     lost_records: u64,
+    /// Reused across drains (Phase 4b Task 5 fix round 1, MAJ-5):
+    /// `Ring::drain_since`'s own doc comment says a reader "reuses one
+    /// `Vec` for its life" — a fresh `Vec::new()` per drain violated
+    /// that. Always empty between calls (`Vec::drain(..)` empties it into
+    /// `records` right after each fill), so its only cost is the
+    /// capacity it grows into and keeps.
+    drain_buf: Vec<Record>,
     records: VecDeque<Record>,
-    rows: Vec<Row>,
+    /// `Rc`, not a plain `Vec` (Phase 4b Task 5 fix round 1, MAJ-4):
+    /// `render` clones this into the `uniform_list` closure on every
+    /// single paint — every shell repaint, not just this tile's own
+    /// rebuilds — so a `Vec<Row>` clone there would be a full
+    /// re-allocation plus a `SharedString` refcount bump per row (up to
+    /// `LOG_CAP` = 4,096 of both) on every keystroke anywhere in the
+    /// shell. `rebuild` is the only place this is ever replaced (with a
+    /// fresh `Rc`); every other reader — `render`, the test accessors —
+    /// clones the `Rc` itself, which is one atomic increment regardless
+    /// of row count.
+    rows: Rc<Vec<Row>>,
     last_diagnostics_version: u64,
     last_frame_versions: FrameVersions,
     visible: bool,
@@ -117,9 +142,24 @@ impl DiagnosticsTile {
         .detach();
         cx.observe(&frame, |this, frame, cx| {
             let now = frame.read(cx).versions();
+            let as_of_changed = now.as_of != this.last_frame_versions.as_of;
             if !frame_versions_relevant_eq(now, this.last_frame_versions) {
                 this.last_frame_versions = now;
                 this.rebuild(cx);
+            }
+            // Phase 4b Task 5 fix round 1, MAJ-7: the data thread computes
+            // the data section's resolved-generation marker under the
+            // as-of carried on the *request* that produced the held
+            // `CatalogSnapshot` — nothing re-requested one when the as-of
+            // changed, so a stale snapshot kept marking a generation the
+            // engine would no longer resolve to. Only while visible
+            // (`watch`'s own reasoning: a request whose outcome nothing
+            // will show is a database round trip spent for nothing).
+            if as_of_changed && this.visible {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog();
+                    cx.notify();
+                });
             }
         })
         .detach();
@@ -137,8 +177,9 @@ impl DiagnosticsTile {
             follow: true,
             since: 0,
             lost_records: 0,
+            drain_buf: Vec::new(),
             records: VecDeque::new(),
-            rows: Vec::new(),
+            rows: Rc::new(Vec::new()),
             last_diagnostics_version,
             last_frame_versions,
             visible: false,
@@ -174,28 +215,40 @@ impl DiagnosticsTile {
                     .oldest_seq()
                     .map(|oldest| oldest.saturating_sub(self.since + 1))
                     .unwrap_or(0);
-                let mut drained = Vec::new();
-                self.ring.drain_since(self.since, &mut drained);
+                // MAJ-5 (fix round 1): `drain_buf` is a persistent field,
+                // not a fresh `Vec::new()` per call — `Ring::drain_since`'s
+                // own contract ("a tile following the tail reuses one
+                // `Vec` for its life") named this exact shape.
+                self.ring.drain_since(self.since, &mut self.drain_buf);
                 self.since = latest;
-                for r in drained {
-                    self.records.push_back(r);
-                }
+                // `drain(..)` moves the records out of `drain_buf` (no
+                // clone — they were already cloned once, by `drain_since`
+                // itself, which the ring's own doc comment sanctions)
+                // into the tail, leaving `drain_buf` empty but with its
+                // capacity intact for the next call.
+                self.records.extend(self.drain_buf.drain(..));
                 while self.records.len() > LOG_CAP {
                     self.records.pop_front();
                 }
             }
         }
         let now = SystemTime::now();
-        {
+        let new_rows: Vec<Row> = {
             let d = self.diagnostics.read(cx);
             let frame = self.frame.read(cx);
-            self.rows = match self.section {
+            match self.section {
                 Section::Sources => sections::sources_rows(d, now),
                 Section::Data => sections::data_rows(d, frame.as_of(), &self.collapsed),
                 Section::Config => sections::config_rows(d, &self.config.borrow(), &self.filter),
                 Section::Log => {
-                    let records: Vec<Record> = self.records.iter().cloned().collect();
-                    let mut rows = sections::log_rows(&records, &self.filter);
+                    // MAJ-5 (fix round 1): `make_contiguous` hands back a
+                    // slice of the existing `VecDeque` storage — no clone
+                    // of the tail (up to `LOG_CAP` = 4,096 `Record`s, each
+                    // with its own `String`) on every rebuild, including
+                    // rebuilds that have nothing to do with the log (a
+                    // health note, a poll, ...).
+                    let records = self.records.make_contiguous();
+                    let mut rows = sections::log_rows(records, &self.filter);
                     if self.lost_records > 0 {
                         rows.insert(
                             0,
@@ -214,13 +267,23 @@ impl DiagnosticsTile {
                     rows
                 }
                 Section::Perf => sections::perf_rows(d, &frame.requery),
-            };
-        }
+            }
+        };
+        // MAJ-4 (fix round 1): a fresh `Rc` here, once per rebuild — every
+        // *reader* (`render`, chiefly, on every paint) clones the `Rc`
+        // itself, never this `Vec`.
+        self.rows = Rc::new(new_rows);
         if self.section == Section::Log && self.follow {
             self.cursor = self.rows.len().saturating_sub(1);
         } else {
             self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
         }
+        // MAJ-1 (fix round 1): a rebuild is the "follow-mode append" case
+        // — `follow` just moved the cursor to the tail above, and a
+        // uniform_list does not track a cursor index on its own. Cheap
+        // and idempotent to call even when the cursor didn't move (non-
+        // strict scrolling: a no-op if already visible).
+        self.sync_scroll();
         cx.notify();
     }
 
@@ -232,6 +295,16 @@ impl DiagnosticsTile {
     #[cfg(test)]
     pub(crate) fn rows(&self) -> &[Row] {
         &self.rows
+    }
+
+    /// MAJ-4 (fix round 1): a clone of the `Rc` itself, for
+    /// `Rc::ptr_eq` — pins "two paints with no rebuild between them share
+    /// the same allocation" (a real `Vec` clone would still pass a
+    /// content equality check, which is why the test needs pointer
+    /// identity, not `rows()`'s slice).
+    #[cfg(test)]
+    pub(crate) fn rows_rc(&self) -> Rc<Vec<Row>> {
+        self.rows.clone()
     }
 
     #[cfg(test)]
@@ -249,6 +322,22 @@ impl DiagnosticsTile {
         self.section
     }
 
+    /// MAJ-1 (fix round 1): the row index `scroll_to_item` most recently
+    /// asked the list to show — `UniformListScrollHandle::
+    /// logical_scroll_top_index`'s own doc comment: "the index of the
+    /// topmost visible child", answered from the still-pending deferred
+    /// scroll when one is queued (exactly the case right after a cursor
+    /// move, before the next paint consumes it).
+    #[cfg(test)]
+    pub(crate) fn scroll_target(&self) -> usize {
+        self.scroll.logical_scroll_top_index()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn drain_buf_capacity(&self) -> usize {
+        self.drain_buf.capacity()
+    }
+
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new("diagnostics")
             .pair("section", self.section.name())
@@ -263,7 +352,18 @@ impl DiagnosticsTile {
         let target = (self.cursor as isize + delta).clamp(0, len - 1);
         self.cursor = target as usize;
         self.follow = false;
+        self.sync_scroll();
         cx.notify();
+    }
+
+    /// MAJ-1 (fix round 1): scroll the list so the cursor stays visible —
+    /// a `uniform_list` does not follow a cursor index on its own. Called
+    /// from every path that moves `self.cursor` directly (this and the
+    /// `top`/`bottom` dispatch arms; `rebuild`'s own tail covers the
+    /// follow-mode and clamp cases).
+    fn sync_scroll(&self) {
+        self.scroll
+            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
     }
 
     fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
@@ -339,15 +439,21 @@ impl DiagnosticsTile {
             "top" => {
                 self.cursor = 0;
                 self.follow = false;
+                self.sync_scroll();
                 cx.notify();
             }
             "bottom" => {
                 self.cursor = self.rows.len().saturating_sub(1);
                 self.follow = self.section == Section::Log;
+                self.sync_scroll();
                 cx.notify();
             }
-            "page_down" => self.move_cursor(5, cx),
-            "page_up" => self.move_cursor(-5, cx),
+            // MIN-4 (fix round 1): `n` (the pending count prefix) was
+            // computed above and used by `down`/`up` only — `key_context`
+            // advertises `.counts()`, so `3 ctrl+d` silently moved 5 rows
+            // instead of 15.
+            "page_down" => self.move_cursor(5 * n, cx),
+            "page_up" => self.move_cursor(-5 * n, cx),
             "next_section" => self.cycle_section(true, cx),
             "prev_section" => self.cycle_section(false, cx),
             "expand" => self.set_collapsed_at_cursor(false, cx),
@@ -387,7 +493,13 @@ impl DiagnosticsTile {
                 self.rebuild(cx);
             }
             FindEvent::Committed(query) => {
+                // MIN-10 (fix round 1): `Changed` already rebuilt with
+                // this exact text in the ordinary case (the shell sends
+                // `Changed` before `Committed`), so this is a no-op then
+                // — but must not silently depend on that ordering holding
+                // forever.
                 self.filter = query;
+                self.rebuild(cx);
             }
             FindEvent::Cancelled => {
                 self.filter.clear();
@@ -429,7 +541,7 @@ impl DiagnosticsTile {
 impl gpui::Render for DiagnosticsTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let header = h_flex()
+        let mut header = h_flex()
             .w_full()
             .h(px(22.))
             .items_center()
@@ -445,6 +557,21 @@ impl gpui::Render for DiagnosticsTile {
                 "diagnostics · {} · [ ] to switch",
                 self.section.name()
             ));
+        // MIN-11 (fix round 1): a tile restored from a session with a
+        // saved `filter` used to paint a narrowed list with no on-screen
+        // indication why — same "filtered" pill the blotter's own header
+        // shows for its own tile-scope filter.
+        if !self.filter.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)
+                    .bg(theme.warning.opacity(0.25))
+                    .px_1()
+                    .rounded(px(3.))
+                    .debug_selector(|| format!("diagnostics-filtered-{}", self.tile.0))
+                    .child("filtered"),
+            );
+        }
 
         let rows = self.rows.clone();
         let cursor = self.cursor;
@@ -492,6 +619,8 @@ mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
     use geode_core::log::{Level, LogLevels};
+    use geode_core::query::AsOf;
+    use geode_core::scope::Scope;
     use geode_core::scopes::SavedScopes;
     use geode_shell::diagnostics::{Diagnostics, Health};
     use geode_shell::frame::Frame;
@@ -812,5 +941,254 @@ mod tests {
             .diagnostics
             .update(&mut vcx, |d, _| d.take_pending_catalog_request());
         assert!(pending);
+    }
+
+    // --- Fix round 1 -----------------------------------------------------
+
+    /// MAJ-1: `scroll_to_item` is never called anywhere in the original
+    /// implementation — a `uniform_list` does not follow a cursor index
+    /// on its own, so the log section's "follows the tail" behaviour (and
+    /// every `j`/`ctrl+d`/`G` press) was invisible on screen. `G`
+    /// (`diagnostics::bottom`) on a 200-row section must scroll the list
+    /// to the last row.
+    #[gpui::test]
+    fn pressing_bottom_scrolls_the_list_to_the_last_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            for i in 0..200 {
+                d.note_health(
+                    &format!("src{i}"),
+                    Health::Ok,
+                    "".into(),
+                    SystemTime::UNIX_EPOCH,
+                );
+            }
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let row_count = h.tile.read_with(&vcx, |t, _| t.rows().len());
+        assert_eq!(row_count, 200, "sanity: 200 sources make 200 rows");
+
+        // Read the scroll target inside the same update as the dispatch,
+        // before any effects flush: the deferred `scroll_to_item` this
+        // pins is consumed by the list's own prepaint once a real draw
+        // runs, at which point `logical_scroll_top_index` falls back to
+        // whatever the (headless, effectively unsized) test window's
+        // actual scroll offset resolved to — not what this test is
+        // about, which is that `scroll_to_item` was queued for the right
+        // row at all.
+        let target = h.tile.update(&mut vcx, |t, cx| {
+            t.dispatch(&ActionId("diagnostics::bottom".into()), None, cx);
+            t.scroll_target()
+        });
+        assert_eq!(target, row_count - 1, "G must scroll to the last row");
+    }
+
+    /// MAJ-4: `render` must clone the `Rc<Vec<Row>>` itself, never the
+    /// `Vec` — two paints with no rebuild between them must share one
+    /// allocation. `Rc::ptr_eq`, not a content comparison: a full `Vec`
+    /// clone would still compare equal.
+    #[gpui::test]
+    fn two_paints_with_no_rebuild_share_the_same_row_allocation(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        let before_count = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+        let a = h.tile.read_with(&vcx, |t, _| t.rows_rc());
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let b = h.tile.read_with(&vcx, |t, _| t.rows_rc());
+        assert!(
+            Rc::ptr_eq(&a, &b),
+            "no rebuild between paints must not reallocate the row Vec"
+        );
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.rebuild_count()),
+            before_count,
+            "sanity: genuinely no rebuild happened"
+        );
+    }
+
+    /// MAJ-5: a rebuild that finds nothing new in the ring (`latest_seq()
+    /// <= since`) must not touch `drain_buf` at all — its capacity must
+    /// be exactly as stable across a no-op drain as `Ring::drain_since`'s
+    /// own "a hit allocates nothing" contract promises the ring side of
+    /// this exchange.
+    #[gpui::test]
+    fn a_no_op_log_drain_does_not_grow_the_drain_buffer(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section log", cx).unwrap();
+        });
+        h.ring.push(Record {
+            at: SystemTime::UNIX_EPOCH,
+            level: Level::INFO,
+            target: "geode::shell",
+            message: "m".into(),
+            seq: 0,
+        });
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(1);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let cap = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
+
+        // A further rebuild with nothing new in the ring — the no-op path.
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(2);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let cap_after = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
+        assert_eq!(
+            cap, cap_after,
+            "a no-op drain must not grow or shrink drain_buf's capacity"
+        );
+    }
+
+    /// MAJ-6: `frame_versions_relevant_eq` narrowed to `as_of` + `config`
+    /// only — a scope-only frame change (what every keystroke in the
+    /// toolbar's text field bumps) must not rebuild this tile, and a
+    /// config reload (`Frame::note_config_reloaded`) must.
+    #[gpui::test]
+    fn a_scope_only_frame_change_does_not_rebuild_but_a_config_reload_does(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, mut vcx) = open(cx);
+        let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_scope(Scope {
+                text: Some("x".into()),
+                ..Scope::default()
+            });
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.rebuild_count()),
+            before,
+            "a scope-only change must not rebuild — no section reads it"
+        );
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.rebuild_count()) > before,
+            "a config reload must rebuild — the config section reads it"
+        );
+    }
+
+    /// MAJ-7: an as-of change while the tile is visible must queue a
+    /// fresh catalog request, so the data section's resolved-generation
+    /// marker gets a chance to refresh under the new as-of rather than
+    /// keep asserting the old one.
+    #[gpui::test]
+    fn an_as_of_change_while_visible_requests_a_fresh_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_visible(true, cx);
+        });
+        // Drain `watch()`'s own first request so only the as-of-driven
+        // one is left to observe.
+        h.diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_catalog_request());
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pending = h
+            .diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_catalog_request());
+        assert!(
+            pending,
+            "an as-of change while visible must request a fresh catalog"
+        );
+    }
+
+    /// MAJ-7's other half: an as-of change while the tile is NOT visible
+    /// must not spend a database round trip nothing will show.
+    #[gpui::test]
+    fn an_as_of_change_while_invisible_does_not_request_a_catalog(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.frame.update(&mut vcx, |f, cx| {
+            f.set_as_of(AsOf::At(chrono::Utc::now()));
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let pending = h
+            .diagnostics
+            .update(&mut vcx, |d, _| d.take_pending_catalog_request());
+        assert!(
+            !pending,
+            "an as-of change while invisible must not request a catalog"
+        );
+    }
+
+    /// MIN-4: a count prefix must reach `ctrl+d`/`ctrl+u`
+    /// (`page_down`/`page_up`), not just `j`/`k` — `3 ctrl+d` must move
+    /// 15 rows (5 * 3), not 5.
+    #[gpui::test]
+    fn a_count_prefix_multiplies_page_down(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            for i in 0..30 {
+                d.note_health(
+                    &format!("src{i}"),
+                    Health::Ok,
+                    "".into(),
+                    SystemTime::UNIX_EPOCH,
+                );
+            }
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        h.tile.update(&mut vcx, |t, cx| {
+            t.dispatch(&ActionId("diagnostics::page_down".into()), Some(3), cx);
+        });
+        let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+        assert_eq!(cursor, 15, "3 ctrl+d must move 5 * 3 = 15 rows");
+    }
+
+    /// MIN-11: a tile carrying a filter shows a "filtered" indicator in
+    /// its header — same pill the blotter's own header shows for its
+    /// tile-scope filter (`blotter-filtered-<tile>`), so a session-
+    /// restored filtered tile is not silently narrowed with no on-screen
+    /// explanation.
+    #[gpui::test]
+    fn a_filtered_tile_shows_the_filtered_pill(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert!(vcx.debug_bounds("diagnostics-filtered-9").is_none());
+        h.tile.update(&mut vcx, |t, cx| {
+            t.find(FindEvent::Changed("theme".into()), cx);
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(vcx.debug_bounds("diagnostics-filtered-9").is_some());
     }
 }
