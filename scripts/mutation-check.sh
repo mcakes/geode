@@ -919,11 +919,13 @@ run_mutation "ingest: the bookless partition is published" \
 
 run_mutation "pool: a panicking query does not wedge its view" \
   crates/geode-data/src/query/pool.rs \
-  '            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(payload) => Err(panic_message(&*payload)),
-            };' \
-  '            run(&conn, &req).map_err(|e| e.to_string());'
+  '        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| run(&conn, &req))
+        })) {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(payload) => Err(panic_message(&*payload)),
+        };' \
+  '        let outcome = run(&conn, &req).map_err(|e| e.to_string());'
 
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
@@ -1125,10 +1127,10 @@ run_mutation "scheduler: the poll re-arms" \
 
 run_mutation "scheduler: ready files reach the runner" \
   crates/geode-data/src/ingest/scheduler.rs \
-  '                if ready > 0 {
-                    ingest.submit(plan);
-                }' \
-  '                let _ = plan;' \
+  '                    if ready > 0 {
+                        ingest.submit(plan);
+                    }' \
+  '                    let _ = plan;' \
   geode-data \
   a_file_that_appears_after_start_is_discovered_and_published
 
@@ -3677,11 +3679,10 @@ run_mutation "ingest runner: the panic payload is dropped from the reported Fail
 
 run_mutation "crash file: the log ring's records are dropped from write_crash_file's output" \
   crates/geode-app/src/crash.rs \
-  '    out.push_str("\n-- log tail --\n");
-    for r in records {
-        out.push_str(&format!("[{}] {} {}\n", r.level, r.target, r.message));
-    }' \
-  '    out.push_str("\n-- log tail --\n");' \
+  '    for r in records {
+        out.push_str(&format_record(r));' \
+  '    for r in records.iter().take(0) {
+        out.push_str(&format_record(r));' \
   geode-app write_crash_file_contains_the_message_location_records_and_actions_in_order
 
 run_mutation "shell: dispatch never records the dispatched action into the tail" \

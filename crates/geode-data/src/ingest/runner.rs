@@ -301,14 +301,13 @@ fn run(
         // though both currently do the same thing.
         //
         // Fix round 1, MIN-10: unlike the load boundary twenty lines
-        // down, a panic caught here produces no event and no log line
-        // at all — `.unwrap_or(false)` below swallows it into "not
-        // stale" with total silence. Recorded as a known asymmetry
-        // (Task 6's brief named only the load arm) rather than fixed
-        // here: the scenario this doc comment itself describes — a
-        // `file_generations` row an older build wrote in an
-        // unrecognized shape — is exactly the one that would benefit
-        // from the same treatment.
+        // down, a panic caught here produces no `IngestEvent` — it is
+        // swallowed into "not stale" by `.unwrap_or(false)` below. It is
+        // not silent: the boundary runs under `geode_core::panic::
+        // contained`, so the process-wide hook logs it at `error` as a
+        // contained panic (message and location) without a crash file.
+        // What it lacks is the load arm's *named* event with the file
+        // path; recorded as a known asymmetry rather than fixed here.
         let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             geode_core::panic::contained(|| {
                 Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)

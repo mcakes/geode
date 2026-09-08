@@ -225,11 +225,12 @@ pub fn write_crash_file(
 
     let mut suffix = 0u32;
     let path = loop {
-        let name = if suffix == 0 {
-            format!("crash-{stamp}.log")
-        } else {
-            format!("crash-{stamp}-{suffix}.log")
-        };
+        // Always suffixed, zero-padded: `-00` for the first file at this
+        // millisecond, `-01` for a collision, so a plain name sort is a
+        // true age order (`-` sorts before `.`, so an unsuffixed name
+        // would sort *after* its own later collision — re-review of Task
+        // 6's fix round).
+        let name = format!("crash-{stamp}-{suffix:02}.log");
         let candidate = dir.join(name);
         match std::fs::OpenOptions::new()
             .write(true)
@@ -400,7 +401,7 @@ mod tests {
             write_crash_file(dir.path(), SystemTime::UNIX_EPOCH, "boom", None, &[], &[]).unwrap();
         assert_eq!(
             path.file_name().unwrap().to_string_lossy(),
-            "crash-19700101-000000-000.log"
+            "crash-19700101-000000-000-00.log"
         );
     }
 
@@ -433,7 +434,7 @@ mod tests {
         assert_ne!(first, second, "the two crash files must not collide");
         assert_eq!(
             second.file_name().unwrap().to_string_lossy(),
-            "crash-19700101-000000-000-1.log"
+            "crash-19700101-000000-000-01.log"
         );
 
         let first_text = std::fs::read_to_string(&first).unwrap();
@@ -469,11 +470,11 @@ mod tests {
             .collect();
         assert_eq!(remaining.len(), 10, "{remaining:?}");
         assert!(
-            !remaining.contains(&"crash-19700101-000000-000.log".to_string()),
+            !remaining.contains(&"crash-19700101-000000-000-00.log".to_string()),
             "the oldest file must have been pruned: {remaining:?}"
         );
         assert!(
-            remaining.contains(&"crash-19700101-000010-000.log".to_string()),
+            remaining.contains(&"crash-19700101-000010-000-00.log".to_string()),
             "the newest file must survive: {remaining:?}"
         );
     }
