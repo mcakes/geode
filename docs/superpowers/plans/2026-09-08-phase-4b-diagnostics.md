@@ -198,7 +198,23 @@ docs/perf.md, CLAUDE.md, the spec       Task 8
   the module: `ShellView::open_module(kind)` focuses an existing tile of
   that kind in the current workspace or splits the focused tile and
   sets `pending_kind_for_new_tile`, which `sync_occupants` consumes.
-  This is the generic door 4c's editor will use too.
+  Kept on the diagnostics module's own merits (a tile opened from a
+  chord, not from the default kind); Phase 4c was redesigned on
+  2026-09-08 (`docs/superpowers/specs/2026-09-08-geode-phase-4c-config-dialogs-design.md`)
+  and ships no tile, so it is not the justification.
+- **Config write paths stay separate in 4b.** 4c's first task introduces
+  a `config_write` door and migrates every persist onto it. Task 4's
+  `:level` persist therefore reuses `theme::write_atomic` and the
+  `toml_edit` pattern of `persist_slot_to_user_config` as a seventh
+  caller — it adds no new atomic-write implementation — and 4c migrates
+  it with the rest. Nothing in 4b consolidates the existing six.
+- **`Diagnostic` gains `path: Option<String>` here, not in 4c.** 4c
+  attaches a reader's key path to a dialog field row and planned to add
+  the field; Task 4 adds it (default `None`, `Diagnostic::error`/`warning`
+  unchanged, a `with_path` builder) so 4c consumes it. Readers do not
+  fill it in 4b.
+- **`ShellEvent::ReloadRejected(Vec<Diagnostic>)`** is coming from 4c;
+  4b's `apply_reload` feed into the entity does not depend on it.
 - **`:overlay` toggles the shell's overlay through the entity:** the
   tile sets `Diagnostics.pending_overlay_toggle`; `ShellView`'s
   observer drains it and flips `perf_overlay`. Modules never reach
@@ -890,6 +906,8 @@ assertion — then GREEN), in commit order:
 - Modify: `crates/geode-shell/src/shell/render.rs` (call site)
 - Modify: `crates/geode-shell/src/shell/hot_reload.rs` (config diagnostics into the entity on load and every reload; `[log]` change → `control.set`)
 - Modify: `crates/geode-shell/src/module.rs` (`create` gains `diagnostics: Entity<Diagnostics>`), `crates/geode-blotter/src/content.rs` (accept and ignore it), `crates/geode-shell/src/module/placeholder.rs`
+- Modify: `crates/geode-core/src/config/mod.rs` (`Diagnostic.path: Option<String>`, `with_path`; every literal construction site in the workspace gains `path: None` — grep `Diagnostic {`)
+- Create: `crates/geode-shell/src/log_persist.rs` (`persist_log_level_to_user_config`, reusing `theme::write_atomic`)
 - Modify: `crates/geode-app/src/bridge.rs` (every `DataEvent` lands in the entity; `Catalog` request on visibility and after `Published` while visible)
 - Test: `diagnostics.rs` (pure); `shell/tests/diagnostics.rs` (new file: status bar summary, reload feed, overlay drain); `bridge.rs` tests
 
