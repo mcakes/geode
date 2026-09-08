@@ -60,10 +60,9 @@ fn dialog_state<T>(
     })
 }
 
-/// The stage this task ends at: the action lists the views, in normal
-/// mode, with the row a user overrode marked as such — and a bare letter
-/// does NOT reach the filter, which is the whole reason the dialog opens
-/// blurred.
+/// The browse stage: the action lists the views, in normal mode, with
+/// the row a user overrode marked as such — and a bare letter does NOT
+/// reach the filter, which is the whole reason the dialog opens blurred.
 #[gpui::test]
 fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
@@ -92,8 +91,9 @@ fn config_views_opens_in_normal_mode_and_lists_the_views(cx: &mut gpui::TestAppC
             "{selector} should have painted, got {bounds:?}"
         );
     }
-    // The marker that decides whether Task 5 offers a destructive
-    // "Revert to desk": painted on the overridden view and on no other.
+    // The marker that decides whether the edit stage offers a
+    // destructive "Revert to desk": painted on the overridden view and
+    // on no other.
     assert!(
         cx.debug_bounds("objectdialog-overridden-tree").is_some(),
         "tree is defined by both layers, so its row is marked overridden"
@@ -251,7 +251,7 @@ fn a_config_with_no_views_says_so(cx: &mut gpui::TestAppContext) {
     );
 }
 
-// ---- The edit stage (Task 5) -----------------------------------------
+// ---- The edit stage ---------------------------------------------------
 
 /// A single **desk-layer** view over a real dataset, and no user layer at
 /// all. That is the fixture the destination split has to be proved on:
@@ -567,4 +567,32 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
         shell.read_with(&cx, |s, _| s.modal.is_some()),
         "the modal is still open"
     );
+}
+
+/// An unbound letter in the edit stage explains itself, like every other
+/// key that deliberately does nothing here (`/`, `enter`, `i`, and a
+/// `space` on a row with no value). A letter that is claimed, does
+/// nothing and says nothing is the precise inert keystroke the
+/// interaction model exists to eliminate — and it is worse in this stage
+/// than in browse, because `s`/`d`/`r` have taught the user that letters
+/// act here.
+#[gpui::test]
+fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains('x')),
+        "an unbound letter must name itself rather than appearing inert, got {notice:?}"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-notice").is_some(),
+        "and the notice has to actually paint"
+    );
+    // Saying so is all it does: the draft is untouched and the modal stays.
+    assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
+    assert!(shell.read_with(&cx, |s, _| s.modal.is_some()));
 }

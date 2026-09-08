@@ -1,5 +1,5 @@
 //! The config dialogs' shared scaffold: browse a config domain's named
-//! objects, and (Task 5) edit one
+//! objects, and edit one
 //! (`docs/superpowers/specs/2026-09-08-geode-phase-4c-config-dialogs-design.md`).
 //!
 //! Phase 4c replaced an earlier design that would have put a TOML text
@@ -8,9 +8,12 @@
 //! on this one scaffold, so a trader edits *objects with fields* rather
 //! than text, and so the layer a change lands in is a property of the
 //! scaffold rather than a thing each dialog remembers to get right.
-//! This task builds the first stage, browse, over the first adapter,
-//! [`Domain::Views`] — the hardest shape first, deliberately (spec §14),
-//! so the vocabulary is settled before three thin adapters depend on it.
+//! Both stages are built, over one adapter, [`Domain::Views`] — the
+//! hardest shape first, deliberately (spec §14), so the vocabulary is
+//! settled before three thin adapters depend on it. Views is the only
+//! domain whose fields split across two destinations, and
+//! [`Destination`] is what makes that split mechanical rather than a
+//! special case inside one adapter.
 //!
 //! ## Layout
 //!
@@ -18,12 +21,15 @@
 //! further out because a domain adapter is a file of its own (spec §4):
 //!
 //! - this module — the pure core: [`Stage`], [`ObjectDialogState`],
-//!   [`ObjectRow`], [`Domain`], and the one derivation of `layer` and
-//!   `overridden` every domain shares;
-//! - [`views`] — the `Domain::Views` adapter: the doc it reads and the
-//!   one-line summary a view row shows, and nothing else;
-//! - [`render`] — the gpui shell: `open`, the [`dialog::ModalKeyHandler`],
-//!   and the painted list.
+//!   [`Draft`] and its field vocabulary ([`Field`], [`FieldKind`],
+//!   [`ListItem`], [`Destination`]), [`ObjectRow`], [`Domain`], and the
+//!   one derivation of `layer` and `overridden` every domain shares;
+//! - [`views`] — the `Domain::Views` adapter: the doc it reads, the
+//!   one-line summary a view row shows, the fields a view has and which
+//!   file each one is written to, and nothing else;
+//! - [`render`] — the gpui shell: `open`, the [`dialog::ModalKeyHandler`]
+//!   both stages come through, and the painted list, fields and action
+//!   bar.
 //!
 //! No `gpui` type appears in this file, so every transition and every
 //! marker below is unit-testable without a window — the same split, for
@@ -38,8 +44,9 @@
 //! cannot show a stale value: a config reload lands in
 //! `ShellView::services.config` with no notification to any dialog, so
 //! anything cached here would be wrong from the next 500 ms watcher tick
-//! onward. Only a draft (Task 5) is stored, because only a draft has no
-//! source of truth to derive from.
+//! onward. Only a [`Draft`] is stored, because only a draft has no
+//! source of truth to derive from — it is the object as the user has it
+//! so far, which is on disk nowhere until they save.
 
 pub mod render;
 mod views;
@@ -99,10 +106,10 @@ pub struct ObjectRow {
     /// replaced whole rather than merged key-by-key.
     pub layer: Layer,
     /// The user layer defines this object **and so does an earlier
-    /// layer**. Both halves matter: Task 5 offers `Revert to desk` on an
-    /// overridden row, and revert deletes the user's copy — on a view
-    /// only the user layer defines, that would delete the view outright
-    /// rather than restore anything. See [`derive_rows`].
+    /// layer**. Both halves matter: the edit stage offers `Revert to
+    /// desk` on an overridden row, and revert deletes the user's copy —
+    /// on a view only the user layer defines, that would delete the view
+    /// outright rather than restore anything. See [`derive_rows`].
     pub overridden: bool,
     /// Always `false` today, and deliberately still a field.
     ///
@@ -176,10 +183,10 @@ impl Domain {
 ///   atomic at depth 1, so a later layer's table replaces the earlier
 ///   one whole;
 /// - `overridden` is the user layer containing it **and** some earlier
-///   layer containing it too. The second half is what stops Task 5
-///   offering `Revert to desk` on a view no desk ever had — reverting
-///   there would delete the user's own view rather than restore
-///   anything.
+///   layer containing it too. The second half is what stops the edit
+///   stage offering `Revert to desk` on a view no desk ever had —
+///   reverting there would delete the user's own view rather than
+///   restore anything (`render::arm_revert` gates on exactly this).
 ///
 /// Sorted by name rather than kept in file order: rows come from up to
 /// three documents, so "file order" would mean one file's order followed
@@ -232,7 +239,7 @@ fn derive_rows(config: &Config, doc: &str, summary: fn(&toml::Value) -> String) 
 }
 
 // ---------------------------------------------------------------------
-// The edit stage (Task 5): fields, destinations, and the draft
+// The edit stage: fields, destinations, and the draft
 // ---------------------------------------------------------------------
 
 /// Which user-layer document one field's value is written to (spec §4.1).
@@ -815,26 +822,34 @@ impl ObjectDialogState {
         }
     }
 
-    /// Open `object`'s edit stage, turning the `escape` ladder's
-    /// `PreviousStage` rung on by constructing [`Stage::Edit`].
+    /// The **pure half** of entering the edit stage — call
+    /// [`render::enter_edit_stage`], never this, from anywhere with a
+    /// `Window` in scope.
     ///
-    /// The query is dropped here, and the caller clears the shared
-    /// `Input` with it: the edit stage does not filter its own rows (see
-    /// [`crate::shell::objectdialog::render`]'s module doc), so a query
-    /// left applied would be ranking nothing while `escape`'s
-    /// `ClearQuery` rung silently ate the keystroke that was meant to go
-    /// back a stage.
+    /// It opens `object`'s edit stage, turning the `escape` ladder's
+    /// `PreviousStage` rung on by constructing [`Stage::Edit`], and it
+    /// sets the two things that decide where the next keystroke goes:
     ///
-    /// The **mode goes back to `Normal`** for the same reason, and it is
-    /// not cosmetic: `enter` opens an object from filter mode too, and a
-    /// stage left in `Filter` would send `escape` down the ladder's
-    /// `LeaveFilter` rung instead of `PreviousStage` — which this handler
-    /// does not claim, so the shell's modal branch would close the whole
-    /// dialog and take the unsaved draft with it, without ever asking.
-    /// The caller blurs the `Input` to match; a mode and a focus that
-    /// disagree is the one thing this dialog's "one switch" exists to
-    /// prevent.
-    pub fn enter_edit(&mut self, config: &Config, object: &str) {
+    /// - the **query is dropped**, because the edit stage does not filter
+    ///   its own rows (see [`render`]'s module doc), so a query left
+    ///   applied would be ranking nothing while `escape`'s `ClearQuery`
+    ///   rung silently ate the keystroke meant to go back a stage;
+    /// - the **mode goes back to `Normal`**, because `enter` opens an
+    ///   object from filter mode too, and a stage left in `Filter` sends
+    ///   the next `escape` down the `LeaveFilter` rung — which the edit
+    ///   handler does not claim, so the shell's modal branch closes the
+    ///   whole dialog and takes the unsaved draft with it, without ever
+    ///   asking.
+    ///
+    /// Neither is worth anything on its own: the shared `Input` has to be
+    /// emptied and blurred to match, and a mode and a focus that disagree
+    /// is the one thing this dialog's "one switch" exists to prevent —
+    /// that disagreement is exactly the defect this method's own second
+    /// half was fixed for. The blur needs a `Window`, which this file
+    /// may not name, so the two halves cannot live in one function; they
+    /// live in one *door* instead, and this method is visible only inside
+    /// this module's subtree so nothing else can reach half of it.
+    pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         self.draft = Some(self.domain.draft(config, object));
         self.stage = Stage::Edit {
             object: object.to_string(),
@@ -872,14 +887,14 @@ impl ObjectDialogState {
     /// its first consumer (the keybinding dialog is one flat list and
     /// always passes `false`).
     ///
-    /// Today it is always `false`, because `Browse` is the only stage
-    /// this task builds and nothing constructs [`Stage::Edit`]. It is
-    /// written as a predicate over the stage anyway, rather than as a
-    /// literal `false` at the call site: Task 5 adds the edit stage, and
-    /// the rung must then turn on by itself. A `false` spelled at the
-    /// call site is exactly the shape that gets left behind when the
-    /// stage arrives, and the failure would be silent — `escape` in the
-    /// edit stage would close the whole dialog instead of going back.
+    /// It is a predicate over the stage rather than a literal `false` at
+    /// the call site, and that is what made the edit stage turn the rung
+    /// on by merely existing: `enter_edit` constructs [`Stage::Edit`] and
+    /// nothing in `render` had to remember to change. A `false` spelled
+    /// at the call site is exactly the shape that gets left behind when a
+    /// stage arrives, and the failure is silent — `escape` in the edit
+    /// stage would close the whole dialog, discarding an unsaved draft,
+    /// instead of going back one stage and asking.
     pub fn has_previous_stage(&self) -> bool {
         matches!(self.stage, Stage::Edit { .. })
     }
@@ -1062,9 +1077,9 @@ mod tests {
         assert!(Domain::Views.objects(&config).is_empty());
     }
 
-    /// The rung Task 5 turns on. `Browse` has nothing behind it, so
-    /// `escape` must reach the close rung; `Edit` does, and the ladder
-    /// must stop there first.
+    /// The rung the edit stage turns on. `Browse` has nothing behind
+    /// it, so `escape` must reach the close rung; `Edit` does, and the
+    /// ladder must stop there first.
     #[test]
     fn only_a_nested_stage_offers_escape_a_previous_stage() {
         let mut state = ObjectDialogState::new(Domain::Views);
@@ -1112,7 +1127,7 @@ mod tests {
         );
     }
 
-    // ---- The edit stage (Task 5) ------------------------------------
+    // ---- The edit stage ---------------------------------------------
 
     /// A fixture with a `datasets` doc (so the dataset `Choice` has real
     /// options) and a desk `views` doc — the shape the demo config has,

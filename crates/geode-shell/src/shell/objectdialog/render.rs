@@ -1,5 +1,6 @@
-//! The object dialog's gpui half: opening it, its
-//! [`dialog::ModalKeyHandler`], and the painted browse list.
+//! The object dialog's gpui half: opening it, the one
+//! [`dialog::ModalKeyHandler`] both its stages come through, and the
+//! painted browse list, field rows and action bar.
 //!
 //! Everything here is the shell around [`super`]'s pure core, and it is
 //! deliberately the same shell `keybindings_view` grew — same door
@@ -16,8 +17,8 @@
 //! `ShellView::dialog_input` **blurred** (`focus_filter: false`), because
 //! a focused gpui-component `Input` consumes bare letters as text before
 //! any raw key listener sees them — which is the whole reason `j`/`k` can
-//! move here at all, and the reason Task 5's `s`/`d`/`r` verbs will be
-//! reachable. `/` focuses the field and enters [`DialogMode::Filter`];
+//! move here at all, and the reason the edit stage's `s`/`d`/`r` verbs
+//! are reachable. `/` focuses the field and enters [`DialogMode::Filter`];
 //! `escape` blurs it again. While the field is blurred the query paints
 //! as static muted text rather than a live caret
 //! ([`dialog::filter_row`]'s `frozen` argument): a caret in a field that
@@ -110,8 +111,8 @@ pub fn open(
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
         // `false`: normal mode. A focused filter would eat every bare
-        // letter as text before [`handle_key`] could read it as a
-        // motion or (Task 5) a verb.
+        // letter as text before [`handle_key`] could read it as a motion
+        // or as one of the edit stage's verbs.
         false,
     );
 }
@@ -198,13 +199,14 @@ fn handle_browse_key(
         // guard would turn `shift+escape` into a key normal mode claims
         // and drops — visibly nothing.
         if ks.key == "escape" {
-            // `has_previous_stage()` is a predicate over the stage, not a
-            // literal `false`, and this dialog is the first consumer of
-            // the `PreviousStage` rung at all. Today `Browse` is the only
-            // stage anything constructs, so the rung is unreachable and
-            // the answer is always `false` — but Task 5's edit stage
-            // turns it on by existing, with no call site to remember to
-            // change. See `ObjectDialogState::has_previous_stage`.
+            // `has_previous_stage()` is a predicate over the stage, not
+            // a literal `false`, and this dialog is the design's first
+            // consumer of the `PreviousStage` rung at all. From THIS
+            // branch it is always false — `Browse` is where the ladder
+            // ends and the modal closes — but the predicate is what let
+            // the edit stage turn the rung on by merely constructing
+            // `Stage::Edit`, with no call site to remember to change.
+            // See `ObjectDialogState::has_previous_stage`.
             match dialogmode::escape_step(
                 state.mode,
                 state.query.is_empty(),
@@ -227,12 +229,13 @@ fn handle_browse_key(
                     return true;
                 }
                 // `LeaveFilter` cannot be reached from normal mode, and
-                // `PreviousStage` cannot be reached until Task 5
-                // constructs `Stage::Edit`. Both are folded into the
-                // catch-all rather than special-cased away, because
-                // `escape_step` is the one ladder every modal surface
-                // walks and forking it per call site is how the rungs
-                // drift apart.
+                // `PreviousStage` cannot be reached from `Browse`, which
+                // is the only stage that arrives here — the edit stage
+                // has its own escape branch and takes that rung there.
+                // Both are folded into the catch-all rather than
+                // special-cased away, because `escape_step` is the one
+                // ladder every modal surface walks and forking it per
+                // call site is how the rungs drift apart.
                 _ => return false, // let the shell's modal branch close it
             }
         }
@@ -392,11 +395,40 @@ fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
         cx.notify();
         return;
     };
+    enter_edit_stage(shell, &name, window, cx);
+}
+
+/// **The one door into the edit stage.** Every way in goes through here —
+/// `enter` from either browse mode today, and Part 2's `n` tomorrow.
+///
+/// It exists because the transition has two halves that are worthless
+/// apart: [`ObjectDialogState::enter_edit`] sets the mode and drops the
+/// query, and only this function empties the shared `Input` and moves
+/// focus off it to match. Setting one without the other is not a cosmetic
+/// slip — it is the defect this task shipped and fixed
+/// (`an_object_opened_from_filter_mode_still_escapes_back_a_stage`): a
+/// stage whose mode and focus disagree sends the next `escape` down a
+/// rung the edit handler does not claim, and the shell closes the whole
+/// dialog with the draft still unsaved.
+///
+/// So the halves are not offered separately: `enter_edit` is visible only
+/// inside this module's subtree and its doc points here, and this is the
+/// only function in that subtree that calls it. A new call site gets both
+/// halves or neither.
+fn enter_edit_stage(
+    shell: &mut ShellView,
+    name: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     if let Some(state) = shell.object_dialog.as_mut() {
-        state.enter_edit(&shell.services.config, &name);
+        state.enter_edit(&shell.services.config, name);
     }
+    // The `Input` owns the text; clearing only the mirrored query would
+    // leave the old one waiting in the field for the next `/`.
     let input = shell.dialog_input.clone();
     input.update(cx, |i, cx| i.set_value("", window, cx));
+    // And the blur, which is what makes the edit stage's letters verbs.
     shell.focus_handle.focus(window, cx);
     shell.object_dialog_scroll.scroll_to_item(0);
     cx.notify();
@@ -527,7 +559,14 @@ fn handle_edit_key(
         NormalCommand::Commit | NormalCommand::EditText => {
             set_notice(shell, "press space to change the selected row".to_string());
         }
-        NormalCommand::Verb(_) => {}
+        // A letter this stage has no verb for. Named rather than
+        // dropped: `s`, `d` and `r` have just taught the user that
+        // letters act here, so a silent `x` reads as the dialog having
+        // stopped responding — and it is the one branch where the key
+        // that did nothing is not otherwise on screen to explain itself.
+        NormalCommand::Verb(letter) => {
+            set_notice(shell, format!("{letter} is not a verb here"));
+        }
     }
     cx.notify();
     true
