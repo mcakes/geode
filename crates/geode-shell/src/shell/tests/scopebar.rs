@@ -202,28 +202,20 @@ fn escape_after_a_session_edit_does_not_let_undo_resurrect_the_abandoned_text(
         "escape must restore the pre-focus text"
     );
 
-    // The session coalesced its one entry (the pre-focus "old" scope,
-    // recorded on the session's first divergence, when typing started)
-    // rather than pushing a second one for the abandoned "new" — so the
-    // first undo pops that session entry, landing back on "old" (a
-    // value no-op: the scope was already "old" after Escape) rather
-    // than resurrecting "new".
-    assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
-    assert_eq!(
-        frame
-            .read_with(&vcx, |f, _| f.scope().text.clone())
-            .as_deref(),
-        Some("old"),
-        "the first undo must land back on the pre-focus scope, never on the abandoned \"new\""
-    );
-
-    // A second undo walks past the session entirely, to the scope from
-    // before "old" was ever set.
+    // Phase 4b M2: the session coalesced its one entry (the pre-focus
+    // "old" scope, recorded on the session's first divergence, when
+    // typing started) rather than pushing a second one for the abandoned
+    // "new" — and since the session ends exactly where it began (Escape
+    // reverted all the way back to "old"), `end_scope_session` pops that
+    // now-pointless entry back off. So a single `undo_scope` walks
+    // straight past the whole focus/type/escape episode to the scope
+    // from before "old" was ever set — "new" never appears anywhere in
+    // the history, and neither does a phantom step that would have
+    // landed back on "old" (a value no-op) for nothing.
     assert!(frame.update(&mut vcx, |f, _| f.undo_scope()));
     assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
 
-    // Nothing further to undo — "new" never appears anywhere in the
-    // history walked above.
+    // Nothing further to undo.
     assert!(!frame.update(&mut vcx, |f, _| f.undo_scope()));
 }
 
