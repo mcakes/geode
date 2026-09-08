@@ -3543,6 +3543,133 @@ run_mutation "diagnostics module: the log section never reports records lost to 
   '                self.lost_records = 0;' \
   geode-diagnostics the_log_section_reports_lost_records_when_the_ring_wrapped_past_since
 
+# --- Task 5 fix round 1 ----------------------------------------------
+
+run_mutation "diagnostics module: MAJ-1 — sync_scroll never scrolls the list" \
+  crates/geode-diagnostics/src/tile.rs \
+  '    fn sync_scroll(&self) {
+        self.scroll
+            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
+    }' \
+  '    fn sync_scroll(&self) {}' \
+  geode-diagnostics pressing_bottom_scrolls_the_list_to_the_last_row
+
+run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant without unwatching it" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                o.content.set_visible(false, cx);
+            }
+        }
+        self.occupants.retain(|id, _| all.contains(id));' \
+  '        self.occupants.retain(|id, _| all.contains(id));' \
+  geode-shell closing_a_watching_tile_unwatches_the_diagnostics_entity
+
+run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_changed gate" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();' \
+  '            if views_changed {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();' \
+  geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
+
+run_mutation "diagnostics module: MAJ-4 — render deep-clones the row Vec every paint" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        let rows = self.rows.clone();' \
+  '        let rows = Rc::new((*self.rows).clone());' \
+  geode-diagnostics two_paints_with_no_rebuild_share_the_same_row_allocation
+
+run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh buffer instead of reusing drain_buf" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                self.ring.drain_since(self.since, &mut self.drain_buf);' \
+  '                let mut fresh_drain_buf = Vec::new();
+                self.ring.drain_since(self.since, &mut fresh_drain_buf);
+                self.drain_buf = fresh_drain_buf;' \
+  geode-diagnostics a_no_op_log_drain_does_not_grow_the_drain_buffer
+
+run_mutation "diagnostics module: MAJ-6 — frame_versions_relevant_eq widens back to include scope" \
+  crates/geode-diagnostics/src/tile.rs \
+  'fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
+    a.as_of == b.as_of && a.config == b.config
+}' \
+  'fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
+    a.as_of == b.as_of && a.config == b.config && a.scope == b.scope
+}' \
+  geode-diagnostics a_scope_only_frame_change_does_not_rebuild_but_a_config_reload_does
+
+run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            if as_of_changed && this.visible {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog();
+                    cx.notify();
+                });
+            }' \
+  '            if false {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog();
+                    cx.notify();
+                });
+            }' \
+  geode-diagnostics an_as_of_change_while_visible_requests_a_fresh_catalog
+
+run_mutation "diagnostics module: MAJ-8 — the config explainer stops recursing into arrays" \
+  crates/geode-diagnostics/src/sections.rs \
+  '        toml::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_value(v, &format!("{path}.{i}"), out);
+            }
+        }
+        other => out.push((path.to_string(), other.to_string())),' \
+  '        other => out.push((path.to_string(), other.to_string())),' \
+  geode-diagnostics config_rows_recurses_into_arrays_with_indexed_paths
+
+run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count multiplier" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            "page_down" => self.move_cursor(5 * n, cx),
+            "page_up" => self.move_cursor(-5 * n, cx),' \
+  '            "page_down" => self.move_cursor(5, cx),
+            "page_up" => self.move_cursor(-5, cx),' \
+  geode-diagnostics a_count_prefix_multiplies_page_down
+
+run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            self.diagnostics.update(cx, |d, cx| {
+                d.unwatch();
+                cx.notify();
+            });
+        }
+    }' \
+  '            self.diagnostics.update(cx, |d, _cx| {
+                d.unwatch();
+            });
+        }
+    }' \
+  geode-diagnostics set_visible_false_unwatches_and_notifies
+
+run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+            return;
+        }
+        self.services' \
+  '        self.services' \
+  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_split_only_once
+
+run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        if !self.filter.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)' \
+  '        if false {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)' \
+  geode-diagnostics a_filtered_tile_shows_the_filtered_pill
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

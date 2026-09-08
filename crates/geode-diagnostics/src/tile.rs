@@ -1105,6 +1105,34 @@ mod tests {
             cap, cap_after,
             "a no-op drain must not grow or shrink drain_buf's capacity"
         );
+
+        // The other half of MAJ-5's claim — reuse, not just "a no-op
+        // costs nothing" (which held even before the fix, since the old
+        // `let mut drained = Vec::new()` sat *inside* the `if latest >
+        // since` branch too): a SECOND real drain must not have reset
+        // `drain_buf` back to a fresh, zero-capacity `Vec` — its capacity
+        // must not have shrunk from what the first real drain already
+        // grew it to.
+        h.ring.push(Record {
+            at: SystemTime::UNIX_EPOCH,
+            level: Level::INFO,
+            target: "geode::shell",
+            message: "m2".into(),
+            seq: 0,
+        });
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_dropped(3);
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let cap_after_second_real_drain = h.tile.read_with(&vcx, |t, _| t.drain_buf_capacity());
+        assert!(
+            cap_after_second_real_drain >= cap,
+            "a second real drain must reuse drain_buf's capacity, not reset it \
+             (first drain: {cap}, second: {cap_after_second_real_drain})"
+        );
     }
 
     /// MAJ-6: `frame_versions_relevant_eq` narrowed to `as_of` + `config`
