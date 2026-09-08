@@ -1004,6 +1004,46 @@ perf` on the shell's existing ~500 ms reload-poll tick and only while
 `watchers() > 0` (open question 2, resolved) — see `docs/perf.md`'s
 Phase 4b section for the allocation contract this pins in tests.
 
+**Known gaps, deferred (recorded in the round-5 re-review, 2026-09-08;
+both to be fixed together on their own branch, not this one).**
+
+1. **An `EventSink` returning `false` means "receiver gone" to both
+   consumers, and a momentarily full channel is indistinguishable from
+   it.** `ingest/runner.rs`'s `if !delivered { return; }` ends the
+   ingest runner thread and `ingest/scheduler.rs`'s ends the scheduler
+   thread — the latter stopping polling for EVERY source, not just the
+   one being polled. But the production sink
+   (`geode-app::bridge::make_sink`) returns `false` for any refused
+   `try_send`, and the event channel is bounded at 256, so one
+   cold-start burst that momentarily fills it silently ends ingest and
+   discovery for the session, with only the `dropped` count in the
+   status summary to say so. The sources section then shows whatever
+   health it last had, forever. Pre-existing since Phase 3a, and it
+   contradicts the scheduler's own `catch_unwind` comment, which
+   forbids exactly this outcome ("every other source would stop being
+   polled with nothing on the sink to say so"). The fix is to
+   distinguish `TrySendError::Full` (a dropped event; keep running)
+   from `Closed` (genuinely gone; stop) — one `match` in `make_sink`,
+   plus the consumers' expectations — and it is deliberately NOT
+   attempted here: the round-5 conditional commit above at least means
+   a health transition refused this way is re-offered rather than lost,
+   which is as far as the health seam can get on its own.
+2. **The load lane is in-process only, so a restart false-cleans a
+   still-live degraded generation.** `generations.health` /
+   `health_reason` are persisted (`store/catalog.rs`) but nothing ever
+   reads them back. On restart the load lane is empty, the first poll
+   finds the CSV `Unchanged` (so nothing reloads and nothing
+   republishes), `worst_health` returns `None`, the scheduler sends
+   `Ok`, and the source reads **ok** while the still-live degraded
+   generation is exactly what the blotter is summing. Same false-clean
+   family as MAJ-2/NEW-4/NEW-6, one level up — and NEW-6's own
+   justification ("its rows are still live, so it must keep showing
+   degraded") is what makes this a contradiction rather than a policy.
+   The fix is to seed the load lane at `DataService::open` from the
+   live generations' persisted health, which is already keyed by batch,
+   exactly the lane's key. Until then, source health as built is
+   per-process.
+
 ### 4.5 `Request::Catalog`
 
 ```rust

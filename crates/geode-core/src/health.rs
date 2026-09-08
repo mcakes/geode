@@ -1,6 +1,19 @@
 //! Degradation vocabulary (spec §5.7). Data problems are never modal and
 //! never fatal: a failed load leaves live untouched and degrades this
-//! file's health. Ord is severity order so a rollup can take the worst.
+//! file's health.
+//!
+//! **`Ord` is variant order, which is severity order — but a rollup
+//! must NOT use it.** Once two values share a variant the derive falls
+//! through to comparing the `reason` STRING, and two simultaneous
+//! `Degraded`s are ordinary (a malformed sentinel from discovery, a
+//! carried-dimension violation from a publish), so `max`/`>` picks
+//! whichever reason sorts later and silently drops the other finding.
+//! That was Phase 4b's NEW-5, and this doc's earlier wording ("Ord is
+//! severity order so a rollup can take the worst") is what invited it.
+//! Roll up with an explicit rank over the variants —
+//! `geode_data::service::severity_rank` is the one in use — and keep
+//! the derive for what it is fit for: sorting a list of states for
+//! display, and the equality half.
 //!
 //! Lives in `geode-core` (Phase 4b Task 4), not `geode-data`, for the
 //! same reason `Scope`/`AsOf`/`QueryKey` do (`geode_core::query`'s own
@@ -70,8 +83,14 @@ impl Health {
 mod tests {
     use super::*;
 
+    /// Variant order is severity order — which is all this proves, and
+    /// all the derive is fit for (see the module doc: a ROLLUP must use
+    /// an explicit rank, because the derive orders two same-variant
+    /// values by their `reason` text). Renamed from
+    /// `health_orders_by_severity_so_rollups_take_the_worst`, whose name
+    /// blessed exactly the reading that produced Phase 4b's NEW-5.
     #[test]
-    fn health_orders_by_severity_so_rollups_take_the_worst() {
+    fn variants_are_declared_in_severity_order() {
         let mut states = [
             Health::Ok,
             Health::Failed {
