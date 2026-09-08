@@ -3483,15 +3483,9 @@ run_mutation "diagnostics module: the log filter matches every row regardless of
 
 run_mutation "diagnostics module: move_cursor never clears follow" \
   crates/geode-diagnostics/src/tile.rs \
-  '        let target = (self.cursor as isize + delta).clamp(0, len - 1);
-        self.cursor = target as usize;
-        self.follow = false;
-        cx.notify();
-    }' \
-  '        let target = (self.cursor as isize + delta).clamp(0, len - 1);
-        self.cursor = target as usize;
-        cx.notify();
-    }' \
+  '        self.cursor = target as usize;
+        self.follow = false;' \
+  '        self.cursor = target as usize;' \
   geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
 
 run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
