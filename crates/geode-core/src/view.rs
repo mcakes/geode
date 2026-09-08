@@ -1035,4 +1035,49 @@ npv = 120
             "a name the view lacks invents no column presentation"
         );
     }
+    /// The view-level half of the same rule, and the one the brief named
+    /// alongside the column case. A desk that renames or retires a view
+    /// leaves exactly this behind in a trader's personal file: a table
+    /// keyed to a name nothing answers to. It is skipped **with a
+    /// warning** rather than silently, because the warning is the only
+    /// thing that ever says why a personalisation stopped applying — and
+    /// it must not touch the views that do exist.
+    #[test]
+    fn a_view_the_config_lacks_is_a_warning_not_an_error() {
+        let (mut views, _) = ViewSpec::from_doc(&doc("[tree]\ndataset = \"risk_snapshot\"\n\
+             [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+             [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n"));
+        let columns_before = views[0].columns.clone();
+        let presentation_before = views[0].presentation.clone();
+
+        let (pres, diags) = ViewPresentationSpec::from_doc(&presentation_doc(
+            "[retired_view]\norder = [\"book\"]\nhidden = [\"npv\"]\n",
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let warnings = pres.apply(&mut views);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one warning for the one stale name: {warnings:?}"
+        );
+        assert_eq!(
+            warnings[0].severity,
+            Severity::Warning,
+            "a stale view name is a warning, never an error: {warnings:?}"
+        );
+        assert!(
+            warnings[0].message.contains("retired_view"),
+            "the warning must name the view it skipped: {warnings:?}"
+        );
+        assert_eq!(views.len(), 1, "no view is invented for the stale name");
+        assert_eq!(
+            views[0].columns, columns_before,
+            "the real view's columns are untouched"
+        );
+        assert_eq!(
+            views[0].presentation, presentation_before,
+            "the real view's presentation is untouched"
+        );
+    }
 }

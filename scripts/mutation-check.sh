@@ -3087,11 +3087,27 @@ run_mutation "views: data_setup goes through load_views, not the raw views doc" 
   geode-app \
   data_setup_hands_out_views_with_the_users_presentation_already_merged
 
-# A desk renaming a column must never break a trader's personal file.
-# Promoting the mismatch to an Error is the plausible mistake — it reads
-# like rigour — and `reload::decide` rejects the WHOLE config on any
-# error diagnostic, so one stale name in `view_presentation.toml` would
-# take every other config change down with it.
+# A desk renaming a column, or retiring a view, must never turn a
+# trader's personal file into an error. Promoting the mismatch to an
+# Error is the plausible mistake, because it reads like rigour.
+#
+# Be precise about what this mutation actually costs, because nothing
+# branches on the severity TODAY: `load_views`' diagnostics never reach
+# `Config::diagnostics`, so `reload::decide` does not see them; at
+# startup `bridge::start` prints them as `[data] ...` lines whatever
+# their severity, and on the reload path they are discarded outright.
+# The test therefore asserts the classification directly rather than
+# through a downstream consequence — which is exactly why this needs an
+# entry rather than being left to a consequence test. A wrong severity
+# here is invisible until the first thing that routes by severity
+# arrives (the Views dialog's per-field diagnostics, spec 1.2's
+# repurposed `Diagnostic.path`), and by then it has been the shipped
+# behaviour for months.
+#
+# The `warn` closure this anchors on is shared by the view-level
+# "no view of that name" case below it, so one line carries the
+# classification for both stale-name shapes; the second entry covers
+# that case's own skip-vs-drop behaviour, which this one cannot see.
 run_mutation "views: a presentation naming a column the view lacks warns, it does not error" \
   crates/geode-core/src/view.rs \
   '            let warn = |m: String| Diagnostic {
@@ -3100,6 +3116,20 @@ run_mutation "views: a presentation naming a column the view lacks warns, it doe
                 severity: Severity::Error,' \
   geode-core \
   a_column_the_view_lacks_is_a_warning_not_an_error
+
+# The other half of the same rule, and a different failure: not the
+# severity but whether the mismatch is reported at all. A presentation
+# table keyed to a view name nothing answers to is what a desk leaves
+# behind every time it renames or retires a view, and `continue`-ing
+# without the warning is the tidy-looking version. It would be silent:
+# the personalisation simply stops applying and nothing anywhere says
+# why, which is the one outcome a trader cannot debug.
+run_mutation "views: a presentation naming a view the config lacks is skipped LOUDLY" \
+  crates/geode-core/src/view.rs \
+  '                diags.push(warn("no view of that name — ignored".into()));' \
+  '' \
+  geode-core \
+  a_view_the_config_lacks_is_a_warning_not_an_error
 
 # `view_presentation` changes the ViewSpecs a tile runs on exactly as a
 # `views` edit does, and it is the doc the Views dialog writes on the
