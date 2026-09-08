@@ -6,7 +6,7 @@
 //! A view is data, not code — it names columns and expressions, and the
 //! compiler (geode-data) turns it into one statement.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::dimensions::DerivedDimensions;
@@ -146,6 +146,14 @@ pub struct ColumnPresentation {
     pub scale: Option<Scale>,
     pub label: Option<String>,
     pub width: Option<f32>,
+    /// Set only by `ViewPresentationSpec` (spec §5.6). It lives here
+    /// rather than on `ViewColumn` — which spec §1.2 sketched — because
+    /// `ViewColumn` is an enum with no shared fields, while this struct
+    /// is already per-column, already carries `width`, and is already
+    /// merged into `ViewSpec.presentation`. A hidden column stays in
+    /// `ViewSpec.columns`: the compiler still selects it, so unhiding is
+    /// free and no query changes shape when a trader hides a column.
+    pub hidden: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -475,6 +483,183 @@ impl ViewSpec {
     }
 }
 
+/// One view's personalisation: what order its columns are shown in,
+/// which are hidden, and how wide each is.
+///
+/// Deliberately a *separate* doc from the view (spec §4.1): dragging a
+/// column's width is the commonest edit a trader makes, and writing it
+/// into `views.toml` would fork the desk's view — the desk adds a column
+/// next week and the trader never sees it. Merged over the view instead,
+/// only a definitional change (dataset, column set) forks anything.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ViewPresentation {
+    /// Column names, most significant first. Names the view lacks are
+    /// warned about and skipped; columns the order omits keep their file
+    /// order behind the ones it names (`preserve_order` is on
+    /// workspace-wide, so a view's file order is meaningful).
+    pub order: Vec<String>,
+    pub hidden: BTreeSet<String>,
+    pub width: BTreeMap<String, f32>,
+}
+
+/// `view_presentation.toml`, user layer — one table per view name,
+/// atomic at depth one exactly as `views` is
+/// (`config::merge::atomic_depth`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ViewPresentationSpec {
+    pub views: BTreeMap<String, ViewPresentation>,
+}
+
+impl ViewPresentationSpec {
+    pub fn from_doc(doc: &MergedDoc) -> (ViewPresentationSpec, Vec<Diagnostic>) {
+        let mut spec = ViewPresentationSpec::default();
+        let mut diags = Vec::new();
+
+        for (view_name, value) in &doc.value {
+            // Every config doc carries this header by convention; it is
+            // not a view name.
+            if view_name == "config_version" {
+                continue;
+            }
+            let bad = |m: String| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: format!("view presentation '{view_name}': {m}"),
+            };
+            let Some(table) = value.as_table() else {
+                diags.push(bad("not a table".into()));
+                continue;
+            };
+
+            let mut p = ViewPresentation::default();
+            if let Some(v) = table.get("order") {
+                match v.as_array() {
+                    Some(a) => {
+                        for item in a {
+                            match item.as_str() {
+                                Some(s) => p.order.push(s.to_string()),
+                                None => diags
+                                    .push(bad(format!("'order' entry is not a string: {item}"))),
+                            }
+                        }
+                    }
+                    None => diags.push(bad("'order' must be an array of column names".into())),
+                }
+            }
+            if let Some(v) = table.get("hidden") {
+                match v.as_array() {
+                    Some(a) => {
+                        for item in a {
+                            match item.as_str() {
+                                Some(s) => {
+                                    p.hidden.insert(s.to_string());
+                                }
+                                None => diags
+                                    .push(bad(format!("'hidden' entry is not a string: {item}"))),
+                            }
+                        }
+                    }
+                    None => diags.push(bad("'hidden' must be an array of column names".into())),
+                }
+            }
+            if let Some(v) = table.get("width") {
+                match v.as_table() {
+                    Some(t) => {
+                        for (col, w) in t {
+                            match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
+                                Some(x) if x > 0.0 => {
+                                    p.width.insert(col.clone(), x as f32);
+                                }
+                                _ => diags.push(bad(format!(
+                                    "column '{col}': 'width' must be a positive number (got {w})"
+                                ))),
+                            }
+                        }
+                    }
+                    None => diags.push(bad("'width' must be a table of column widths".into())),
+                }
+            }
+
+            spec.views.insert(view_name.clone(), p);
+        }
+
+        (spec, diags)
+    }
+
+    /// Merge this over the views, in place.
+    ///
+    /// Called by `config::load_views` after the named-object merge, so
+    /// every `ViewSpec` a module is handed already reflects it (spec
+    /// §5.6). Every mismatch is a **Warning**, never an Error: a desk
+    /// renaming or dropping a column must not break a trader's personal
+    /// file, and the view itself is left exactly as the desk wrote it.
+    pub fn apply(&self, views: &mut [ViewSpec]) -> Vec<Diagnostic> {
+        let mut diags = Vec::new();
+        for (view_name, p) in &self.views {
+            let warn = |m: String| Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: format!("view presentation '{view_name}': {m}"),
+            };
+            let Some(view) = views.iter_mut().find(|v| &v.name == view_name) else {
+                diags.push(warn("no view of that name — ignored".into()));
+                continue;
+            };
+
+            // Order first: `hidden`/`width` only touch presentation, so
+            // they neither depend on nor disturb the column sequence.
+            let mut taken = vec![false; view.columns.len()];
+            let mut permutation: Vec<usize> = Vec::with_capacity(view.columns.len());
+            for name in &p.order {
+                match view.columns.iter().position(|c| c.name() == name) {
+                    Some(i) if !taken[i] => {
+                        taken[i] = true;
+                        permutation.push(i);
+                    }
+                    Some(_) => diags.push(warn(format!(
+                        "column '{name}' is listed twice in 'order' — the repeat is ignored"
+                    ))),
+                    None => diags.push(warn(format!(
+                        "'order' names column '{name}', which the view does not have — ignored"
+                    ))),
+                }
+            }
+            // A column the order omits is not dropped: it keeps its file
+            // order behind the ones named, so a desk adding a column
+            // still reaches a trader whose personal order predates it.
+            permutation.extend((0..view.columns.len()).filter(|i| !taken[*i]));
+            let mut slots: Vec<Option<ViewColumn>> = view.columns.drain(..).map(Some).collect();
+            view.columns = permutation
+                .into_iter()
+                .map(|i| slots[i].take().expect("each index appears once"))
+                .collect();
+
+            for name in &p.hidden {
+                if !view.columns.iter().any(|c| c.name() == name) {
+                    diags.push(warn(format!(
+                        "'hidden' names column '{name}', which the view does not have — ignored"
+                    )));
+                    continue;
+                }
+                view.presentation.entry(name.clone()).or_default().hidden = Some(true);
+            }
+
+            for (name, width) in &p.width {
+                if !view.columns.iter().any(|c| c.name() == name) {
+                    diags.push(warn(format!(
+                        "'width' names column '{name}', which the view does not have — ignored"
+                    )));
+                    continue;
+                }
+                view.presentation.entry(name.clone()).or_default().width = Some(*width);
+            }
+        }
+        diags
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +973,66 @@ format = { color = "none" }
 "#));
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(views[0].presentation_of("npv").colour, Some(Colour::None));
+    }
+    /// Presentation lives in its own doc, so its merged form must be
+    /// built under its own name — `atomic_depth` keys off the doc name,
+    /// and a per-view table is replaced whole exactly as `views` is.
+    fn presentation_doc(text: &str) -> crate::config::MergedDoc {
+        merge_docs(
+            "view_presentation",
+            &[LayerDoc::builtin("view_presentation", text).unwrap()],
+        )
+    }
+
+    #[test]
+    fn presentation_reads_order_hidden_and_width_per_view() {
+        let doc = presentation_doc(
+            r#"
+config_version = 1
+[tree]
+order = ["book", "npv", "delta01"]
+hidden = ["cross_gamma02"]
+[tree.width]
+npv = 120
+"#,
+        );
+        let (spec, diags) = ViewPresentationSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let tree = spec.views.get("tree").expect("tree");
+        assert_eq!(tree.order, vec!["book", "npv", "delta01"]);
+        assert!(tree.hidden.contains("cross_gamma02"));
+        assert_eq!(tree.width.get("npv").copied(), Some(120.0));
+    }
+
+    /// A desk that renames a column must not break a personal file. The
+    /// name is warned about and ignored, never an error.
+    #[test]
+    fn a_column_the_view_lacks_is_a_warning_not_an_error() {
+        let (mut views, _) = ViewSpec::from_doc(&doc("[tree]\ndataset = \"risk_snapshot\"\n\
+             [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+             [[tree.columns]]\nname = \"npv\"\nkind = \"measure\"\n"));
+        let before = views[0].columns.clone();
+        let (pres, diags) = ViewPresentationSpec::from_doc(&presentation_doc(
+            "[tree]\norder = [\"gone\"]\nhidden = [\"gone\"]\n[tree.width]\ngone = 90\n",
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+
+        let warnings = pres.apply(&mut views);
+        assert!(
+            !warnings.is_empty() && warnings.iter().all(|d| d.severity == Severity::Warning),
+            "an unknown column is a warning, never an error: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|d| d.message.contains("gone")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            views[0].columns, before,
+            "the view's own columns are untouched"
+        );
+        assert!(
+            !views[0].presentation.contains_key("gone"),
+            "a name the view lacks invents no column presentation"
+        );
     }
 }

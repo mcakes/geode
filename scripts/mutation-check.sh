@@ -3063,6 +3063,55 @@ run_mutation "bridge: a refused distinct request errors the picker instead of le
   '                if false {' \
   geode-app a_refused_distinct_request_errors_the_picker
 
+# ---- Phase 4c Task 3: view presentation (spec §5.6, §4.1) -------------
+
+# The whole design rests on ORDER: `Config::load` merges the named
+# objects, and only then is `view_presentation` merged over the views.
+# Drop that second half and every reader still gets perfectly valid
+# views — the desk's, with the trader's column order, hidden set and
+# widths silently gone. Nothing errors; the personal file simply stops
+# existing. Two entries because there are two doors and each can be
+# reverted independently: the core loader itself, and the one production
+# caller that must go through it rather than reading the `views` doc.
+run_mutation "views: the user's presentation is merged over the view in the loader" \
+  crates/geode-core/src/config/load.rs \
+  '    if let Some(doc) = config.doc("view_presentation") {' \
+  '    if let Some(doc) = None::<&crate::config::MergedDoc> {' \
+  geode-core \
+  presentation_is_merged_over_the_view_after_the_named_object_merge
+
+run_mutation "views: data_setup goes through load_views, not the raw views doc" \
+  crates/geode-app/src/bridge.rs \
+  '    let (views, d) = load_views(config);' \
+  '    let (views, d) = ViewSpec::from_doc(config.doc("views").expect("checked above"));' \
+  geode-app \
+  data_setup_hands_out_views_with_the_users_presentation_already_merged
+
+# A desk renaming a column must never break a trader's personal file.
+# Promoting the mismatch to an Error is the plausible mistake — it reads
+# like rigour — and `reload::decide` rejects the WHOLE config on any
+# error diagnostic, so one stale name in `view_presentation.toml` would
+# take every other config change down with it.
+run_mutation "views: a presentation naming a column the view lacks warns, it does not error" \
+  crates/geode-core/src/view.rs \
+  '            let warn = |m: String| Diagnostic {
+                severity: Severity::Warning,' \
+  '            let warn = |m: String| Diagnostic {
+                severity: Severity::Error,' \
+  geode-core \
+  a_column_the_view_lacks_is_a_warning_not_an_error
+
+# `view_presentation` changes the ViewSpecs a tile runs on exactly as a
+# `views` edit does, and it is the doc the Views dialog writes on the
+# commonest edit there is. Left out of `views_changed`, the write lands
+# on disk and nothing on screen moves until the next restart.
+run_mutation "reload: a view_presentation change triggers the same reload a views change does" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  'changed("views") || changed("view_presentation") || changed("dimensions");' \
+  'changed("views") || changed("dimensions");' \
+  geode-shell \
+  a_view_presentation_only_change_emits_config_reloaded
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

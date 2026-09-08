@@ -182,7 +182,15 @@ impl ShellView {
             let groupings_changed =
                 changed("groupings") || changed("datasets") || changed("dimensions");
             let scopes_changed = changed("scopes") || changed("datasets") || changed("dimensions");
-            let views_changed = changed("views") || changed("dimensions");
+            // `view_presentation` is merged over the views in
+            // `geode_core::config::load_views`, so a change to it changes
+            // the `ViewSpec`s a tile runs on exactly as a `views` edit
+            // does — and it is the doc the Views dialog writes on the
+            // commonest edit there is (a column width). Omitted here, a
+            // personalisation would sit on disk until the next restart
+            // (spec §5.6).
+            let views_changed =
+                changed("views") || changed("view_presentation") || changed("dimensions");
             // The dimension pickers' column list (Phase 4a §3.3):
             // `pickable_columns` depends on exactly `datasets` (categorical
             // columns) and `dimensions` (derived dimensions) — the same

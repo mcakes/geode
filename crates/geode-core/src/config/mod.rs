@@ -5,7 +5,7 @@
 mod load;
 mod merge;
 
-pub use load::load_layer;
+pub use load::{load_layer, load_views};
 pub use merge::{MergedDoc, merge_docs};
 
 use std::path::PathBuf;

@@ -744,6 +744,71 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     );
 }
 
+/// Phase 4c: `view_presentation.toml` is merged over the views
+/// (`geode_core::config::load_views`), so a change to it changes the
+/// `ViewSpec`s every tile runs on just as a `views` edit does. The Views
+/// dialog writes it on the commonest edit a trader makes — a column
+/// width — and then relies on the 500 ms mtime watcher's ordinary reload
+/// to apply it. Left out of `views_changed`, that write would sit on disk
+/// until the next restart, which is the one outcome the whole
+/// presentation split exists to avoid.
+///
+/// Two reloads: the first establishes a baseline whose `views` doc is
+/// already present, so the second differs in `view_presentation` and in
+/// nothing else.
+#[gpui::test]
+fn a_view_presentation_only_change_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
+    const DATASETS: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n";
+    const VIEWS: &str = "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n";
+
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let config_with = |presentation: Option<&str>| {
+        let mut builtin = vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("datasets", DATASETS).unwrap(),
+            LayerDoc::builtin("views", VIEWS).unwrap(),
+        ];
+        if let Some(text) = presentation {
+            builtin.push(LayerDoc::builtin("view_presentation", text).unwrap());
+        }
+        Config::load(&ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        })
+    };
+
+    // Baseline: `views` is now present in the shell's own config.
+    let mut baseline = config_with(None);
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut baseline), cx)
+    });
+
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let f = fired.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            if matches!(event, ShellEvent::ConfigReloaded) {
+                *f.borrow_mut() += 1;
+            }
+        })
+        .detach();
+    });
+
+    let mut with_presentation = config_with(Some("[v]\norder = [\"book\"]\n"));
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_presentation), cx)
+    });
+
+    assert_eq!(
+        *fired.borrow(),
+        1,
+        "a view_presentation-only edit must trigger the same reload path a views edit does"
+    );
+}
+
 /// I2 (final review): a `views`-changing reload must queue
 /// `ShellEvent::ConfigReloaded` *before* it notifies the frame. gpui
 /// flushes effects FIFO, so which of the two runs first for any given
