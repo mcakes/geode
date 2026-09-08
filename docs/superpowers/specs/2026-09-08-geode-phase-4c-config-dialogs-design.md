@@ -768,12 +768,19 @@ specific prerequisite no task in this plan built:
    command, the only other thing that ever set it, was deleted with that
    design. Needs the `Number` sub-row §3.3 describes under an included
    `OrderedList` item, made writable.
-3. **`FieldKind::Number` stepping down.** §3.3 steps a `Number` with
+3. **Reverse stepping.** §3.3 steps both `Choice` and `Number` with
    `space` forward and `shift+space` back; `dialogmode::normal_command`
-   has no `shift+space` today, and `Number` as built steps forward only,
-   clamping at `max` with no way back down. Whichever adapter builds the
-   first real `Number` field — Groupings' `slot` (§8.2) is the obvious
-   candidate — would otherwise inherit a field that can be raised and
-   never lowered. Needs both the interaction-model addition and the
-   `FieldKind::Number` step fix; Views has no `Number` field, so nothing
-   in Part 1 forced this.
+   (`dialogmode.rs:83-119`) has no `shift+space` case at all — its shift
+   branch handles only `j`/`k`/`g` — so *every* steppable kind is
+   forward-only today: `Choice` wraps forward with no way back, and
+   `Number` steps forward only, clamping at `max` with no way back down.
+   This is one missing key in the interaction model, not a per-kind gap,
+   so the task is `shift+space` itself, with `Choice` and `Number` as its
+   two consumers — implementing it for `Number` alone and leaving
+   `Choice` still forward-only would satisfy the letter of a
+   `Number`-only task name while missing half the defect. Whichever
+   adapter builds the first real `Number` field — Groupings' `slot`
+   (§8.2) is the obvious candidate — would otherwise inherit a field
+   that can be raised and never lowered. Views exercises `Choice` but
+   never needs to step it backward, and has no `Number` field at all, so
+   nothing in Part 1 forced either half into view.
