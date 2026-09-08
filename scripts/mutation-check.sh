@@ -3142,6 +3142,62 @@ run_mutation "reload: a view_presentation change triggers the same reload a view
   geode-shell \
   a_view_presentation_only_change_emits_config_reloaded
 
+# ---- Phase 4c: the object dialog's browse stage
+#
+# The marker that decides whether Task 5 offers a DESTRUCTIVE action.
+# "Revert to desk" deletes the object from the user layer; on a view only
+# the user layer defines, that deletes the view outright instead of
+# restoring anything. Computing `overridden` from the winning layer alone
+# — "the user layer defines it" — is the tidy-looking version and is
+# green against every fixture where a user override shadows something,
+# because there it gives the right answer for the wrong reason. Only a
+# user-ONLY object separates the two.
+run_mutation "objectdialog: overridden is computed from the winning layer alone" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  'layers.contains(&Layer::User) && layers.iter().any(|l| *l < Layer::User);' \
+  'layers.contains(&Layer::User);' \
+  geode-shell \
+  a_user_only_object_is_not_marked_overridden
+
+# The opening mode is one line, and it silently restores the pre-modal
+# model: every filter test still passes with the dialog opening
+# filter-first (`/` is harmless when the field is already focused), and
+# the rows still paint. What breaks is invisible from those tests — the
+# letters become text again, so `j`/`k` type instead of moving and Task
+# 5's verbs would have nowhere to live. Only a test asserting a bare
+# letter did NOT reach the filter can see it.
+run_mutation "objectdialog: the dialog opens in filter mode" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            mode: DialogMode::Normal,' \
+  '            mode: DialogMode::Filter,' \
+  geode-shell \
+  config_views_opens_in_normal_mode_and_lists_the_views
+
+# The query has to reach the ranking, not just be stored. With the rank
+# run against an empty query the state assertions all stay green — the
+# mode changes, the query is mirrored, the escape ladder still walks —
+# and the list simply never narrows, which only a test asserting a
+# non-matching row stopped PAINTING can see.
+run_mutation "objectdialog: the browse list ignores the query it displays" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    crate::listfilter::rank(&texts, &state.query)' \
+  '    crate::listfilter::rank(&texts, "")' \
+  geode-shell \
+  slash_filters_and_escape_walks_the_ladder
+
+# `close_modal` is the one door every modal close goes through, and the
+# shared `dialog_input` subscription routes a query edit to "whichever
+# dialog state is Some". A close that leaves `object_dialog` behind is
+# invisible until the NEXT dialog opens, at which point that stale state
+# swallows its queries — the exact bug that field's own doc comment
+# records for `settings`.
+run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        self.object_dialog = None;' \
+  '' \
+  geode-shell \
+  slash_filters_and_escape_walks_the_ladder
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

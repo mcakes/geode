@@ -19,7 +19,7 @@ use crate::{fontsize, theme};
 use geode_core::query::AsOf;
 
 use super::keys::convert_keystroke;
-use super::{ShellView, asof_view, keybindings_view, picker, settings_view};
+use super::{ShellView, asof_view, keybindings_view, objectdialog, picker, settings_view};
 
 impl ShellView {
     /// The active context stack for key resolution, outermost first:
@@ -128,6 +128,12 @@ impl ShellView {
             // keymap_edit.rs are its pure cores). Reachable today only via
             // the palette (defaults.rs: no key binding).
             keybindings_view::open(self, window, cx);
+        } else if action.0 == "config::views" {
+            // Phase 4c: the object dialog's browse stage over
+            // `Domain::Views` (`shell::objectdialog`). Palette-only, like
+            // `keybindings::open` above and for the same reason
+            // (defaults.rs: no key binding).
+            objectdialog::render::open(self, objectdialog::Domain::Views, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

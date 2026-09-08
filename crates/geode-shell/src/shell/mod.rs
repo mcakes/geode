@@ -15,6 +15,7 @@ mod hot_reload;
 mod input;
 pub mod keybindings_view;
 pub mod keys;
+pub mod objectdialog;
 mod occupants;
 mod palette_ctl;
 pub mod perf_overlay;
@@ -632,6 +633,18 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// The open config-object dialog's own pure state (Phase 4c: the
+    /// shared scaffold every config domain's dialog is built on — see
+    /// `objectdialog`'s module doc), or `None` when closed/never opened.
+    /// Set fresh by [`objectdialog::render::open`] each time and cleared
+    /// by [`close_modal`](Self::close_modal), the same contract the four
+    /// dialogs above hold — including holding no `gpui` types itself, so
+    /// the stage machine and the provenance markers stay unit-testable
+    /// without a window.
+    object_dialog: Option<objectdialog::ObjectDialogState>,
+    /// Scroll state for the object dialog's row list — the
+    /// `keybindings_scroll`/`settings_scroll` split, one dialog over.
+    object_dialog_scroll: ScrollHandle,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -772,10 +785,16 @@ impl ShellView {
             }
             let query = input.read(cx).value().to_string();
             // Route to whichever dialog is actually open. `close_modal`
-            // clears all four fields, so at most one is `Some` here — the
-            // routing cannot land in a stale state left over from an
-            // earlier open.
-            if let Some(state) = view.keybindings.as_mut() {
+            // clears every one of these fields, so at most one is `Some`
+            // here — the routing cannot land in a stale state left over
+            // from an earlier open.
+            if let Some(state) = view.object_dialog.as_mut() {
+                // First, and by nothing more than convenience: the arms
+                // are mutually exclusive by `close_modal`'s contract, so
+                // order carries no meaning here.
+                state.set_query(query);
+                view.object_dialog_scroll.scroll_to_item(0);
+            } else if let Some(state) = view.keybindings.as_mut() {
                 state.set_query(query);
                 view.keybindings_scroll.scroll_to_item(0);
             } else if let Some(state) = view.settings.as_mut() {
@@ -1035,6 +1054,8 @@ impl ShellView {
             picker: None,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            object_dialog: None,
+            object_dialog_scroll: ScrollHandle::new(),
         }
     }
 
@@ -1047,18 +1068,20 @@ impl ShellView {
     /// backdrop listeners, all go through this rather than setting
     /// `self.modal = None` directly.
     ///
-    /// Also clears all four dialogs' state (`keybindings`, `settings`,
-    /// the dimension picker — Phase 4a §3.3 — `picker`, and the as-of
-    /// dialog — Phase 4a §3.6 — `as_of_dialog`). That is not tidiness:
-    /// the shared `dialog_input` subscription routes by "whichever state
-    /// is `Some`", so a stale `settings` left behind by an earlier open
-    /// would swallow the *keybinding* dialog's queries.
+    /// Also clears every dialog's state (`keybindings`, `settings`, the
+    /// dimension picker — Phase 4a §3.3 — `picker`, the as-of dialog —
+    /// Phase 4a §3.6 — `as_of_dialog`, and Phase 4c's `object_dialog`).
+    /// That is not tidiness: the shared `dialog_input` subscription
+    /// routes by "whichever state is `Some`", so a stale `settings` left
+    /// behind by an earlier open would swallow the *keybinding* dialog's
+    /// queries.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.settings = None;
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.object_dialog = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }

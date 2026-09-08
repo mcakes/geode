@@ -173,6 +173,17 @@ pub(super) fn dialog_test_shell(
     cx: &mut gpui::TestAppContext,
     action: &str,
 ) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    dialog_test_shell_with(cx, test_services(), action)
+}
+/// [`dialog_test_shell`] over a caller-supplied `ShellServices` — the one
+/// thing a dialog whose rows come from *config* needs, since
+/// `test_services`' own `Config` is empty (`ConfigSources::default`) and
+/// would give the object dialog nothing to list.
+pub(super) fn dialog_test_shell_with(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    action: &str,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     // Same reclaimed keybindings `main` registers in production
     // (`dialog::init_reclaimed_keybindings`'s own doc comment has the
@@ -184,7 +195,7 @@ pub(super) fn dialog_test_shell(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -309,6 +320,7 @@ mod dock;
 mod drag;
 mod flip;
 mod keybindings_dialog;
+mod objectdialog;
 mod occupants;
 mod palette;
 mod perf;
