@@ -36,6 +36,11 @@ use std::thread::JoinHandle;
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
     Published {
+        /// The `[sources.<name>]` this item came from (Phase 4b final
+        /// review, MAJ-1) — distinct from `dataset`: `SourceSpec` names
+        /// and datasets are two separate fields, and the service must key
+        /// `DataEvent::Health` by this, never by `dataset`.
+        source: String,
         dataset: String,
         batch: String,
         gen_id: i64,
@@ -45,6 +50,8 @@ pub enum IngestEvent {
         health: Health,
     },
     Failed {
+        /// See `Published::source`'s doc — same reasoning, same field.
+        source: String,
         dataset: String,
         batch: String,
         reason: String,
@@ -328,6 +335,7 @@ fn run(
         // one is this item's failure, named, and the runner carries on.
         let Some(dataset) = schema.dataset(&item.dataset) else {
             let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '{}' is not declared", item.dataset),
@@ -363,6 +371,7 @@ fn run(
 
         let event = match outcome {
             Ok(Ok(loaded)) => IngestEvent::Published {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 gen_id: loaded.gen_id,
@@ -377,6 +386,7 @@ fn run(
                 health: loaded.health,
             },
             Ok(Err(reason)) => IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason,
@@ -392,6 +402,7 @@ fn run(
                 let path = item.candidate.csv_path.display();
                 log_ingest_panic(&item.candidate.csv_path, &message);
                 IngestEvent::Failed {
+                    source: item.source.clone(),
                     dataset: item.dataset.clone(),
                     batch: item.batch.clone(),
                     reason: format!("ingest task panicked at {path}: {message}"),

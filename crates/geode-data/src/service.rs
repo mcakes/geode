@@ -294,26 +294,52 @@ impl DataService {
             let sink = Arc::clone(&sink);
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Published {
+                    source,
                     dataset,
                     batch,
                     gen_id,
                     books,
                     rows,
-                    ..
+                    health,
                 } => {
                     tracing::info!(
                         target: "geode::ingest",
                         "published {dataset}/{batch} gen {gen_id}: {} book(s), {rows} row(s)",
                         books.len(),
                     );
-                    sink(DataEvent::Published {
+                    let delivered = sink(DataEvent::Published {
                         dataset,
-                        batch,
+                        batch: batch.clone(),
                         gen_id,
                         books,
-                    })
+                    });
+                    // MAJ-3 (final review): a degraded *publish* — the
+                    // exact carried-dimension violation Phase 4a's grain
+                    // rules exist to catch — used to reach nowhere but a
+                    // DuckDB column nothing reads. Paired `Health` event
+                    // under the source key (MAJ-1), same shape a load
+                    // failure reports, whenever the load itself wasn't
+                    // clean.
+                    if health != Health::Ok {
+                        let reason = match &health {
+                            Health::Degraded { reason } | Health::Failed { reason } => {
+                                reason.clone()
+                            }
+                            _ => String::new(),
+                        };
+                        log_health_event(&source, &health, &reason);
+                        delivered
+                            && sink(DataEvent::Health {
+                                source,
+                                worst: health,
+                                detail: format!("{batch}: {reason}"),
+                            })
+                    } else {
+                        delivered
+                    }
                 }
                 IngestEvent::Failed {
+                    source,
                     dataset,
                     batch,
                     reason,
@@ -327,8 +353,15 @@ impl DataService {
                     // `Health` line's (which source, what's wrong with
                     // it).
                     log_ingest_failure(&dataset, &batch, &reason);
+                    // MAJ-1 (final review): keyed by the SOURCE name
+                    // (`WorkItem::source`, threaded onto `IngestEvent`),
+                    // never the dataset — a `[sources.<name>]` block's
+                    // `name` and `dataset` are two separate fields, and
+                    // keying by `dataset` created a phantom `sources`
+                    // entry while the real source kept reading "no
+                    // report yet".
                     sink(DataEvent::Health {
-                        source: dataset,
+                        source,
                         worst: Health::Failed {
                             reason: reason.clone(),
                         },
@@ -1227,6 +1260,186 @@ mod tests {
         svc.query(&params(1, "tree", &Scope::default(), AsOf::Live, 1))
             .unwrap();
         assert!(next(&rx).snapshot.unwrap().rows() > 1, "data is queryable");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_load_failure_reports_health_under_the_source_name_not_the_dataset_name() {
+        // MAJ-1 (final review): `[sources.eod_risk] dataset = "risk_snapshot"`
+        // — the source's own name differs from the dataset it feeds, which
+        // is exactly the review's failure scenario. The schema is left
+        // without `risk_snapshot` declared on purpose, so the runner's
+        // "dataset is not declared" failure fires deterministically without
+        // depending on a real load succeeding or failing.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 50,
+            seed: 11,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(src.path());
+        opts.leave_one_pending = false;
+        geode_demo_data::emit_directory(&batch, &opts).unwrap();
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema: SchemaSpec::default(),
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_secs(3600),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = None;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(DataEvent::Health { source, detail, .. }) => {
+                    seen = Some((source, detail));
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        let (source, detail) = seen.expect("a Health event for the failed load");
+        assert_eq!(
+            source, "eod_risk",
+            "keyed by the SOURCE name, never the dataset name"
+        );
+        assert!(
+            detail.contains("risk_snapshot"),
+            "dataset/batch still named in the detail: {detail}"
+        );
+        svc.shutdown();
+    }
+
+    /// A minimal schema with `currency` a dimension carried by the
+    /// instrument grain (spec §3.3) — same shape as
+    /// `ingest::load::tests::carried_schema` (not reused directly: that
+    /// one is private to its own test module), needed here to drive a
+    /// `Degraded` publish end to end through a real source directory.
+    fn carried_schema() -> geode_core::schema::DatasetSpec {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[risk_snapshot.columns.book]
+type = "utf8"
+role = "dimension"
+source_name = "Book"
+[risk_snapshot.columns.lhu]
+type = "utf8"
+role = "dimension"
+source_name = "LHU"
+[risk_snapshot.columns.position_ref]
+type = "utf8"
+role = "key"
+source_name = "PositionRef"
+[risk_snapshot.columns.counterparty]
+type = "utf8"
+role = "dimension"
+source_name = "Counterparty"
+[risk_snapshot.columns.instrument_ref]
+type = "utf8"
+role = "key"
+source_name = "InstrumentRef"
+[risk_snapshot.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+source_name = "Currency"
+[risk_snapshot.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "NPV"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        SchemaSpec::from_doc(&doc)
+            .0
+            .dataset("risk_snapshot")
+            .unwrap()
+            .clone()
+    }
+
+    #[test]
+    fn a_degraded_publish_reaches_the_entity_as_degraded_health() {
+        // MAJ-3 (final review): `IngestEvent::Published.health` used to be
+        // swallowed by the service's `..` — a load with a carried-dimension
+        // violation (spec §3.3, the exact silent-wrong-data condition
+        // Phase 4a's grain rules exist to catch) went live with no
+        // `DataEvent::Health` at all. Through the real door: a source
+        // directory with one file whose `currency` disagrees within its
+        // instrument key.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let csv_path = src.path().join("risk_2026-08-24_BK0.csv");
+        std::fs::write(
+            &csv_path,
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P1,C,I1,EUR,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_secs(3600),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut seen = None;
+        let mut published = false;
+        while Instant::now() < deadline && (!published || seen.is_none()) {
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(DataEvent::Published { .. }) => published = true,
+                Ok(DataEvent::Health { source, worst, detail }) => {
+                    seen = Some((source, worst, detail));
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        assert!(published, "the file still publishes — Degraded, not Failed");
+        let (source, worst, detail) = seen.expect("a Health event for the degraded publish");
+        assert_eq!(source, "eod_risk", "keyed by the source name (MAJ-1)");
+        assert!(
+            matches!(worst, Health::Degraded { .. }),
+            "expected Degraded, got {worst:?}"
+        );
+        assert!(detail.contains("currency"), "{detail}");
         svc.shutdown();
     }
 
