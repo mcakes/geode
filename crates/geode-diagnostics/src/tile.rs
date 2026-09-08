@@ -1511,6 +1511,34 @@ mod tests {
         );
     }
 
+    /// MAJ-4's frame-observer narrowing covers every section, not just
+    /// `Data`/`Config` — the successor of the retired "MAJ-6:
+    /// frame_versions_relevant_eq widens back to include scope" mutation
+    /// entry (final review round 2, NEW-3): that entry's own test
+    /// (above) only ever exercises the `Config` section: this pins the
+    /// `Section::Sources | Section::Log | Section::Perf => false` arm
+    /// directly, on the tile's default section.
+    #[gpui::test]
+    fn a_config_reload_while_showing_sources_does_not_rebuild(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        assert_eq!(h.tile.read_with(&vcx, |t, _| t.section()), Section::Sources);
+        let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+
+        h.frame.update(&mut vcx, |f, cx| {
+            f.note_config_reloaded();
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            h.tile.read_with(&vcx, |t, _| t.rebuild_count()),
+            before,
+            "a config reload must not rebuild a tile showing sources — no \
+             section but Config reads the frame's config version"
+        );
+    }
+
     /// MAJ-7: an as-of change while the tile is visible must queue a
     /// fresh catalog request, so the data section's resolved-generation
     /// marker gets a chance to refresh under the new as-of rather than

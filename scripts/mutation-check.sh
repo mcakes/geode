@@ -1079,6 +1079,7 @@ run_mutation "service: replace_views actually replaces" \
 run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
   crates/geode-data/src/ingest/runner.rs \
   '            let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '"'"'{}'"'"' is not declared", item.dataset),
@@ -1148,16 +1149,14 @@ run_mutation "scheduler: pending-too-long surfaces as health" \
 # coverage — geode-data's own `service::tests` module).
 run_mutation "service: a publish becomes a Published event" \
   crates/geode-data/src/service.rs \
-  '                    sink(DataEvent::Published {
+  '                    let delivered = sink(DataEvent::Published {
                         dataset,
-                        batch,
+                        batch: batch.clone(),
                         gen_id,
                         books,
-                    })
-                }' \
-  '                    let _ = (dataset, batch, gen_id, books);
-                    true
-                }' \
+                    });' \
+  '                    let delivered = true;
+                    let _ = (dataset, gen_id, books);' \
   geode-data \
   a_configured_source_is_discovered_loaded_and_announced
 
@@ -3755,8 +3754,8 @@ run_mutation "diagnostics module: sources sorted best-first instead of worst-fir
 
 run_mutation "diagnostics module: the resolved-generation marker points at the wrong generation" \
   crates/geode-diagnostics/src/sections.rs \
-  '                let marked = !as_of.is_live() && part.resolved_gen == Some(generation.gen_id);' \
-  '                let marked = !as_of.is_live() && part.resolved_gen == Some(generation.gen_id + 1);' \
+  '                    && part.resolved_gen == Some(generation.gen_id);' \
+  '                    && part.resolved_gen == Some(generation.gen_id + 1);' \
   geode-diagnostics data_rows_mark_the_resolved_generation_under_an_as_of
 
 run_mutation "diagnostics module: the log filter matches every row regardless of target or level" \
@@ -3776,20 +3775,18 @@ run_mutation "diagnostics module: move_cursor never clears follow" \
 
 run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
   crates/geode-diagnostics/src/tile.rs \
-  '        cx.observe(&diagnostics, |this, diagnostics, cx| {
-            let now = diagnostics.read(cx).version();
-            if now != this.last_diagnostics_version {
-                this.last_diagnostics_version = now;
+  '            this.last_diag_versions = now;
+            if relevant {
                 this.rebuild(cx);
             }
         })
-        .detach();' \
-  '        cx.observe(&diagnostics, |this, diagnostics, cx| {
-            let now = diagnostics.read(cx).version();
-            this.last_diagnostics_version = now;
+        .detach();
+        // MIN-7 (final review)' \
+  '            this.last_diag_versions = now;
             this.rebuild(cx);
         })
-        .detach();' \
+        .detach();
+        // MIN-7 (final review)' \
   geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
 
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
@@ -3863,15 +3860,11 @@ run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh b
                 self.drain_buf = fresh_drain_buf;' \
   geode-diagnostics a_no_op_log_drain_does_not_grow_the_drain_buffer
 
-run_mutation "diagnostics module: MAJ-6 — frame_versions_relevant_eq widens back to include scope" \
+run_mutation "diagnostics module: the frame observer rebuilds Sources/Log/Perf on an as_of-or-config change too (successor of the retired MAJ-6 frame_versions_relevant_eq entry — that function was deleted by MAJ-4)" \
   crates/geode-diagnostics/src/tile.rs \
-  'fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
-    a.as_of == b.as_of && a.config == b.config
-}' \
-  'fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
-    a.as_of == b.as_of && a.config == b.config && a.scope == b.scope
-}' \
-  geode-diagnostics a_scope_only_frame_change_does_not_rebuild_but_a_config_reload_does
+  '                Section::Sources | Section::Log | Section::Perf => false,' \
+  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
+  geode-diagnostics a_config_reload_while_showing_sources_does_not_rebuild
 
 run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog" \
   crates/geode-diagnostics/src/tile.rs \
@@ -4025,45 +4018,86 @@ run_mutation "service: an ingest failure is keyed by the source name, not the da
   crates/geode-data/src/service.rs \
   '                    sink(DataEvent::Health {
                         source,
-                        worst: Health::Failed {' \
+                        worst: reported,
+                        detail: format!("{batch}: {reason}"),
+                    })' \
   '                    sink(DataEvent::Health {
                         source: dataset.clone(),
-                        worst: Health::Failed {' \
+                        worst: reported,
+                        detail: format!("{batch}: {reason}"),
+                    })' \
   geode-data a_load_failure_reports_health_under_the_source_name_not_the_dataset_name
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                    if health != Health::Ok {' \
-  '                    if false && health != Health::Ok {' \
+  '                    match health_tracker.report(&source, health) {
+                        Some(reported) => {
+                            log_health_event(&source, &reported, &reason);
+                            delivered
+                                && sink(DataEvent::Health {
+                                    source,
+                                    worst: reported,
+                                    detail: format!("{batch}: {reason}"),
+                                })
+                        }
+                        None => delivered,
+                    }' \
+  '                    let _ = health_tracker.report(&source, health);
+                    delivered' \
   geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
 
-run_mutation "scheduler: Health::Ok goes out only on a transition, not every clean poll" \
+run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved to DataService's shared HealthTracker)" \
   crates/geode-data/src/ingest/scheduler.rs \
-  '                            if *last == Some(Health::Ok) {
-                                true
-                            } else {' \
-  '                            if false {
-                                true
-                            } else {' \
-  geode-data a_steadily_healthy_source_produces_exactly_one_ok_across_many_polls
-
-run_mutation "scheduler: a recovered source is reported Health::Ok" \
-  crates/geode-data/src/ingest/scheduler.rs \
-  '                        None => {
-                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
-                            if *last == Some(Health::Ok) {
-                                true
-                            } else {
-                                *last = Some(Health::Ok);
-                                sink(SchedulerEvent::Health {
-                                    source: spec.name.clone(),
-                                    worst: Health::Ok,
-                                    detail: String::new(),
-                                })
-                            }
-                        }' \
+  '                        None => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst: Health::Ok,
+                            detail: String::new(),
+                        }),' \
   '                        None => true,' \
-  geode-data a_degraded_source_that_recovers_emits_an_ok_health_event
+  geode-data a_steadily_healthy_source_reports_ok_on_every_poll
+
+# ---- final review round 2: NEW-1 (one HealthTracker, shared by both sinks) ----
+
+run_mutation "service: HealthTracker.report returns Some unconditionally, never deduping" \
+  crates/geode-data/src/service.rs \
+  '        if last.get(source) == Some(&health) {
+            return None;
+        }' \
+  '        if false {
+            return None;
+        }' \
+  geode-data a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok
+
+run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to the shared tracker" \
+  crates/geode-data/src/service.rs \
+  '                    match health_tracker.report(&source, health) {
+                        Some(reported) => {
+                            log_health_event(&source, &reported, &reason);
+                            delivered
+                                && sink(DataEvent::Health {
+                                    source,
+                                    worst: reported,
+                                    detail: format!("{batch}: {reason}"),
+                                })
+                        }
+                        None => delivered,
+                    }' \
+  '                    if health == Health::Ok {
+                        return delivered;
+                    }
+                    match health_tracker.report(&source, health) {
+                        Some(reported) => {
+                            log_health_event(&source, &reported, &reason);
+                            delivered
+                                && sink(DataEvent::Health {
+                                    source,
+                                    worst: reported,
+                                    detail: format!("{batch}: {reason}"),
+                                })
+                        }
+                        None => delivered,
+                    }' \
+  geode-data a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish
 
 run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
   crates/geode-diagnostics/src/tile.rs \
