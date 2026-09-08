@@ -434,13 +434,13 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut degraded = false;
         while std::time::Instant::now() < deadline {
-            if let Ok(SchedulerEvent::Health { worst, .. }) =
-                sched_rx.recv_timeout(Duration::from_secs(1))
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::PendingTooLong,
+                ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
             {
-                if worst == Health::PendingTooLong {
-                    degraded = true;
-                    break;
-                }
+                degraded = true;
+                break;
             }
         }
         assert!(degraded, "setup: the source must degrade first");
@@ -456,13 +456,12 @@ mod tests {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut recovered = false;
         while std::time::Instant::now() < deadline {
-            if let Ok(SchedulerEvent::Health { worst, .. }) =
-                sched_rx.recv_timeout(Duration::from_secs(1))
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::Ok, ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
             {
-                if worst == Health::Ok {
-                    recovered = true;
-                    break;
-                }
+                recovered = true;
+                break;
             }
         }
         assert!(recovered, "a recovered source must report Health::Ok");

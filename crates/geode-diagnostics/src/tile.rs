@@ -32,26 +32,39 @@ use crate::sections::{self, Row, Tone};
 /// capacity), oldest dropped first once full.
 const LOG_CAP: usize = 4_096;
 
-/// `FrameVersions` equality for "does this tile need to rebuild" (Phase
-/// 4b Task 5 fix round 1, MAJ-6): narrowed to exactly the two counters any
-/// section actually reads — `as_of` (`sections::data_rows`) and `config`
-/// (the config section's explainer, now that `config` bumps on every
-/// applied reload rather than only a `views`/`dimensions` one — see
-/// `hot_reload::apply_reload`'s own comment on that call). `scope` and
-/// `grouping` used to be compared too, even though no section reads
-/// either — `Frame::set_scope_in_session` bumps `scope` on *every
-/// keystroke* in the toolbar's text field (Phase 4a requeries per
-/// keystroke by design), so this tile was rebuilding its full row list —
-/// MAJ-5's log-tail clone chief among the cost — inside the same <50ms
-/// window §7.1 gives the requery that keystroke just launched, for
-/// sections that had nothing to do with either counter. `data` is
-/// redundant for a different reason: a publish already reaches
-/// `Diagnostics::note_published`, which bumps the diagnostics version the
-/// other observer already watches. `flip` stays excluded — CLAUDE.md:
-/// `flip` only tells a tile with an already-staged snapshot that it may
-/// promote; this tile never stages anything.
-fn frame_versions_relevant_eq(a: FrameVersions, b: FrameVersions) -> bool {
-    a.as_of == b.as_of && a.config == b.config
+/// Which `FrameVersions` counters matter at all to this tile — `as_of`
+/// (`sections::data_rows`) and `config` (the config section's explainer)
+/// are the only two any section reads; `scope`/`grouping`/`flip` never
+/// are (Phase 4b Task 5 fix round 1, MAJ-6 first drew this line; the
+/// final review's MAJ-4 then narrowed it further — see
+/// `diag_version_for_section` and the frame observer below, which now
+/// also gate on *which* section is showing, not just on this pair).
+/// `Frame::set_scope_in_session` bumps `scope` on *every keystroke* in
+/// the toolbar's text field (Phase 4a requeries per keystroke by
+/// design), so comparing it here would rebuild this tile's full row list
+/// inside the same <50ms window §7.1 gives the requery that keystroke
+/// just launched, for sections that have nothing to do with either
+/// counter. `data` is redundant for a different reason: a publish
+/// already reaches `Diagnostics::note_published`, which bumps the
+/// diagnostics entity's own `data` version the other observer already
+/// watches. `flip` stays excluded — CLAUDE.md: `flip` only tells a tile
+/// with an already-staged snapshot that it may promote; this tile never
+/// stages anything.
+///
+/// Which of `Diagnostics::versions`'s five counters the given section's
+/// row builder actually reads (Phase 4b final review, MAJ-4) — see
+/// `DiagVersions`'s own doc for the full mapping. `Section::Log`'s other
+/// half — the ring's own `latest_seq` — is not a `Diagnostics` version at
+/// all and is compared separately, at the one call site below that needs
+/// it, against `latest_seq`.
+fn diag_version_for_section(section: Section, v: geode_shell::diagnostics::DiagVersions) -> u64 {
+    match section {
+        Section::Sources => v.sources,
+        Section::Data => v.data,
+        Section::Config => v.config,
+        Section::Log => v.log_levels,
+        Section::Perf => v.perf,
+    }
 }
 
 pub struct DiagnosticsTile {
@@ -98,7 +111,12 @@ pub struct DiagnosticsTile {
     /// clones the `Rc` itself, which is one atomic increment regardless
     /// of row count.
     rows: Rc<Vec<Row>>,
-    last_diagnostics_version: u64,
+    /// Per-population, not the entity's single combined `version()`
+    /// (MAJ-4, final review) — the observer below compares only the
+    /// field(s) [`diag_version_for_section`] says the current section
+    /// reads, so a perf-only tick (the 500ms frame-histogram copy) does
+    /// not rebuild, say, the config section's expensive explainer walk.
+    last_diag_versions: geode_shell::diagnostics::DiagVersions,
     last_frame_versions: FrameVersions,
     visible: bool,
     scroll: UniformListScrollHandle,
@@ -129,13 +147,25 @@ impl DiagnosticsTile {
             .map(str::to_string)
             .unwrap_or_default();
 
-        let last_diagnostics_version = diagnostics.read(cx).version();
+        let last_diag_versions = diagnostics.read(cx).versions();
         let last_frame_versions = frame.read(cx).versions();
 
         cx.observe(&diagnostics, |this, diagnostics, cx| {
-            let now = diagnostics.read(cx).version();
-            if now != this.last_diagnostics_version {
-                this.last_diagnostics_version = now;
+            let now = diagnostics.read(cx).versions();
+            // MAJ-4 (final review): the log section's staleness check is
+            // the ring's own `latest_seq`, not a `Diagnostics` version —
+            // compared here (not deferred into `rebuild`) so a tick that
+            // touches neither the ring nor `log_levels` skips the rebuild
+            // entirely, same as every other section.
+            let relevant = if this.section == Section::Log {
+                this.ring.latest_seq() > this.since
+                    || now.log_levels != this.last_diag_versions.log_levels
+            } else {
+                diag_version_for_section(this.section, now)
+                    != diag_version_for_section(this.section, this.last_diag_versions)
+            };
+            this.last_diag_versions = now;
+            if relevant {
                 this.rebuild(cx);
             }
         })
@@ -143,8 +173,19 @@ impl DiagnosticsTile {
         cx.observe(&frame, |this, frame, cx| {
             let now = frame.read(cx).versions();
             let as_of_changed = now.as_of != this.last_frame_versions.as_of;
-            if !frame_versions_relevant_eq(now, this.last_frame_versions) {
-                this.last_frame_versions = now;
+            let config_changed = now.config != this.last_frame_versions.config;
+            // MAJ-4 (final review): narrowed the same way as the
+            // diagnostics observer above — a config reload must rebuild
+            // the config section, but not a tile currently showing
+            // sources/data/log/perf, none of which read the frame's
+            // `config` version; the frame's `as_of` is `Data`'s alone.
+            let relevant = match this.section {
+                Section::Data => as_of_changed,
+                Section::Config => config_changed,
+                Section::Sources | Section::Log | Section::Perf => false,
+            };
+            this.last_frame_versions = now;
+            if relevant {
                 this.rebuild(cx);
             }
             // Phase 4b Task 5 fix round 1, MAJ-7: the data thread computes
@@ -180,7 +221,7 @@ impl DiagnosticsTile {
             drain_buf: Vec::new(),
             records: VecDeque::new(),
             rows: Rc::new(Vec::new()),
-            last_diagnostics_version,
+            last_diag_versions,
             last_frame_versions,
             visible: false,
             scroll: UniformListScrollHandle::new(),
@@ -937,6 +978,75 @@ mod tests {
         );
     }
 
+    /// MAJ-4 (final review): before per-population versions, ANY
+    /// `Diagnostics` mutation — including the perf-only reload-tick copy
+    /// of the frame histogram, which fires roughly every 500ms while a
+    /// tile is visible — rebuilt whatever section happened to be showing.
+    /// For the config section (the expensive one: a walk of every loaded
+    /// doc's leaves) that meant a full rebuild twice a second regardless
+    /// of what actually changed. Pinned here: a perf-only bump must leave
+    /// the config section's `rebuild_count` untouched.
+    #[gpui::test]
+    fn refresh_frame_hist_does_not_rebuild_the_config_section(cx: &mut gpui::TestAppContext) {
+        use geode_shell::perf::FrameHistogram;
+
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.set_visible(true, cx);
+            t.command("section config", cx).unwrap();
+        });
+        let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            let mut hist = FrameHistogram::new();
+            hist.record_micros(1_000);
+            let bumped = d.refresh_frame_hist(&hist);
+            assert!(bumped, "sanity: the histogram copy must have happened");
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let after = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+        assert_eq!(
+            before, after,
+            "a perf-only version bump must not rebuild the config section"
+        );
+    }
+
+    /// MAJ-4's other half: the config section MUST still rebuild on an
+    /// actual config change — the fix narrows what wakes a rebuild, it
+    /// must not silence real ones.
+    #[gpui::test]
+    fn note_config_rebuilds_the_config_section(cx: &mut gpui::TestAppContext) {
+        use geode_core::config::{Diagnostic, Layer};
+        use std::path::PathBuf;
+
+        let (h, mut vcx) = open(cx);
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section config", cx).unwrap();
+        });
+        let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            d.note_config(
+                vec![Diagnostic::error(Layer::User, PathBuf::new(), "bad")],
+                SystemTime::UNIX_EPOCH,
+            );
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let after = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
+        assert!(
+            after > before,
+            "a real config change must rebuild the config section"
+        );
+    }
+
     #[gpui::test]
     fn visibility_watches_and_requests_a_catalog(cx: &mut gpui::TestAppContext) {
         let (h, mut vcx) = open(cx);
@@ -1188,6 +1298,13 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let (h, mut vcx) = open(cx);
+        // MAJ-4 (final review): the frame observer's rebuild gate is now
+        // per-section too (not just the diagnostics entity's), so this
+        // test must actually be showing the config section for a config
+        // reload to be expected to rebuild it.
+        h.tile.update(&mut vcx, |t, cx| {
+            t.command("section config", cx).unwrap();
+        });
         let before = h.tile.read_with(&vcx, |t, _| t.rebuild_count());
 
         h.frame.update(&mut vcx, |f, cx| {

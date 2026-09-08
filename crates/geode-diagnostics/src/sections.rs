@@ -703,6 +703,73 @@ mod tests {
         assert_eq!(leaf_rows, MAX_LEAVES_PER_DOC);
     }
 
+    /// MAJ-4's display-free measurement recipe (final review, ruling 4):
+    /// times `config_rows` on the largest shipped config — the `--demo`
+    /// layer's five docs (`app`, `datasets`, `dimensions`, `groupings`,
+    /// `views`) plus the compiled-in builtin keymap, the biggest single
+    /// doc in a real session (one leaf per binding key, after MAJ-8's
+    /// array recursion) — standing in for a display, since no display
+    /// was available to measure the tile's actual paint. Run with
+    /// `cargo test -p geode-diagnostics --lib sections::tests::
+    /// config_rows_on_the_demo_config_stays_under_budget -- --nocapture`
+    /// to see the printed number; `docs/perf.md`'s Phase 4b section
+    /// records what this measured. The assertion is a generous sanity
+    /// bound (10ms — well inside §7.1's 8ms *pure-UI* budget would be a
+    /// coincidence worth flagging, not the actual per-frame cost this
+    /// stands in for; twice a second, not every frame), not a tight
+    /// regression gate.
+    #[test]
+    fn config_rows_on_the_demo_config_stays_under_budget() {
+        let d = Diagnostics::new(LogLevels::default());
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "app",
+                    include_str!("../../../examples/demo-config/app.toml"),
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "datasets",
+                    include_str!("../../../examples/demo-config/datasets.toml"),
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "dimensions",
+                    include_str!("../../../examples/demo-config/dimensions.toml"),
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "groupings",
+                    include_str!("../../../examples/demo-config/groupings.toml"),
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    include_str!("../../../examples/demo-config/views.toml"),
+                )
+                .unwrap(),
+                LayerDoc::builtin("keymap", geode_shell::defaults::BUILTIN_KEYMAP).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+
+        let start = std::time::Instant::now();
+        let rows = config_rows(&d, &config, "");
+        let elapsed = start.elapsed();
+        println!(
+            "config_rows on the demo config + builtin keymap: {} rows in {:?}",
+            rows.len(),
+            elapsed
+        );
+        assert!(!rows.is_empty());
+        assert!(
+            elapsed < Duration::from_millis(10),
+            "config_rows took {elapsed:?} on the demo config — record the real number in \
+             docs/perf.md and reconsider MAJ-4's fix (b)/(c) if this budget ever tightens"
+        );
+    }
+
     #[test]
     fn log_rows_filter_by_target_or_level_text() {
         let records = vec![

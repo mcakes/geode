@@ -1119,11 +1119,77 @@ comparison must not rebuild on a notify that changed nothing.
 `an_unchanged_entity_does_not_rebuild_rows` (`crates/geode-diagnostics/
 src/tile.rs`) pins this the hard way: it calls `cx.notify()` on both
 `diagnostics` and `frame` with no real mutation behind either call and
-asserts `rebuild_count` does not move. `DiagnosticsTile::
-frame_versions_relevant_eq` narrows the comparison to exactly the two
-`FrameVersions` fields any section reads (`as_of`, `config`) — a
-scope-only or grouping-only frame change is not a reason for this tile
-to rebuild.
+asserts `rebuild_count` does not move. The frame-driven half of that
+comparison narrows to exactly the two `FrameVersions` fields any
+section reads (`as_of`, `config`) — a scope-only or grouping-only frame
+change is not a reason for this tile to rebuild.
+
+**Per-population versions (final-review fix, MAJ-4).** The whole-branch
+review found that this discipline held for the *entity's own* version
+but not fully: `Diagnostics` had one combined `version()` counter, so
+ANY mutation — including the perf-only reload-tick copy of the frame
+histogram, which fires roughly every 500ms while any diagnostics tile
+is visible — bumped it, and the tile's one `cx.observe` compared that
+single counter regardless of which of the five sections was showing.
+For four sections that comparison was cheap to redo; for `config` it
+was not — `sections::config_rows` walks every loaded doc's leaves
+(several allocations per leaf: the walked path, the value's `to_
+string`, `explain`'s own probe, the row's `format!`), and was being
+redone twice a second whenever a `config` tile sat open beside anything
+painting frames, whether or not the config actually changed.
+
+The fix: `Diagnostics` gained `versions: DiagVersions { sources, data,
+config, log_levels, perf }` (`crates/geode-shell/src/diagnostics.rs`),
+one counter per section, each bumped only by the mutators that
+section's row builder reads — `note_config`/a changed `note_data_
+diagnostics` bump `config` (despite `data_diagnostics`' name, it is
+`config_rows` that renders it); `describe_source`/`note_health`/
+`note_polled` bump `sources`; `note_published`/`set_catalog` bump
+`data`; `request_level`/`set_levels` bump `log_levels`; `refresh_frame_
+hist`/`note_dropped` bump `perf`. `Diagnostics::version()` is untouched
+and keeps bumping on every mutation, unrelated to this — it still backs
+`summary()`'s cache. `DiagnosticsTile`'s two `cx.observe` closures
+(`crates/geode-diagnostics/src/tile.rs`) now compare only the
+version(s) the *current* section reads — `diag_version_for_section`
+for the diagnostics-entity half, plus the ring's own `latest_seq` for
+the log section specifically (not a `Diagnostics` version at all); the
+frame-driven half compares `as_of` only while showing `Data` and
+`config` only while showing `Config`. A perf-only tick while showing
+`config` now touches neither counter the config comparison reads, so
+`rebuild()` — and `config_rows`'s walk — does not run.
+
+Pinned by `refresh_frame_hist_does_not_rebuild_the_config_section`
+(a perf-only bump leaves the config section's `rebuild_count`
+untouched) and `note_config_rebuilds_the_config_section` (a real config
+change still does) in `crates/geode-diagnostics/src/tile.rs`.
+
+**The config section's own cost, measured (display-free proxy).** No
+display was available to take the reading the "Display recipe" section
+below describes, so — as MAJ-4's ruling asks — `config_rows` was timed
+directly against the largest config this repo ships: the `--demo`
+layer's five docs (`app`, `datasets`, `dimensions`, `groupings`,
+`views`) plus the compiled-in builtin keymap (the single biggest doc in
+a real session — one leaf per binding key, after the earlier MAJ-8 fix
+recurses into `[[bindings]]`'s array). Recipe:
+
+```sh
+cargo test -p geode-diagnostics --lib \
+  sections::tests::config_rows_on_the_demo_config_stays_under_budget \
+  -- --nocapture
+```
+
+| build | rows produced | `config_rows` elapsed |
+| --- | --- | --- |
+| debug (`cargo test`, unoptimized) | 591 | ~0.7-1.3ms (five runs, warm cache) |
+
+Well inside the render thread's 8ms pure-UI budget even unoptimized and
+even paid on every rebuild — the periodic-tick waste MAJ-4 fixed was
+real (twice a second regardless of relevance), but the walk itself was
+never close to the budget on a config this size. The test asserts a
+generous 10ms sanity bound, not this measured number, so it does not
+flake on a slower CI runner; a maintainer whose desk config grows much
+larger than the demo config's five docs plus the builtin keymap should
+re-run the recipe above rather than trust this row indefinitely.
 
 **The histogram copy cadence.** `ShellView::perf: FrameHistogram` stays
 the value the overlay and the render path read every frame;

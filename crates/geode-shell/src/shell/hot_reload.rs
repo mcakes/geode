@@ -28,6 +28,12 @@ use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
 /// ().spawn`); only the cheap decision + entity mutation happens on the UI
 /// thread, via the async entity handle (spec PHILOSOPHY.md: "nothing may
 /// stall the render thread").
+///
+/// **Coupled to `perf::IDLE_CUTOFF` (also 500ms) — see that constant's own
+/// doc comment for why.** This is also the tick `Diagnostics::
+/// refresh_frame_hist` rides while a diagnostics tile is visible; keep the
+/// two at least this close, or add a floor at the `refresh_frame_hist`
+/// call site instead of relying on the coincidence.
 pub(super) const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Rebuild `GroupingSlots` from whatever `[groupings]` (plus the

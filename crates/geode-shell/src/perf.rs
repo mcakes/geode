@@ -28,6 +28,24 @@ use std::time::Duration;
 /// Deliberately well above [`BUCKET_UPPER_BOUNDS_MICROS`]' top (100ms) so a
 /// genuinely catastrophic-but-real 100–500ms frame still lands in the
 /// overflow bucket and drives `max` instead of being mistaken for idleness.
+///
+/// **Coupled to `hot_reload::RELOAD_POLL_INTERVAL` (also 500ms) — not by
+/// any code reference, only by value (Phase 4b final review, MAJ-4's
+/// related finding).** A visible diagnostics tile's `Diagnostics::
+/// refresh_frame_hist` copies `ShellView::perf` and calls `cx.notify()`
+/// on that same ~500ms tick even when nothing new was recorded; that
+/// notify alone drives a repaint, which records a fresh render interval,
+/// which is exactly the reload tick's own period later — landing just
+/// under this cutoff and being discarded as an idle gap rather than
+/// counted. If either constant ever moves independently (a shorter
+/// reload poll, or a lower cutoff to catch shorter real idle gaps), an
+/// idle diagnostics tile could instead pin the app in a self-sustaining
+/// full-repaint loop: notify -> repaint -> interval recorded as a real
+/// frame -> `perf.record()` moves `count()`/`max_micros()` -> the next
+/// tick's `refresh_frame_hist` sees a change and copies again -> notify.
+/// Keep these two constants at least this close, or add a floor: a
+/// notify with no real state change must not, on its own, ever produce
+/// an interval below `IDLE_CUTOFF`.
 pub const IDLE_CUTOFF: Duration = Duration::from_millis(500);
 
 /// Upper bounds (inclusive ceiling of each bucket, in microseconds) of the

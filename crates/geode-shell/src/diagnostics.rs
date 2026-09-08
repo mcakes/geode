@@ -102,6 +102,42 @@ pub const CONFIG_HISTORY_CAP: usize = 16;
 /// first (a plain append cap, not "batches" — see that field's doc).
 pub const DATA_DIAGNOSTICS_CAP: usize = 256;
 
+/// Per-population versions (Phase 4b final review, MAJ-4): one counter
+/// per diagnostics *section*, bumped only by the mutators that section's
+/// row builder actually reads — so a tile only ever rebuilds the section
+/// it is currently showing, never all five just because *something*
+/// changed. [`Diagnostics::version`] is unrelated and unchanged by this:
+/// it keeps bumping on every mutation, exactly as before, for
+/// [`Diagnostics::summary`]'s cache and anything else that wants "did
+/// anything at all change" — these are a second, finer-grained signal
+/// alongside it, not a replacement.
+///
+/// The mapping to `sections.rs`'s five builders:
+/// - `sources` -> `sources_rows` (reads `Diagnostics::sources`)
+/// - `data` -> `data_rows` (reads `Diagnostics::datasets`; the frame's
+///   own `as_of` is the other half `DiagnosticsTile` already compares
+///   separately, via `Frame::versions`)
+/// - `config` -> `config_rows` (reads `Diagnostics::config`,
+///   `config_history`, **and** `data_diagnostics` — despite that field's
+///   name, it is the config section that renders it, not the data
+///   section; the frame's own `config` version is the other half
+///   `DiagnosticsTile` already compares separately)
+/// - `log_levels` -> `log_rows`'s target/level filtering reads
+///   `Diagnostics::levels`; the ring's own `latest_seq` is the other
+///   half, read directly off the `Ring` rather than mirrored here (the
+///   ring is not part of this entity)
+/// - `perf` -> `perf_rows` (reads `Diagnostics::frame_hist` and
+///   `dropped_events`; `RequeryStats` comes from the frame, compared the
+///   same way as `data`/`config`'s frame half)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiagVersions {
+    pub sources: u64,
+    pub data: u64,
+    pub config: u64,
+    pub log_levels: u64,
+    pub perf: u64,
+}
+
 /// The shell-owned diagnostics gatherer (spec §4.4). See the module doc
 /// for the version-bump discipline every mutator here follows.
 pub struct Diagnostics {
@@ -159,6 +195,8 @@ pub struct Diagnostics {
     /// real work while at least one tile could show it.
     watchers: u32,
     version: u64,
+    /// Per-population versions (MAJ-4) — see [`DiagVersions`]'s own doc.
+    versions: DiagVersions,
     pending_level: Option<(String, Level)>,
     pending_overlay_toggle: bool,
     pending_catalog_request: bool,
@@ -191,6 +229,7 @@ impl Diagnostics {
             levels,
             watchers: 0,
             version: 0,
+            versions: DiagVersions::default(),
             pending_level: None,
             pending_overlay_toggle: false,
             pending_catalog_request: false,
@@ -200,6 +239,12 @@ impl Diagnostics {
 
     pub fn version(&self) -> u64 {
         self.version
+    }
+
+    /// Per-population versions (MAJ-4) — see [`DiagVersions`]'s own doc.
+    /// `Copy`, so a caller snapshots it cheaply on every observer tick.
+    pub fn versions(&self) -> DiagVersions {
+        self.versions
     }
 
     /// A source's static description (once, at bridge `attach`). A
@@ -214,6 +259,7 @@ impl Diagnostics {
         }
         state.spec = Some(summary);
         self.version += 1;
+        self.versions.sources += 1;
     }
 
     /// Record a source's worst health as of `at`. The *first* real note
@@ -242,6 +288,7 @@ impl Diagnostics {
             state.history.pop_front();
         }
         self.version += 1;
+        self.versions.sources += 1;
     }
 
     /// Record a source's last/next poll and how many files were ready.
@@ -256,6 +303,7 @@ impl Diagnostics {
         state.next_poll = Some(next);
         state.last_ready = ready;
         self.version += 1;
+        self.versions.sources += 1;
     }
 
     /// A file was published for `dataset` (§3.12-style feed, mirrored
@@ -272,6 +320,7 @@ impl Diagnostics {
             self.pending_catalog_request = true;
         }
         self.version += 1;
+        self.versions.data += 1;
     }
 
     /// The current config diagnostics batch, from a load or reload —
@@ -297,6 +346,7 @@ impl Diagnostics {
             self.config_history.pop_back();
         }
         self.version += 1;
+        self.versions.config += 1;
     }
 
     /// The data layer's own diagnostics (Phase 4b Task 4 fix round 2,
@@ -326,6 +376,10 @@ impl Diagnostics {
         }
         if changed {
             self.version += 1;
+            // `config`, not `data` — despite this field's name, it is
+            // `sections::config_rows` that renders `data_diagnostics`
+            // (see `DiagVersions`'s own doc for the full mapping).
+            self.versions.config += 1;
         }
     }
 
@@ -337,6 +391,9 @@ impl Diagnostics {
         }
         self.dropped_events = total;
         self.version += 1;
+        // `sections::perf_rows` is the section that renders
+        // `dropped_events`.
+        self.versions.perf += 1;
     }
 
     /// `None` clears it. A no-op (the same message, or already `None`)
@@ -369,6 +426,7 @@ impl Diagnostics {
         }
         self.catalog = Some(snapshot);
         self.version += 1;
+        self.versions.data += 1;
     }
 
     /// Copy `hist` into [`Self::frame_hist`] — only while at least one
@@ -410,6 +468,7 @@ impl Diagnostics {
         }
         self.frame_hist = hist.clone();
         self.version += 1;
+        self.versions.perf += 1;
         true
     }
 
@@ -508,6 +567,7 @@ impl Diagnostics {
         self.levels = self.levels.with(target, level);
         self.pending_level = Some((target.to_string(), level));
         self.version += 1;
+        self.versions.log_levels += 1;
     }
 
     pub fn take_pending_level(&mut self) -> Option<(String, Level)> {
@@ -525,6 +585,7 @@ impl Diagnostics {
         }
         self.levels = levels;
         self.version += 1;
+        self.versions.log_levels += 1;
         true
     }
 

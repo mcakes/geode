@@ -1314,7 +1314,9 @@ mod tests {
                 // failure this test cares about is the *ingest* failure
                 // that follows once the runner tries to load the
                 // undeclared dataset.
-                Ok(DataEvent::Health { worst, .. }) if worst == Health::Ok => {}
+                Ok(DataEvent::Health {
+                    worst: Health::Ok, ..
+                }) => {}
                 Ok(DataEvent::Health { source, detail, .. }) => {
                     seen = Some((source, detail));
                     break;
@@ -1441,7 +1443,9 @@ source_name = "NPV"
                 // `Health{Degraded}` pair in either order — it must not
                 // be mistaken for the degraded-publish event this test is
                 // watching for.
-                Ok(DataEvent::Health { worst, .. }) if worst == Health::Ok => {}
+                Ok(DataEvent::Health {
+                    worst: Health::Ok, ..
+                }) => {}
                 Ok(DataEvent::Health {
                     source,
                     worst,
