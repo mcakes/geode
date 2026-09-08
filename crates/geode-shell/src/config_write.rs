@@ -57,7 +57,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use geode_core::config::Layer;
+use geode_core::config::{CONFIG_VERSION, Layer};
 use toml_edit::{DocumentMut, value};
 
 /// The path a layered config document lives at, refusing every layer but
@@ -154,7 +154,11 @@ fn open_at(path: &Path) -> Result<DocumentMut, String> {
     };
 
     if !existed {
-        doc["config_version"] = value(1_i64);
+        // The stamp every layered doc carries, from the one constant the
+        // loader checks it against (`config::load`) — a literal here
+        // would be a second copy to remember when the schema moves, and
+        // this door is now the only place a new file gets one at all.
+        doc["config_version"] = value(CONFIG_VERSION);
     }
 
     Ok(doc)
