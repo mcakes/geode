@@ -12,7 +12,6 @@ use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
 use crate::source::{CandidateState, SourceSpec, discover};
 use crate::store::Catalog;
-use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -113,14 +112,6 @@ fn run(
     }
     // Everything is due now: the first sweep is the cold start.
     let mut due: Vec<(Instant, usize)> = (0..sources.len()).map(|i| (Instant::now(), i)).collect();
-    // MAJ-2 (final review): one entry per source, so `Health::Ok` goes out
-    // on a TRANSITION only — never per poll (the ring would otherwise be
-    // spammed twice a minute forever), and never omitted on a recovery
-    // (nothing else in the running system can ever clear a latched
-    // `Degraded`/`PendingTooLong`/`Failed`). `None` means "never reported
-    // anything for this source yet" — the first clean poll is itself a
-    // transition, into `Ok`.
-    let mut last_reported: HashMap<String, Option<Health>> = HashMap::new();
 
     loop {
         due.sort_by_key(|(t, _)| *t);
@@ -146,33 +137,28 @@ fn run(
                 geode_core::panic::contained(|| {
                     let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
                     let health = worst_health(&candidates);
+                    // NEW-1 (final review round 2): the scheduler ALWAYS
+                    // emits its poll result now — `Ok` on a clean poll,
+                    // `worst` otherwise — with no dedup of its own. The
+                    // transition guard moved to `DataService`'s shared
+                    // `HealthTracker`, which both this scheduler sink and
+                    // the ingest sink report through: a scheduler-local
+                    // tracker (the old `last_reported`) could not see a
+                    // publish's own health notes, so a degraded publish
+                    // stayed latched even after the scheduler's own next
+                    // clean poll — the scheduler thought it had already
+                    // said `Ok`.
                     let ok = match health {
-                        Some((worst, detail)) => {
-                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
-                            if last.as_ref() == Some(&worst) {
-                                true
-                            } else {
-                                *last = Some(worst.clone());
-                                sink(SchedulerEvent::Health {
-                                    source: spec.name.clone(),
-                                    worst,
-                                    detail,
-                                })
-                            }
-                        }
-                        None => {
-                            let last = last_reported.entry(spec.name.clone()).or_insert(None);
-                            if *last == Some(Health::Ok) {
-                                true
-                            } else {
-                                *last = Some(Health::Ok);
-                                sink(SchedulerEvent::Health {
-                                    source: spec.name.clone(),
-                                    worst: Health::Ok,
-                                    detail: String::new(),
-                                })
-                            }
-                        }
+                        Some((worst, detail)) => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst,
+                            detail,
+                        }),
+                        None => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst: Health::Ok,
+                            detail: String::new(),
+                        }),
                     };
                     let plan = build_plan(&[(spec.clone(), candidates)]);
                     let ready = plan.items.len();
@@ -191,36 +177,20 @@ fn run(
 
         let delivered = match outcome {
             Ok(Ok(delivered)) => delivered,
-            Ok(Err(e)) => {
-                last_reported.insert(
-                    spec.name.clone(),
-                    Some(Health::Failed {
-                        reason: e.to_string(),
-                    }),
-                );
-                sink(SchedulerEvent::Health {
-                    source: spec.name.clone(),
-                    worst: Health::Failed {
-                        reason: e.to_string(),
-                    },
-                    detail: format!("discovery failed: {e}"),
-                })
-            }
-            Err(_) => {
-                last_reported.insert(
-                    spec.name.clone(),
-                    Some(Health::Failed {
-                        reason: "discovery panicked".into(),
-                    }),
-                );
-                sink(SchedulerEvent::Health {
-                    source: spec.name.clone(),
-                    worst: Health::Failed {
-                        reason: "discovery panicked".into(),
-                    },
-                    detail: "discovery panicked".into(),
-                })
-            }
+            Ok(Err(e)) => sink(SchedulerEvent::Health {
+                source: spec.name.clone(),
+                worst: Health::Failed {
+                    reason: e.to_string(),
+                },
+                detail: format!("discovery failed: {e}"),
+            }),
+            Err(_) => sink(SchedulerEvent::Health {
+                source: spec.name.clone(),
+                worst: Health::Failed {
+                    reason: "discovery panicked".into(),
+                },
+                detail: "discovery panicked".into(),
+            }),
         };
         if !delivered {
             return;
@@ -468,11 +438,20 @@ mod tests {
         sched.shutdown();
     }
 
-    /// MAJ-2's other half: a healthy source must not spam `Ok` every poll
-    /// (the transition guard's whole reason to exist — the ruling's stated
-    /// worry was "one event per poll" if this were unconditional).
+    /// MAJ-2's original dedup guard lived here, at the scheduler; final
+    /// review round 2 (NEW-1) moved it to `DataService`'s shared
+    /// `HealthTracker`, because a scheduler-local tracker had no way to
+    /// see a PUBLISH's own health notes — a degraded publish stayed
+    /// latched even after the scheduler's next clean poll, since the
+    /// scheduler thought it had already said `Ok`. The scheduler now
+    /// emits its poll result unconditionally; the "exactly one Ok" case
+    /// this test used to pin now lives at the service level
+    /// (`service.rs`'s
+    /// `a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok`).
+    /// Pinned here instead: a steadily healthy source reports `Ok` on
+    /// EVERY poll, not just the first.
     #[test]
-    fn a_steadily_healthy_source_produces_exactly_one_ok_across_many_polls() {
+    fn a_steadily_healthy_source_reports_ok_on_every_poll() {
         let poll = Duration::from_millis(20);
         let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
             harness(poll, Duration::from_secs(3600));
@@ -492,8 +471,9 @@ mod tests {
         }
         assert_eq!(polls, 8, "eight polls within 30s");
         assert_eq!(
-            ok_count, 1,
-            "exactly one Ok across many clean polls, not one per poll"
+            ok_count, 8,
+            "the scheduler emits Ok on every clean poll now — dedup lives \
+             in DataService's shared HealthTracker"
         );
         sched.shutdown();
     }

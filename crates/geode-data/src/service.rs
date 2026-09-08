@@ -167,6 +167,49 @@ fn log_health_event(source: &str, worst: &Health, detail: &str) {
     }
 }
 
+/// One source's last REPORTED health, shared between the ingest sink and
+/// the scheduler sink (final review round 2, NEW-1) — MAJ-3 added a
+/// second writer of source health (a publish) that MAJ-2's
+/// scheduler-only transition tracker knew nothing about: a degraded
+/// publish set `SourceState.health` to `Degraded`, but the scheduler's
+/// own `last_reported` (keyed and consulted only inside `ingest::
+/// scheduler::run`) had no idea a publish had happened, so its next
+/// clean poll saw its own state as already `Some(Ok)` and suppressed the
+/// event that would have cleared it — and the publish path's own guard
+/// (`health == Health::Ok` never sent) meant a later clean republish
+/// couldn't clear it either. `Health::Ok` was reachable in general
+/// (MAJ-2), but a source that had ever had one degraded publish stayed
+/// latched at `degraded` for the rest of the session — MAJ-2's exact
+/// failure mode, through the path MAJ-3 opened.
+///
+/// One tracker, owned by the service and shared by both sinks, closes
+/// the gap: every report from EITHER path goes through the same
+/// `report`, so whichever next reports `Ok` — a scheduler poll or a
+/// publish — is the one that clears it, and a report that repeats the
+/// last one recorded (from either path) is suppressed regardless of
+/// which path sent it.
+#[derive(Default)]
+struct HealthTracker {
+    last: std::sync::Mutex<std::collections::HashMap<String, Health>>,
+}
+
+impl HealthTracker {
+    /// `Some(health)` exactly on a transition for `source` — the first
+    /// report ever, or one that differs from the last reported (`Health`
+    /// derives `PartialEq` down to `Degraded`/`Failed`'s own `reason`, so
+    /// a changed reason at the same severity still counts as a
+    /// transition). `None` when it repeats the last reported state,
+    /// meaning the caller must not forward it.
+    fn report(&self, source: &str, health: Health) -> Option<Health> {
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.get(source) == Some(&health) {
+            return None;
+        }
+        last.insert(source.to_string(), health.clone());
+        Some(health)
+    }
+}
+
 pub struct DataService {
     config: DataServiceConfig,
     /// Config errors found at open (spec §10.1). Held rather than
@@ -263,6 +306,11 @@ impl DataService {
         // store moves onto the ingest thread (Phase 3 §2.5).
         let conn = store.reader()?;
         let discovery_conn = store.reader()?;
+        // NEW-1 (final review round 2): one `HealthTracker`, shared by
+        // both sinks built below — see that type's own doc for why a
+        // tracker scoped to just one of the two producers cannot close
+        // the latch MAJ-3 reopened.
+        let health_tracker = Arc::new(HealthTracker::default());
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |r: QueryResult| match r.kind {
@@ -292,6 +340,7 @@ impl DataService {
 
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
+            let health_tracker = Arc::clone(&health_tracker);
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Published {
                     source,
@@ -320,22 +369,31 @@ impl DataService {
                     // under the source key (MAJ-1), same shape a load
                     // failure reports, whenever the load itself wasn't
                     // clean.
-                    if health != Health::Ok {
-                        let reason = match &health {
-                            Health::Degraded { reason } | Health::Failed { reason } => {
-                                reason.clone()
-                            }
-                            _ => String::new(),
-                        };
-                        log_health_event(&source, &health, &reason);
-                        delivered
-                            && sink(DataEvent::Health {
-                                source,
-                                worst: health,
-                                detail: format!("{batch}: {reason}"),
-                            })
-                    } else {
-                        delivered
+                    //
+                    // NEW-1 (final review round 2): EVERY publish's
+                    // health is reported to the shared tracker now, `Ok`
+                    // included — not gated on `health != Health::Ok`
+                    // here. That old guard was the other half of the
+                    // latch: a clean republish's `Ok` never even reached
+                    // the entity, so nothing could ever clear a source a
+                    // degraded publish had marked. The tracker decides
+                    // whether this is a real transition; only then is it
+                    // forwarded.
+                    let reason = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+                        _ => String::new(),
+                    };
+                    match health_tracker.report(&source, health) {
+                        Some(reported) => {
+                            log_health_event(&source, &reported, &reason);
+                            delivered
+                                && sink(DataEvent::Health {
+                                    source,
+                                    worst: reported,
+                                    detail: format!("{batch}: {reason}"),
+                                })
+                        }
+                        None => delivered,
                     }
                 }
                 IngestEvent::Failed {
@@ -351,7 +409,9 @@ impl DataService {
                     // message shape a load failure wants (which file,
                     // which batch) differs from a discovery-level
                     // `Health` line's (which source, what's wrong with
-                    // it).
+                    // it). Unconditional — a load failure is always worth
+                    // this line, whether or not the AGGREGATE health
+                    // (below) changed.
                     log_ingest_failure(&dataset, &batch, &reason);
                     // MAJ-1 (final review): keyed by the SOURCE name
                     // (`WorkItem::source`, threaded onto `IngestEvent`),
@@ -360,11 +420,23 @@ impl DataService {
                     // keying by `dataset` created a phantom `sources`
                     // entry while the real source kept reading "no
                     // report yet".
-                    sink(DataEvent::Health {
-                        source,
-                        worst: Health::Failed {
+                    //
+                    // NEW-1 (final review round 2): routed through the
+                    // shared tracker like every other health report, so
+                    // a repeated identical failure (a permanently
+                    // unreachable share, polled forever) does not
+                    // re-send.
+                    let Some(reported) = health_tracker.report(
+                        &source,
+                        Health::Failed {
                             reason: reason.clone(),
                         },
+                    ) else {
+                        return true;
+                    };
+                    sink(DataEvent::Health {
+                        source,
+                        worst: reported,
                         detail: format!("{batch}: {reason}"),
                     })
                 }
@@ -379,6 +451,7 @@ impl DataService {
 
         let scheduler_sink: SchedulerSink = {
             let sink = Arc::clone(&sink);
+            let health_tracker = Arc::clone(&health_tracker);
             Arc::new(move |e: SchedulerEvent| match e {
                 SchedulerEvent::Polled {
                     source,
@@ -393,12 +466,23 @@ impl DataService {
                     worst,
                     detail,
                 } => {
-                    log_health_event(&source, &worst, &detail);
-                    sink(DataEvent::Health {
-                        source,
-                        worst,
-                        detail,
-                    })
+                    // NEW-1 (final review round 2): the scheduler now
+                    // sends its poll result on every poll, unconditionally
+                    // (see `ingest::scheduler::run`'s own comment) — this
+                    // is the one place that decides whether it is a real
+                    // transition, through the SAME tracker the ingest
+                    // sink above reports through.
+                    match health_tracker.report(&source, worst) {
+                        Some(reported) => {
+                            log_health_event(&source, &reported, &detail);
+                            sink(DataEvent::Health {
+                                source,
+                                worst: reported,
+                                detail,
+                            })
+                        }
+                        None => true,
+                    }
                 }
             })
         };
@@ -1465,6 +1549,283 @@ source_name = "NPV"
             "expected Degraded, got {worst:?}"
         );
         assert!(detail.contains("currency"), "{detail}");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn health_tracker_reports_a_transition_only() {
+        let t = HealthTracker::default();
+        assert_eq!(
+            t.report("a", Health::Ok),
+            Some(Health::Ok),
+            "the first report for a source is always a transition"
+        );
+        assert_eq!(
+            t.report("a", Health::Ok),
+            None,
+            "a repeated identical report is not a transition"
+        );
+        let degraded = Health::Degraded { reason: "x".into() };
+        assert_eq!(
+            t.report("a", degraded.clone()),
+            Some(degraded.clone()),
+            "a changed report is a transition"
+        );
+        assert_eq!(
+            t.report("a", degraded),
+            None,
+            "repeating the new state again is not a transition"
+        );
+        assert_eq!(
+            t.report("b", Health::Ok),
+            Some(Health::Ok),
+            "a different source's first report is its own transition, \
+             independent of source \"a\""
+        );
+    }
+
+    /// NEW-1 (final review round 2): a degraded PUBLISH is cleared by a
+    /// later, CLEAN publish for the same source — the shared
+    /// `HealthTracker` closes the gap MAJ-3 opened (a second writer of
+    /// source health the scheduler's old, service-local dedup knew
+    /// nothing about). Two publishes, same source, different batches: the
+    /// first violates the carried-dimension rule, the second does not.
+    #[test]
+    fn a_clean_publish_clears_source_health_left_degraded_by_an_earlier_publish() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+
+        // batch BK0: currency varies within its instrument key — Degraded.
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv"),
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK0,L0,P1,C,I1,USD,100\n\
+             BK0,L0,P1,C,I1,EUR,100\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_millis(50),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_degraded = false;
+        while Instant::now() < deadline && !saw_degraded {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Degraded { .. },
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_degraded = true;
+            }
+        }
+        assert!(saw_degraded, "setup: the first publish must degrade");
+
+        // batch BK1: a clean, non-violating publish for the SAME source.
+        std::fs::write(
+            src.path().join("risk_2026-08-25_BK1.csv"),
+            "Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n\
+             BK1,L0,P2,C,I2,USD,50\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.path().join("risk_2026-08-25_BK1.csv.done"),
+            r#"{"as_of":"2026-08-25T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK1"]}"#,
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_ok = false;
+        while Instant::now() < deadline && !saw_ok {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_ok = true;
+            }
+        }
+        assert!(
+            saw_ok,
+            "a later clean publish for the same source must clear the \
+             earlier degraded health"
+        );
+        svc.shutdown();
+    }
+
+    /// NEW-1's other direction: a source the SCHEDULER reported
+    /// `PendingTooLong` (discovery alone, no load involved) is cleared by
+    /// a later CLEAN PUBLISH for the same source — proving the tracker is
+    /// genuinely shared, not just consulted one-way.
+    #[test]
+    fn a_clean_publish_clears_source_health_left_pending_too_long_by_the_scheduler() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+
+        // A stray CSV with no sentinel at all: discovery alone reports it
+        // PendingTooLong forever (pending_timeout = 0), independent of
+        // whatever else is in the directory.
+        std::fs::write(src.path().join("risk_2026-09-03_STRAY.csv"), "Book\nX\n").unwrap();
+
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_millis(50),
+                pending_timeout: Duration::ZERO,
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_pending = false;
+        while Instant::now() < deadline && !saw_pending {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::PendingTooLong,
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_pending = true;
+            }
+        }
+        assert!(
+            saw_pending,
+            "setup: the stray file must report PendingTooLong"
+        );
+
+        // A real, ready file for the same source lands and loads cleanly.
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 50,
+            seed: 13,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(src.path());
+        opts.leave_one_pending = false;
+        geode_demo_data::emit_directory(&batch, &opts).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut saw_ok = false;
+        while Instant::now() < deadline && !saw_ok {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_secs(5))
+            {
+                assert_eq!(source, "eod_risk");
+                saw_ok = true;
+            }
+        }
+        assert!(
+            saw_ok,
+            "a clean publish must clear health the scheduler alone set"
+        );
+        svc.shutdown();
+    }
+
+    /// NEW-1's dedup half: the scheduler's own clean polls (now emitted
+    /// unconditionally, every poll — MAJ-2's dedup moved here, to the
+    /// shared tracker) and one clean publish for the same source must
+    /// still add up to exactly ONE `DataEvent::Health { worst: Ok, .. }`
+    /// reaching the outer channel, not one per producer.
+    #[test]
+    fn a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let ds = crate::ingest::load::tests_support::fixture().3;
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(ds);
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 50,
+            seed: 17,
+            business_dates: 1,
+        });
+        let mut opts = geode_demo_data::EmitOptions::new(src.path());
+        opts.leave_one_pending = false;
+        geode_demo_data::emit_directory(&batch, &opts).unwrap();
+
+        let (svc, rx) = DataService::open_channel(DataServiceConfig {
+            db_path: db.path().join("geode.duckdb"),
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![crate::source::SourceSpec {
+                name: "eod_risk".into(),
+                dataset: "risk_snapshot".into(),
+                paths: vec![format!("{}/*.csv", src.path().display())],
+                readiness: crate::source::Readiness::Sentinel,
+                priority: crate::source::Priority::LatestRisk,
+                poll_interval: Duration::from_millis(30),
+                pending_timeout: Duration::from_secs(3600),
+                batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            }],
+        })
+        .unwrap();
+
+        let mut ok_count = 0;
+        // ~20 poll intervals' worth of wall time: comfortably enough for
+        // several scheduler polls AND the one publish to both report,
+        // without the test itself taking long.
+        let deadline = Instant::now() + Duration::from_millis(900);
+        while Instant::now() < deadline {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_millis(100))
+                && source == "eod_risk"
+            {
+                ok_count += 1;
+            }
+        }
+        assert_eq!(
+            ok_count, 1,
+            "the scheduler's own repeated clean polls and the one clean \
+             publish must not double-send Ok"
+        );
         svc.shutdown();
     }
 
