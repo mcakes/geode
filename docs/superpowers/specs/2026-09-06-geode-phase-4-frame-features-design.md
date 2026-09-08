@@ -70,8 +70,10 @@ Phase 4 is one spec and three implementation plans, sequenced 4a → 4b →
 - A shell-owned `Diagnostics` entity fed by the app bridge: source
   health with history, generations, config diagnostics with provenance,
   dropped-event count, frame and requery histograms.
-- `Request::Catalog` on `DataHandle`: per-dataset generations, rows,
-  live/archive table, bytes, and freshness against an as-of.
+- `Request::Catalog` on `DataHandle`: per-dataset generations, rows
+  (live/archive table estimates), and freshness against an as-of.
+  Database-wide bytes (as built: `database_bytes`/`memory_bytes` on the
+  perf section, not per-dataset — MIN-4, final review round 2).
 - The diagnostics module: five sections (sources, data, config, log,
   perf), each a keyboard-navigable list, including the effective-config
   explainer of §8.
@@ -1019,10 +1021,15 @@ row *estimate* (`live_rows`/`archive_rows`, correctly labelled "rows
 rather than in one dataset-keyed list on the snapshot — the per-
 partition placement is what the data section's marker (below) actually
 needs, since a resolved generation is a property of one partition's
-timeline, not the whole dataset. `database_bytes`, `used_blocks`,
-`block_size`, `memory_bytes` and `threads` are real fields, wired into
-the perf section (`database bytes`, `memory bytes`, `threads`) rather
-than left computed-and-unread.
+timeline, not the whole dataset. Three of the five computed catalog
+fields are wired into the perf section — `database_bytes`,
+`memory_bytes` and `threads` (`"database {} (checkpointed) · memory {}
+· threads {}"`) — rather than left computed-and-unread. `used_blocks`
+and `block_size` remain computed (the same `pragma_database_size()`
+round trip already pays for them) but displayed by nothing (MIN-4,
+final review round 2 — recorded as a known gap, not fixed): a future
+reader may wire them in beside `database_bytes` or drop them from
+`CatalogSnapshot` outright.
 
 Built on the data thread from `file_generations`, `pragma_database_size`
 and per-table storage info, and delivered as `DataEvent::Catalog`. The
@@ -1080,8 +1087,9 @@ filtering, rebuilt only when the observed version changes:
 - **sources** — name, path, priority, readiness rule, health with
   detail, since, last poll, next poll. Sorted worst first.
 - **data** — dataset › batch › book, each with generation id, published
-  at, rows, live or archive, bytes; the row the current as-of resolves
-  to marked when historical. Collapsible by dataset with `zo`/`zc`.
+  at, rows (live or archive, row estimates — no per-dataset bytes, MIN-4
+  final review round 2); the row the current as-of resolves to marked
+  when historical. Collapsible by dataset with `zo`/`zc`.
 - **config** — every diagnostic with layer, file, line where known;
   then the effective-config explainer: each doc as a tree, every leaf
   as `path = value  [user]` using `Config::explain`. `/` filters by
