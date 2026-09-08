@@ -185,7 +185,23 @@ impl ShellView {
         // for a candidate to spend it on.
         let mut pending_kind = self.pending_kind_for_new_tile.take();
 
-        for id in &all {
+        // MIN-6 (final review): `all` is a `HashSet<TileId>`, so its
+        // iteration order is not deterministic. In the normal flow
+        // exactly one tile below is both occupant-less and carries no
+        // restored record, so which order this loop visits `all` in
+        // never matters — but two tiles can go occupant-less in one pass
+        // (a plain split followed by an `open_module` call that itself
+        // splits again, since no occupant of the requested kind exists
+        // yet to focus), and `pending_kind` above is a single value spent
+        // by the FIRST such tile this loop reaches. Sorting makes that
+        // choice deterministic (the lower `TileId`) rather than a coin
+        // flip on the hasher's internal state — a separate `Vec`, not a
+        // reassignment of `all` itself, since `all` (the `HashSet`) is
+        // still needed below (`self.scratch_all_tiles = all`).
+        let mut creation_order: Vec<TileId> = all.iter().copied().collect();
+        creation_order.sort();
+
+        for id in &creation_order {
             if self.occupants.contains_key(id) {
                 continue;
             }

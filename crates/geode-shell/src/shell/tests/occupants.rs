@@ -619,3 +619,71 @@ fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns
         "expected a warning naming the unmatched kind: {records:?}"
     );
 }
+
+/// MIN-6 (final review): a plain `ctrl+v` split and a same-render
+/// `open_module("diagnostics")` (which itself splits again, since no
+/// occupant of that kind exists yet to focus) leave TWO occupant-less
+/// tiles for one `ensure_occupants` pass to fill — `pending_kind_for_
+/// new_tile` is consumed by the first one the `for id in &all` loop
+/// happens to visit, which used to be whichever order `HashSet<TileId>`
+/// iterated in. `all` is now sorted before that loop, so the outcome is
+/// deterministic — pinned here as "the lower TileId gets the pending
+/// kind", not merely "the same tile every time" (a test that only
+/// checked determinism would pass on a stable-but-still-arbitrary
+/// order).
+#[gpui::test]
+fn a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    // Both before any render: `ensure_occupants` only ever runs inside
+    // `ShellView::render`, so nothing below is visible to it until the
+    // one `window.draw` at the end. `open_shell`'s harness starts the
+    // active workspace's tree empty, so the first split creates only the
+    // first tile (nothing to split yet — `session.rs`'s own comment on
+    // `split_right` covers this); the SECOND split (`open_module`'s own,
+    // since no occupant of "diagnostics" exists yet to focus) is a real
+    // split of that first tile, leaving both halves occupant-less.
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.dispatch(
+                &crate::actions::ActionId("workspace::split_right".into()),
+                None,
+                window,
+                cx,
+            );
+            s.open_module("diagnostics", window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let mut tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    tiles.sort();
+    assert_eq!(
+        tiles.len(),
+        2,
+        "one real split of the first tile: {tiles:?}"
+    );
+    let lower = tiles[0];
+    let higher = tiles[1];
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(lower)),
+        Some("diagnostics"),
+        "the lower TileId of the two occupant-less tiles gets the pending kind"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(higher)),
+        Some("rec"),
+        "the other one falls back to the roster's default kind"
+    );
+}
