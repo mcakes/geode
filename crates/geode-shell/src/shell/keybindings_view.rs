@@ -28,6 +28,34 @@
 //! own doc comment for why claiming, not just ignoring, is what actually
 //! makes them inert).
 //!
+//! ## The two verbs (spec §8)
+//!
+//! `d` **unbinds** the selected row's currently-effective binding and
+//! `r` **resets** it — the capability that could not exist while the
+//! filter owned every letter, and the reason this dialog went modal at
+//! all. Both write through [`crate::keymap_edit::apply_unbind`], which
+//! only ever edits the *user* layer, so the two verbs differ exactly
+//! where the layers do:
+//!
+//! - a binding from builtin or desk cannot be removed, so `d` silences
+//!   it with the documented `"none"` shadow in the user entry;
+//! - a binding that IS the user's own is removed outright, which is also
+//!   the whole of what `r` does — `r` is the removal branch on its own,
+//!   guarded by the row's binding actually coming from the user layer.
+//!
+//! Which branch a write takes is decided by [`BoundKey::layer`], carried
+//! onto the row by [`derive_rows`] from the very [`Binding`] the row
+//! displays — never re-inferred at the call site. See
+//! [`unbind_selected`] for why getting that backwards is destructive in
+//! two different directions.
+//!
+//! A verb that finds nothing to do writes nothing and says so, through
+//! [`KeybindingsState::notice`] — `r` on a row with no user override, `d`
+//! on a row already unbound. A key that visibly does nothing is the
+//! defect class this interaction model exists to remove, so "nothing
+//! happened" is stated in the footer rather than left to be inferred
+//! from an unchanged screen.
+//!
 //! `escape` walks the ladder of [`crate::dialogmode::escape_step`], one
 //! visible change per press: filter → normal (keeping the query
 //! applied), → clear the query, → close the modal. The close rung is the
@@ -119,7 +147,7 @@ use geode_core::config::Layer;
 use crate::actions::{ActionId, ActionRegistry};
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Binding, Keymap, Keystroke, Modifiers};
-use crate::keymap_edit::{Displacement, Rebind, apply_rebind};
+use crate::keymap_edit::{Displacement, Rebind, Unbind, apply_rebind, apply_unbind};
 use crate::listfilter::{self, Ranked};
 use crate::palette;
 use crate::vimnav;
@@ -298,6 +326,22 @@ pub struct KeybindingsState {
     /// assuming the filter, so the focused surface and the painted mode
     /// can never disagree.
     pub mode: DialogMode,
+    /// A one-line report about the keystroke *just* pressed, painted in
+    /// the footer above the hint row and cleared by the next normal-mode
+    /// command. It exists for exactly one situation: a verb the user
+    /// pressed deliberately that had nothing to do — `r` on a row with
+    /// no user override, `d` on a row that is already unbound. A verb
+    /// that silently does nothing is the defect class this whole model
+    /// exists to remove, so "nothing happened" is *said*, not implied by
+    /// an unchanged screen.
+    ///
+    /// This is **not** the forbidden cache of a write's outcome (see the
+    /// module doc's "What this dialog does NOT do"): it never records
+    /// what a binding now is, and no row is ever rendered from it. It
+    /// only records that a keystroke declined to write, which is
+    /// knowledge no later re-derivation of the rows could recover —
+    /// precisely because nothing was written.
+    pub notice: Option<String>,
 }
 
 /// Hand-written rather than derived so the opening mode is one explicit,
@@ -312,6 +356,7 @@ impl Default for KeybindingsState {
             listening: None,
             query: String::new(),
             mode: DialogMode::Normal,
+            notice: None,
         }
     }
 }
@@ -327,10 +372,15 @@ impl KeybindingsState {
     /// points at an unrelated row) and cancels any in-progress capture,
     /// since typing is an external interruption to it exactly as a click
     /// is ([`click_selects_or_listens`]).
+    /// A notice names the row a verb was pressed on ("Toggle command
+    /// palette has no user override to reset"); an edit re-ranks the
+    /// list and moves the selection off that row, so keeping it would
+    /// leave a complaint pointing at nothing.
     pub fn set_query(&mut self, query: String) {
         self.query = query;
         self.selected = 0;
         self.listening = None;
+        self.notice = None;
     }
 }
 
@@ -664,6 +714,12 @@ fn handle_key(
             // shell (which is still listening underneath the modal).
             return true;
         };
+        // A notice reports on the keystroke that produced it and nothing
+        // else, so it is cleared here — before the arms below get their
+        // chance to set a new one — rather than left to expire. A stale
+        // "nothing to reset" sitting under a row the user has since
+        // moved off would be a worse lie than saying nothing at all.
+        state.notice = None;
         match cmd {
             NormalCommand::Nav(nav) => {
                 state.selected = vimnav::apply(state.selected, visible.len(), nav);
@@ -679,11 +735,19 @@ fn handle_key(
             NormalCommand::Commit => {
                 begin_capture(state, visible.len(), &shell.focus_handle, window, cx);
             }
-            // The verbs Task 4 fills in (`d` unbind, `r` reset). Listed
-            // rather than left to the catch-all so the seam is visible:
-            // both are already reaching this match, and swallowed.
-            NormalCommand::Verb('d') => {}
-            NormalCommand::Verb('r') => {}
+            // The two write verbs (spec §8): `d` silences the selected
+            // row's effective binding, `r` removes the user's override
+            // so the layer beneath shows through. Both hand back the
+            // notice to show when they declined to write — see
+            // [`unbind_selected`]/[`reset_selected`].
+            NormalCommand::Verb('d') => {
+                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+                state.notice = unbind_selected(row, &user_dir, cx);
+            }
+            NormalCommand::Verb('r') => {
+                let row = visible.get(state.selected).and_then(|m| rows.get(m.row));
+                state.notice = reset_selected(row, &user_dir, cx);
+            }
             // `Toggle`, `EditText`, `MoveItem` and any other verb belong
             // to surfaces that have something to toggle, edit or reorder;
             // this one has a flat list of actions and does neither.
@@ -870,6 +934,143 @@ fn spawn_rebind(
             }
         })
         .detach();
+}
+
+/// `d`: silence the selected row's currently-effective binding.
+///
+/// Returns the notice ([`KeybindingsState::notice`]) to show when the
+/// keystroke deliberately declined to write, `None` when a write was
+/// actually spawned. `row` is `None` only when the filter hid every row
+/// ("no matches"), which is not a row the user was pointing at, so it
+/// says nothing.
+///
+/// **The `is_user_layer` derivation, which is the dangerous input.** It
+/// is read off [`BoundKey::layer`] — the layer `derive_rows` copied from
+/// the very [`Binding`] this row is currently displaying, resolved by
+/// [`effective_binding`]'s shadow-aware last-wins scan — and never
+/// inferred from anything else. Getting it wrong is destructive in two
+/// different directions (a wrong `true` deletes whatever the user
+/// actually had on that key; a wrong `false` buries the user's own entry
+/// under a redundant `"none"` so the key stays dead with nothing in the
+/// file explaining why — see [`Unbind::is_user_layer`]), which is why
+/// the layer travels with the binding from `derive_rows` rather than
+/// being recomputed here from the action id.
+///
+/// One consequence worth stating, since it makes `d` and `r` coincide on
+/// exactly one kind of row: when the effective binding IS the user's,
+/// `is_user_layer` is `true`, so the write removes the key from the user
+/// entry rather than shadowing it — which silences that keystroke (no
+/// lower layer binds it, or the user would not have been the effective
+/// layer for it) but lets the *action* fall back to whatever lower-layer
+/// binding it has. That is the same removal `r` performs, and it is the
+/// right shape: writing `"none"` over a key the user themselves put
+/// there would leave a self-shadowing entry no reader could explain.
+fn unbind_selected(
+    row: Option<&KeybindingRow>,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    let row = row?;
+    let Some(bound) = row.current.as_ref() else {
+        // Nothing to silence. Said out loud rather than dropped: a verb
+        // that appears inert is exactly what this interaction model
+        // exists to remove.
+        return Some(format!("{} is already unbound", row.title));
+    };
+    let unbind = Unbind {
+        context: bound.context_source.clone(),
+        key: palette::render_binding(&bound.keystrokes),
+        is_user_layer: bound.layer == Layer::User,
+    };
+    spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
+}
+
+/// `r`: remove the user's own override on the selected row, so the layer
+/// beneath it shows through again.
+///
+/// Unlike [`unbind_selected`], the layer here is a *precondition*, not a
+/// branch selector: reset is only meaningful when the row's effective
+/// binding actually came from the user layer, and the [`Unbind`] it
+/// builds is therefore always `is_user_layer: true`. That `true` is
+/// still earned rather than asserted — the guard below is what
+/// establishes it, so the one branch that can delete a user's binding is
+/// only ever reached on a row whose binding demonstrably IS the user's.
+///
+/// A row with no user override is the case the brief singles out: a
+/// silent no-op there would be a key that visibly does nothing, so it
+/// returns a notice and writes nothing at all. Writing anyway would be
+/// actively wrong, not merely redundant — the only thing `apply_unbind`
+/// could write for a non-user row is the `"none"` shadow, which would
+/// *silence* the very binding the user asked to restore.
+///
+/// It cannot lift a `"none"` shadow a previous `d` left over a builtin
+/// binding: such a row derives as unbound (the shadow carries the
+/// `"none"` action, not this row's, so [`effective_binding`] reports no
+/// binding at all), leaving nothing on the row to name the key that
+/// would have to be removed. Restoring one of those still means editing
+/// `keymap.toml` — a real remaining gap, recorded here rather than
+/// papered over.
+fn reset_selected(
+    row: Option<&KeybindingRow>,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    let row = row?;
+    let Some(bound) = row.current.as_ref().filter(|b| b.layer == Layer::User) else {
+        return Some(format!("{} has no user override to reset", row.title));
+    };
+    let unbind = Unbind {
+        context: bound.context_source.clone(),
+        key: palette::render_binding(&bound.keystrokes),
+        is_user_layer: true,
+    };
+    spawn_unbind(unbind, row.action.0.clone(), user_dir, cx)
+}
+
+/// Run one [`apply_unbind`] on the background executor — the unbind twin
+/// of [`spawn_rebind`], and the same contract in every respect: no file
+/// I/O on the render thread (PHILOSOPHY: "nothing may stall the render
+/// thread"), args captured, task spawned and detached, failures logged
+/// as a warning from inside the task, and no touch of `shell`'s own
+/// state — the row picks the change up when the reload watcher applies
+/// it.
+///
+/// `Ok(UnbindOutcome { removed: false })` from a `is_user_layer: true`
+/// write means the key was not where the row said it was (a stale read,
+/// a `context` that does not match the entry it actually lives in) — the
+/// [`Displacement::OldKeyNotFound`] contract restated for unbind, and
+/// warned about for the same reason: the binding may still be live.
+///
+/// Returns a notice only for the one refusal it owns: no writable user
+/// config dir at all, in which case nothing was even attempted.
+fn spawn_unbind(
+    unbind: Unbind,
+    action: String,
+    user_dir: &Option<PathBuf>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    let Some(user_dir) = user_dir.clone() else {
+        eprintln!(
+            "[keybindings] warning: no writable user config dir; the binding change for {action} was not saved"
+        );
+        return Some("no writable user config directory — nothing was saved".to_string());
+    };
+    cx.background_executor()
+        .spawn(async move {
+            match apply_unbind(&user_dir, &unbind) {
+                Ok(outcome) if unbind.is_user_layer && !outcome.removed => eprintln!(
+                    "[keybindings] warning: the binding for {action} was not found where \
+                     expected, so nothing was removed — it may still be reachable from \
+                     wherever it actually lives"
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!(
+                    "[keybindings] warning: failed to change the binding for {action}: {e}"
+                ),
+            }
+        })
+        .detach();
+    None
 }
 
 /// Paint `text` with the fuzzy-match `indices` (char offsets into
@@ -1097,10 +1298,18 @@ fn build(
                     sep("±10"),
                 ],
                 vec![
+                    chip("enter"),
+                    sep("rebind ·"),
+                    // The two verbs normal mode exists to make room for
+                    // (spec §8/§9): a chord has no clickable target and
+                    // a bare letter has no visible one, so the footer is
+                    // where `d` and `r` are discovered at all.
+                    chip("d"),
+                    sep("unbind ·"),
+                    chip("r"),
+                    sep("reset ·"),
                     chip("/"),
                     sep("filter ·"),
-                    chip("enter"),
-                    sep("rebind the selected row ·"),
                     chip("escape"),
                     // Honest about which rung the next escape takes: with
                     // a query still applied it clears the query, and only
@@ -1146,6 +1355,19 @@ fn build(
         .pt_2()
         .border_t_1()
         .border_color(theme.border)
+        // The notice sits ABOVE the hints, in `theme.warning` rather
+        // than the hints' muted grey: it is a report about the keystroke
+        // just pressed ("… has no user override to reset"), and a verb
+        // that wrote nothing has to say so somewhere the eye is already
+        // going. `debug_selector` so a test can prove it painted rather
+        // than only that the field was set.
+        .children(state.notice.as_ref().map(|notice| {
+            div()
+                .text_sm()
+                .text_color(theme.warning)
+                .debug_selector(|| "keybindings-notice".to_string())
+                .child(notice.clone())
+        }))
         .child(
             div()
                 .text_sm()

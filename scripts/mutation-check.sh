@@ -1394,6 +1394,80 @@ run_mutation "keybindings: escape only walks the ladder when unmodified" \
   geode-shell \
   a_modified_escape_walks_the_same_ladder_as_a_bare_one
 
+# ---- keybinding dialog: the two verbs (dialog interaction model task 4)
+#
+# The capability the whole model exists to prove. Every entry below breaks
+# one half of it; the two `is_user_layer` entries are the pair the spec's
+# own risk list singles out ("unbind lowering to remove where it should
+# shadow, which would delete a user's *other* binding rather than silence
+# a desk one") — and its mirror, which entombs the user's own entry under
+# a redundant `"none"` so the key stays dead with nothing in the file
+# saying why.
+
+run_mutation "keybindings: d never writes an unbind" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            NormalCommand::Verb('"'"'d'"'"') => {' \
+  '            NormalCommand::Verb('"'"'\0'"'"') => {' \
+  geode-shell \
+  d_unbinds_the_selected_binding
+
+run_mutation "keybindings: r never writes a reset" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '            NormalCommand::Verb('"'"'r'"'"') => {' \
+  '            NormalCommand::Verb('"'"'\u{1}'"'"') => {' \
+  geode-shell \
+  r_resets_a_user_override_by_removing_it
+
+# `d` ignoring the row's layer, both directions. A `false` here shadows
+# the user's own key with `"none"` instead of removing it; a `true`
+# removes a key that lives in a layer this app never writes, so the
+# builtin binding is left live and the user's file gains nothing.
+run_mutation "keybindings: d shadows the user's own binding instead of removing it" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: bound.layer == Layer::User,' \
+  '        is_user_layer: false,' \
+  geode-shell \
+  d_on_a_user_layer_binding_removes_it_rather_than_shadowing_it
+
+run_mutation "keybindings: d removes where it should shadow a lower layer" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: bound.layer == Layer::User,' \
+  '        is_user_layer: true,' \
+  geode-shell \
+  d_unbinds_the_selected_binding
+
+# Reset is the removal branch by definition — a shadow would bury the
+# very layer it was asked to uncover.
+run_mutation "keybindings: r shadows instead of removing the user's override" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        is_user_layer: true,' \
+  '        is_user_layer: false,' \
+  geode-shell \
+  r_resets_a_user_override_by_removing_it
+
+# Without the user-layer guard, `r` on a builtin row reaches
+# `apply_unbind` with `is_user_layer: true` against a key that is not in
+# the user file — which writes an otherwise-empty keymap.toml and, worse,
+# lowers to a `"none"` shadow the moment the guard is relaxed the other
+# way. Only a test that asserts NO file was written can see it.
+run_mutation "keybindings: r writes on a row with no user override" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  'row.current.as_ref().filter(|b| b.layer == Layer::User)' \
+  'row.current.as_ref()' \
+  geode-shell \
+  r_on_a_row_with_no_user_override_says_so_and_writes_nothing
+
+# A notice reports on the keystroke that produced it. Left standing, it
+# points at a row the user has since moved off — the footer lying about
+# the current selection, which is worse than saying nothing.
+run_mutation "keybindings: a notice outlives the keystroke it reports on" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '        state.notice = None;
+' \
+  '' \
+  geode-shell \
+  a_notice_clears_on_the_next_normal_mode_keystroke
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \

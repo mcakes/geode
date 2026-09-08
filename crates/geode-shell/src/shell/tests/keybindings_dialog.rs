@@ -872,3 +872,307 @@ fn a_modified_escape_walks_the_same_ladder_as_a_bare_one(cx: &mut gpui::TestAppC
          swallowed by normal mode's claim-and-drop"
     );
 }
+
+// --- Task 4: `d` unbinds, `r` resets ---------------------------------
+//
+// The capability the whole modal model exists to prove: before it, the
+// only way to clear a binding was to hand-edit `keymap.toml`.
+
+/// Open the keybinding dialog on an already-open shell and draw, so the
+/// modal's key handler is live. The preamble every Task 4 test below
+/// shares (`dialog_test_shell` can't be used: these need a real
+/// `user_dir`, which only `open_shell_with_user_dir` supplies).
+fn open_keybindings(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("keybindings::open".to_string()), None, window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+/// The selected row's action and its `(rendered binding, layer)`, read
+/// from the live shell rather than assumed — a test that hardcoded "row
+/// 0 is bound" would silently stop testing anything the day the sort
+/// order moved an unbound action to the top.
+fn selected_row(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> (ActionId, Option<(String, Layer)>) {
+    shell.read_with(cx, |shell, _| {
+        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+        let state = shell.keybindings.as_ref().expect("dialog open");
+        let visible = keybindings_view::visible_rows(state, &rows);
+        let row = &rows[visible[state.selected].row];
+        (
+            row.action.clone(),
+            row.current
+                .as_ref()
+                .map(|b| (crate::palette::render_binding(&b.keystrokes), b.layer)),
+        )
+    })
+}
+
+/// The on-disk user keymap the fixture below claims to have come from:
+/// the writer edits the *file*, so a fixture's in-memory keymap and its
+/// file must agree, or a removal would find nothing to remove.
+const USER_KEYMAP_TEXT: &str =
+    "config_version = 1\n\n[[bindings]]\n\n[bindings.keys]\n\"ctrl+alt+y\" = \"palette::toggle\"\n";
+
+/// A user-layer keymap on top of the builtin one, binding `ctrl+alt+y`
+/// to `palette::toggle`. That key is in no lower layer, so the dialog's
+/// `palette::toggle` row resolves to the USER's binding — the fixture
+/// both "`d` removes rather than shadows" and "`r` resets" need, and the
+/// one shape where getting `is_user_layer` backwards would delete or
+/// entomb the wrong thing.
+fn services_with_a_user_binding_for_the_palette() -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: USER_KEYMAP_TEXT.parse().unwrap(),
+    };
+    let (keymap, diags) = build_keymap(&[builtin, user], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    services
+}
+
+/// Filter down to the palette row and leave filter mode, so the tests
+/// below act on a row with a known, non-empty binding rather than
+/// whatever happens to sort first.
+fn select_the_palette_row(cx: &mut gpui::VisualTestContext) {
+    cx.simulate_keystrokes("/ p a l e t t e");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+}
+
+/// The gap this model exists to close: before it, clearing a binding
+/// meant hand-editing keymap.toml. A builtin binding cannot be *removed*
+/// (this app only ever writes the user layer), so it is silenced with
+/// the documented `"none"` shadow.
+#[gpui::test]
+fn d_unbinds_the_selected_binding(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    let (action, bound) = selected_row(&shell, &vcx);
+    let (key, layer) = bound.expect("the filtered-to row must actually have a binding");
+    assert_eq!(
+        action.0, "palette::toggle",
+        "sanity: the filter landed on the palette row"
+    );
+    assert_eq!(
+        layer,
+        Layer::Builtin,
+        "sanity: with no user keymap this binding is builtin"
+    );
+
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml"))
+        .expect("d must write the user keymap");
+    assert!(
+        text.contains(&format!("\"{key}\" = \"none\"")),
+        "a builtin binding is silenced, not removed: {text}"
+    );
+}
+
+/// The dangerous branch, the other way round: the user's OWN binding is
+/// removed outright rather than shadowed. A wrong `is_user_layer: false`
+/// here would leave a redundant `"none"` over the user's own entry — the
+/// key stays dead and nothing in the file says why.
+#[gpui::test]
+fn d_on_a_user_layer_binding_removes_it_rather_than_shadowing_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_TEXT).unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(
+        cx,
+        services_with_a_user_binding_for_the_palette(),
+        dir.path(),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    let (action, bound) = selected_row(&shell, &vcx);
+    let (key, layer) = bound.expect("the filtered-to row must actually have a binding");
+    assert_eq!(action.0, "palette::toggle");
+    assert_eq!(key, "ctrl+alt+y", "the user's binding is the effective one");
+    assert_eq!(layer, Layer::User);
+
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("d must write");
+    assert!(
+        !text.contains("ctrl+alt+y"),
+        "the user's own key must be removed outright: {text}"
+    );
+    assert!(
+        !text.contains("none"),
+        "and must not be left shadowed by a redundant none: {text}"
+    );
+}
+
+/// `r` removes the user's override so the layer beneath shows through —
+/// always the removal branch, never a shadow.
+#[gpui::test]
+fn r_resets_a_user_override_by_removing_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("keymap.toml"), USER_KEYMAP_TEXT).unwrap();
+    let (window, mut vcx) = open_shell_with_user_dir(
+        cx,
+        services_with_a_user_binding_for_the_palette(),
+        dir.path(),
+    );
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+
+    let text = std::fs::read_to_string(dir.path().join("keymap.toml")).expect("r must write");
+    assert!(
+        !text.contains("ctrl+alt+y"),
+        "reset removes the user's key so the builtin shows through: {text}"
+    );
+    assert!(
+        !text.contains("none"),
+        "reset must never write a shadow — that would bury the layer it \
+         is meant to uncover: {text}"
+    );
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_none()),
+        "a reset that had something to reset reports no complaint"
+    );
+}
+
+/// A key that visibly does nothing is exactly the defect class this
+/// branch exists to remove, so `r` on a row the user has never
+/// overridden says so instead of silently writing nothing.
+#[gpui::test]
+fn r_on_a_row_with_no_user_override_says_so_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    let (_, bound) = selected_row(&shell, &vcx);
+    assert_eq!(
+        bound.expect("bound").1,
+        Layer::Builtin,
+        "sanity: this row's binding is not the user's"
+    );
+
+    vcx.simulate_keystrokes("r");
+    vcx.run_until_parked();
+
+    assert!(
+        !dir.path().join("keymap.toml").exists(),
+        "reset with nothing to reset must not write a file at all — a \
+         none shadow here would silence the key it was asked to restore"
+    );
+    let notice = shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("no user override")),
+        "and must say why nothing happened, got {notice:?}"
+    );
+
+    // "Observable" means painted, not merely stored — a notice the user
+    // cannot see is the same silent no-op this branch exists to remove.
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let bounds = vcx.debug_bounds("keybindings-notice");
+    assert!(
+        bounds.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "the notice must paint with non-zero bounds, got {bounds:?}"
+    );
+}
+
+/// The same honesty for `d` on a row that has no binding to silence.
+#[gpui::test]
+fn d_on_an_unbound_row_says_so_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    // Walk to a row that is genuinely unbound rather than assuming one.
+    let target = shell.read_with(&vcx, |shell, _| {
+        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+        rows.iter()
+            .position(|r| r.current.is_none())
+            .expect("the builtin keymap leaves plenty of actions unbound")
+    });
+    vcx.update(|_, cx| {
+        shell.update(cx, |shell, _| {
+            shell.keybindings.as_mut().unwrap().selected = target;
+        });
+    });
+
+    vcx.simulate_keystrokes("d");
+    vcx.run_until_parked();
+
+    assert!(
+        !dir.path().join("keymap.toml").exists(),
+        "there is no key to silence, so nothing is written"
+    );
+    let notice = shell.read_with(&vcx, |s, _| s.keybindings.as_ref().unwrap().notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("already unbound")),
+        "and the keystroke reports why it did nothing, got {notice:?}"
+    );
+}
+
+/// A notice is a report about the *last* keystroke; leaving it up would
+/// make the footer lie about the next one.
+#[gpui::test]
+fn a_notice_clears_on_the_next_normal_mode_keystroke(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (window, mut vcx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    open_keybindings(&shell, &mut vcx);
+
+    select_the_palette_row(&mut vcx);
+    vcx.simulate_keystrokes("r");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_some()),
+        "sanity: r on a builtin row leaves a notice"
+    );
+    vcx.simulate_keystrokes("j");
+    assert!(
+        shell.read_with(&vcx, |s, _| s
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .notice
+            .is_none()),
+        "the next keystroke clears it"
+    );
+}
