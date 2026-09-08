@@ -2818,6 +2818,53 @@ run_mutation "M9: the as-of presets cache is keyed on the frame's data version" 
     }' \
   geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
 
+# ---- Phase 4b Task 2: the tracing foundation (the ring, [log]) --------
+
+run_mutation "the ring's push wraps to the next slot, not slot 0" \
+  crates/geode-core/src/log/mod.rs \
+  '        g.head = (head + 1) % cap;' \
+  '        g.head = head;' \
+  geode-core wrapping_overwrites_the_oldest_and_keeps_order
+
+run_mutation "drain_since excludes the record at exactly since, not only older ones" \
+  crates/geode-core/src/log/mod.rs \
+  '            if let Some(r) = &g.records[idx]
+                && r.seq > since
+            {' \
+  '            if let Some(r) = &g.records[idx]
+                && r.seq >= since
+            {' \
+  geode-core drain_since_returns_only_newer_records_oldest_first
+
+run_mutation "seq is assigned by the ring's push, not carried from the caller" \
+  crates/geode-core/src/log/mod.rs \
+  '        g.seq += 1;
+        r.seq = g.seq;
+        let cap = g.records.len();' \
+  '        g.seq += 1;
+        let cap = g.records.len();' \
+  geode-core two_writers_never_lose_a_sequence_number
+
+run_mutation "[log] rejects a key that names no known target" \
+  crates/geode-core/src/log/mod.rs \
+  '            if !TARGETS
+                .iter()
+                .any(|t| t.strip_prefix("geode::") == Some(key.as_str()))
+            {
+                diags.push(warn(format!(
+                    "[log] {key}: not a known target ({})",
+                    TARGETS
+                        .iter()
+                        .map(|t| &t[7..])
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+                continue;
+            }
+            levels.targets.retain(|(k, _)| k != key);' \
+  '            levels.targets.retain(|(k, _)| k != key);' \
+  geode-core an_unknown_target_key_is_a_warning
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
