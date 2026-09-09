@@ -13,7 +13,7 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     // Desk rebinds mod+h; adds a sequence binding.
     std::fs::write(
         desk.path().join("keymap.toml"),
-        "config_version = 1\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::split_down\"\n\"g g\" = \"workspace::focus_up\"\n",
+        "config_version = 1\n\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+h\" = \"workspace::close_tile\"\n\"g g\" = \"workspace::focus_up\"\n",
     )
     .unwrap();
     // User unbinds fullscreen. (Mod remapping is covered by defaults' unit
@@ -46,7 +46,7 @@ fn desk_overrides_user_unbinds_and_sequences_work() {
     assert_eq!(
         matcher.press(&keymap, ks("mod+h"), &stack),
         MatchResult::Matched {
-            action: ActionId("workspace::split_down".into()),
+            action: ActionId("workspace::close_tile".into()),
             count: None
         }
     );

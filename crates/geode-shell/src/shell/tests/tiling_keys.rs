@@ -1,9 +1,13 @@
-//! Tiling key bindings end to end: splits, focus motion, resize,
-//! swap, and close, dispatched through the real key pipeline.
+//! Tiling key bindings end to end: adds, focus motion, resize, swap,
+//! and close, dispatched through the real key pipeline. `ctrl+v` /
+//! `ctrl+h` are the fixture layer's own bindings (`tests::
+//! TEST_ADD_KEYMAP` — `tile::add_rec_horizontal`/`_vertical`), not
+//! shipped keys: the builtin keymap has no create-a-tile chord (spec
+//! 2026-09-08 add-tile §3.1).
 
 use super::*;
 
-/// The empty-workspace hint (`"ctrl+h / ctrl+v to open a tile"`) paints
+/// The empty-workspace hint (`"ctrl+k → Add a tile"`) paints
 /// when there are no tiles. gpui's test API (`painted_quads`) has no way
 /// to inspect painted *text* content directly, so this asserts what it
 /// can see honestly: the hint's container div — tagged with a
@@ -59,12 +63,13 @@ fn empty_workspace_paints_the_hint(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// End-to-end: a real `ctrl+v` keystroke, dispatched through gpui's own
-/// key-event pipeline (not called directly), lands on `ShellView` and
-/// changes workspace state. Exercises `convert_keystroke` -> `Matcher`
-/// -> `apply_workspace_action` wired the way the render path wires them.
+/// End-to-end: a real `ctrl+v` keystroke — the fixture layer's
+/// `tile::add_rec_horizontal` — dispatched through gpui's own key-event
+/// pipeline (not called directly), lands on `ShellView` and changes
+/// workspace state. Exercises `convert_keystroke` -> `Matcher` ->
+/// `ShellView::add_tile` wired the way the render path wires them.
 #[gpui::test]
-fn ctrl_v_keystroke_splits_the_active_workspace(cx: &mut gpui::TestAppContext) {
+fn a_test_layer_add_keystroke_creates_the_first_tile(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -103,32 +108,32 @@ fn ctrl_v_keystroke_splits_the_active_workspace(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(
         tile_count, 1,
-        "ctrl+v (workspace::split_right) should have created the first tile \
-         on the empty starting workspace"
+        "ctrl+v (the test layer's tile::add_rec_horizontal) should have \
+         created the first tile on the empty starting workspace"
     );
 
     // The tile render path (Task 3) paints a background/border quad per
-    // visible tile, not just text; a non-empty scene after the split is
+    // visible tile, not just text; a non-empty scene after the add is
     // cheap evidence the tiling surface actually drew something (the
     // geometry itself is tiling::tree's job, already unit-tested there).
-    let quads_after_split = cx.update(|window, _cx| window.painted_quads().len());
+    let quads_after_add = cx.update(|window, _cx| window.painted_quads().len());
     assert!(
-        quads_after_split > 0,
+        quads_after_add > 0,
         "expected the single tile to paint at least one quad"
     );
 }
 
 /// End-to-end: the direct focus bindings `mod+h`/`mod+l`
-/// (Alt, the default `mod` alias) move focus between
-/// two tiles created via the new split bindings — `ctrl+h`
-/// (`workspace::split_down`, which on the empty starting workspace just
-/// opens the first tile per `Tree::split`'s documented "split verbs
-/// double as open a tile" behavior) then `ctrl+v`
-/// (`workspace::split_right`, side by side), leaving focus on the new
+/// (Alt, the default `mod` alias) move focus between two tiles created
+/// via the fixture layer's add bindings — `ctrl+h`
+/// (`tile::add_rec_vertical`, which on the empty starting workspace
+/// just opens the first tile per `Tree::split`'s documented "a split
+/// doubles as open a tile" behavior) then `ctrl+v`
+/// (`tile::add_rec_horizontal`, side by side), leaving focus on the new
 /// (right) tile. `mod+h` must move focus to the left tile, and
 /// `mod+l` back to the right one.
 #[gpui::test]
-fn ctrl_h_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
+fn add_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -477,8 +482,9 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    // Create three tiles by splitting right twice (ctrl+v = split right).
-    // First ctrl+v on empty tree creates tile 1 and focuses it.
+    // Create three tiles with the fixture layer's ctrl+v
+    // (tile::add_rec_horizontal, side by side).
+    // First ctrl+v on the empty tree creates tile 1 and focuses it.
     // Second ctrl+v creates tile 2 right of tile 1 and focuses it.
     // Third ctrl+v creates tile 3 right of tile 2 and focuses it.
     cx.simulate_keystrokes("ctrl-v");
@@ -535,5 +541,28 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
         Some(tiles_before[2]),
         "closing the middle tile should focus the adjacent sibling (tiles_before[2]), \
          not the first leaf (tiles_before[0])"
+    );
+}
+
+/// Spec 2026-09-08 add-tile §3.1: the shipped keymap has no split chord.
+/// This shell is built on `BUILTIN_KEYMAP` alone (no test layer), so
+/// `ctrl+v`/`ctrl+h` reach the matcher and match nothing.
+#[gpui::test]
+fn the_shipped_keymap_has_no_split_chord(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let (keymap, diags) = build_keymap(&[doc], default_mod(), &services.registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    services.keymap = keymap;
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-h");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().is_empty()),
+        "neither key creates a tile any more"
     );
 }

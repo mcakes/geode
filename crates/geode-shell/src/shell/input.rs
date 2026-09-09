@@ -437,8 +437,8 @@ impl ShellView {
         // Task 9 instant-modal redesign (see `dialog`'s module doc): while
         // Geode's own modal (`self.modal`) OR a gpui-component `Dialog`
         // layer is open, the shell's own keymap `Matcher` must not see a
-        // single keystroke — otherwise e.g. `ctrl+v` typed inside the
-        // settings dialog would *also* dispatch `workspace::split_right`
+        // single keystroke — otherwise e.g. `ctrl+w` typed inside the
+        // settings dialog would *also* dispatch `workspace::close_tile`
         // behind it (the modal paints above the tile surface, but this
         // on_key_down listener sits on the ShellView root and still
         // receives every raw KeyDownEvent that bubbles up the dispatch
@@ -553,14 +553,14 @@ impl ShellView {
         // its `Escape` action handler calls `cx.propagate()` whenever there
         // is no popover/inline-completion/IME-marked-text/`clean_on_escape`
         // to consume it (the plain-filter case, always, here) — and any key
-        // with *no* action binding at all in that context (e.g. `ctrl+h`,
+        // with *no* action binding at all in that context (e.g. `ctrl+w`,
         // `ctrl+k`, bare typed letters) skips the action system entirely.
         // Both cases still deliver the raw `KeyDownEvent` to every
         // `on_key_down` listener up the dispatch path, this one included
         // (verified against the pinned gpui rev's `Window::
         // finish_dispatch_key_event`/`dispatch_key_down_up_event`), so
-        // without this guard e.g. `ctrl+h` typed into the filter would
-        // *also* dispatch `workspace::split_down`. Esc is the one key this
+        // without this guard e.g. `ctrl+w` typed into the filter would
+        // *also* dispatch `workspace::close_tile`. Esc is the one key this
         // view still acts on itself: it hands focus back to the shell root
         // so hjkl and friends resume working immediately.
         if self

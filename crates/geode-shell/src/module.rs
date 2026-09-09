@@ -181,7 +181,7 @@ pub mod placeholder {
                 .justify_center()
                 .text_color(cx.theme().muted_foreground)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
-                .child("ctrl+k → open a view")
+                .child("ctrl+k → Add a tile")
         }
     }
 

@@ -2130,7 +2130,7 @@ mod tests {
 
     #[test]
     fn toggle_split_orientation_in_a_flat_row_reorients_only_the_focused_pair() {
-        // ctrl+v three times: ONE flat horizontal split with three children.
+        // Three horizontal splits: ONE flat row with three children.
         // Toggling on tile 3 (last, so it pairs with its previous sibling 2)
         // must not restack the whole row: tile 1 keeps its slot, and 2/3
         // stack inside their old combined footprint (right two-thirds).

@@ -974,10 +974,10 @@ mod tests {
         let items = vec![
             action("workspace::focus_left", "Focus left", "Workspace", None),
             action(
-                "workspace::split_right",
-                "Split right",
+                "workspace::close_tile",
+                "Close tile",
                 "Workspace",
-                Some("ctrl+v"),
+                Some("ctrl+w"),
             ),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ];
@@ -991,17 +991,17 @@ mod tests {
     #[test]
     fn query_filters_out_non_matching_items() {
         let mut state = PaletteState::new(vec![
-            action("workspace::split_right", "Split right", "Workspace", None),
+            action("workspace::close_tile", "Close tile", "Workspace", None),
             action("workspace::focus_left", "Focus left", "Workspace", None),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ]);
-        state.set_query("split");
+        state.set_query("close");
         let titles: Vec<String> = state
             .filtered()
             .iter()
             .map(|(item, _)| item.title())
             .collect();
-        assert_eq!(titles, vec!["Split right".to_string()]);
+        assert_eq!(titles, vec!["Close tile".to_string()]);
     }
 
     #[test]
@@ -1264,14 +1264,14 @@ mod tests {
     #[test]
     fn action_item_exposes_its_registry_fields_and_binding() {
         let item = action(
-            "workspace::split_right",
-            "Split right",
+            "workspace::close_tile",
+            "Close tile",
             "Workspace",
-            Some("ctrl+v"),
+            Some("ctrl+w"),
         );
-        assert_eq!(item.title(), "Split right");
+        assert_eq!(item.title(), "Close tile");
         assert_eq!(item.category(), "Workspace");
-        assert_eq!(item.binding(), Some("ctrl+v"));
+        assert_eq!(item.binding(), Some("ctrl+w"));
     }
 
     // -- render_binding / build_binding_index / build_items ---------------
@@ -1359,10 +1359,10 @@ mod tests {
             );
         }
 
-        let split = items
+        let close = items
             .iter()
-            .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::split_right"))
+            .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::close_tile"))
             .unwrap();
-        assert_eq!(split.binding(), Some("ctrl+v"));
+        assert_eq!(close.binding(), Some("ctrl+w"));
     }
 }

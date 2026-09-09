@@ -1055,12 +1055,12 @@ mod tests {
 
     /// Two tiles side by side in workspace 1 — the simplest fixture with
     /// more than one tile to hang a `TileRecord` on. The first
-    /// `split_right` on an empty tree only creates the first tile (nothing
-    /// to split yet); the second actually splits it in two.
+    /// `split_active` on an empty tree only creates the first tile
+    /// (nothing to split yet); the second actually splits it in two.
     fn two_tile_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         ws
     }
 
@@ -1185,11 +1185,11 @@ mod tests {
     #[test]
     fn round_trips_a_multi_workspace_layout() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Vertical);
         ws.switch(3);
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
@@ -1560,8 +1560,8 @@ mod tests {
         let path = dir.path().join("session.toml");
 
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
 
         save(&path, &ws, &TileRecords::new(), None).unwrap();
         assert!(path.exists());
@@ -1610,9 +1610,9 @@ mod tests {
     #[test]
     fn a_restored_session_then_splitting_does_not_collide_tile_ids() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: mut restored,
@@ -1624,7 +1624,7 @@ mod tests {
         let before_ids: std::collections::HashSet<_> =
             restored.active().tree().tiles().into_iter().collect();
 
-        apply_workspace_action(&mut restored, &act("workspace::split_right"));
+        restored.split_active(Orientation::Horizontal);
         let after_ids: Vec<_> = restored.active().tree().tiles();
         let new_id = after_ids
             .iter()
@@ -1648,10 +1648,10 @@ mod tests {
     /// exercises the recursive dock encoding, not just a single leaf.
     fn docked_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         apply_workspace_action(&mut ws, &act("workspace::resize_right"));
         ws
     }
@@ -1700,7 +1700,7 @@ mod tests {
     fn a_default_dock_session_writes_no_dock_keys() {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
@@ -1726,7 +1726,7 @@ mod tests {
         // fresh split lands in the main tree (a dock-focused split would
         // work too — same allocator — but Main keeps the assertion simple).
         apply_workspace_action(&mut restored, &act("workspace::focus_right"));
-        apply_workspace_action(&mut restored, &act("workspace::split_right"));
+        restored.split_active(Orientation::Horizontal);
         let new_id = restored
             .active()
             .tree()

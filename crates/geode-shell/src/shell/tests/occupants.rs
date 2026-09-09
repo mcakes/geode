@@ -6,6 +6,7 @@ use super::*;
 // glob-imported `crate::session`, so the bare `session::` paths below need
 // this to resolve to the real module rather than to the sibling test file.
 use crate::session;
+use crate::tiling::Orientation;
 
 /// A minimal `ModuleFactory` that calls `Diagnostics::watch`/`unwatch`
 /// from `set_visible` — the same thing `geode_diagnostics::DiagnosticsTile`
@@ -118,18 +119,16 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     let mut roster = crate::module::ModuleRoster::new("watching");
     roster.add(Box::new(watching::WatchingFactory));
     roster.register_actions(&mut services.registry);
-    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
-    let (keymap, diags) = build_keymap(&[doc], default_mod(), &services.registry);
-    assert!(diags.is_empty(), "{diags:?}");
-    services.keymap = keymap;
+    // This roster has no "rec", so the fixture layer's `ctrl+v` would
+    // paint a placeholder; the watching tile is added by its own kind's
+    // row instead (spec 2026-09-08 add-tile §3.2).
+    crate::defaults::register_add_actions(&mut services.registry, &["watching"]);
+    services.keymap = test_keymap(&services.registry, &[]);
     services.roster = roster;
 
     let (window, mut cx) = open_shell(cx, services);
-    cx.simulate_keystrokes("ctrl-v");
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
     let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_watching");
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     let tile = shell.read_with(&cx, |s, _| {
         s.services.workspaces.active().focused_tile().unwrap()
@@ -676,19 +675,15 @@ fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::T
 
 #[gpui::test]
 fn add_on_a_placeholder_tile_fills_it_in_place(cx: &mut gpui::TestAppContext) {
-    // `test_services` has an empty roster, so the first tile is a
-    // placeholder; a recorder added afterwards is what "Add Rec" fills
-    // it with.
-    let mut services = test_services();
-    let rec = crate::module::recording::RecordingFactory::new("rec");
-    let log = rec.log.clone();
-    services.roster.add(Box::new(rec));
+    // `test_services`'s default kind is "placeholder", so a tile created
+    // by a bare `split_active` — no pending request of its own — is one;
+    // the fixture's recorder is what "Add Rec" fills it with.
+    let (services, log) = test_services_with_log();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    cx.update(|window, cx| {
-        shell.update(cx, |s, cx| {
-            s.dispatch(&ActionId("workspace::split_right".into()), None, window, cx);
-        });
+    shell.update(&mut cx, |s, cx| {
+        s.services.workspaces.split_active(Orientation::Horizontal);
+        cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -872,11 +867,12 @@ fn duplicate_on_an_empty_workspace_or_a_placeholder_is_a_no_op(cx: &mut gpui::Te
         let _ = window.draw(cx);
     });
     assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().is_empty()));
-    // A placeholder (empty roster) has nothing to duplicate either.
-    cx.update(|window, cx| {
-        shell.update(cx, |s, cx| {
-            s.dispatch(&ActionId("workspace::split_right".into()), None, window, cx);
-        });
+    // A placeholder — what a bare `split_active` leaves behind, since
+    // the fixture's default kind is "placeholder" — has nothing to
+    // duplicate either.
+    shell.update(&mut cx, |s, cx| {
+        s.services.workspaces.split_active(Orientation::Horizontal);
+        cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -933,7 +929,10 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
     let shell = shell_of(&window, &mut cx);
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.dispatch(&ActionId("workspace::split_right".into()), None, window, cx);
+            // A plain split (no request of its own), then an
+            // `open_module` that splits again: two tiles go
+            // occupant-less in one render pass.
+            s.services.workspaces.split_active(Orientation::Horizontal);
             s.open_module("diagnostics", window, cx);
         });
     });

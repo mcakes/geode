@@ -486,33 +486,14 @@ impl Render for ShellView {
             // its own absolutely-positioned, internally-centered child
             // rather than turning the surface itself into a flex row.
             //
-            // State-aware (review nit): while a dock holds focus, a split
-            // lands in the *dock's* tree (dock-trees task), so advertising
-            // ctrl+h/ctrl+v as the way to fill the empty main area would
-            // be misleading advice; name the move-back chord for the
-            // focused dock instead, in the same physical-key spelling the
-            // dock hints use (the user presses ctrl+shift+[; the binding
-            // is spelled `ctrl+{` — see BUILTIN_KEYMAP's doc comment).
-            // "the focused docked tile": a dock can hold several tiles
-            // now, and the chord moves exactly the one its tree has
-            // focused, one per press.
-            let (hint, selector) = match region {
-                crate::tiling::FocusRegion::Main => {
-                    ("ctrl+h / ctrl+v to open a tile", "empty-hint")
-                }
-                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left) => (
-                    "ctrl+shift+[ moves the focused docked tile back here",
-                    "empty-hint-return-left",
-                ),
-                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Right) => (
-                    "ctrl+shift+] moves the focused docked tile back here",
-                    "empty-hint-return-right",
-                ),
-                crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Bottom) => (
-                    "ctrl+shift+/ moves the focused docked tile back here",
-                    "empty-hint-return-bottom",
-                ),
-            };
+            // One hint whatever holds focus (spec 2026-09-08 add-tile
+            // §7.3): the palette adds a tile into the focused region, so
+            // the advice reads the same from the main tree and from a
+            // focused dock — the old state-aware "return" variants, which
+            // existed because the split chords could not fill this area
+            // from a dock, collapse into it.
+            let hint = "ctrl+k → Add a tile";
+            let selector = "empty-hint";
             surface = surface.child(
                 div()
                     .absolute()
@@ -607,7 +588,9 @@ impl Render for ShellView {
         // same `tile_cell`, click-to-focus included; a click focuses that
         // tile *within* the dock's tree AND moves the region there). A
         // visible but empty dock renders a centered muted hint naming the
-        // *physical* keys that would move a tile into it (the user presses
+        // palette (a dock takes focus when it is shown, so `ctrl+k` adds
+        // into it — spec 2026-09-08 add-tile §7.3/§8) and the *physical*
+        // keys that would move an existing tile into it (the user presses
         // ctrl+shift+[ even though the binding is spelled `ctrl+{` — see
         // BUILTIN_KEYMAP's doc comment).
         for (side, r, dock_tiles, dock_focused) in dock_cells {
@@ -652,15 +635,18 @@ impl Render for ShellView {
                 }
             } else {
                 let (hint, selector) = match side {
-                    crate::tiling::DockSide::Left => {
-                        ("ctrl+shift+[ moves a tile here", "dock-empty-hint-left")
-                    }
-                    crate::tiling::DockSide::Right => {
-                        ("ctrl+shift+] moves a tile here", "dock-empty-hint-right")
-                    }
-                    crate::tiling::DockSide::Bottom => {
-                        ("ctrl+shift+/ moves a tile here", "dock-empty-hint-bottom")
-                    }
+                    crate::tiling::DockSide::Left => (
+                        "ctrl+k → Add a tile here · ctrl+shift+[ moves one",
+                        "dock-empty-hint-left",
+                    ),
+                    crate::tiling::DockSide::Right => (
+                        "ctrl+k → Add a tile here · ctrl+shift+] moves one",
+                        "dock-empty-hint-right",
+                    ),
+                    crate::tiling::DockSide::Bottom => (
+                        "ctrl+k → Add a tile here · ctrl+shift+/ moves one",
+                        "dock-empty-hint-bottom",
+                    ),
                 };
                 surface = surface.child(
                     div()

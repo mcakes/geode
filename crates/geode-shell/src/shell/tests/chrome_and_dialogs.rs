@@ -7,7 +7,7 @@ use super::*;
 
 /// Cheap evidence the new chrome actually paints something, on a
 /// window with zero tiles open — before this task, an empty workspace
-/// painted no quads at all (just the "ctrl+h / ctrl+v" placeholder
+/// painted no quads at all (just the "ctrl+k → Add a tile" placeholder
 /// text). The title bar and sidebar now fill their own background
 /// regardless of tile state, so this is a real regression check, not a
 /// tautology.
@@ -108,9 +108,9 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
 
 /// Focus interplay (brief): while the filter input has focus, a shell
 /// chord that has no key binding at all in the input's own gpui action
-/// context (`ctrl+h` = `workspace::split_down`) must not reach the
-/// shell's keymap `Matcher` — it stays with the input instead of
-/// splitting the workspace.
+/// context (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`)
+/// must not reach the shell's keymap `Matcher` — it stays with the
+/// input instead of adding a tile to the workspace.
 #[gpui::test]
 fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -151,8 +151,8 @@ fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::Test
     });
     assert_eq!(
         tile_count, 0,
-        "ctrl+h (workspace::split_down) must not dispatch while the filter \
-         input has focus"
+        "ctrl+h (the test layer's tile::add_rec_vertical) must not dispatch \
+         while the filter input has focus"
     );
 }
 
@@ -378,7 +378,8 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
 
 /// Fix wave, Fix 1 regression, carried forward by the Task 9
 /// instant-modal redesign: while the settings modal is open, `ctrl+v`
-/// (`workspace::split_right`) must not reach the shell's keymap
+/// (the fixture layer's `tile::add_rec_horizontal`) must not reach the
+/// shell's keymap
 /// `Matcher` at all — modeled on the filter-input guard this mirrors
 /// (`handle_key_down`'s early return while the filter field is
 /// focused). Before the original fix, `ShellView::handle_key_down`'s
@@ -432,8 +433,8 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(
         tile_count, 0,
-        "ctrl+v (workspace::split_right) must not reach the matcher while \
-         the settings modal is open"
+        "ctrl+v (the test layer's tile::add_rec_horizontal) must not reach \
+         the matcher while the settings modal is open"
     );
 
     cx.simulate_keystrokes("ctrl-k");

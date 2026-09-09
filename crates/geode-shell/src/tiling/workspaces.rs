@@ -1122,19 +1122,10 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
             ws.active_mut().focus_direction(Direction::Right);
             true
         }
-        // Vim naming (user direction): split_right = Orientation::Horizontal
-        // (side by side, vim :vsplit, bound ctrl+v); split_down =
-        // Orientation::Vertical (stacked, vim :split, bound ctrl+h). The
-        // direction-named ids exist so the vim bindings don't read backwards
-        // (see BUILTIN_KEYMAP).
-        "workspace::split_right" => {
-            ws.split_active(Orientation::Horizontal);
-            true
-        }
-        "workspace::split_down" => {
-            ws.split_active(Orientation::Vertical);
-            true
-        }
+        // No split verbs: a new tile is *added* by kind through
+        // `ShellView::add_tile` (spec 2026-09-08 add-tile §3.1), which
+        // calls `Workspaces::split_active` directly — the router owns
+        // only the actions that need nothing but the tree.
         "workspace::close_tile" => {
             ws.active_mut().close_tile();
             true
@@ -1236,8 +1227,8 @@ mod tests {
     /// Two tiles side by side in the tree, focus on the second (right).
     fn two_tiles() -> Workspaces {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         ws
     }
 
@@ -1293,7 +1284,7 @@ mod tests {
     }
 
     #[test]
-    fn split_actions_create_and_arrange_tiles() {
+    fn split_active_creates_and_arranges_tiles() {
         let ws = two_tiles();
         assert_eq!(ws.active().tree().tiles().len(), 2);
         let rects = ws.active().tree().layout(Rect::UNIT);
@@ -1346,7 +1337,7 @@ mod tests {
     #[test]
     fn edge_focus_is_claimed_but_changes_nothing() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let focused = ws.active().tree().focused();
         assert!(apply_workspace_action(
             &mut ws,
@@ -1356,16 +1347,10 @@ mod tests {
     }
 
     #[test]
-    fn split_down_creates_a_stacked_tile() {
+    fn a_vertical_split_creates_a_stacked_tile() {
         let mut ws = Workspaces::new();
-        assert!(apply_workspace_action(
-            &mut ws,
-            &act("workspace::split_down")
-        ));
-        assert!(apply_workspace_action(
-            &mut ws,
-            &act("workspace::split_down")
-        ));
+        ws.split_active(Orientation::Vertical);
+        ws.split_active(Orientation::Vertical);
         assert_eq!(ws.active().tree().tiles().len(), 2);
         let rects = ws.active().tree().layout(Rect::UNIT);
         // Vertical (stacked) split: both tiles half-height, not half-width.
@@ -1389,7 +1374,7 @@ mod tests {
     #[test]
     fn move_with_no_neighbor_is_claimed_but_changes_nothing() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let before = ws.active().tree().layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
@@ -1733,7 +1718,7 @@ mod tests {
     #[test]
     fn resize_with_no_matching_split_is_claimed_but_changes_nothing() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let before = ws.active().tree().layout(Rect::UNIT);
         // Single tile: no ancestor split to resize against.
         assert!(apply_workspace_action(
@@ -1756,7 +1741,7 @@ mod tests {
         // Claimed even when it changes nothing (lone tile), same contract
         // as the resize arms.
         let mut lone = Workspaces::new();
-        apply_workspace_action(&mut lone, &act("workspace::split_right"));
+        lone.split_active(Orientation::Horizontal);
         assert!(apply_workspace_action(
             &mut lone,
             &act("workspace::toggle_split_orientation")
@@ -2042,7 +2027,7 @@ mod tests {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         // Split inside the dock so hiding has real structure to preserve.
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         let parked = ws.active().docks().get(DockSide::Left).tree().clone();
         assert_eq!(parked.tiles().len(), 2);
         apply_workspace_action(&mut ws, &act("dock::toggle_left"));
@@ -2199,7 +2184,7 @@ mod tests {
     #[test]
     fn hiding_the_focused_dock_with_nothing_else_falls_back_to_main() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("dock::toggle_left"));
         assert_eq!(ws.active().region(), FocusRegion::Main);
@@ -2357,7 +2342,7 @@ mod tests {
     #[test]
     fn move_back_into_an_empty_tree_makes_the_tile_the_root() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let tile = ws.active().tree().focused().unwrap();
         apply_workspace_action(&mut ws, &act("dock::move_right"));
         assert!(ws.active().tree().is_empty());
@@ -2434,7 +2419,7 @@ mod tests {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
-        apply_workspace_action(&mut ws, &act("workspace::split_right")); // third tile
+        ws.split_active(Orientation::Horizontal); // third tile
         apply_workspace_action(&mut ws, &act("dock::move_left")); // insert (dock holds two)
         apply_workspace_action(&mut ws, &act("dock::move_bottom")); // dock→dock
         let mut all: Vec<TileId> = ws.active().tree().tiles();
@@ -2498,7 +2483,7 @@ mod tests {
         // edge does the inward direction cross back to Main.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         let bottom = ws
             .active()
             .docks()
@@ -2530,7 +2515,7 @@ mod tests {
         // Right — now at the edge — crosses into Main.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         // Focus the dock's left column.
         apply_workspace_action(&mut ws, &act("workspace::focus_left"));
         let left_col = ws
@@ -2601,7 +2586,7 @@ mod tests {
     #[test]
     fn inward_focus_from_the_bottom_dock_over_an_empty_tree_stays_put() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("dock::move_bottom"));
         assert!(ws.active().tree().is_empty());
         apply_workspace_action(&mut ws, &act("workspace::focus_up"));
@@ -2636,7 +2621,7 @@ mod tests {
         // the dock tree's divider and leaves the frame size alone.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down")); // vertical split inside
+        ws.split_active(Orientation::Vertical); // vertical split inside
         let frame_before = ws.active().docks().get(DockSide::Left).size();
         let layout_before = ws
             .active()
@@ -2668,7 +2653,7 @@ mod tests {
         // holds for a lone tile.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         let frame_before = ws.active().docks().get(DockSide::Left).size();
         let layout_before = ws
             .active()
@@ -2782,7 +2767,7 @@ mod tests {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let dock_size = ws.active().docks().get(DockSide::Left).size();
         assert!(apply_workspace_action(
             &mut ws,
@@ -2798,7 +2783,7 @@ mod tests {
     fn close_in_a_multi_tile_dock_refocuses_within_and_keeps_the_dock() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down")); // second dock tile
+        ws.split_active(Orientation::Vertical); // second dock tile
         let closed = ws
             .active()
             .docks()
@@ -2847,15 +2832,12 @@ mod tests {
     #[test]
     fn splits_while_a_dock_is_focused_grow_the_docks_tree() {
         // Dock-trees semantics: the old "splits are refused in a dock"
-        // rule is gone — ctrl+h/ctrl+v split within the focused dock's
-        // tree, allocating from the same app-wide id counter.
+        // rule is gone — a split lands within the focused dock's tree,
+        // allocating from the same app-wide id counter.
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         let main_before = ws.active().tree().layout(Rect::UNIT);
-        assert!(apply_workspace_action(
-            &mut ws,
-            &act("workspace::split_down")
-        ));
+        ws.split_active(Orientation::Vertical);
         let dock = ws.active().docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 2);
         assert_eq!(
@@ -2883,7 +2865,7 @@ mod tests {
     fn directional_move_within_a_dock_swaps_and_never_crosses_regions() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down")); // dock: two stacked tiles
+        ws.split_active(Orientation::Vertical); // dock: two stacked tiles
         let dock_layout_before = ws
             .active()
             .docks()
@@ -2926,7 +2908,7 @@ mod tests {
     fn orientation_toggle_while_a_dock_is_focused_reorients_the_docks_split() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         let before = ws
             .active()
             .docks()
@@ -2970,7 +2952,7 @@ mod tests {
     #[test]
     fn a_workspace_whose_only_tile_is_docked_counts_as_non_empty() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("dock::move_left"));
         assert!(ws.active().tree().is_empty());
         assert!(!ws.active().is_empty());
@@ -3024,7 +3006,7 @@ mod tests {
     fn click_focus_on_a_dock_tile_focuses_it_within_the_docks_tree() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down")); // dock: two tiles
+        ws.split_active(Orientation::Vertical); // dock: two tiles
         let tiles = ws.active().docks().get(DockSide::Left).tree().tiles();
         let unfocused = tiles
             .iter()
@@ -3085,7 +3067,7 @@ mod tests {
     fn three_row() -> Workspaces {
         let mut ws = Workspaces::new();
         for _ in 0..3 {
-            apply_workspace_action(&mut ws, &act("workspace::split_right"));
+            ws.split_active(Orientation::Horizontal);
         }
         ws
     }
@@ -3423,7 +3405,7 @@ mod tests {
     #[test]
     fn drop_verbs_from_a_single_tile_main_tree_empty_it_cleanly() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right")); // lone tile 1
+        ws.split_active(Orientation::Horizontal); // lone tile 1
         ws.active_mut().toggle_dock(DockSide::Left);
         assert!(ws.active_mut().drop_to_dock(TileId(1), DockSide::Left));
         assert!(ws.active().tree().is_empty());

@@ -16,12 +16,12 @@ use geode_core::config::{Config, Diagnostic, Severity};
 /// retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window prefix and
 /// `shift+h/j/k/l`) — the builtin keymap now has no sequence
 /// bindings at all; sequences remain a first-class engine feature for
-/// desk/user layers. Splits follow vim's own mnemonics —
-/// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
-/// which is why the actions they bind to are named by resulting geometry
-/// (`split_right`/`split_down`) rather than by vim verb: naming them
-/// `split_vertical`/`split_horizontal` would read backwards against these
-/// keys. Resize is a direct binding, not a mode: `shift+arrows` move the
+/// desk/user layers. There is no split chord: tiles are *added* by kind
+/// (`tile::add_<kind>[_horizontal|_vertical]`, palette rows registered
+/// by `register_add_actions`) and `shift+d`/`ctrl+shift+d` duplicate the
+/// focused tile beside/below itself (spec 2026-09-08 add-tile §3).
+/// `ctrl+v` and `ctrl+h` are free. Resize is a direct binding, not a
+/// mode: `shift+arrows` move the
 /// divider adjacent to the focused tile toward the arrow's direction by
 /// `RESIZE_STEP` (the key names the divider's direction, not
 /// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
@@ -92,8 +92,6 @@ context = "workspace"
 "shift+down" = "workspace::resize_down"
 "shift+up" = "workspace::resize_up"
 "shift+right" = "workspace::resize_right"
-"ctrl+v" = "workspace::split_right"
-"ctrl+h" = "workspace::split_down"
 "mod+e" = "workspace::toggle_split_orientation"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+w" = "workspace::close_tile"
@@ -332,11 +330,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Move split right",
         "Workspace",
     );
-    // Vim naming: split_right = Orientation::Horizontal (side by side, vim
-    // :vsplit, bound ctrl+v); split_down = Orientation::Vertical (stacked,
-    // vim :split, bound ctrl+h). See BUILTIN_KEYMAP's doc comment.
-    action(reg, "workspace::split_right", "Split right", "Workspace");
-    action(reg, "workspace::split_down", "Split down", "Workspace");
     // Pairwise reorient around the focused tile (see
     // `Tree::toggle_split_orientation` — deliberately not i3's
     // whole-container toggle), bound mod+e (i3's layout-toggle key).
@@ -725,12 +718,13 @@ mod tests {
             diags.is_empty(),
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
-        // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
-        // fullscreen + close + 2 duplicates + 3 dock toggles + 3 dock
-        // moves + 9 workspace switches + 2 palette::toggle bindings +
-        // theme toggle + settings::open (Task 5) + 2 font size steps +
-        // perf overlay toggle (spec §7.4).
-        assert!(keymap.bindings().len() >= 41);
+        // 4 focus + 4 move + 4 resize + orientation toggle + fullscreen
+        // + close + 2 duplicates + 3 dock toggles + 3 dock moves + 9
+        // workspace switches + 2 palette::toggle bindings + theme toggle
+        // + settings::open (Task 5) + 2 font size steps + perf overlay
+        // toggle (spec §7.4). No splits: the add-tile task retired them
+        // and freed ctrl+v/ctrl+h (spec 2026-09-08 add-tile §3.1).
+        assert!(keymap.bindings().len() >= 39);
     }
 
     #[test]
@@ -874,6 +868,19 @@ mod tests {
                 "{id} must be reserved by register_builtin_actions"
             );
         }
+    }
+
+    /// Spec 2026-09-08 add-tile §3.1: the split verbs are retired and
+    /// their chords are free — tiles are added by kind instead.
+    #[test]
+    fn the_split_actions_are_gone() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        assert!(!reg.contains(&ActionId("workspace::split_right".into())));
+        assert!(!reg.contains(&ActionId("workspace::split_down".into())));
+        assert!(!BUILTIN_KEYMAP.contains("\"ctrl+v\""));
+        assert!(!BUILTIN_KEYMAP.contains("\"ctrl+h\""));
     }
 
     #[test]
