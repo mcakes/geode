@@ -4259,14 +4259,15 @@ run_mutation "commands: diagnostics completions split words on the shell's delim
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
 
+# ---- a refused event never stops a producer (Phase 4b follow-up, Task 1)
+
 run_mutation "runner: a refused idle announcement drops the event, it does not stop the runner" \
   crates/geode-data/src/ingest/runner.rs \
-  '                    if !sink(IngestEvent::PlanComplete) {
+  '                        drop(q);
                         log_refused_event("the queue-drained announcement");
-                    }' \
-  '                    if !sink(IngestEvent::PlanComplete) {
-                        return;
-                    }' \
+                        q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        continue;' \
+  '                        return;' \
   geode-data a_refused_plan_complete_does_not_stop_the_runner
 
 run_mutation "runner: a refused undeclared-dataset failure does not stop the runner" \
@@ -4293,13 +4294,13 @@ run_mutation "runner: a refused load outcome does not stop the runner" \
   '        if !delivered {
             return;
         }' \
-  geode-data a_refused_publish_does_not_stop_the_runner
+  geode-data a_refused_load_outcome_does_not_stop_the_runner
 
 run_mutation "scheduler: a refused event does not stop polling every source" \
   crates/geode-data/src/ingest/scheduler.rs \
   '            tracing::warn!(
                 target: "geode::ingest",
-                "event channel refused a discovery event for source '"'"'{}'"'"': dropped, polling continues",
+                "event channel refused {what} for source '"'"'{}'"'"': dropped, polling continues",
                 spec.name,
             );' \
   '            return;' \
@@ -4314,6 +4315,19 @@ run_mutation "pool: a refused result does not stop the worker" \
             );' \
   '            return;' \
   geode-data a_refused_result_does_not_stop_the_worker
+
+run_mutation "scheduler: a poll sends its result even when its health report was refused" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                    let polled_delivered = sink(SchedulerEvent::Polled {' \
+  '                    let polled_delivered = health_delivered
+                        && sink(SchedulerEvent::Polled {' \
+  geode-data a_refused_health_does_not_swallow_that_polls_result
+
+run_mutation "bridge: a gone receiver is logged once per sink, not once per event" \
+  crates/geode-app/src/bridge.rs \
+  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
+  '            if err.is_closed() && true {' \
+  geode-app a_closed_channel_is_counted_and_logged_once
 
 run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never a full one" \
   crates/geode-app/src/bridge.rs \

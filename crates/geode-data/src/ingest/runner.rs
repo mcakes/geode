@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_publish_does_not_stop_the_runner() {
+    fn a_refused_load_outcome_does_not_stop_the_runner() {
         // A momentarily full event channel is not a shutdown signal: the
         // runner's own `shutdown` is (Phase 4b follow-up, Task 1).
         let (_db, _src, store, ds, plan) = harness();

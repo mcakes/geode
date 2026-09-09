@@ -121,11 +121,10 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
 /// The sink `DataService::spawn` is given: `try_send` onto `tx`, never
 /// blocking the caller (query-pool worker or ingest thread), and a
 /// refusal bumps `dropped` rather than being lost silently (§7.3).
-/// Factored out of `start` so it's unit-testable without a real
-/// service thread.
-/// The sink handed to `DataService::spawn`. `false` is "this event was
-/// not delivered", never "stop producing" — no producer inside the
-/// service exits on one (Phase 4b follow-up, Task 1).
+/// Factored out of `start` so it's unit-testable without a real service
+/// thread. `false` means "this event was not delivered", never "stop
+/// producing" — no producer inside the service exits on one (Phase 4b
+/// follow-up, Task 1).
 ///
 /// Both refusals are counted, because both lose an event, but they are
 /// different facts: a FULL channel means the UI is momentarily behind a
