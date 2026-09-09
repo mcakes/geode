@@ -10,62 +10,13 @@ use crate::store::StoreError;
 use crate::store::catalog::FileGeneration;
 use chrono::{DateTime, Utc};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
-/// How a source decides a file is complete.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Readiness {
-    /// `<name>.done` exists and is at least as new as the CSV.
-    Sentinel,
-    /// No sentinel convention: require a stable (size, mtime) across N polls.
-    StableMtime { polls: u32 },
-}
-
-/// Where a source sits in the cold-start ladder (spec §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Priority {
-    /// Current risk on screen first.
-    LatestRisk,
-    /// Vol, instrument reference, scenario data.
-    LatestOther,
-    /// Older files not already in the database.
-    Backfill,
-}
-
-#[derive(Debug, Clone)]
-pub struct SourceSpec {
-    pub name: String,
-    pub dataset: String,
-    /// One or more directory globs (spec §5.1).
-    pub paths: Vec<String>,
-    pub readiness: Readiness,
-    pub priority: Priority,
-    pub poll_interval: Duration,
-    pub pending_timeout: Duration,
-    /// Regex with a named `batch` capture, applied to the file stem, that
-    /// strips the date component so business dates share a partition
-    /// (spec §4.3). Without one the whole stem is the batch.
-    pub batch_pattern: Option<String>,
-}
-
-impl SourceSpec {
-    pub fn batch_of(&self, csv: &Path) -> String {
-        let stem = csv
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
-        let Some(pattern) = &self.batch_pattern else {
-            return stem;
-        };
-        let Ok(re) = regex::Regex::new(pattern) else {
-            return stem;
-        };
-        re.captures(&stem)
-            .and_then(|c| c.name("batch"))
-            .map(|m| m.as_str().to_string())
-            .unwrap_or(stem)
-    }
-}
+// `SourceSpec` (and the `Readiness`/`Priority` types it carries) now lives
+// in geode-core so geode-shell can validate a sources doc without
+// depending on this crate (Phase 4c §2.2). Discovery and ingest keep using
+// it unchanged through this re-export.
+pub use geode_core::source_config::{Priority, Readiness, SourceSpec};
 
 #[derive(Debug, Clone)]
 pub enum CandidateState {

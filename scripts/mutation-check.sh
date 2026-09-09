@@ -1103,19 +1103,25 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
   an_item_naming_an_undeclared_dataset_fails_by_name_and_the_runner_continues
 
 # ---- sources config (Phase 3 §5.2)
+#
+# Re-anchored (Phase 4c §2.2): `SourceSpec::from_doc` moved from
+# geode-data/src/source/config.rs to geode-core/src/source_config.rs, so
+# the covering tests moved with it and the entries below now run against
+# geode-core, not geode-data — an unfiltered geode-data package check
+# would find neither the mutated line nor the test that used to catch it.
 
 run_mutation "sources: an undeclared dataset skips the source" \
-  crates/geode-data/src/source/config.rs \
+  crates/geode-core/src/source_config.rs \
   '                Some(d) if schema.dataset(d).is_some() => d.to_string(),' \
   '                Some(d) => d.to_string(),' \
-  geode-data \
+  geode-core \
   a_missing_or_unknown_dataset_is_an_error_and_the_source_is_skipped
 
 run_mutation "sources: a pattern without a batch capture is dropped" \
-  crates/geode-data/src/source/config.rs \
+  crates/geode-core/src/source_config.rs \
   '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
   '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),' \
-  geode-data \
+  geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
 # ---- discovery scheduler (Phase 3 §5.3)
@@ -1661,6 +1667,26 @@ run_mutation "hosting: leaving the screen is announced" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# The behaviour the entry above used to mutate by accident, now named in
+# its own right (Phase 4b Task 5 fix round 1, MAJ-2): a tile that vanished
+# between renders is told it is invisible BEFORE its occupant is dropped,
+# so an occupant that opened something in `set_visible(true)` gets the
+# matching close rather than leaking it for the life of the process. The
+# visibility diff further down cannot cover this — a closed tile is not in
+# `active`, so that diff never sees it. Narrower than the `shell: MAJ-2 —
+# ensure_occupants ...` entry much further down, which deletes the whole
+# loop: this one keeps the loop and removes only the announcement.
+run_mutation "hosting: a vanished tile is told before its occupant is dropped" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                o.content.set_visible(false, cx);' \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                let _ = o;' \
+  geode-shell \
+  closing_a_watching_tile_unwatches_the_diagnostics_entity
+
 # Rewritten 2026-09-08 (add-tile): there is no fallback factory any more
 # (spec 2026-09-08 add-tile §7.1), so `matched.and(restored)` is no
 # longer the guard — the `match (matched, pending_factory)` below only
@@ -1900,8 +1926,45 @@ run_mutation "frame: bar_model is rebuilt when versions change" \
   geode-shell \
   the_bar_model_is_cached_on_versions_and_describes_the_scope
 
-run_mutation "theme: write_atomic's temp name derives from the target file, not a hardcoded app.toml (M9)" \
-  crates/geode-shell/src/theme.rs \
+# ---- config_write: the one write door (Phase 4c task 1)
+#
+# These three guard the door every config write in geode-shell now goes
+# through — the theme/fontsize/vimfind/frame/keymap persists and, from
+# Phase 4c on, the config dialogs. A green suite sees none of them: each
+# failure writes a file that parses fine and looks plausible, just to the
+# wrong layer or over the user's own hand-edits.
+#
+# The layer guard is the only thing standing between a UI toggle and the
+# shared desk layer. Defeating it makes every layer writable, which is
+# silent: the write succeeds and the desk file is now the user's.
+run_mutation "config_write: a non-user layer is writable" \
+  crates/geode-shell/src/config_write.rs \
+  '    if layer != Layer::User {' \
+  '    if false {' \
+  geode-shell \
+  only_the_user_layer_is_writable
+
+# The refusal a hand-edited-then-broken config depends on. Falling back to
+# a fresh document instead of returning Err does not fail, warn, or crash
+# — it silently replaces the user's file with an empty one on the next
+# theme toggle.
+run_mutation "config_write: an unparseable file is overwritten instead of refused" \
+  crates/geode-shell/src/config_write.rs \
+  '        text.parse::<DocumentMut>().map_err(|e| {
+            format!(
+                "failed to parse {}: {e} (file left untouched)",
+                path.display()
+            )
+        })?' \
+  '        text.parse::<DocumentMut>().unwrap_or_default()' \
+  geode-shell \
+  edit_refuses_an_unparseable_file_without_touching_it
+
+# Re-anchored from theme.rs in Phase 4c task 1: `theme::write_atomic` and
+# its `tmp_file_name` moved into config_write when the three write_atomic
+# copies collapsed into one. Same M9 finding, same test, new home.
+run_mutation "config_write: the temp name derives from the target file, not a hardcoded app.toml (M9)" \
+  crates/geode-shell/src/config_write.rs \
   '    let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
@@ -3060,6 +3123,511 @@ run_mutation "bridge: a refused distinct request errors the picker instead of le
   '                if !queued {' \
   '                if false {' \
   geode-app a_refused_distinct_request_errors_the_picker
+
+# ---- Phase 4c Task 3: view presentation (spec §5.6, §4.1) -------------
+
+# The whole design rests on ORDER: `Config::load` merges the named
+# objects, and only then is `view_presentation` merged over the views.
+# Drop that second half and every reader still gets perfectly valid
+# views — the desk's, with the trader's column order, hidden set and
+# widths silently gone. Nothing errors; the personal file simply stops
+# existing. Two entries because there are two doors and each can be
+# reverted independently: the core loader itself, and the one production
+# caller that must go through it rather than reading the `views` doc.
+run_mutation "views: the user's presentation is merged over the view in the loader" \
+  crates/geode-core/src/config/load.rs \
+  '    if let Some(doc) = config.doc("view_presentation") {' \
+  '    if let Some(doc) = None::<&crate::config::MergedDoc> {' \
+  geode-core \
+  presentation_is_merged_over_the_view_after_the_named_object_merge
+
+run_mutation "views: data_setup goes through load_views, not the raw views doc" \
+  crates/geode-app/src/bridge.rs \
+  '    let (views, d) = load_views(config);' \
+  '    let (views, d) = ViewSpec::from_doc(config.doc("views").expect("checked above"));' \
+  geode-app \
+  data_setup_hands_out_views_with_the_users_presentation_already_merged
+
+# A desk renaming a column, or retiring a view, must never turn a
+# trader's personal file into an error. Promoting the mismatch to an
+# Error is the plausible mistake, because it reads like rigour.
+#
+# Be precise about what this mutation actually costs, because nothing
+# branches on the severity TODAY: `load_views`' diagnostics never reach
+# `Config::diagnostics`, so `reload::decide` does not see them; at
+# startup `bridge::start` prints them as `[data] ...` lines whatever
+# their severity, and on the reload path they are discarded outright.
+# The test therefore asserts the classification directly rather than
+# through a downstream consequence — which is exactly why this needs an
+# entry rather than being left to a consequence test. A wrong severity
+# here is invisible until the first thing that routes by severity
+# arrives (the Views dialog's per-field diagnostics, spec 1.2's
+# repurposed `Diagnostic.path`), and by then it has been the shipped
+# behaviour for months.
+#
+# The `warn` closure this anchors on is shared by the view-level
+# "no view of that name" case below it, so one line carries the
+# classification for both stale-name shapes; the second entry covers
+# that case's own skip-vs-drop behaviour, which this one cannot see.
+run_mutation "views: a presentation naming a column the view lacks warns, it does not error" \
+  crates/geode-core/src/view.rs \
+  '            let warn = |m: String| Diagnostic {
+                severity: Severity::Warning,' \
+  '            let warn = |m: String| Diagnostic {
+                severity: Severity::Error,' \
+  geode-core \
+  a_column_the_view_lacks_is_a_warning_not_an_error
+
+# The other half of the same rule, and a different failure: not the
+# severity but whether the mismatch is reported at all. A presentation
+# table keyed to a view name nothing answers to is what a desk leaves
+# behind every time it renames or retires a view, and `continue`-ing
+# without the warning is the tidy-looking version. It would be silent:
+# the personalisation simply stops applying and nothing anywhere says
+# why, which is the one outcome a trader cannot debug.
+run_mutation "views: a presentation naming a view the config lacks is skipped LOUDLY" \
+  crates/geode-core/src/view.rs \
+  '                diags.push(warn("no view of that name — ignored".into()));' \
+  '' \
+  geode-core \
+  a_view_the_config_lacks_is_a_warning_not_an_error
+
+# `view_presentation` changes the ViewSpecs a tile runs on exactly as a
+# `views` edit does, and it is the doc the Views dialog writes on the
+# commonest edit there is. Left out of `views_changed`, the write lands
+# on disk and nothing on screen moves until the next restart.
+run_mutation "reload: a view_presentation change triggers the same reload a views change does" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  'changed("views") || changed("view_presentation") || changed("dimensions");' \
+  'changed("views") || changed("dimensions");' \
+  geode-shell \
+  a_view_presentation_only_change_emits_config_reloaded
+
+# ---- Phase 4c: the object dialog's browse stage
+#
+# The marker that decides whether Task 5 offers a DESTRUCTIVE action.
+# "Revert to desk" deletes the object from the user layer; on a view only
+# the user layer defines, that deletes the view outright instead of
+# restoring anything. Computing `overridden` from the winning layer alone
+# — "the user layer defines it" — is the tidy-looking version and is
+# green against every fixture where a user override shadows something,
+# because there it gives the right answer for the wrong reason. Only a
+# user-ONLY object separates the two.
+run_mutation "objectdialog: overridden is computed from the winning layer alone" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            row.overridden = mine && layers.iter().any(|l| *l < Layer::User);' \
+  '            row.overridden = mine;' \
+  geode-shell \
+  a_user_only_object_is_not_marked_overridden
+
+# The other half of the same line, and the fix for a Critical the browse
+# fixtures could not reach: `mine` has to span the PRESENTATION doc too.
+# §4.1's split guarantees that hiding a column writes
+# `view_presentation.toml` and leaves the domain's own user layer empty,
+# so a marker read off `doc` alone is green against every fixture where a
+# user override shadows something and wrong on the commonest edit there
+# is — `r` answered "no user override to revert" about a file sitting on
+# disk. Only a fixture with a user-layer presentation entry and NO
+# user-layer views entry separates the two.
+run_mutation "objectdialog: overridden ignores a presentation-only override" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());' \
+  '            let mine = layers.contains(&Layer::User);' \
+  geode-shell \
+  a_presentation_only_override_is_marked_overridden
+
+# And the notice `d` answers with once that marker is right. Dropping the
+# tail leaves every delete/revert test green — the gate is unchanged and
+# nothing is written either way — while the refusal goes back to telling a
+# trader who has a personalisation on disk that there is nothing of theirs,
+# and naming no verb that would undo it.
+run_mutation "objectdialog: d denies an override it can see" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                " — but r reverts your changes to it"' \
+  '                ""' \
+  geode-shell \
+  revert_undoes_a_presentation_only_override
+
+# The opening mode is one line, and it silently restores the pre-modal
+# model: every filter test still passes with the dialog opening
+# filter-first (`/` is harmless when the field is already focused), and
+# the rows still paint. What breaks is invisible from those tests — the
+# letters become text again, so `j`/`k` type instead of moving and Task
+# 5's verbs would have nowhere to live. Only a test asserting a bare
+# letter did NOT reach the filter can see it.
+run_mutation "objectdialog: the dialog opens in filter mode" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            mode: DialogMode::Normal,' \
+  '            mode: DialogMode::Filter,' \
+  geode-shell \
+  config_views_opens_in_normal_mode_and_lists_the_views
+
+# The query has to reach the ranking, not just be stored. With the rank
+# run against an empty query the state assertions all stay green — the
+# mode changes, the query is mirrored, the escape ladder still walks —
+# and the list simply never narrows, which only a test asserting a
+# non-matching row stopped PAINTING can see.
+run_mutation "objectdialog: the browse list ignores the query it displays" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    crate::listfilter::rank(&texts, &state.query)' \
+  '    crate::listfilter::rank(&texts, "")' \
+  geode-shell \
+  slash_filters_and_escape_walks_the_ladder
+
+# `close_modal` is the one door every modal close goes through, and the
+# shared `dialog_input` subscription routes a query edit to "whichever
+# dialog state is Some". A close that leaves `object_dialog` behind is
+# invisible until the NEXT dialog opens, at which point that stale state
+# swallows its queries — the exact bug that field's own doc comment
+# records for `settings`.
+run_mutation "objectdialog: closing the modal leaves the dialog's state behind" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        self.object_dialog = None;' \
+  '' \
+  geode-shell \
+  slash_filters_and_escape_walks_the_ladder
+
+# ---- Phase 4c: the object dialog's edit stage
+#
+# THE destination split (spec §4.1), and the most expensive thing on this
+# surface to get wrong. Sending the column list to `Doc` is the tidy-looking
+# version — one destination, one file — and every unit assertion about
+# order, hiding and width still passes, because the draft is unchanged and
+# only the FILE it lands in moves. What it silently does is fork the desk's
+# view into the user's `views.toml` the first time a trader hides a column,
+# and a forked view is frozen: the desk adds a column next week and this
+# trader never sees it. Only a test asserting that `views.toml` was NOT
+# created can see it.
+run_mutation "objectdialog: a presentation field is written to the view's own doc" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            dest: Destination::Presentation,' \
+  '            dest: Destination::Doc,' \
+  geode-shell \
+  hiding_a_column_writes_presentation_and_does_not_fork_the_view
+
+# Spec §7.2: validate the object being edited, not the merged result.
+# Validating the merged doc instead is green against any fixture with one
+# view in it — the diagnostics are identical — and only diverges when some
+# OTHER view in the config is broken, at which point the dialog reports a
+# stranger's problem against the object on screen and the user has nothing
+# to fix. The covering test needs two views, one of them broken, which is
+# exactly the fixture a single-view test would never build.
+run_mutation "objectdialog: validation runs against the merged doc, not the draft" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    let table = rendered_doc_table(draft);' \
+  '    let table = config.doc(DOC).map(|d| d.value.clone()).unwrap_or_default();' \
+  geode-shell \
+  validation_sees_the_draft_and_not_the_rest_of_the_config
+
+# ---- Phase 4c: instant config edits (spec §3.2/§7.1)
+#
+# Two entries were REMOVED here rather than re-anchored, because the
+# behaviour they defended is gone rather than moved:
+#
+#   * "a field edit writes immediately instead of staging" — staging is
+#     what this design deletes. Its covering test
+#     (`a_field_edit_stages_and_writes_nothing_until_save`) asserted the
+#     opposite of the requirement and is replaced by
+#     `a_field_edit_applies_instantly_and_the_file_follows`, defended by
+#     the entry below.
+#   * "escape on a dirty draft skips the confirm" — `leave_or_confirm`
+#     and `Confirm::Discard` no longer exist. With every edit applied on
+#     its own keystroke there is no unsaved work for `escape` to
+#     discard, so there is no branch left to break.
+#
+# THE requirement ("changing a config field is INSTANT"), and the one
+# mutation that puts the old design back: apply the change by writing the
+# file and letting the loader read it home. Every assertion about the
+# resulting VALUE stays green — a round trip through disk produces the
+# same merged config in the end — and what silently returns is the half
+# second between the keystroke and the screen, plus a config rebuilt from
+# whatever else happens to be in the user's directory. Only a fixture
+# whose disk DISAGREES with memory can tell the two apart, which is why
+# the covering test plants a decoy `views.toml` the running config has
+# never read.
+run_mutation "objectdialog: an edit round-trips through disk instead of merging in memory" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let mut docs = shell.services.config.all_docs();
+    for ((doc, object), value) in edits {
+        docs = docs_with_object(docs, user_dir, doc, object, value.clone());
+    }
+    let config = Config::from_docs(docs);' \
+  '    let _ = edits;
+    let config = Config::load(&geode_core::config::ConfigSources {
+        builtin: shell.services.builtin.clone(),
+        desk: None,
+        user: Some(user_dir.to_path_buf()),
+    });' \
+  geode-shell \
+  an_edit_merges_in_memory_without_reading_disk
+
+# Applying stays singular (spec §7.1). Assigning `services.config`
+# directly is the tempting shortcut — the dialog is the thing that
+# changed, and it re-derives from `services.config` on every render, so
+# BOTH stages repaint correctly and every value assertion here stays
+# green. What is skipped is everything else `apply_reload` does: the
+# `ShellEvent::ConfigReloaded` the app bridge turns into the `ViewSpec`s
+# the data thread runs on. The trader hides a column, the dialog agrees
+# it is hidden, and every blotter tile keeps querying the old view.
+run_mutation "objectdialog: an edit assigns the config instead of going through apply_reload" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    shell.apply_reload(config, cx);' \
+  '    shell.services.config = config;' \
+  geode-shell \
+  the_config_fan_out_is_debounced_and_goes_through_the_one_applier
+
+# The fan-out rides the write's timer (spec §7.1, review ruling). Applying
+# on the keystroke is what the first build did and it is invisible to
+# every value assertion — the config ends up identical, just sooner and N
+# times instead of once. What it costs is a `ConfigReloaded` per
+# keystroke: the bridge re-derives views and EVERY blotter tile requeries,
+# a §7.1 <50 ms operation, at the OS key-repeat rate under a held key.
+# Only a test counting the events can see it.
+run_mutation "objectdialog: the config fan-out fires per keystroke instead of riding the debounce" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    schedule_flush(shell, user_dir, edits, revert, cx);' \
+  '    apply_in_memory(shell, &user_dir, &edits, cx);
+    schedule_flush(shell, user_dir, edits, revert, cx);' \
+  geode-shell \
+  the_config_fan_out_is_debounced_and_goes_through_the_one_applier
+
+# CRITICAL, and a data-loss path: the success arm has to respect the
+# sequence it was launched with. Clearing the pending batch
+# unconditionally erases any edit that arrived while the write was in
+# flight — that edit reaches neither memory nor disk, and the watcher,
+# woken by the write that DID land, then reverts memory to the older
+# on-disk state. Every ordinary test stays green, because in the test
+# executor a `background_executor().spawn` is polled inline and no
+# keystroke can land inside the window at all; the covering test drives
+# `finish_flush` with a stale sequence on real state for exactly that
+# reason.
+run_mutation "objectdialog: a stale write completion clears a newer edit's batch" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            if shell
+                .pending_config_write
+                .as_ref()
+                .is_some_and(|pending| pending.seq == seq)
+            {
+                shell.pending_config_write = None;
+            }' \
+  '            let _ = seq;
+            shell.pending_config_write = None;' \
+  geode-shell \
+  a_stale_write_completion_does_not_erase_a_newer_edit
+
+# `reload::decide` rejects any config holding an error diagnostic, so
+# carrying the previous config's forward makes ONE unparseable file in
+# the user directory turn every dialog edit into a silent in-memory
+# no-op — while the write still fires, so memory and disk diverge with
+# nothing on screen saying why. Every test with a healthy config stays
+# green; only a fixture that starts with a broken file can see it.
+run_mutation "objectdialog: an edit carries the previous config's diagnostics forward" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let config = Config::from_docs(docs);
+    shell.apply_reload(config, cx);' \
+  '    let mut config = Config::from_docs(docs);
+    config.diagnostics = shell.services.config.diagnostics.clone();
+    shell.apply_reload(config, cx);' \
+  geode-shell \
+  an_edit_applies_even_when_another_config_file_is_broken
+
+# A failed write with no dialog open. `PendingConfigWrite` lives on
+# `ShellView` precisely so a write outlives the dialog that started it —
+# a trader can close the dialog inside the 250 ms window — so the
+# dialog-only notice is absent on exactly the path this exists to cover,
+# and the revert would happen in silence. The dialog-open test stays
+# green either way.
+run_mutation "objectdialog: a failed write reports only through the dialog notice" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}"));' \
+  '' \
+  geode-shell \
+  a_write_that_fails_after_the_dialog_closed_still_reports_itself
+
+# The empty-table ruling. `views::presentation_table` renders an EMPTY
+# table whenever the trader's presentation matches the view's own doc —
+# which is one keystroke away, every time the last hidden column is
+# unhidden — and writing it produces a bare `[tree]` in
+# `view_presentation.toml`: a table that says nothing, which
+# `ViewPresentationSpec::apply` then reports as a stale entry naming a
+# view. Green against every other assertion, because an empty table
+# merges to the same result as no table at all. Only a test asserting the
+# object is ABSENT can see it.
+run_mutation "objectdialog: an empty object table is written instead of removed" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    if table.is_empty() {
+        return None;
+    }' \
+  '    if false {
+        return None;
+    }' \
+  geode-shell \
+  unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table
+
+# Hazard 1: a failed background write leaves memory ahead of disk. Logging
+# and moving on is what every other persist path in this crate does, and
+# it was right there — those paths write what the user already asked for
+# and nothing on screen depends on the result. Here memory has ALREADY
+# applied the change, so a swallowed failure leaves the trader looking at
+# a value that exists nowhere but this process, with no notice and no way
+# to find out. Every green-path test stays green: the failure only happens
+# when the file cannot be written at all.
+run_mutation "objectdialog: a failed write is logged instead of reverting memory" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        Err(message) => revert_failed_write(shell, message, cx),' \
+  '        Err(message) => eprintln!("[config] warning: {message}"),' \
+  geode-shell \
+  a_failed_write_reverts_the_in_memory_change_and_says_so
+
+# The write debounce. Without it every value assertion still passes — the
+# file ends up holding the same final state — and what returns is a write
+# per keystroke: a held `shift+j` reordering a column at the OS key-repeat
+# rate rewrites `view_presentation.toml` ten times a second, each one
+# firing the mtime watcher. Only a test asserting that NOTHING reached
+# disk while the keys were still coming can see it.
+run_mutation "objectdialog: the config write fires per keystroke instead of coalescing" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        cx.background_executor().timer(WRITE_DEBOUNCE).await;' \
+  '' \
+  geode-shell \
+  edits_inside_the_debounce_window_coalesce_into_one_write
+
+# Hazard 2's proof, and the one line it rests on. A user-layer document
+# memory creates for a file that does not exist yet has to carry the same
+# `config_version` stamp `config_write::edit` puts at the top of a file it
+# creates — otherwise the document memory holds and the document the
+# watcher reads back a moment later differ by one key, `apply_reload`'s
+# `changed(..)` answers true, and the self-write reload stops being the
+# no-op this design chose to prove instead of suppress: a `ConfigReloaded`
+# emit and every tile requerying, a beat after a keystroke that had
+# already finished. Invisible to every test that only reads values.
+run_mutation "objectdialog: a user doc created in memory carries no config_version" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    table.insert(
+        "config_version".to_string(),
+        toml::Value::Integer(CONFIG_VERSION),
+    );' \
+  '' \
+  geode-shell \
+  the_watchers_reload_of_our_own_write_changes_nothing
+
+# The one edit that still asks first. Forking is instant and irreversible
+# in the direction that matters — a user-layer copy of a desk view stops
+# receiving the desk's changes — and applying it without the confirm is
+# green against every test that only checks the value landed: it DID
+# land, in the user's own `views.toml`, weeks before anyone notices the
+# desk's new column never arrived.
+run_mutation "objectdialog: a definitional change forks without asking" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if super::apply::would_fork(shell, domain) {' \
+  '    if false {' \
+  geode-shell \
+  a_definitional_change_to_a_desk_view_confirms_before_forking
+
+# `Config::all_docs` is the other half of the loader split: it is what
+# hands `from_docs` the documents to merge, and dropping the layers below
+# the user's is the plausible "we only changed the user layer" shortcut.
+# The merged result is still a valid config and still contains the edit,
+# so a value assertion passes; what vanishes is every desk and builtin
+# document — the exact shape of the shipped reload bug this codebase
+# already paid for once, one function further in.
+run_mutation "config: all_docs hands the merge the user layer alone" \
+  crates/geode-core/src/config/mod.rs \
+  '        self.layered.values().flatten().cloned().collect()' \
+  '        self.layered
+            .values()
+            .flatten()
+            .filter(|d| d.layer == Layer::User)
+            .cloned()
+            .collect()' \
+  geode-core \
+  from_docs_merges_exactly_as_load_does
+
+# The edit stage is always normal mode. `enter` opens an object from
+# FILTER mode too, and a stage left in `Filter` sends the next `escape`
+# down the ladder's `LeaveFilter` rung — which `handle_edit_key` does not
+# claim, so the shell's modal branch closes the whole dialog and takes the
+# unsaved draft with it, without ever asking. Every escape test that opens
+# its object from normal mode stays green; only one that opens it out of a
+# filtered list can see it.
+run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.mode = DialogMode::Normal;' \
+  '' \
+  geode-shell \
+  an_object_opened_from_filter_mode_still_escapes_back_a_stage
+
+# ---- Phase 4c review wave: hiding a column, and not freezing the desk
+#
+# THE headline capability of the presentation design (spec §1.3): "hiding
+# one … and the blotter reflects it without a restart". Nothing consumed
+# `ColumnPresentation.hidden` when Part 1 shipped, and the end-to-end test
+# could not see it because it asserted the WRITE, not the effect — the
+# dialog wrote `view_presentation.toml` correctly, the watcher reloaded,
+# the merge applied, and the column was still on screen. Every link in
+# that chain has its own green test. Only a test asserting the column is
+# absent from what the blotter PLANS to paint can see this one.
+run_mutation "plan: a hidden column is planned anyway" \
+  crates/geode-blotter/src/core/plan.rs \
+  '            if presentation.hidden.unwrap_or(false) {' \
+  '            if false {' \
+  geode-blotter \
+  a_hidden_column_is_not_planned
+
+# The freeze `Destination` exists to prevent, one field-granularity down.
+# `order` arrives from the EFFECTIVE view, so writing it unconditionally
+# pins the desk's own column order into the trader's personal file the
+# first time they hide anything — and every assertion about what the file
+# contains stays green, because the order written is the right order
+# TODAY. Only a test asserting the key is ABSENT when nothing was
+# reordered can see it.
+run_mutation "views: a presentation save pins the desk's column order" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if names != doc_order {' \
+  '    if true {' \
+  geode-shell \
+  a_presentation_save_writes_only_what_the_trader_changed
+
+# The same freeze for `width`, and the half that is latent today: nothing
+# in Geode can set a width yet, so a suite that only ever sees widths the
+# desk declared cannot tell "kept the trader's" from "copied the desk's".
+# The fixture has to declare a width in `views.toml` and change something
+# else entirely.
+run_mutation "views: a presentation save copies the desk's widths into the user's file" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if doc_widths.get(item.name.as_str()) == Some(&width) {' \
+  '        if false {' \
+  geode-shell \
+  a_presentation_save_writes_only_what_the_trader_changed
+
+# ---- Phase 4c: the reload keeps the app's own builtin layer ----------
+
+# The shipped bug, and the reason this entry exists at all: the reload
+# rebuilt the builtin layer as "the builtin keymap, surely" instead of
+# reusing the docs the process started with. Under `--demo` that layer is
+# a whole generated desk, so the first config write of a session — a theme
+# toggle, a font-size change, a dialog save — silently deleted the views,
+# datasets and sources, and the views dialog then reported "no views are
+# configured". Every test in the suite was green throughout: none of them
+# had a builtin layer wider than the keymap, so none could tell reuse from
+# reconstruction. The mutation below is exactly the old code.
+run_mutation "reload: the builtin layer is reused, not rebuilt from the keymap alone" \
+  crates/geode-shell/src/reload.rs \
+  '    Config::load(&ConfigSources {
+        builtin,
+        desk,
+        user,
+    })' \
+  '    Config::load(&ConfigSources {
+        builtin: builtin
+            .into_iter()
+            .filter(|doc| doc.name == "keymap")
+            .collect(),
+        desk,
+        user,
+    })' \
+  geode-shell \
+  a_reload_keeps_every_builtin_doc_not_just_the_keymap
 
 # ---- Phase 4b Task 1: the deferred 4a-review minors (M2, M5, M7, M8,
 # M10, M11, M12, M13) ---------------------------------------------------

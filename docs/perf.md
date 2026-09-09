@@ -1236,3 +1236,74 @@ cargo run --release -p geode-app -- --demo 1000000
 | baseline `j`-hold, no diagnostics tile, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
 | same hold, diagnostics tile open + log section following, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
 | verdict: does the diagnostics tile move p95? | comparison of the two rows above | *(template — not yet measured)* |
+
+## Phase 4c: what a config-dialog keystroke costs, and what its flush costs
+
+Config dialogs have no save key (spec §3.2/§7.1). A keystroke changes the
+draft — which is what the edit stage paints, so the dialog responds with
+nothing in between — and everything else rides one 250 ms debounce: the
+merge, `hot_reload::apply_reload`, and the file write.
+
+**The split is the point, and it was measured before it was chosen.** An
+earlier build applied the merged config on every keystroke. That is
+affordable as arithmetic and not as behaviour: `apply_reload` emits
+`ShellEvent::ConfigReloaded`, the app bridge turns it into fresh
+`ViewSpec`s, and **every blotter tile requeries** — a §7.1 <50 ms
+operation at 1M rows, fired at the OS key-repeat rate under a held key.
+The debounce now carries the fan-out and the write together, because both
+are "the rest of the world catches up".
+
+### Per keystroke (`cargo bench -p geode-shell -- config_edit`)
+
+| Bench | time |
+|---|---|
+| `config_edit/keystroke_toggle_validate_render` | **37.1 µs** |
+
+That is the keystroke's whole pure core: toggle the row, re-run
+`Domain::validate`, render the object for both destinations, and turn
+each into the value memory and the file both take. **0.46% of the 8 ms
+pure-UI budget.** It is an over-estimate on purpose — the bench rebuilds
+the `Draft` from the config each iteration, which a real keystroke does
+not do (it mutates the draft it already has) — so the real figure is
+lower than the one recorded here.
+
+No merge and no `apply_reload` appear in that number, because after this
+design neither runs on a keystroke.
+
+### Per flush, once per 250 ms
+
+| Bench | time |
+|---|---|
+| `geode-shell` `config_edit/flush_merge_full_layer` | **70.0 µs** |
+| `geode-shell` `config_edit/flush_build_keymap` | **20.3 µs** |
+| `geode-core` `config_merge/config_from_docs_demo_desk` | 63.7 µs |
+| `geode-core` `config_merge/config_all_docs_then_from_docs` | 64.0 µs |
+
+`flush_merge_full_layer` is the honest merge number: a builtin layer
+carrying the **real** `BUILTIN_KEYMAP` — by far the largest document in
+the config model — plus the demo desk's 7.8 KB `datasets.toml` and 6.8 KB
+`views.toml`. The two `geode-core` numbers measure the demo desk without
+the keymap and are therefore a mild underestimate; that crate cannot
+reach `BUILTIN_KEYMAP` (it must not depend on `geode-shell`), which is
+why the keymap-inclusive figure lives in the shell's own bench. The
+`all_docs` + `from_docs` pair being within noise of `from_docs` alone
+says cloning the documents out of the live `Config` is free at this
+scale.
+
+`flush_build_keymap` is measured because `apply_reload` rebuilds the
+keymap **unconditionally**, and this design moved that code from a 500 ms
+poll into an interactive path. "It was already in the reload path" stops
+being an excuse the moment the caller changes; at 20 µs once per 250 ms
+it is not a concern, but that is now a number rather than an assumption.
+
+A whole flush is therefore on the order of 100 µs of pure work plus the
+file write, once per debounce window — nowhere near a frame, and off the
+keystroke entirely.
+
+### Not measured
+
+`apply_reload`'s remaining work (`docs_equal` over each doc, the theme
+and pickable re-derives, the frame updates) and the fan-out it triggers.
+The fan-out's cost **is** the blotter requery already budgeted by §7.1;
+what this design changed is how often it can fire, which is now bounded
+at one per 250 ms rather than one per key repeat.

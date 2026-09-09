@@ -16,8 +16,6 @@ use std::time::SystemTime;
 
 use geode_core::config::{Config, ConfigSources, LayerDoc, Severity};
 
-use crate::defaults::BUILTIN_KEYMAP;
-
 /// Filename excluded from every [`scan`] snapshot. A later task writes
 /// `session.toml` into the user config dir from inside the running app;
 /// if it were included here, the app's own write would perturb the
@@ -81,17 +79,28 @@ fn scan_dir(dir: &Path, entries: &mut BTreeMap<PathBuf, SystemTime>) {
     }
 }
 
-/// Load a fresh `Config` from `desk` and `user` the same way `geode-app`'s
-/// `main.rs` builds the initial one (builtin keymap doc + the two config
-/// directories). Pulled out here so both the app's startup path and the
-/// reload watcher build a `Config` the same way — this is plain
-/// composition of already-tested pieces (`LayerDoc::builtin`,
-/// `Config::load`), not new logic, so it has no tests of its own.
-pub fn load_config(desk: Option<PathBuf>, user: Option<PathBuf>) -> Config {
-    let builtin_keymap =
-        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).expect("builtin keymap TOML is well-formed");
+/// Load a fresh `Config` for a reload: the SAME builtin docs the process
+/// started with, re-merged over freshly re-read `desk` and `user`
+/// directories.
+///
+/// `builtin` is passed in, never rebuilt here, and that is the whole
+/// point of the parameter. The builtin layer is whatever the *app*
+/// compiled in for this run — `geode-app` always supplies the default
+/// keymap and, under `--demo`, an entire generated desk on top of it —
+/// and it exists nowhere on disk for a reload to re-read. This function
+/// once reconstructed it as "the builtin keymap, surely", which silently
+/// deleted every other builtin doc on the first config write of a
+/// session: a theme toggle, a font-size change or a dialog save fired the
+/// mtime watcher, and the demo's views, datasets and sources ceased to
+/// exist until restart. The caller ([`crate::shell::ShellServices::
+/// builtin`]) holds the real docs; this takes them verbatim.
+///
+/// Runs off the UI thread (`shell/mod.rs`'s watcher spawns it on the
+/// background executor): it reads directories, and PHILOSOPHY.md forbids
+/// file I/O on the render thread.
+pub fn load_config(builtin: Vec<LayerDoc>, desk: Option<PathBuf>, user: Option<PathBuf>) -> Config {
     Config::load(&ConfigSources {
-        builtin: vec![builtin_keymap],
+        builtin,
         desk,
         user,
     })
@@ -173,6 +182,10 @@ pub fn decide(new_config: &Config) -> ReloadOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The real builtin keymap doc: only the tests build one now — the
+    // reload itself is handed the app's builtin layer rather than
+    // reconstructing any part of it (see `load_config`).
+    use crate::defaults::BUILTIN_KEYMAP;
     use geode_core::config::{ConfigSources, Diagnostic, Layer};
     use std::time::Duration;
 
@@ -271,6 +284,64 @@ mod tests {
         let a = scan(Some(&missing), None);
         let b = scan(None, None);
         assert!(!a.changed_since(&b));
+    }
+
+    // --- load_config ----------------------------------------------------
+
+    /// The reload must re-merge the SAME builtin layer the process started
+    /// with, not a reconstruction of it. `geode-app` compiles in more than
+    /// the keymap — under `--demo` a whole generated desk (`views`,
+    /// `datasets`, `sources`, …) — and none of it is on disk, so a reload
+    /// that rebuilt "the builtin keymap" deleted the rest of it the
+    /// instant anything wrote a config file.
+    #[test]
+    fn a_reload_keeps_every_builtin_doc_not_just_the_keymap() {
+        let user = tempfile::tempdir().unwrap();
+        let builtin = vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("views", "[risk]\ncolumns = [\"delta\"]\n").unwrap(),
+        ];
+
+        let config = load_config(builtin, None, Some(user.path().to_path_buf()));
+
+        assert!(
+            config.doc("views").is_some(),
+            "a reload dropped the app's builtin `views` doc — the builtin \
+             layer must be reused, not rebuilt"
+        );
+        assert!(
+            config.doc("keymap").is_some(),
+            "the builtin keymap must survive the reload too"
+        );
+    }
+
+    /// The user layer still merges over the builtin one after a reload —
+    /// proving the fix reuses the builtin docs as a *layer*, not as a
+    /// replacement for what is on disk.
+    #[test]
+    fn a_user_doc_still_overrides_the_builtin_layer_after_a_reload() {
+        let user = tempfile::tempdir().unwrap();
+        write(
+            user.path(),
+            "app.toml",
+            "config_version = 1\n[theme]\nname = \"user-choice\"\n",
+        );
+        let builtin = vec![
+            LayerDoc::builtin("app", "[theme]\nname = \"builtin-choice\"\n").unwrap(),
+            LayerDoc::builtin("views", "[risk]\ncolumns = [\"delta\"]\n").unwrap(),
+        ];
+
+        let config = load_config(builtin, None, Some(user.path().to_path_buf()));
+
+        assert_eq!(
+            config.get("app", "theme.name").and_then(|v| v.as_str()),
+            Some("user-choice"),
+            "the user layer must still win over the builtin one"
+        );
+        assert!(
+            config.doc("views").is_some(),
+            "the builtin-only doc must survive alongside the overridden one"
+        );
     }
 
     // --- decide ---------------------------------------------------------

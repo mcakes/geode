@@ -20,7 +20,6 @@ duckdb = { version = "1.10505.0", features = ["bundled", "chrono"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"
 glob = "0.3.3"
-regex = "1.11.1"
 # Phase 4b Task 2: publish/health/poll events emit through this rather
 # than the crate staying silent (it had no `eprintln!` before this task).
 tracing.workspace = true

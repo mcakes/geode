@@ -7,6 +7,90 @@ use super::*;
 // below need this to resolve to the real module rather than to `self`.
 use crate::reload;
 
+/// A `views` doc the app compiled in — the shape `--demo` supplies a
+/// whole generated desk in (`app`, `datasets`, `groupings`, `sources`,
+/// `views`), reduced to the one doc this test asserts on.
+const BUILTIN_VIEWS_DOC: &str = "[risk]\ncolumns = [\"delta\"]\n";
+
+/// `test_services()` with a compiled-in builtin layer that is more than
+/// the keymap — the only fixture in which the reload's builtin handling
+/// is observable at all, since every other one starts from an empty
+/// `ConfigSources`.
+fn services_with_a_builtin_views_doc() -> ShellServices {
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("views", BUILTIN_VIEWS_DOC).unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The bug a trader actually hit: the app writes a config file of its own
+/// accord — here `theme::toggle_mode`'s `persist_theme`, exactly as the
+/// views dialog's save or a font-size change would — the mtime watcher
+/// sees the change and reloads, and the views the app compiled in are
+/// gone. Under `--demo` that meant the views dialog reporting "no views
+/// are configured" the instant anything was saved, with only a restart to
+/// bring them back.
+///
+/// The watcher's own timer cannot be driven from a gpui test (see
+/// `apply_reload`'s doc comment), so this runs the two steps it schedules
+/// verbatim: `reload::load_config` off the live `services.builtin`, then
+/// `apply_reload`.
+#[gpui::test]
+fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut vcx) =
+        open_shell_with_user_dir(cx, services_with_a_builtin_views_doc(), dir.path());
+    let shell = shell_of(&window, &mut vcx);
+    assert!(
+        shell.read_with(&vcx, |shell, _| shell
+            .services
+            .config
+            .doc("views")
+            .is_some()),
+        "fixture is wrong: the shell should start with the builtin views doc"
+    );
+
+    // The user changes the theme; `persist_theme` writes `app.toml` into
+    // the user config dir off the UI thread.
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(
+                &ActionId("theme::toggle_mode".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    vcx.run_until_parked();
+    assert!(
+        dir.path().join("app.toml").exists(),
+        "the theme toggle should have written app.toml — without that \
+         write there is no reload to test"
+    );
+
+    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    shell.read_with(&vcx, |shell, _| {
+        assert!(
+            shell.services.config.get("views", "risk.columns").is_some(),
+            "the reload triggered by the app's own config write dropped the \
+             builtin views — every module reading views sees an empty desk \
+             until restart"
+        );
+    });
+}
+
 /// A clean reload (no error diagnostics) is applied: the mod alias
 /// (and therefore the keymap built from it) updates to match the new
 /// config, an open palette closes (brief: "must close on a successful
@@ -297,6 +381,11 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let mut services = test_services();
+                // `builtin` deliberately left at `test_services()`'s
+                // empty vec: this test drives `apply_reload` directly
+                // (below and via `new_config`), which only ever assigns
+                // `self.services.config` and never reads `builtin` — see
+                // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox", "dark");
                 let view = cx.new(|cx| {
                     // Mirrors what main.rs does before opening the
@@ -363,6 +452,11 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let mut services = test_services();
+                // `builtin` deliberately left at `test_services()`'s
+                // empty vec: this test drives `apply_reload` directly
+                // (below and via `new_config`), which only ever assigns
+                // `self.services.config` and never reads `builtin` — see
+                // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox", "dark");
                 let view = cx.new(|cx| {
                     services.theme.apply_from_config(&services.config, cx);
@@ -629,7 +723,10 @@ fn ctrl_digits_switch_the_frame_slot_and_ctrl_0_clears_it(cx: &mut gpui::TestApp
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
     )
     .unwrap();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
             groupings,
@@ -790,6 +887,71 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
     );
 }
 
+/// Phase 4c: `view_presentation.toml` is merged over the views
+/// (`geode_core::config::load_views`), so a change to it changes the
+/// `ViewSpec`s every tile runs on just as a `views` edit does. The Views
+/// dialog writes it on the commonest edit a trader makes — a column
+/// width — and then relies on the 500 ms mtime watcher's ordinary reload
+/// to apply it. Left out of `views_changed`, that write would sit on disk
+/// until the next restart, which is the one outcome the whole
+/// presentation split exists to avoid.
+///
+/// Two reloads: the first establishes a baseline whose `views` doc is
+/// already present, so the second differs in `view_presentation` and in
+/// nothing else.
+#[gpui::test]
+fn a_view_presentation_only_change_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
+    const DATASETS: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n";
+    const VIEWS: &str = "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n[[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n";
+
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let config_with = |presentation: Option<&str>| {
+        let mut builtin = vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("datasets", DATASETS).unwrap(),
+            LayerDoc::builtin("views", VIEWS).unwrap(),
+        ];
+        if let Some(text) = presentation {
+            builtin.push(LayerDoc::builtin("view_presentation", text).unwrap());
+        }
+        Config::load(&ConfigSources {
+            builtin,
+            ..ConfigSources::default()
+        })
+    };
+
+    // Baseline: `views` is now present in the shell's own config.
+    let mut baseline = config_with(None);
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut baseline), cx)
+    });
+
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let f = fired.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            if matches!(event, ShellEvent::ConfigReloaded) {
+                *f.borrow_mut() += 1;
+            }
+        })
+        .detach();
+    });
+
+    let mut with_presentation = config_with(Some("[v]\norder = [\"book\"]\n"));
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_presentation), cx)
+    });
+
+    assert_eq!(
+        *fired.borrow(),
+        1,
+        "a view_presentation-only edit must trigger the same reload path a views edit does"
+    );
+}
+
 /// I2 (final review): a `views`-changing reload must queue
 /// `ShellEvent::ConfigReloaded` *before* it notifies the frame. gpui
 /// flushes effects FIFO, so which of the two runs first for any given
@@ -877,7 +1039,10 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut services, _log) = services_with_recorder();
-    services.config = Config::load(&ConfigSources {
+    // See `test_services`'s own comment: mirroring `builtin` here (rather
+    // than leaving it at its inherited empty vec) costs nothing and keeps
+    // this fixture a real `(config, builtin)` pair.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
             LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
             LayerDoc::builtin("groupings", "1 = [\"desk\"]\n").unwrap(),

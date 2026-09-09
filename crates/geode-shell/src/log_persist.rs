@@ -2,21 +2,18 @@
 //! table (Phase 4b Task 4, spec §4.3) — `Diagnostics::request_level`'s
 //! `take_pending_level` drain calls this on the background executor.
 //!
-//! Reuses `theme::write_atomic` and the same `toml_edit` format-
-//! preserving read-modify-write `frame::persist_slot_to_user_config`
-//! already uses (a plain `toml::Table` re-serialize would silently
-//! destroy comments and reorder keys — see `theme::persist_to_user_config`'s
-//! own doc comment for the fuller version of that argument). This adds
-//! no new atomic-write implementation of its own (plan ruling, "config
-//! write paths stay separate in 4b" — 4c's `config_write` door migrates
-//! every persist, this one included, onto itself later).
+//! Goes through [`crate::config_write::edit`], the one config-write door
+//! (Phase 4c §6): the format-preserving `toml_edit` read-modify-write, the
+//! user-layer-only guard, the atomic write, and the refuse-an-unparseable-
+//! file-untouched contract are all that door's, not reimplemented here. 4b
+//! landed this on `theme::write_atomic` under the plan ruling that "config
+//! write paths stay separate in 4b"; that ruling's own stated end state was
+//! this migration, and merging 4c is where it happens.
 
-use std::path::Path;
-
+use geode_core::config::Layer;
 use geode_core::log::Level;
-use toml_edit::{DocumentMut, Item, Table, value};
-
-use crate::theme::write_atomic;
+use std::path::Path;
+use toml_edit::{Item, Table, value};
 
 /// `target`'s bare suffix (`"ingest"`, not `"geode::ingest"` — the same
 /// key shape `[log]` already reads via `LogLevels::from_doc`) mapped to
@@ -33,40 +30,21 @@ pub fn persist_log_level_to_user_config(
     target: &str,
     level: Level,
 ) -> Result<(), String> {
-    let path = user_dir.join("app.toml");
-    let existed = path.exists();
-
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-
-    if !doc.get("log").is_some_and(Item::is_table_like) {
-        doc["log"] = Item::Table(Table::new());
-    }
-    let log_table = doc["log"]
-        .as_table_mut()
-        .expect("just ensured [log] is a table");
-    log_table[target] = value(level.to_string().to_ascii_lowercase());
-
-    write_atomic(user_dir, &path, &doc.to_string())
+    crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
+        if !doc.get("log").is_some_and(Item::is_table_like) {
+            doc["log"] = Item::Table(Table::new());
+        }
+        let log_table = doc["log"]
+            .as_table_mut()
+            .expect("just ensured [log] is a table");
+        log_table[target] = value(level.to_string().to_ascii_lowercase());
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toml_edit::DocumentMut;
 
     #[test]
     fn creates_a_fresh_file_with_config_version_and_the_target() {

@@ -419,6 +419,16 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // regardless. Category "Keyboard", not "Appearance" — this edits
     // behavior (bindings), not how the app looks.
     action(reg, "keybindings::open", "Keyboard shortcuts", "Keyboard");
+    // Phase 4c: the object dialog over `views` (`shell::objectdialog`).
+    // Palette-only, with no binding in BUILTIN_KEYMAP, for the same
+    // reason `keybindings::open` above has none: it is an occasional,
+    // deliberate act of config maintenance rather than muscle memory
+    // worth a chord, and the palette is always reachable. Category
+    // "Configuration" — its siblings (`config::groupings`,
+    // `config::sources`, `config::scopes`, the schema inspector) land
+    // beside it as their adapters are built, so the palette groups the
+    // whole family under one heading.
+    action(reg, "config::views", "Edit views", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no

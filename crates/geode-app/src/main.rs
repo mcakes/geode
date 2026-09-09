@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use geode_blotter::BlotterFactory;
-use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc, Severity};
+use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
 use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_diagnostics::DiagnosticsFactory;
 use geode_shell::actions::ActionRegistry;
@@ -517,7 +517,12 @@ fn build_shell_services(
     if let Some(root) = demo_root {
         builtin.extend(demo::layer(&root.join("src")));
     }
-    let config = Config::load(&ConfigSources {
+    // `ShellServices::config_and_builtin` derives `config` and `builtin`
+    // from one `ConfigSources`, so the two cannot disagree (see that
+    // function's doc comment — reconstructing `builtin` separately from
+    // what `config` was loaded from silently deleted the demo desk on the
+    // first config write of a session).
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin,
         desk: desk.clone(),
         user: user.clone(),
@@ -634,6 +639,7 @@ fn build_shell_services(
 
     let services = ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,

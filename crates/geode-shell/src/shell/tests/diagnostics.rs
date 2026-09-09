@@ -338,17 +338,30 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
     let desk_path = desk_dir.path().to_path_buf();
     let user_path = user_dir.path().to_path_buf();
 
-    let config = reload::load_config(Some(desk_path.clone()), Some(user_path.clone()));
+    // Through `ShellServices::config_and_builtin`, so `config` and
+    // `builtin` are derived together and cannot disagree — and so the
+    // reload below is handed the *same* builtin docs the shell was built
+    // from, which is the whole point of the parameter (`reload::
+    // load_config`'s doc comment). Rebuilding the builtin layer at the
+    // reload site instead is the bug that silently deleted every
+    // non-keymap builtin doc on the first config write of a session.
+    let builtin = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin,
+        desk: Some(desk_path.clone()),
+        user: Some(user_path.clone()),
+    });
     let mut registry = ActionRegistry::default();
     register_builtin_actions(&mut registry);
     let mod_alias = default_mod();
-    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
-    let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
+    let (keymap, diags) = build_keymap(&builtin, mod_alias, &registry);
     assert!(diags.is_empty(), "{diags:?}");
     let (theme, warnings) = crate::theme::load_bundled();
     assert!(warnings.is_empty(), "{warnings:?}");
+    let reload_builtin = builtin.clone();
     let services = ShellServices {
         config,
+        builtin,
         registry,
         keymap,
         mod_alias,
@@ -408,7 +421,11 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
     });
     cx.run_until_parked();
 
-    let new_config = reload::load_config(Some(desk_path.clone()), Some(user_path.clone()));
+    let new_config = reload::load_config(
+        reload_builtin,
+        Some(desk_path.clone()),
+        Some(user_path.clone()),
+    );
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
     cx.run_until_parked();
 

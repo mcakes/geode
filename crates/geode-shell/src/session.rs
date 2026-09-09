@@ -90,9 +90,7 @@
 //! non-empty ones.
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::tiling::{
     DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
@@ -922,14 +920,6 @@ pub fn to_string_pretty(
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
-/// Process-global counter (fix wave, Fix 2) giving every [`write_atomic`]
-/// call in this process a temp filename distinct from every other
-/// *concurrent* call, on top of the pid already distinguishing this process
-/// from any other one racing on the same session file. `Ordering::Relaxed`
-/// is enough — this only needs distinct values, not a synchronization point
-/// with any other memory access.
-static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Atomically write already-serialized session `text` to `path`: a temp
 /// file in the same directory, `fsync`, then rename over `path` (rename is
 /// atomic on the same filesystem — a crash or concurrent read never
@@ -947,56 +937,36 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// off-the-UI-thread callers: direct test use, and the best-effort
 /// `on_app_quit` final flush, which fires at most once, at shutdown.
 ///
-/// Temp filename (fix wave, Fix 2): `.session.toml.{pid}-{counter}.tmp`,
-/// unique per call rather than the fixed `.session.toml.tmp` this used
-/// before. The fixed name was a real race: `ShellView`'s ~500ms watcher
-/// tick and the `on_app_quit` best-effort flush can both call this against
-/// the *same* `path` close together (quit right after a workspace
-/// mutation), and two concurrent writers sharing one temp filename could
-/// interleave — one call's `File::create` truncating the other's
-/// in-progress write, or one call's `rename` consuming the other's temp
-/// file out from under it (an `ENOENT` on the second `rename`, surfaced as
-/// a spurious `[session] warning:` line even though the first writer's data
-/// was fine). A unique name per call removes that interleaving entirely:
-/// each writer only ever touches its own file until its own `rename`.
+/// The atomic write itself is [`crate::config_write::write_file`]'s (Phase
+/// 4c collapsed the three `write_atomic` copies into one door); this
+/// function is now only the session file's *boundary* onto it. Two things
+/// it keeps that the door cannot know:
 ///
-/// The pid+counter suffix keeps the *residual* case honest rather than
-/// pretending it away: two writers can still race the final `rename` step
-/// itself (both succeed — `rename` is atomic per-call — but whichever
-/// finishes second wins, since both target the same `path`). That ordering
-/// is acceptable, not a defect: every candidate `text` here is a valid,
-/// self-consistent serialization of *some* real session state, so the
-/// "wrong" outcome is at worst a slightly stale-but-valid file (e.g. an
-/// old periodic flush's rename lands after the quit-time save's rename,
-/// so the file on disk reflects state from ~500ms earlier than the very
-/// last action) — never a torn/corrupt file, and never a crash. Losing at
-/// most one flush interval of session freshness is exactly the tradeoff
-/// this module's whole "best-effort, never load-bearing" session design
-/// already accepts elsewhere (see this function's own doc above, and
-/// `load`'s "never panic or block startup").
+/// * **`std::io::Result`.** Every caller of this function — `ShellView`'s
+///   background flush, `save`, the session tests — already speaks
+///   `io::Result`, so the door's `String` error is mapped back here rather
+///   than rippling a signature change through them. Nothing inspects the
+///   `ErrorKind`; the message is what reaches the `[session] warning:`
+///   line.
+/// * **A path, not a layer + doc name.** `session.toml` is per-machine
+///   session state, deliberately *excluded* from the layered config merge
+///   and from `reload::scan` (`reload::EXCLUDED_FILENAME`), so it must not
+///   go through `config_write::write`'s layer-and-doc-name door — which
+///   would imply it is a config document that hot-reloads like the others.
 ///
-/// Still a non-`.toml` name so the reload watcher's `*.toml` glob (Task
-/// 1c-1, `reload::scan`) never even sees it mid-write, on top of
-/// `session.toml` itself already being excluded by name.
+/// The temp filename the door derives for this path is
+/// `.session.toml.{pid}-{counter}.tmp` — the same name this function used
+/// to build itself, and still a non-`.toml` name so the reload watcher's
+/// `*.toml` glob (Task 1c-1, `reload::scan`) never even sees it mid-write,
+/// on top of `session.toml` itself already being excluded by name. See
+/// `config_write`'s `TMP_COUNTER` for the race that uniqueness closes and
+/// the residual rename ordering it deliberately leaves open — which for
+/// this file is at worst a stale-but-valid session (e.g. an old periodic
+/// flush's rename landing after the quit-time save's), exactly the
+/// tradeoff this module's "best-effort, never load-bearing" design accepts
+/// elsewhere (see `load`'s "never panic or block startup").
 pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "session path has no parent directory",
-        )
-    })?;
-    std::fs::create_dir_all(dir)?;
-
-    let pid = std::process::id();
-    let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp_path = dir.join(format!(".session.toml.{pid}-{counter}.tmp"));
-    {
-        let mut file = std::fs::File::create(&tmp_path)?;
-        file.write_all(text.as_bytes())?;
-        file.sync_all()?;
-    }
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
+    crate::config_write::write_file(path, text).map_err(std::io::Error::other)
 }
 
 /// Serialize and atomically write in one synchronous call — for callers

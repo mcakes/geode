@@ -13,6 +13,7 @@
 
 use crate::perf::RequeryStats;
 use crate::scopebar::{self, ScopeBarModel};
+use geode_core::config::Layer;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey};
 use geode_core::scope::Scope;
@@ -22,7 +23,7 @@ use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
-use toml_edit::{DocumentMut, value};
+use toml_edit::value;
 
 /// How long [`Frame::open_flip`]'s barrier waits for every following
 /// tile's outcome before [`Frame::sweep`] releases it with whatever
@@ -738,29 +739,13 @@ pub fn persist_slot_to_user_config(
     if !(1..=9).contains(&slot) || grouping.is_empty() {
         return Err(format!("slot {slot} out of range or empty grouping"));
     }
-    let path = user_dir.join("groupings.toml");
-    let existed = path.exists();
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-    let mut array = toml_edit::Array::new();
-    for g in grouping {
-        array.push(g.as_str());
-    }
-    doc[slot.to_string().as_str()] = value(array);
-    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+    crate::config_write::edit(user_dir, Layer::User, "groupings", |doc| {
+        let mut array = toml_edit::Array::new();
+        for g in grouping {
+            array.push(g.as_str());
+        }
+        doc[slot.to_string().as_str()] = value(array);
+    })
 }
 
 /// Write one named scope into the user layer's `scopes.toml`, keeping
@@ -772,25 +757,9 @@ pub fn persist_scope_to_user_config(
     name: &str,
     scope: &Scope,
 ) -> Result<(), String> {
-    let path = user_dir.join("scopes.toml");
-    let existed = path.exists();
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-    doc[name] = toml_edit::Item::Table(geode_core::scopes::scope_to_table(scope));
-    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+    crate::config_write::edit(user_dir, Layer::User, "scopes", |doc| {
+        doc[name] = toml_edit::Item::Table(geode_core::scopes::scope_to_table(scope));
+    })
 }
 
 #[cfg(test)]

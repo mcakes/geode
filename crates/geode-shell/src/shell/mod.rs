@@ -16,6 +16,7 @@ mod hot_reload;
 mod input;
 pub mod keybindings_view;
 pub mod keys;
+pub mod objectdialog;
 mod occupants;
 mod palette_ctl;
 pub mod perf_overlay;
@@ -58,7 +59,7 @@ use crate::session;
 use crate::theme::ThemeService;
 use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
-use geode_core::config::{Config, LayerDoc};
+use geode_core::config::{Config, ConfigSources, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_core::query::{DistinctOutcome, QueryKey};
@@ -71,6 +72,23 @@ use std::sync::{Arc, Mutex};
 /// life of the window.
 pub struct ShellServices {
     pub config: Config,
+    /// The compiled-in builtin layer `config` was loaded from: the
+    /// default keymap, plus whatever else this particular binary compiled
+    /// in for this run (the app decides — under `--demo` it is a whole
+    /// generated desk: `app`, `datasets`, `dimensions`, `groupings`,
+    /// `sources`, `views`).
+    ///
+    /// Kept here because it is process-lifetime state, decided at startup
+    /// and reachable from nowhere on disk, while a config hot reload
+    /// re-reads only the desk and user *directories*. The reload path
+    /// must therefore REUSE these docs ([`crate::reload::load_config`]
+    /// takes them verbatim) rather than reconstruct a guess at what the
+    /// app compiled in. Reconstructing them was a live bug: the reload
+    /// rebuilt the builtin keymap and nothing else, so the first config
+    /// write of a session — a theme toggle, a font-size change, a dialog
+    /// save — dropped every other builtin doc, and under `--demo` the
+    /// views, datasets and sources vanished until restart.
+    pub builtin: Vec<LayerDoc>,
     pub registry: ActionRegistry,
     pub keymap: Keymap,
     pub mod_alias: Modifiers,
@@ -118,6 +136,31 @@ pub struct LogServices {
     pub ring: Arc<Ring>,
     pub control: Arc<dyn LevelControl>,
     pub levels: LogLevels,
+}
+
+impl ShellServices {
+    /// Loads `config` from `sources` and returns it paired with the exact
+    /// `builtin` docs it was loaded from — the one way to produce this
+    /// struct's `config`/`builtin` pair that cannot drift, because both
+    /// come out of the same `ConfigSources` value instead of two separate
+    /// call sites independently deciding what the builtin layer is.
+    ///
+    /// This is the field-level version of the bug fixed in 665be45: there
+    /// it was two independent *builders* of the builtin layer (`main.rs`
+    /// and `reload.rs`) disagreeing; here it would be two independent
+    /// *assignments* on the same struct (`services.config = ...` without
+    /// the matching `services.builtin = ...`) disagreeing instead. Every
+    /// other `ShellServices` field still has to be assembled by the
+    /// caller — most of them (the registry, the keymap) depend on
+    /// `config` itself, so they cannot be produced here too.
+    ///
+    /// A fixture that deliberately needs a `config`/`builtin` mismatch
+    /// (modelling a stale reload, say) can still set the two fields by
+    /// hand instead of calling this — just comment why at the call site.
+    pub fn config_and_builtin(sources: ConfigSources) -> (Config, Vec<LayerDoc>) {
+        let builtin = sources.builtin.clone();
+        (Config::load(&sources), builtin)
+    }
 }
 
 /// What `ShellView` tells the rest of the app about a config reload (§4.5)
@@ -694,6 +737,42 @@ pub struct ShellView {
     /// and cleared by [`close_modal`](Self::close_modal), same as the
     /// other three dialogs.
     as_of_dialog: Option<asof_view::AsOfState>,
+    /// The open config-object dialog's own pure state (Phase 4c: the
+    /// shared scaffold every config domain's dialog is built on — see
+    /// `objectdialog`'s module doc), or `None` when closed/never opened.
+    /// Set fresh by [`objectdialog::render::open`] each time and cleared
+    /// by [`close_modal`](Self::close_modal), the same contract the four
+    /// dialogs above hold — including holding no `gpui` types itself, so
+    /// the stage machine and the provenance markers stay unit-testable
+    /// without a window.
+    object_dialog: Option<objectdialog::ObjectDialogState>,
+    /// Scroll state for the object dialog's row list — the
+    /// `keybindings_scroll`/`settings_scroll` split, one dialog over.
+    object_dialog_scroll: ScrollHandle,
+    /// Config edits applied to memory and not yet flushed to disk (Phase
+    /// 4c, `objectdialog::apply`): the debounce's accumulated batch, plus
+    /// the layered documents a failed write restores memory from.
+    ///
+    /// It lives on `ShellView` rather than on `ObjectDialogState` because
+    /// it must outlive the dialog: a trader can close the dialog inside
+    /// the 250 ms debounce window, and the write — and its failure
+    /// handling — still has to happen.
+    pending_config_write: Option<objectdialog::apply::PendingConfigWrite>,
+    /// Which scheduled config-write flush is the current one. Bumped by
+    /// every applied edit; a flush task that wakes holding an older value
+    /// has been superseded and does nothing, which is how N keystrokes
+    /// coalesce into one write.
+    config_write_seq: u64,
+    /// The last config write that failed and had to be rolled back out of
+    /// memory, as the status bar shows it (`objectdialog::apply::
+    /// revert_failed_write`), or `None` once a later write succeeds.
+    ///
+    /// The status bar rather than the dialog's own notice, because
+    /// `pending_config_write` outlives the dialog on purpose: a trader can
+    /// close the dialog inside the 250 ms debounce window, which is the
+    /// commonest way to reach the failure path with no dialog left on
+    /// screen to carry a notice.
+    pub(crate) config_write_error: Option<String>,
     /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
     /// refreshed once per reload-poll tick (~500ms, alongside the flip
     /// sweep and the dirty-session flush) rather than read fresh on
@@ -844,10 +923,16 @@ impl ShellView {
             }
             let query = input.read(cx).value().to_string();
             // Route to whichever dialog is actually open. `close_modal`
-            // clears all four fields, so at most one is `Some` here — the
-            // routing cannot land in a stale state left over from an
-            // earlier open.
-            if let Some(state) = view.keybindings.as_mut() {
+            // clears every one of these fields, so at most one is `Some`
+            // here — the routing cannot land in a stale state left over
+            // from an earlier open.
+            if let Some(state) = view.object_dialog.as_mut() {
+                // First, and by nothing more than convenience: the arms
+                // are mutually exclusive by `close_modal`'s contract, so
+                // order carries no meaning here.
+                state.set_query(query);
+                view.object_dialog_scroll.scroll_to_item(0);
+            } else if let Some(state) = view.keybindings.as_mut() {
                 state.set_query(query);
                 view.keybindings_scroll.scroll_to_item(0);
             } else if let Some(state) = view.settings.as_mut() {
@@ -1059,9 +1144,17 @@ impl ShellView {
                     continue;
                 }
 
+                // The builtin layer is read off the live services rather
+                // than rebuilt here (see `ShellServices::builtin`), and
+                // only once a change has actually been seen — a clone per
+                // 500ms poll would be pure per-frame churn for a reload
+                // that almost never happens.
+                let Ok(builtin) = this.update(cx, |view, _cx| view.services.builtin.clone()) else {
+                    return;
+                };
                 let new_config = cx
                     .background_executor()
-                    .spawn(async move { reload::load_config(desk_dir, user_dir) })
+                    .spawn(async move { reload::load_config(builtin, desk_dir, user_dir) })
                     .await;
 
                 if this
@@ -1229,6 +1322,11 @@ impl ShellView {
             next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
+            object_dialog: None,
+            object_dialog_scroll: ScrollHandle::new(),
+            pending_config_write: None,
+            config_write_seq: 0,
+            config_write_error: None,
             today: chrono::Local::now().date_naive(),
         }
     }
@@ -1242,18 +1340,20 @@ impl ShellView {
     /// backdrop listeners, all go through this rather than setting
     /// `self.modal = None` directly.
     ///
-    /// Also clears all four dialogs' state (`keybindings`, `settings`,
-    /// the dimension picker — Phase 4a §3.3 — `picker`, and the as-of
-    /// dialog — Phase 4a §3.6 — `as_of_dialog`). That is not tidiness:
-    /// the shared `dialog_input` subscription routes by "whichever state
-    /// is `Some`", so a stale `settings` left behind by an earlier open
-    /// would swallow the *keybinding* dialog's queries.
+    /// Also clears every dialog's state (`keybindings`, `settings`, the
+    /// dimension picker — Phase 4a §3.3 — `picker`, the as-of dialog —
+    /// Phase 4a §3.6 — `as_of_dialog`, and Phase 4c's `object_dialog`).
+    /// That is not tidiness: the shared `dialog_input` subscription
+    /// routes by "whichever state is `Some`", so a stale `settings` left
+    /// behind by an earlier open would swallow the *keybinding* dialog's
+    /// queries.
     pub(crate) fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.modal = None;
         self.settings = None;
         self.keybindings = None;
         self.picker = None;
         self.as_of_dialog = None;
+        self.object_dialog = None;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }

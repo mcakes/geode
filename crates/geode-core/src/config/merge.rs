@@ -15,9 +15,12 @@ pub struct MergedDoc {
 /// by name (spec §8): merging inside a view/layout is clever but undebuggable.
 fn atomic_depth(doc_name: &str) -> Option<u32> {
     match doc_name {
-        "views" | "layouts" | "groupings" | "scopes" | "datasets" | "sources" | "dimensions" => {
-            Some(1)
-        }
+        // `view_presentation` is here for the same reason `views` is: one
+        // table per view name, and a later layer's table for a view
+        // replaces the earlier one whole rather than half-merging one
+        // trader's column order into another's (spec §5.6).
+        "views" | "view_presentation" | "layouts" | "groupings" | "scopes" | "datasets"
+        | "sources" | "dimensions" => Some(1),
         _ => None,
     }
 }

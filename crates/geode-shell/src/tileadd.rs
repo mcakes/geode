@@ -4,14 +4,16 @@
 //! shape exactly — `ALL`/`label`/`config_value`/`from_value`/
 //! `from_config` plus a `persist_to_user_config` sibling — so the
 //! settings row, startup resolution and hot reload ride the paths font
-//! size and find style already do. `persist_to_user_config` is the
-//! seventh copy of that read-modify-write and a Phase 4c `config_write`
-//! migration target; it is not to be consolidated by hand (CLAUDE.md).
+//! size and find style already do. `persist_to_user_config` arrived as
+//! the seventh copy of that read-modify-write and went through the
+//! Phase 4c `config_write` door on the merge that brought the two
+//! branches together — it is `config_write::edit`'s caller now, like
+//! every other keyed persist in this crate.
 
 use std::path::Path;
 
-use geode_core::config::Config;
-use toml_edit::{DocumentMut, Item, Table, value};
+use geode_core::config::{Config, Layer};
+use toml_edit::{Item, Table, value};
 
 use crate::tiling::{Orientation, Rect};
 
@@ -89,40 +91,29 @@ impl AddDirection {
 
 /// Write `[tiles] add` into `<user_dir>/app.toml`, preserving every
 /// other table, key and comment — the same toml_edit + atomic-write
-/// contract as `vimfind::persist_to_user_config` (see
-/// `theme::persist_to_user_config`'s doc comment for the failure-mode
-/// reasoning: a missing file is created with `config_version = 1`, an
-/// unparseable file is left untouched and reported as `Err`).
+/// contract as [`crate::vimfind::persist_to_user_config`] (see
+/// [`crate::theme::persist_to_user_config`]'s doc comment for the
+/// failure-mode reasoning: a missing file is created with
+/// `config_version = 1`, an unparseable file is left untouched and
+/// reported as `Err`).
+///
+/// Migrated to [`crate::config_write::edit`] when the add-tile work met
+/// the Phase 4c foundation branch: this arrived as the seventh
+/// hand-rolled copy of that read-modify-write, and `config_write` is the
+/// one door that copy was always headed for. The behaviour is
+/// unchanged — `edit` owns the read-or-create, the parse-or-refuse and
+/// the `config_version = 1` on create that this function used to spell
+/// out itself.
 pub fn persist_to_user_config(user_dir: &Path, direction: AddDirection) -> Result<(), String> {
-    let path = user_dir.join("app.toml");
-    let existed = path.exists();
-
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-
-    if !doc.get("tiles").is_some_and(Item::is_table_like) {
-        doc["tiles"] = Item::Table(Table::new());
-    }
-    let tiles = doc["tiles"]
-        .as_table_mut()
-        .expect("just ensured [tiles] is a table");
-    tiles["add"] = value(direction.config_value());
-
-    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+    crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
+        if !doc.get("tiles").is_some_and(Item::is_table_like) {
+            doc["tiles"] = Item::Table(Table::new());
+        }
+        let tiles = doc["tiles"]
+            .as_table_mut()
+            .expect("just ensured [tiles] is a table");
+        tiles["add"] = value(direction.config_value());
+    })
 }
 
 #[cfg(test)]

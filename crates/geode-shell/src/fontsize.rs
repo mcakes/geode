@@ -16,17 +16,17 @@
 //! **Persistence**: `[ui] font_size = "small" | "medium" | "large"` in the
 //! user `app.toml` — its own table, not `[theme]`, because font size is
 //! not part of a theme family (switching themes must never change it).
-//! Written by [`persist_to_user_config`] with the same toml_edit
-//! format-preserving atomic write the theme persist uses
-//! ([`crate::theme::write_atomic`]); read back through the layered
+//! Written by [`persist_to_user_config`] through the one write door
+//! ([`crate::config_write::edit`]), which is where the format-preserving
+//! toml_edit round trip and the atomic write live; read back through the layered
 //! [`Config`] by [`FontSize::from_config`], so desk/user layers and hot
 //! reload behave exactly like every other config key.
 
 use std::path::Path;
 
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Item, Table, value};
 
-use geode_core::config::Config;
+use geode_core::config::{Config, Layer};
 
 /// The three offered UI text scales: 10/12/14px (user direction — shifted
 /// down twice, from the original 14/16/18 through 12/14/16). `Medium`
@@ -117,35 +117,15 @@ impl FontSize {
 /// `config_version = 1`, unparseable file left untouched and reported as
 /// `Err`, reload-watcher interplay identical).
 pub fn persist_to_user_config(user_dir: &Path, size: FontSize) -> Result<(), String> {
-    let path = user_dir.join("app.toml");
-    let existed = path.exists();
-
-    let mut doc = if existed {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
-        text.parse::<DocumentMut>().map_err(|e| {
-            format!(
-                "failed to parse {}: {e} (file left untouched)",
-                path.display()
-            )
-        })?
-    } else {
-        DocumentMut::new()
-    };
-
-    if !existed {
-        doc["config_version"] = value(1_i64);
-    }
-
-    if !doc.get("ui").is_some_and(Item::is_table_like) {
-        doc["ui"] = Item::Table(Table::new());
-    }
-    let ui_table = doc["ui"]
-        .as_table_mut()
-        .expect("just ensured [ui] is a table");
-    ui_table["font_size"] = value(size.config_value());
-
-    crate::theme::write_atomic(user_dir, &path, &doc.to_string())
+    crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
+        if !doc.get("ui").is_some_and(Item::is_table_like) {
+            doc["ui"] = Item::Table(Table::new());
+        }
+        let ui_table = doc["ui"]
+            .as_table_mut()
+            .expect("just ensured [ui] is a table");
+        ui_table["font_size"] = value(size.config_value());
+    })
 }
 
 #[cfg(test)]

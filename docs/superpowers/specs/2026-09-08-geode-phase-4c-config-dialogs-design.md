@@ -209,34 +209,110 @@ always-focused `Input` the key space was exhausted and there was nowhere
 else to put them. Two prototypes changed that: the row form makes the
 list **reflow while you edit** (a `Save changes` row appearing under the
 cursor the moment a draft goes dirty), and dropping the focused input
-frees every letter. Verbs are now keys *and* buttons.
+frees every letter. Verbs are now keys *and* buttons. (The reflow
+argument is now moot from the other side too: there is no save row,
+because there is no save — see the amendment below.)
 
 | Stage | Keys |
 |---|---|
 | Browse | `/` filter · `j`/`k` move · `enter` open · `n` new · `escape` close |
-| Edit | `/` filter · `j`/`k` move · `space` include · `shift+j`/`shift+k` reorder · `i` edit text · `s` save · `d` delete · `r` revert · `escape` back |
+| Edit | `/` filter · `j`/`k` move · `space` include · `shift+j`/`shift+k` reorder · `i` edit text · `d` delete · `r` revert · `escape` back |
 
-Every verb is **also a button** in a bar pinned below the row list,
-labelled with its own key. That is what makes a letter verb
-discoverable and mouse-reachable — a key alone has no clickable target,
-and every other verb in Geode's dialogs has one. `Save changes` appears
-in the bar only while the draft is dirty, `Revert to desk` only when the
-object is overridden, and `Copy to user layer` replaces both when the
-winning layer is builtin or desk. The bar sits outside the scrolling
-list, so **the row list never changes length as you edit**.
+**There is no `s`.** An earlier build of this section had one, and
+staged every field edit behind it; §3.2's amendment below records why
+that was replaced by instant application, and §7.1 records how.
 
-Field edits **stage into the draft and do not write**. This is the one
-place these dialogs deliberately differ from `settings_view`, where a
-step applies immediately: a setting is one scalar with a live preview,
-while an object is a set of fields that is only coherent once, and
-writing on every keystroke would fire the watcher mid-edit and reload a
-half-finished object.
+Every verb that acts on the **object** is also a button in a bar pinned
+below the row list, labelled with its own key: `d`, `r`. That is what
+makes a letter verb discoverable and mouse-reachable — a key alone has
+no clickable target, and every other verb in Geode's dialogs has one.
+`Revert to desk` appears only when the object is overridden. The bar
+holds only the destructive and structural verbs, because they are the
+only ones left that do not simply happen when you press them.
+
+As built, the verbs that act on a **row** — `space` (include) and
+`shift+j`/`shift+k` (reorder) — have no button. An earlier draft of this
+paragraph claimed every verb in the table above has one; it does not.
+Nothing is unreachable by mouse as a result: the bar is about actions,
+and PHILOSOPHY's requirement runs the other way (every action must be
+keyboard-reachable). A row verb's natural mouse gesture is the row
+itself — a click on the tick, a drag on the handle — not a bar button
+that would have to ask which row it meant, so the honest statement is
+the one above rather than three more buttons.
+
+`Copy to user layer` is a **confirm**, not a verb and no longer a
+label. It arms when the edit just made would fork the object — a
+`Doc`-destined field (§4.1) changed on an object whose winning layer is
+builtin or desk — and it is the one edit in these dialogs that asks
+before acting. Everything else applies on the keystroke.
+
+It asks because a fork *freezes*: a user-layer copy of a desk view stops
+receiving the column the desk adds next week, and that cost lands weeks
+after the keystroke that caused it. Nothing else on this surface has
+that shape — order, inclusion and width fork nothing (§4.1) — so nothing
+else asks.
+
+Declining puts the field back where it was. That is not politeness: with
+every other edit applying instantly, a declined fork would otherwise be
+the one value on screen that is neither applied nor persisted, which is
+exactly the state this design exists to make unreachable.
+
+Earlier drafts of this paragraph made `Copy to user layer` a *label* on
+`s`, replacing `Save changes` when the save would fork. Both halves are
+gone with `s` itself; what survives is the warning, which was the part
+that mattered.
+
+The bar sits outside the scrolling list, so **the row list never changes
+length as you edit**.
+
+**Amendment: field edits apply instantly. There is no staging, no save
+row and no `s`.**
+
+This section originally said the opposite — edits stage into the draft
+and write only on `s`, so that a write per keystroke could not fire the
+watcher mid-edit and reload a half-finished object. That reasoning
+identified a real hazard and picked the wrong cure. The hazard came from
+*applying through the disk*: the app wrote a file, the 500 ms watcher
+noticed it, and the loader read every layer back to rebuild a config the
+app could have built from documents it already held. Staging did not fix
+that round trip; it just made the user press another key first, and then
+still wait half a second to see whether anything had happened.
+
+The cure is to apply in memory (§7.1). A field edit now:
+
+1. changes the draft — still the edit buffer, still where the cursor and
+   the row structure live, and **what the edit stage paints**, so the
+   dialog shows the change on the keystroke;
+2. folds the changed object into one pending batch;
+3. and when the 250 ms window closes, that batch is written into the
+   in-memory user-layer `LayerDoc`, re-merged through the loader's own
+   `Config::from_docs`, handed to the same applier the watcher uses, and
+   written to the file — all together.
+
+**"Instant" is the dialog, not every downstream consumer.** Applying the
+merged config per keystroke would emit `ShellEvent::ConfigReloaded` per
+keystroke, and the app bridge turns that into fresh `ViewSpec`s — so a
+held key would make every blotter tile requery at the OS key-repeat rate,
+against a §7.1 budget of 50 ms at 1M rows. The dialog's own response is
+free; the world catching up is not, so the world catches up on the same
+timer the file does. The blotter updating a beat after the dialog is
+correct behaviour, not a compromise.
+
+Nothing a trader can see waits on a file. The half-finished-object
+hazard is gone rather than deferred: the object never travels through
+disk to reach the screen, and the watcher's reload of our own write is a
+no-op (§7.1).
+
+The draft's **baseline** moves in step 2 — as the keystroke is
+accounted for, not as the flush lands — so "dirty" is a state that
+exists only within the keystroke that changed a field. That is why the bar has no save row
+and why the row list no longer reflows as you edit.
 
 `escape` follows the interaction model's ladder (§5 there): filter mode
 → normal mode keeping the query, → clear the query, → back a stage, →
-close. Leaving `Edit` with a dirty draft runs a confirm first, so
-abandoning work is a deliberate act rather than a keystroke that
-silently discards it.
+close. Leaving `Edit` no longer confirms: there is nothing unsaved to
+discard, and asking anyway would teach a trader that their changes might
+not have landed.
 
 ### 3.3 Editing a field
 
@@ -278,9 +354,9 @@ impl Domain {
     fn doc(self) -> &'static str;
     fn objects(self, config: &Config) -> Vec<ObjectRow>;
     fn fields(self, config: &Config, object: Option<&str>) -> Vec<Field>;
-    /// `false` for `Schema`: the scaffold then shows no `+ New`, no
-    /// action block and no `Save changes` row, and `save` is unreachable
-    /// rather than merely refused.
+    /// `false` for `Schema`: the scaffold then shows no `+ New` and no
+    /// action block, and a field edit cannot apply at all rather than
+    /// being merely refused.
     fn writable(self) -> bool;
     fn to_table(self, draft: &Draft) -> toml_edit::Table;
     fn validate(self, draft: &Draft, config: &Config) -> Vec<Diagnostic>;
@@ -419,24 +495,139 @@ The six existing persist paths are migrated onto this door in the same
 task that introduces it, so there is one implementation from the start
 rather than a seventh alongside six.
 
-## 7. Applying, validation and the save outcome
+## 7. Applying, validation and the outcome of an edit
 
-### 7.1 Applying is the watcher's job
+### 7.1 Applying is the watcher's *applier*; the source is memory
 
-A dialog writes; it does not apply. The existing mtime watcher
-(`shell::hot_reload`, 500 ms poll) reloads with last-good semantics, and
-the browse list — deriving fresh from `Config` — updates itself. No
-apply path is special-cased, which is precisely why a dialog cannot
-disagree with the file it wrote.
+**Amended.** This section originally said "a dialog writes; it does not
+apply", and accepted that an edit would appear up to 500 ms after
+saving, to be measured before deciding. The measurement was overtaken by
+a plainer objection: if a value is already in memory, writing it to disk
+so that a poller can read it back and hand it to the code that would
+have accepted it directly is not a design, it is a detour.
 
-Two consequences, both accepted:
+What is kept, unchanged and deliberately so, is the **applier**.
+`shell::hot_reload::apply_reload` is still the only thing that turns a
+`Config` into a running state — keymap, theme, pickables, grouping
+slots, saved scopes, the frame's `ConfigReloaded`, the restart banner —
+and a dialog edit goes through it exactly as a watcher reload does. What
+differs between the two is the `Config`'s **source** (memory, not disk)
+and **when** it is applied (on the debounce, not on a poll). Nothing
+about the merge or the application differs.
 
-- An edit appears up to 500 ms after saving. If that reads as lag on a
-  display, the fix is a post-write nudge to the watcher, not a
-  dialog-owned apply path. The plan measures it before deciding.
-- A write the *merge* rejects is on disk and not live, which is what
-  last-good means. `ShellEvent::ReloadRejected(Vec<Diagnostic>)` (§2.3)
-  lets the dialog say `saved · rejected: n errors` and show them.
+What is new is that the loader's two halves are separable
+(`geode-core::config`):
+
+```rust
+Config::read_docs(&sources) -> (Vec<LayerDoc>, Vec<Diagnostic>)  // disk
+Config::from_docs(docs)     -> Config                             // merge
+Config::load(&sources)      -> Config                             // read, then merge
+```
+
+`Config::load` keeps its signature and its behaviour, so no existing
+caller changes. There are three sources of a `Config` and **one merge**:
+
+| Source | Documents from | Merged by |
+|---|---|---|
+| startup | disk | `Config::from_docs` |
+| the watcher's reload | disk | `Config::from_docs` |
+| a dialog edit | memory | `Config::from_docs` |
+
+`Config::from_docs` is the only place merging happens anywhere, and it
+must stay that way. A second merger written to "optimise" the in-memory
+path — patching the already-merged doc in place rather than re-merging
+the layers, say — would be free to disagree with the loader about
+override order, atomic depth or provenance, and the disagreement would
+surface only as a config that behaves differently depending on whether
+it was last touched by a dialog or by a file.
+
+Costs, measured rather than assumed (`docs/perf.md`, "Phase 4c"): a
+keystroke's pure core is **37 µs** — it merges nothing and applies
+nothing — and the debounced flush pays **70 µs** to merge a builtin layer
+including the real keymap, plus **20 µs** to rebuild that keymap inside
+`apply_reload`, once per 250 ms.
+
+Five consequences, each decided rather than accepted:
+
+- **Persistence is background and feeds nothing back.** The write still
+  goes through `config_write::edit`, because the *file* must keep the
+  user's comments and unrelated keys — that is what `toml_edit`'s
+  read-modify-write is for. Memory and disk both derive from the same
+  rendered table; the write's completion never updates memory.
+- **A failed write reverts memory, and says so where it can be seen.**
+  It is the one thing that can leave a trader looking at a value that is
+  not persisted, so the in-memory change goes back to where the batch
+  started, through the same applier. Logging and moving on — what every
+  other persist path in this crate does — is right only where memory did
+  not already apply the change.
+
+  The report goes to the **status bar** (`config not saved — reverted:
+  …`), not only to the dialog's own notice. The pending write outlives
+  the dialog on purpose — a trader can close the dialog inside the
+  debounce window, which is the commonest way to reach this path — so a
+  dialog-only notice would be absent exactly when it is needed. The
+  dialog's notice is still set when one is open, and the next successful
+  write clears the status segment.
+- **Coalescing is a 250 ms debounce on the write *and the fan-out*.**
+  An earlier build debounced the file alone and applied the merged config
+  per keystroke. That protected the cheap side and left the expensive one
+  exposed: every application emits `ConfigReloaded`, the bridge re-derives
+  views, and every blotter tile requeries — the §7.1 <50 ms operation, at
+  the OS key-repeat rate (~100 ms on macOS) under a held key. The
+  fan-out and the write are the same event — "the rest of the world
+  catches up" — so they share one timer. 250 ms is over twice the
+  key-repeat period and half the watcher's poll.
+
+  Write-on-field-commit was the alternative and was rejected: this stage
+  has no commit moment, so "commit" would mean "when the dialog closes",
+  and a crash would lose edits the screen had shown as applied for
+  minutes. A quarter of a second is the whole exposure — and it is a real
+  one: **a quit inside the debounce window loses the pending write.**
+  Closing that would mean either writing per keystroke (the thrash this
+  exists to prevent) or a shutdown hook this shell does not have.
+
+- **An edit made while a write is in flight is not erased by that
+  write's completion.** Each keystroke bumps a sequence and folds its
+  change into one pending batch; the flush that wakes holding the current
+  sequence owns it. The success arm checks that sequence too — without
+  it, an edit that arrives during a write is folded into the batch the
+  completing write then clears, so it reaches neither memory nor disk,
+  and the watcher (woken by the write that did land) reverts memory to
+  the older on-disk state. The change would disappear with nothing on
+  screen having said so.
+
+- **A pre-existing broken config file does not disable editing.**
+  `reload::decide` rejects any `Config` holding an error diagnostic, so
+  carrying the previous config's diagnostics into an edit's config made
+  one unparseable `*.toml` turn every edit into a silent in-memory no-op
+  — while the write still fired, so memory and disk diverged. Those
+  diagnostics describe files that were *skipped* and contributed no
+  documents, so they are not diagnostics of the documents an edit
+  re-merges, and an edit does not carry them. Last-good still guards what
+  it is for: `apply_reload` derives the keymap and mod-alias diagnostics
+  from the documents themselves, so an edit that really does produce a
+  broken config is still rejected, and the watcher restores the
+  `config: N error(s)` status on its next poll.
+
+**The self-write reload is proved inert, not suppressed.** The watcher
+will see the file this dialog wrote. `apply_reload` decides what a
+reload changes by comparing layered documents against the ones already
+live (`docs_equal`); the file is `config_write::edit`'s read-modify-write
+of the same object value memory holds, and a user-layer document memory
+creates carries the same `config_version` stamp `edit` writes at the top
+of a file it creates — so every `changed(..)` predicate answers false,
+nothing is emitted, requeried or closed, and the reload assigns an
+identical `Config`. Suppression was the alternative: it needs a
+self-write ledger that must be right about every path a write can take,
+including the ones that fail after the entry is made, and a ledger that
+is wrong in the other direction silently swallows somebody's real
+external edit. The proof costs nothing and cannot go stale; it is
+pinned by a test that compares the layered documents across a
+self-triggered reload.
+
+A write the *merge* rejects is still on disk and not live, which is what
+last-good means. `ShellEvent::ReloadRejected(Vec<Diagnostic>)` (§2.3)
+remains the route for reporting that.
 
 ### 7.2 Validation before the write
 
@@ -679,3 +870,224 @@ None block the plans. Recorded so they are not rediscovered.
    merged over the view rather than replacing it, so it does not fork
    and cannot drift in the §5.2 sense. If a desk ever ships its own
    presentation layer, this needs revisiting.
+
+## 16. As built — Part 1
+
+Tasks 1–5 built the write door, the `SourceSpec::from_doc` move,
+`ViewPresentationSpec`, and the scaffold's browse and edit stages over
+`Domain::Views`. A later wave, on a user ruling, replaced the staged
+save with instant in-memory application — §3.2 and §7.1 carry that
+amendment in full, and the first bullet below records what shipped.
+Where the sketch above and the shipped code disagree, this section is
+the correction.
+
+- **`hidden` lives on `ColumnPresentation`, not on `ViewColumn`.** §3's
+  `ListItem` sketch implied a field shared with the view's own column
+  type; `ViewColumn` (`geode-core::view`) is an enum
+  (`Dimension`/`Measure`/`Derived`) with no struct fields to add one to.
+  `hidden: Option<bool>` sits on `ColumnPresentation` instead, beside the
+  `width` it already carried, and both merge into `ViewSpec.presentation`
+  the same way `format`/`label` already did. A hidden column deliberately
+  stays in `ViewSpec.columns` — the compiler still selects it — so
+  unhiding is free and no query changes shape when a column is hidden.
+  It is dropped in exactly one place instead: `ColumnPlan::build`
+  (`geode-blotter/src/core/plan.rs`), which is what the blotter paints.
+  That one `continue` is the whole of §1.3's "hiding one … and the
+  blotter reflects it without a restart" — without it every other part
+  of the chain (the dialog, the file, the reader, the merge) works and
+  the column is still on screen.
+- **`width` is `f32`**, matching `ColumnPresentation::width`
+  (`view.rs:148`), not §3.1's `Option<u32>` sketch. `ListItem.width`
+  follows suit.
+- **A presentation save writes only what the trader changed.** §4.1
+  splits by *field*; that is not fine enough for `columns`, whose
+  `order` and `width` both arrive from the **effective** view — the one
+  `views.toml`'s own widths and column order are already merged into. A
+  save that wrote every column's position and every declared width back
+  would pin the desk's layout for that trader against the desk's later
+  changes: the same freeze `Destination` exists to prevent, one
+  field-granularity down, fired by the commonest edit there is.
+  `views::presentation_table` therefore compares both against
+  `doc_baseline` — the order and widths this same save leaves in
+  `views.toml` — and omits what still matches. `hidden` needs no such
+  comparison: nothing but `view_presentation.toml` can set it.
+- **`overridden` counts a user-layer `view_presentation.toml` entry**,
+  not just a user-layer entry in the domain's own doc. §5.3 assumed
+  presentation always accompanies a doc override; §4.1's split
+  guarantees the opposite — hiding a column writes presentation and
+  forks nothing — so markers read off the `views` doc alone answered `r`
+  with "*tree* has no user override to revert" while the file `r` would
+  have removed sat on disk. `derive_rows` takes the presentation doc
+  too; the "some earlier layer defines it" half is still read off the
+  domain's own doc, because that is the half guaranteeing a revert
+  leaves an object behind. `d` is unchanged and still gated on the
+  winning layer — presentation forks nothing, so there is no *view* of
+  the trader's to delete — but its refusal now names `r` rather than
+  claiming they have nothing.
+- **`drifted` is present on every `ObjectRow` but is always `false`.**
+  §5.2's `overrides.toml` — the sidecar the scaffold would read to
+  compare an override against what it shadowed — is not built in Part 1,
+  so there is no honest way to compute drift yet; a stand-in derived from
+  the live config would mark every deliberate customisation as drifted.
+  It is a Part 2 item, below.
+- **Config edits are instant; the save key is gone.** The largest
+  correction in this section, and the one §3.2 and §7.1 are amended for
+  rather than annotated. What shipped:
+
+  - `Config::load` split into `read_docs` (disk) and `from_docs`
+    (merge), with `load` unchanged as read-then-merge, so no existing
+    caller or test moved. `Config::all_docs` hands the layered documents
+    back for re-merging. `load_layer` was left under its own name: it
+    already **was** the disk half, so the split only had to lift the
+    merge out beside it.
+  - `shell::objectdialog::apply` writes the edited object into the
+    in-memory user-layer `LayerDoc`, re-merges through `from_docs`, and
+    calls `hot_reload::apply_reload`. No disk read on that path — pinned
+    by a test that plants a decoy `views.toml` the running config has
+    never loaded and asserts the edit does not pick it up.
+  - **The merge, the application and the write all ride one 250 ms
+    debounce; only the draft moves on the keystroke.** A first build
+    applied per keystroke and debounced the file alone, which protected
+    the cheap side: `apply_reload` emits `ConfigReloaded`, and every
+    blotter tile requeries on it. Ruling: *instant* means the dialog
+    responds instantly, not that every downstream consumer re-derives per
+    keystroke. Measured after the change (`docs/perf.md`): 37 µs per
+    keystroke, 70 µs merge + 20 µs `build_keymap` per flush.
+  - The file write stays `config_write::edit` on the background
+    executor, keyed by `(doc, object)` so a debounce window spanning two
+    objects still lands both. Both ends of the flush check the batch's
+    sequence: `promote` before doing the work, and `finish_flush` before
+    clearing it. **The second check is what stops an edit made while a
+    write is in flight from being erased by that write's completion** —
+    without it that edit reaches neither memory nor disk, and the
+    watcher then reverts memory to the older on-disk state.
+  - **An edit carries no diagnostics forward.** `reload::decide` rejects
+    any config holding an error diagnostic, so carrying the previous
+    config's made a single unparseable `*.toml` turn every edit into a
+    silent in-memory no-op while the write still fired. They describe
+    files that were skipped and contributed no documents; they are not
+    diagnostics of the documents being re-merged.
+  - **A failed write reports to the status bar**, not only to the
+    dialog's notice: the pending write outlives the dialog on purpose, so
+    the commonest way to reach that path has no dialog left on screen.
+  - `Confirm::Discard`, `Draft`-staging and the `s` verb are deleted.
+    `Confirm::Fork` replaces the `Copy to user layer` label.
+  - **An empty rendered table is written as an absence.**
+    `views::presentation_table` renders empty whenever the trader's
+    presentation matches the view's own doc, which under instant editing
+    is one keystroke away — unhide the last hidden column and there is
+    nothing of theirs left to record. Written literally that produced a
+    bare `[tree]` in `view_presentation.toml`: a table that says nothing,
+    which `ViewPresentationSpec::apply` then reports as a stale entry.
+    That artefact had been seen in a real user's file and attributed to
+    the staged-save path's baseline handling; the machinery blamed for it
+    is deleted, and the same rendering now removes the object from the
+    document instead, in memory and on disk alike. It is the one place
+    where making edits instant made a latent defect routine, and it is
+    closed by construction rather than by hoping the case is rare.
+- **`d` (delete) and `r` (revert) both confirm**, and now so does a
+  fork. §3.2 originally mandated a confirm only for discarding a dirty
+  draft. Delete and revert both remove a file's table outright and
+  neither is undoable from inside the dialog; a fork is not destructive
+  today but freezes the object against the layer that maintains it,
+  which is worse for being invisible until weeks later. All three share
+  the one `Confirm` row, which replaces the action bar rather than
+  joining it, so the row list never changes length. Discard is gone with
+  the staging it guarded.
+- **Diagnostics attach to the object, not to the field whose `key`
+  matches `path`** (§7.2 step 3, §8.5). `Diagnostic` has no `path` field
+  yet — adding one touches all of its construction sites across
+  `geode-core` plus every reader that would need to fill it in, none of
+  which Part 1's tasks built. Validation still runs (§7.2 steps 1–2); its
+  diagnostics render against the object header instead.
+- **The write door takes a `user_dir`, has no `read`, and returns
+  `Result<(), String>`.** §6's signature block is a sketch and all three
+  of its details are false as built (`geode-shell/src/config_write.rs`):
+
+  ```rust
+  pub fn write(user_dir: &Path, layer: Layer, doc: &str, text: &str) -> Result<(), String>;
+  pub fn edit(user_dir: &Path, layer: Layer, doc: &str,
+              f: impl FnOnce(&mut DocumentMut)) -> Result<(), String>;
+  ```
+
+  `read` was cut by ruling: nothing needs it. Every caller either has a
+  `Config` already (which holds the parsed doc) or wants `edit`'s
+  read-modify-write, and a `read` beside them would be a second way to
+  get a doc's text with no reader to keep it honest. `&ShellServices`
+  became `&Path` because the path is all the door uses and a write runs
+  on the background executor, where a whole services struct cannot
+  follow. `io::Result` became `Result<(), String>`: two of the three
+  implementations this replaced already returned messages naming the
+  path and the failing step, and `edit`'s parse refusal is not an
+  `io::Error` at all.
+- **There is no `/` in the edit stage**, though §3.2's key table lists
+  one. Filtering field rows would need a second cursor space — a
+  filtered position beside the draft's own row index — and would make
+  `shift+j`/`shift+k` reordering ambiguous, since the visible neighbour
+  would not be the underlying one. Entering the stage clears the query
+  instead, which is also what makes the escape ladder land on
+  `PreviousStage`: with no query to clear, `escape` has nothing to spend
+  on `ClearQuery` first. `/` in the edit stage is claimed rather than left
+  to fall through: it is bound to `NormalCommand::EnterFilter` and answers
+  with a notice explaining that this stage's rows are not filtered, so it
+  reads as a deliberate refusal rather than the dialog having stopped
+  responding.
+
+### Unmet done-state items, named for Part 2
+
+§1.3 claims three things Part 1 does not deliver. Each is blocked on a
+specific prerequisite no task in this plan built:
+
+1. **A field's diagnostic shows on that field's row.** Blocked on
+   `Diagnostic.path` (§8.5) — see above. Needs every reader
+   (`ViewSpec::from_doc` and its siblings) to fill it in before the
+   object dialog can match a diagnostic to the field it names instead of
+   showing it against the object header.
+2. **Setting a width.** `width` is displayed and preserved across a save
+   — read from `ColumnPresentation::width`, written back to
+   `view_presentation.toml`, surviving an edit that was about something
+   else — but nothing in Geode can *set* it: the blotter reads
+   `presentation.width` and nothing writes it, and old 4c's `:cols save`
+   command, the only other thing that ever set it, was deleted with that
+   design. Needs the `Number` sub-row §3.3 describes under an included
+   `OrderedList` item, made writable.
+3. **Reverse stepping.** §3.3 steps both `Choice` and `Number` with
+   `space` forward and `shift+space` back; `dialogmode::normal_command`
+   (`dialogmode.rs:83-119`) has no `shift+space` case at all — its shift
+   branch handles only `j`/`k`/`g` — so *every* steppable kind is
+   forward-only today: `Choice` wraps forward with no way back, and
+   `Number` steps forward only, clamping at `max` with no way back down.
+   This is one missing key in the interaction model, not a per-kind gap,
+   so the task is `shift+space` itself, with `Choice` and `Number` as its
+   two consumers — implementing it for `Number` alone and leaving
+   `Choice` still forward-only would satisfy the letter of a
+   `Number`-only task name while missing half the defect. Whichever
+   adapter builds the first real `Number` field — Groupings' `slot`
+   (§8.2) is the obvious candidate — would otherwise inherit a field
+   that can be raised and never lowered. Views exercises `Choice` but
+   never needs to step it backward, and has no `Number` field at all, so
+   nothing in Part 1 forced either half into view.
+
+### Deferred, and not blocked on anything
+
+**`ShellEvent::ReloadRejected(Vec<Diagnostic>)` (§2, amendment 3) is not
+built.** §7.1 and §8.5 both rely on it — it is how a dialog says
+`saved · rejected: n errors` about a write the *merge* refused, which
+last-good semantics leave on disk and not live. No Part 1 task named it,
+so it fell through both the plan's task list and its "deliberately out"
+list. It is not blocked on a prerequisite: `ShellEvent` already carries
+`ConfigReloaded`, and `hot_reload::apply_reload` already has the
+diagnostics in hand at the point it decides to keep the last good
+config.
+
+Its cost has risen since the sketch. `bridge.rs:209` discards the
+presentation diagnostics on the reload path — `let (views, _) =
+load_views(config)` — exactly as `data_setup` does at startup, where
+they *are* reported. So a `view_presentation.toml` entry naming a view
+that no longer exists warns once at startup and is silent through every
+reload afterwards, including the reload the Views dialog's own write
+triggers. With no `ReloadRejected` and no `Diagnostic.path`, a stale
+presentation name is silent in every path after startup: the trader
+renames a view, their personal order and hidden columns quietly stop
+applying, and nothing anywhere says so. Whichever of the two is built
+first should carry the other's fix with it.

@@ -4,7 +4,7 @@
 //! wakes on arrival, and forwards config reloads back to the data thread.
 
 use geode_blotter::BlotterFactory;
-use geode_core::config::{Config, Diagnostic};
+use geode_core::config::{Config, Diagnostic, load_views};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
@@ -48,11 +48,15 @@ pub struct DataSetup {
 /// `None` when there is nothing to serve: no datasets or no views.
 pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
-    let views_doc = config.doc("views")?;
+    // Presence only: the views themselves come from `load_views`, which
+    // applies `view_presentation` over them. Nothing here may read the
+    // `views` doc directly — a module must never see a view the
+    // trader's presentation has not been merged into (spec §5.6).
+    config.doc("views")?;
     let mut diagnostics = Vec::new();
     let (schema, d) = SchemaSpec::from_doc(datasets);
     diagnostics.extend(d);
-    let (views, d) = ViewSpec::from_doc(views_doc);
+    let (views, d) = load_views(config);
     diagnostics.extend(d);
     let (dimensions, d) = config
         .doc("dimensions")
@@ -288,10 +292,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
                 let config = shell.read(cx).config();
-                let Some(views_doc) = config.doc("views") else {
+                if config.doc("views").is_none() {
                     return;
-                };
-                let (views, _) = ViewSpec::from_doc(views_doc);
+                }
+                // Same door as `data_setup`: a reload that read the
+                // `views` doc directly would silently drop the trader's
+                // `view_presentation.toml` the first time anything
+                // reloaded, which is precisely what the Views dialog's
+                // write relies on picking up (spec §5.6, §7.1).
+                let (views, _) = load_views(config);
                 let (dims, _) = config
                     .doc("dimensions")
                     .map(DerivedDimensions::from_doc)
@@ -628,7 +637,7 @@ mod tests {
     /// from here: it is `pub(super)` inside that crate's test module),
     /// built from public items only.
     fn test_shell_services() -> ShellServices {
-        test_shell_services_with_config(Config::load(&ConfigSources::default()))
+        test_shell_services_with_sources(ConfigSources::default())
     }
 
     /// A trimmed `datasets` doc making `book` pickable (categorical
@@ -649,14 +658,19 @@ role = "key"
     /// only emits `DistinctRequested`) for a column `ShellView.pickable`
     /// actually names.
     fn test_shell_services_with_pickable_book() -> ShellServices {
-        test_shell_services_with_config(Config::load(&ConfigSources {
+        test_shell_services_with_sources(ConfigSources {
             builtin: vec![LayerDoc::builtin("datasets", PICKABLE_DATASETS_DOC).unwrap()],
             desk: None,
             user: None,
-        }))
+        })
     }
 
-    fn test_shell_services_with_config(config: Config) -> ShellServices {
+    /// Builds `config` and `builtin` from one `ConfigSources` via
+    /// `ShellServices::config_and_builtin`, so the two cannot disagree —
+    /// a config hot reload re-merges exactly the docs `builtin` holds
+    /// (see that constructor's doc comment).
+    fn test_shell_services_with_sources(sources: ConfigSources) -> ShellServices {
+        let (config, builtin) = ShellServices::config_and_builtin(sources);
         let mut registry = ActionRegistry::default();
         register_builtin_actions(&mut registry);
         let mod_alias = default_mod();
@@ -667,6 +681,7 @@ role = "key"
         assert!(warnings.is_empty(), "{warnings:?}");
         ShellServices {
             config,
+            builtin,
             registry,
             keymap,
             mod_alias,
@@ -1205,6 +1220,52 @@ role = "key"
         assert_eq!(setup.config.sources.len(), 1);
         assert_eq!(setup.views.len(), 1);
         assert_eq!(setup.config.query_workers, 4);
+    }
+
+    /// The views handed to the data service and the blotter factory are
+    /// the *merged* ones: `data_setup` must go through
+    /// `geode_core::config::load_views`, never read the `views` doc
+    /// itself. Reading it directly still compiles and still produces
+    /// views — it just silently discards the trader's
+    /// `view_presentation.toml`, which is exactly the failure the
+    /// presentation split exists to prevent (spec §5.6), and nothing
+    /// downstream can tell the difference.
+    #[test]
+    fn data_setup_hands_out_views_with_the_users_presentation_already_merged() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "views",
+                    "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+                     [[v.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                     [[v.columns]]\nname = \"npv\"\nkind = \"measure\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "view_presentation",
+                    "[v]\norder = [\"npv\", \"book\"]\n[v.width]\nnpv = 140\n",
+                )
+                .unwrap(),
+            ],
+            ..ConfigSources::default()
+        });
+        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let view = &setup.views[0];
+        let names: Vec<&str> = view.columns.iter().map(|c| c.name()).collect();
+        assert_eq!(names, vec!["npv", "book"], "presentation order applied");
+        assert_eq!(view.presentation_of("npv").width, Some(140.0));
+        // The service is built from the same list, not a second read.
+        let served: Vec<&str> = setup.config.views[0]
+            .columns
+            .iter()
+            .map(|c| c.name())
+            .collect();
+        assert_eq!(served, names);
     }
 
     #[test]

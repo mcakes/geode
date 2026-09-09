@@ -29,6 +29,7 @@ use geode_shell::keymap::{
 };
 use geode_shell::palette::{PaletteItem, PaletteState, fuzzy_match};
 use geode_shell::session;
+use geode_shell::shell::objectdialog::{Destination, Domain, apply};
 use geode_shell::tiling::{
     DIVIDER_HIT_WIDTH, DockSide, Orientation, Rect, TileId, Tree, Workspaces, divider_strips,
     resolve_drop_target,
@@ -295,8 +296,108 @@ fn bench_session(c: &mut Criterion) {
     group.finish();
 }
 
+/// What ONE KEYSTROKE in a config dialog costs, and what the debounced
+/// flush behind it costs (Phase 4c §7.1).
+///
+/// The split matters and is the reason both are here. A keystroke
+/// changes the draft, revalidates it, and renders the changed object —
+/// all bounded by the one object being edited. It does **not** merge the
+/// config or run `apply_reload`; those moved onto the 250 ms debounce
+/// with the file write, because `apply_reload` emits `ConfigReloaded` and
+/// every blotter tile requeries on it. `build_keymap` is the largest
+/// thing `apply_reload` does unconditionally, so it is measured here as
+/// the per-flush cost it now is rather than assumed free — it used to run
+/// only on a 500 ms poll, and moving code from a poll into an interactive
+/// path is exactly when "it was already there" stops being an excuse.
+fn bench_config_edit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("config_edit");
+    group.sample_size(50);
+    group.measurement_time(Duration::from_millis(500));
+    group.warm_up_time(Duration::from_millis(200));
+
+    let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("datasets", BENCH_DATASETS).unwrap(),
+            LayerDoc::builtin("views", BENCH_VIEWS).unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+
+    // The keystroke's whole pure core: toggle the row, revalidate, render
+    // the object for both destinations, and turn each into the value
+    // memory and the file both take.
+    group.bench_function("keystroke_toggle_validate_render", |b| {
+        b.iter(|| {
+            let mut draft = Domain::Views.draft(black_box(&config), "tree");
+            draft.selected = 1;
+            draft.toggle_selected();
+            let diagnostics = Domain::Views.validate(&draft, &config);
+            let mut out = Vec::new();
+            for dest in [Destination::Doc, Destination::Presentation] {
+                let table = Domain::Views.to_table(&draft, dest);
+                out.push(apply::object_value(&draft.name, table));
+            }
+            black_box((diagnostics, out))
+        })
+    });
+
+    // The flush's merge, over a builtin layer that includes the REAL
+    // keymap — by far the largest document in the config model, and the
+    // one `geode-core`'s own `config_merge` bench cannot reach (that
+    // crate must not depend on this one). This is the honest per-flush
+    // merge cost.
+    let full_layer = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+        LayerDoc::builtin("views", DEMO_VIEWS).unwrap(),
+    ];
+    group.bench_function("flush_merge_full_layer", |b| {
+        b.iter(|| {
+            black_box(geode_core::config::Config::from_docs(black_box(
+                full_layer.clone(),
+            )))
+        })
+    });
+
+    // What the debounced flush pays on top of that merge: `apply_reload`
+    // rebuilds the keymap from the layered docs every time,
+    // unconditionally.
+    let mut registry = ActionRegistry::default();
+    register_builtin_actions(&mut registry);
+    let keymap_docs = vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()];
+    group.bench_function("flush_build_keymap", |b| {
+        b.iter(|| {
+            black_box(build_keymap(
+                black_box(&keymap_docs),
+                default_mod(),
+                black_box(&registry),
+            ))
+        })
+    });
+    group.finish();
+}
+
+/// The demo desk's real `datasets`/`views` documents (7.8 KB and 6.8 KB —
+/// the largest this repo ships), for the flush-merge bench above.
+const DEMO_DATASETS: &str = include_str!("../../../examples/demo-config/datasets.toml");
+const DEMO_VIEWS: &str = include_str!("../../../examples/demo-config/views.toml");
+
+/// A desk-sized dataset and the view over it the config-edit bench edits.
+const BENCH_DATASETS: &str = "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+     [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n\
+     [risk_snapshot.columns.delta]\ntype = \"f64\"\nrole = \"measure\"\n\
+     [risk_snapshot.columns.vega]\ntype = \"f64\"\nrole = \"measure\"\n";
+
+const BENCH_VIEWS: &str = "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
+     [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+     [[tree.columns]]\nname = \"npv\"\n\
+     [[tree.columns]]\nname = \"delta\"\n\
+     [[tree.columns]]\nname = \"vega\"\n";
+
 criterion_group!(
     benches,
+    bench_config_edit,
     bench_tree_layout,
     bench_divider_strips,
     bench_dropzones,

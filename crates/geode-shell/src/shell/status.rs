@@ -36,7 +36,11 @@ pub const HEIGHT: f32 = 26.0;
 /// when one is in flight, then the pending keystrokes as space-separated
 /// text, then the reload indicator when `reload_message` is `Some` (Task
 /// 1c-1: a danger-toned `config: N error(s) — keeping last good` marker,
-/// `None` when config is healthy), then the restart indicator when
+/// `None` when config is healthy), then the write-failure indicator when
+/// `write_error_message` is `Some` (Phase 4c §7.1: a config write the
+/// dialogs applied in memory and could not persist, rolled back — shown
+/// here rather than only in the dialog, because the write outlives the
+/// dialog that started it), then the restart indicator when
 /// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
 /// reload the frame cannot pick up live, so this asks for a restart in the
 /// same `warning` token the readout's AS OF badge uses), then the
@@ -59,7 +63,7 @@ pub const HEIGHT: f32 = 26.0;
 /// colors come from `cx.theme()`; no other input is read, so the same
 /// call always renders the same tree for the same arguments.
 ///
-/// Eight plain, independently-`Option`al inputs rather than a bundling
+/// Nine plain, independently-`Option`al inputs rather than a bundling
 /// struct (clippy's `too_many_arguments`, `-D warnings`-enforced):
 /// `render.rs`'s one call site already has each of these as its own
 /// separate local (`self.matcher.pending()`, `self.last_reload.
@@ -72,6 +76,7 @@ pub fn status_bar(
     pending: &[Keystroke],
     count: Option<u32>,
     reload_message: Option<&str>,
+    write_error_message: Option<&str>,
     restart_message: Option<&str>,
     diagnostics_summary: Option<&str>,
     on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
@@ -104,6 +109,18 @@ pub fn status_bar(
     );
     if let Some(message) = reload_message {
         bar = bar.left(div().text_color(theme.danger).child(message.to_string()));
+    }
+    if let Some(message) = write_error_message {
+        // Danger, not warning: unlike every other segment here this one
+        // reports work the app agreed to do and then could not, and it is
+        // the only place a trader whose dialog is already closed learns
+        // that the change they watched land was rolled back.
+        bar = bar.left(
+            div()
+                .text_color(theme.danger)
+                .debug_selector(|| "config-write-error".to_string())
+                .child(message.to_string()),
+        );
     }
     if let Some(message) = restart_message {
         bar = bar.left(
