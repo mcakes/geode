@@ -16,8 +16,8 @@ use geode_core::log::{LevelControl, LogLevels, Ring, RingLayer};
 use geode_diagnostics::DiagnosticsFactory;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults::{
-    BUILTIN_KEYMAP, mod_alias_from_config, register_builtin_actions, register_pick_actions,
-    register_scope_actions,
+    BUILTIN_KEYMAP, mod_alias_from_config, modules_default_diagnostic, register_add_actions,
+    register_builtin_actions, register_pick_actions, register_scope_actions,
 };
 use geode_shell::diagnostics::{ActionTail, Diagnostics};
 use geode_shell::fonts;
@@ -566,14 +566,11 @@ fn build_shell_services(
     // malformed `scopes.toml` entry twice on every launch.
     register_scope_actions(&mut registry, &saved_scopes(&config, false));
 
-    // The default kind is read from `[app] modules.default`, "blotter"
-    // when unset.
-    let default_kind = config
-        .get("app", "modules.default")
-        .and_then(|v| v.as_str())
-        .unwrap_or("blotter")
-        .to_string();
-    let mut roster = ModuleRoster::new(default_kind);
+    // No default kind (spec 2026-09-08 add-tile §7.1): a tile is added by
+    // naming the kind it hosts, and a tile nothing claims paints the
+    // placeholder. `[app] modules.default` is no longer read at all — a
+    // layer that still sets it gets the warning printed below.
+    let mut roster = ModuleRoster::new();
 
     // The diagnostics module (Phase 4b Task 5, spec §4.6): registered
     // unconditionally, unlike the blotter factory just below — it needs
@@ -589,11 +586,11 @@ fn build_shell_services(
     )));
 
     // The data bridge (spec §5.1, §5.4): `None` when the config declares
-    // no datasets/views, in which case the roster's only occupant is
-    // whatever `default_kind` names with nothing behind it — a blotter
-    // with no data handle would panic on its first requery, so a roster
-    // with no bridge simply gets no blotter factory at all, and every
-    // tile falls back to the placeholder.
+    // no datasets/views. A blotter with no data handle would panic on its
+    // first requery, so a roster with no bridge simply gets no blotter
+    // factory at all — the palette then lists no "Add Blotter" row, and a
+    // tile nothing else claims paints the placeholder (2026-09-08
+    // add-tile §7.1).
     let db = bridge::db_path(
         &config,
         demo_root,
@@ -608,12 +605,22 @@ fn build_shell_services(
         bridge
     });
 
+    // One "Add <Kind>" palette row per registered kind (spec 2026-09-08
+    // add-tile §3.2), from the roster as it finally stands — so a build
+    // with no data bridge lists no "Add Blotter". Before `build_keymap`,
+    // like every other registration in this function.
+    register_add_actions(&mut registry, &roster.kinds());
     // Modules register their actions before the keymap builds (§3.2).
     roster.register_actions(&mut registry);
 
     let (mod_alias, mod_diags) = mod_alias_from_config(&config);
     for diag in &mod_diags {
         print_diagnostic(diag);
+    }
+    // `[app] modules.default` is retired (§7.1) — one warning so the key
+    // does not silently rot in a desk file.
+    if let Some(diag) = modules_default_diagnostic(&config) {
+        print_diagnostic(&diag);
     }
     let (keymap, keymap_diags) = build_keymap(config.layered_docs("keymap"), mod_alias, &registry);
     for diag in &keymap_diags {

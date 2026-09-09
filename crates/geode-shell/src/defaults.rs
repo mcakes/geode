@@ -16,12 +16,12 @@ use geode_core::config::{Config, Diagnostic, Severity};
 /// retiring the Phase 1c `ctrl+w shift+h/j/k/l` vim window prefix and
 /// `shift+h/j/k/l`) — the builtin keymap now has no sequence
 /// bindings at all; sequences remain a first-class engine feature for
-/// desk/user layers. Splits follow vim's own mnemonics —
-/// `ctrl+v` is `:vsplit` (side by side), `ctrl+h` is `:split` (stacked) —
-/// which is why the actions they bind to are named by resulting geometry
-/// (`split_right`/`split_down`) rather than by vim verb: naming them
-/// `split_vertical`/`split_horizontal` would read backwards against these
-/// keys. Resize is a direct binding, not a mode: `shift+arrows` move the
+/// desk/user layers. There is no split chord: tiles are *added* by kind
+/// (`tile::add_<kind>[_horizontal|_vertical]`, palette rows registered
+/// by `register_add_actions`) and `shift+d`/`ctrl+shift+d` duplicate the
+/// focused tile beside/below itself (spec 2026-09-08 add-tile §3).
+/// `ctrl+v` and `ctrl+h` are free. Resize is a direct binding, not a
+/// mode: `shift+arrows` move the
 /// divider adjacent to the focused tile toward the arrow's direction by
 /// `RESIZE_STEP` (the key names the divider's direction, not
 /// "grow"; see [`crate::tiling::Tree::move_divider`] for the edge-flip
@@ -92,11 +92,11 @@ context = "workspace"
 "shift+down" = "workspace::resize_down"
 "shift+up" = "workspace::resize_up"
 "shift+right" = "workspace::resize_right"
-"ctrl+v" = "workspace::split_right"
-"ctrl+h" = "workspace::split_down"
 "mod+e" = "workspace::toggle_split_orientation"
 "mod+f" = "workspace::fullscreen_tile"
 "ctrl+w" = "workspace::close_tile"
+"shift+d" = "workspace::duplicate_horizontal"
+"ctrl+shift+d" = "workspace::duplicate_vertical"
 "ctrl+[" = "dock::toggle_left"
 "ctrl+]" = "dock::toggle_right"
 "ctrl+/" = "dock::toggle_bottom"
@@ -330,11 +330,6 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Move split right",
         "Workspace",
     );
-    // Vim naming: split_right = Orientation::Horizontal (side by side, vim
-    // :vsplit, bound ctrl+v); split_down = Orientation::Vertical (stacked,
-    // vim :split, bound ctrl+h). See BUILTIN_KEYMAP's doc comment.
-    action(reg, "workspace::split_right", "Split right", "Workspace");
-    action(reg, "workspace::split_down", "Split down", "Workspace");
     // Pairwise reorient around the focused tile (see
     // `Tree::toggle_split_orientation` — deliberately not i3's
     // whole-container toggle), bound mod+e (i3's layout-toggle key).
@@ -342,6 +337,21 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         reg,
         "workspace::toggle_split_orientation",
         "Toggle split orientation",
+        "Workspace",
+    );
+    // Duplicate the focused tile beside itself, carrying its serialized
+    // state (spec 2026-09-08 add-tile §3.3/§6). Horizontal = to the
+    // right, Vertical = below — the tree's own orientation words.
+    action(
+        reg,
+        "workspace::duplicate_horizontal",
+        "Duplicate tile horizontal",
+        "Workspace",
+    );
+    action(
+        reg,
+        "workspace::duplicate_vertical",
+        "Duplicate tile vertical",
         "Workspace",
     );
     action(
@@ -587,6 +597,63 @@ pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scop
     }
 }
 
+/// Three palette rows per module kind (spec 2026-09-08 add-tile §3.2):
+/// `tile::add_<kind>` ("Add <Kind>", the setting decides the direction),
+/// `tile::add_<kind>_horizontal` ("… Horizontal", to the right) and
+/// `tile::add_<kind>_vertical` ("… Vertical", below), category "Tiles".
+/// Registered from the roster's kinds right beside `register_pick_actions`
+/// / `register_scope_actions` — after the builtins, before `build_keymap`
+/// — so a desk keymap can bind e.g. `mod+b = "tile::add_blotter"`.
+pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
+    for kind in kinds {
+        let title = capitalize(kind);
+        action(
+            reg,
+            &format!("tile::add_{kind}"),
+            &format!("Add {title}"),
+            "Tiles",
+        );
+        action(
+            reg,
+            &format!("tile::add_{kind}_horizontal"),
+            &format!("Add {title} Horizontal"),
+            "Tiles",
+        );
+        action(
+            reg,
+            &format!("tile::add_{kind}_vertical"),
+            &format!("Add {title} Vertical"),
+            "Tiles",
+        );
+    }
+}
+
+fn capitalize(kind: &str) -> String {
+    let mut chars = kind.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The inverse of [`register_add_actions`] for `ShellView::dispatch`:
+/// `(kind, explicit direction)` for a `tile::add_*` id, `None` for
+/// anything else. The suffix is peeled BEFORE the kind is read, so a
+/// kind can never be misparsed by a suffix of its own name, and an empty
+/// kind is not an add.
+pub fn parse_add_action(id: &str) -> Option<(&str, Option<crate::tiling::Orientation>)> {
+    use crate::tiling::Orientation;
+    let rest = id.strip_prefix("tile::add_")?;
+    let (kind, dir) = if let Some(k) = rest.strip_suffix("_horizontal") {
+        (k, Some(Orientation::Horizontal))
+    } else if let Some(k) = rest.strip_suffix("_vertical") {
+        (k, Some(Orientation::Vertical))
+    } else {
+        (rest, None)
+    };
+    (!kind.is_empty()).then_some((kind, dir))
+}
+
 /// The default primary modifier (spec §3.1: Alt, remappable).
 pub fn default_mod() -> Modifiers {
     Modifiers::ALT
@@ -619,6 +686,21 @@ pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
         Some("alt") => (Modifiers::ALT, Vec::new()),
         _ => (default_mod(), Vec::new()),
     }
+}
+
+/// `[app] modules.default` is no longer read (spec 2026-09-08 add-tile
+/// §7.1): tiles are added by kind. A layer that still sets it gets one
+/// warning so the key does not silently rot in a desk file.
+pub fn modules_default_diagnostic(config: &Config) -> Option<Diagnostic> {
+    config.get("app", "modules.default").map(|_| Diagnostic {
+        severity: Severity::Warning,
+        layer: config.explain("app", "modules.default"),
+        file: None,
+        message: "app: modules.default is no longer read — tiles are added by kind \
+                  (ctrl+k → Add …); remove the key"
+            .into(),
+        path: None,
+    })
 }
 
 #[cfg(test)]
@@ -661,11 +743,12 @@ mod tests {
             diags.is_empty(),
             "builtin keymap must be diagnostic-free: {diags:?}"
         );
-        // 4 focus + 4 move + 4 resize + 2 splits + orientation toggle +
-        // fullscreen + close + 3 dock toggles + 3 dock moves + 9 workspace
-        // switches + 2 palette::toggle bindings + theme toggle +
-        // settings::open (Task 5) + 2 font size steps + perf overlay
-        // toggle (spec §7.4).
+        // 4 focus + 4 move + 4 resize + orientation toggle + fullscreen
+        // + close + 2 duplicates + 3 dock toggles + 3 dock moves + 9
+        // workspace switches + 2 palette::toggle bindings + theme toggle
+        // + settings::open (Task 5) + 2 font size steps + perf overlay
+        // toggle (spec §7.4). No splits: the add-tile task retired them
+        // and freed ctrl+v/ctrl+h (spec 2026-09-08 add-tile §3.1).
         assert!(keymap.bindings().len() >= 39);
     }
 
@@ -726,6 +809,21 @@ mod tests {
             assert!(diags.is_empty(), "{value}: {diags:?}");
             assert_eq!(alias.ctrl, expect_ctrl);
         }
+    }
+
+    #[test]
+    fn modules_default_in_config_is_a_warning_and_absent_is_silent() {
+        let none = Config::load(&ConfigSources::default());
+        assert!(modules_default_diagnostic(&none).is_none());
+        let set = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        let diag = modules_default_diagnostic(&set).expect("a diagnostic");
+        assert_eq!(diag.severity, Severity::Warning);
+        assert!(diag.message.contains("modules.default"), "{}", diag.message);
+        assert!(diag.message.contains("Add"), "{}", diag.message);
     }
 
     /// Fix round 1 (review Finding 1): if `mod_alias` were ever
@@ -810,5 +908,80 @@ mod tests {
                 "{id} must be reserved by register_builtin_actions"
             );
         }
+    }
+
+    /// Spec 2026-09-08 add-tile §3.1: the split verbs are retired and
+    /// their chords are free — tiles are added by kind instead.
+    #[test]
+    fn the_split_actions_are_gone() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        assert!(!reg.contains(&ActionId("workspace::split_right".into())));
+        assert!(!reg.contains(&ActionId("workspace::split_down".into())));
+        assert!(!BUILTIN_KEYMAP.contains("\"ctrl+v\""));
+        assert!(!BUILTIN_KEYMAP.contains("\"ctrl+h\""));
+    }
+
+    #[test]
+    fn register_add_actions_registers_three_rows_per_kind_in_the_tiles_category() {
+        let mut reg = ActionRegistry::default();
+        register_add_actions(&mut reg, &["blotter", "diagnostics"]);
+        let expect = |id: &str, title: &str| {
+            let def = reg
+                .iter()
+                .find(|d| d.id.0 == id)
+                .unwrap_or_else(|| panic!("{id} not registered"));
+            assert_eq!(def.title, title);
+            assert_eq!(def.category, "Tiles");
+        };
+        expect("tile::add_blotter", "Add Blotter");
+        expect("tile::add_blotter_horizontal", "Add Blotter Horizontal");
+        expect("tile::add_blotter_vertical", "Add Blotter Vertical");
+        expect("tile::add_diagnostics", "Add Diagnostics");
+        assert_eq!(reg.iter().count(), 6);
+        let mut empty = ActionRegistry::default();
+        register_add_actions(&mut empty, &[]);
+        assert_eq!(empty.iter().count(), 0);
+    }
+
+    #[test]
+    fn parse_add_action_peels_the_direction_suffix_before_the_kind() {
+        use crate::tiling::Orientation;
+        assert_eq!(
+            parse_add_action("tile::add_blotter"),
+            Some(("blotter", None))
+        );
+        assert_eq!(
+            parse_add_action("tile::add_blotter_horizontal"),
+            Some(("blotter", Some(Orientation::Horizontal)))
+        );
+        assert_eq!(
+            parse_add_action("tile::add_blotter_vertical"),
+            Some(("blotter", Some(Orientation::Vertical)))
+        );
+        assert_eq!(parse_add_action("tile::add_"), None);
+        assert_eq!(parse_add_action("tile::add__vertical"), None);
+        assert_eq!(parse_add_action("tile::command_line"), None);
+        assert_eq!(parse_add_action("workspace::close_tile"), None);
+    }
+
+    #[test]
+    fn duplicate_actions_are_registered_and_bound() {
+        use crate::actions::ActionId;
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        assert!(reg.contains(&ActionId("workspace::duplicate_horizontal".into())));
+        assert!(reg.contains(&ActionId("workspace::duplicate_vertical".into())));
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let bound: Vec<String> = keymap
+            .bindings()
+            .iter()
+            .map(|b| b.action.0.clone())
+            .collect();
+        assert!(bound.iter().any(|a| a == "workspace::duplicate_horizontal"));
+        assert!(bound.iter().any(|a| a == "workspace::duplicate_vertical"));
     }
 }

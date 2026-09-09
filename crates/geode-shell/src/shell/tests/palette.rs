@@ -185,23 +185,20 @@ fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestA
 
 /// End-to-end command palette flow (Task 6), through the real
 /// key-event pipeline exactly like the tests above: `ctrl+k` opens it,
-/// typing "split" filters the list down to "Split right" and
-/// "Split down" — the only two titles containing that whole run
-/// as a subsequence, and, having matched the identical literal
-/// prefix "split", scored *identically* by `fuzzy_match` (verified by
-/// hand: both score 45). Which one lands at index 0 is not a
-/// fuzzy-match property; it's `PaletteState::filtered`'s stable sort
-/// preserving `build_items`' input order, which is
-/// `ActionRegistry::iter()`'s `BTreeMap<ActionId, _>` order — and
-/// `"workspace::split_down" < "workspace::split_right"` (`d` < `r`)
-/// puts "Split down" first (the rename to direction-based ids flips
-/// this tie-break from what it was under the old i3-named
-/// `split_horizontal`/`split_vertical` ids — `h` < `v` put horizontal
-/// first then; `d` < `r` puts down first now). That tie-break is
-/// deterministic (so this test is not flaky), just not the "the only
-/// match" story a prior version of this comment told. Enter then
-/// dispatches the selected item through the normal chain, closing the
-/// palette and splitting the (until then empty) active workspace.
+/// typing "add rec" filters the list down to the three rows
+/// `register_add_actions` registers for the "rec" kind ("Add Rec",
+/// "Add Rec Horizontal", "Add Rec Vertical" — spec 2026-09-08
+/// add-tile §3.2). All three contain the run as a subsequence; the
+/// plain row leads. Which one lands at index 0 is not a fuzzy-match
+/// property; it is `PaletteState::filtered`'s stable sort preserving
+/// `build_items`' input order, which is `ActionRegistry::iter()`'s
+/// `BTreeMap<ActionId, _>` order — and `"tile::add_rec"` sorts ahead
+/// of `"tile::add_rec_horizontal"`/`"…_vertical"` (a prefix is less
+/// than what extends it). That tie-break is deterministic, so this
+/// test is not flaky. Enter then dispatches the selected item through
+/// the normal chain, closing the palette and adding the (until then
+/// empty) active workspace's first tile — an add through the palette,
+/// end to end.
 #[gpui::test]
 fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     cx: &mut gpui::TestAppContext,
@@ -242,7 +239,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
         "ctrl-k (ctrl+k = palette::toggle) should have opened the palette"
     );
 
-    cx.simulate_input("split");
+    cx.simulate_input("add rec");
     let selected_title = shell.read_with(&cx, |shell, _| {
         shell
             .palette
@@ -252,10 +249,10 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     });
     assert_eq!(
         selected_title,
-        Some("Split down".to_string()),
-        "typing \"split\" should rank \"Split down\" first, ahead of the \
-         equally-scored \"Split right\", via the registry's alphabetical \
-         (d < r) ActionId order and filtered()'s stable sort"
+        Some("Add Rec".to_string()),
+        "typing \"add rec\" should rank the plain \"Add Rec\" row first, \
+         ahead of its Horizontal/Vertical siblings, via the registry's \
+         ActionId order and filtered()'s stable sort"
     );
 
     cx.update(|window, cx| {
@@ -272,8 +269,8 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     });
     assert_eq!(
         tile_count, 1,
-        "enter on \"Split down\" should have dispatched \
-         workspace::split_down through the normal chain"
+        "enter on \"Add Rec\" should have dispatched tile::add_rec \
+         through the normal chain"
     );
 }
 
@@ -896,15 +893,15 @@ fn shell_chord_does_not_fire_while_the_palette_is_open(cx: &mut gpui::TestAppCon
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    // Create a real tile (ctrl+v = workspace::split_right) so there is
-    // something for a leaked ctrl+w to actually close.
+    // Create a real tile (the test layer's ctrl+v = tile::add_rec_
+    // horizontal) so there is something for a leaked ctrl+w to close.
     cx.simulate_keystrokes("ctrl-v");
     let tile_count_before = shell.read_with(&cx, |shell, _| {
         shell.services.workspaces.active().tree().tiles().len()
     });
     assert_eq!(
         tile_count_before, 1,
-        "sanity: ctrl+v should have split a tile"
+        "sanity: ctrl+v should have added a tile"
     );
 
     cx.simulate_keystrokes("ctrl-k");
@@ -1092,46 +1089,23 @@ fn the_new_palette_arm_does_not_intercept_typing(cx: &mut gpui::TestAppContext) 
     );
 }
 
-/// Layers a user binding on top of the builtin keymap that rebinds
+/// Layers a user binding on top of the fixture keymap that rebinds
 /// `ctrl+k` (BUILTIN_KEYMAP's `palette::toggle` key) to
-/// `workspace::split_right` instead. Per the layering contract
+/// `workspace::close_tile` instead. Per the layering contract
 /// (last-exact-match-wins), this must fully shadow the builtin
 /// `palette::toggle` binding for that key.
-fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
-    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
-    let mut registry = ActionRegistry::default();
-    register_builtin_actions(&mut registry);
-    let mod_alias = default_mod();
-    let builtin_doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+fn test_services_with_ctrl_k_rebound_to_close_tile() -> ShellServices {
+    let mut services = test_services();
     let user_doc = LayerDoc {
         layer: geode_core::config::Layer::User,
         name: "keymap".to_string(),
         file: "<test:user>".into(),
-        table: "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"workspace::split_right\"\n"
+        table: "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"workspace::close_tile\"\n"
             .parse()
             .unwrap(),
     };
-    let (keymap, diags) = build_keymap(&[builtin_doc, user_doc], mod_alias, &registry);
-    assert!(diags.is_empty(), "{diags:?}");
-    let (theme, warnings) = crate::theme::load_bundled();
-    assert!(warnings.is_empty(), "{warnings:?}");
-    ShellServices {
-        config,
-        builtin,
-        registry,
-        keymap,
-        mod_alias,
-        workspaces: Workspaces::new(),
-        theme,
-        session_path: None,
-        roster: crate::module::ModuleRoster::default(),
-        restored_tiles: crate::session::TileRecords::new(),
-        restored_frame: None,
-        log: None,
-        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
-            crate::diagnostics::ActionTail::new(),
-        )),
-    }
+    services.keymap = test_keymap(&services.registry, &[user_doc]);
+    services
 }
 
 /// Regression for `is_palette_toggle` respecting keymap layering
@@ -1140,7 +1114,7 @@ fn test_services_with_ctrl_k_rebound_to_split() -> ShellServices {
 /// palette — the pre-matcher intercept in `handle_key_down` must not
 /// fire just because *some* binding for that key, anywhere in the
 /// keymap, happens to be `palette::toggle`. The rebound action
-/// (`workspace::split_right`) must dispatch instead, through the
+/// (`workspace::close_tile`) must dispatch instead, through the
 /// normal matcher path, proving the key was fully handed over rather
 /// than merely swallowed.
 #[gpui::test]
@@ -1154,7 +1128,7 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let view = cx.new(|cx| {
                     ShellView::new(
-                        test_services_with_ctrl_k_rebound_to_split(),
+                        test_services_with_ctrl_k_rebound_to_close_tile(),
                         None,
                         None,
                         window,
@@ -1172,7 +1146,9 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
         let _ = window.draw(cx);
     });
 
-    cx.simulate_keystrokes("ctrl-k");
+    // Something for the rebound close-tile to actually close (the test
+    // layer's ctrl+v = tile::add_rec_horizontal).
+    cx.simulate_keystrokes("ctrl-v");
 
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -1185,6 +1161,23 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
             .downcast::<ShellView>()
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .tiles()
+            .len()),
+        1,
+        "sanity: ctrl+v should have added a tile"
+    );
+
+    cx.simulate_keystrokes("ctrl-k");
+
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
 
     assert!(
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
@@ -1195,8 +1188,8 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
         shell.services.workspaces.active().tree().tiles().len()
     });
     assert_eq!(
-        tile_count, 1,
-        "ctrl-k should have dispatched the rebound workspace::split_right \
+        tile_count, 0,
+        "ctrl-k should have dispatched the rebound workspace::close_tile \
          action through the normal matcher path"
     );
 }

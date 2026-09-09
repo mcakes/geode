@@ -20,7 +20,52 @@ use gpui_component::{Root, TITLE_BAR_HEIGHT};
 // `dialog_filter_is_focused`'s `.focus_handle(cx)` calls below,
 // respectively.
 
+/// The test layer every shell fixture stacks on `BUILTIN_KEYMAP`: the
+/// shipped keymap has no create-a-tile chord any more (spec 2026-09-08
+/// add-tile §3.1 — tiles are added by kind from the palette), so the
+/// ~80 tests that say `ctrl-v`/`ctrl-h` keep meaning "add a recorder
+/// tile, side by side / below" through these two bindings. They are
+/// exactly the shape a desk keymap would ship (`tile::add_<kind>_*`),
+/// not a private test-only action.
+pub(super) const TEST_ADD_KEYMAP: &str = "[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"ctrl+v\" = \"tile::add_rec_horizontal\"\n\"ctrl+h\" = \"tile::add_rec_vertical\"\n";
+
+/// `BUILTIN_KEYMAP` + [`TEST_ADD_KEYMAP`] + `extra`, built clean.
+pub(super) fn test_keymap(registry: &ActionRegistry, extra: &[LayerDoc]) -> crate::keymap::Keymap {
+    let mut docs = vec![
+        LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+        LayerDoc::builtin("keymap", TEST_ADD_KEYMAP).unwrap(),
+    ];
+    docs.extend(extra.iter().cloned());
+    let (keymap, diags) = build_keymap(&docs, default_mod(), registry);
+    assert!(diags.is_empty(), "{diags:?}");
+    keymap
+}
+
 pub(super) fn test_services() -> ShellServices {
+    test_services_with_log().0
+}
+
+/// [`test_services`] plus the recorder's log — for a test that wants to
+/// see what the "rec" occupant [`TEST_ADD_KEYMAP`]'s keys add was told.
+pub(super) fn test_services_with_log() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+) {
+    services_with_rec_roster()
+}
+
+/// The shell fixtures' one roster: a `RecordingFactory` of kind "rec" —
+/// the kind [`TEST_ADD_KEYMAP`]'s `ctrl+v`/`ctrl+h` add, so a shell
+/// built here really can add a tile twice and get two tiles (an add
+/// onto a *placeholder* fills it in place, spec 2026-09-08 add-tile
+/// §4.2, so a roster with no "rec" would collapse every second add into
+/// the first tile). There is no default kind (§7.1): a tile created by
+/// some *other* path — a direct `Workspaces::split_active`, or a session
+/// record naming a kind nothing registered — is a placeholder.
+fn services_with_rec_roster() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+) {
     // No compiled-in builtin layer in this fixture, so a reload has
     // nothing to preserve. `ShellServices::config_and_builtin` is the
     // constructor that keeps `config` and `builtin` from disagreeing
@@ -49,13 +94,23 @@ pub(super) fn test_services() -> ShellServices {
     // startup-ordering path itself still runs on every test built from
     // this fixture.
     register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
+    // The add rows for the recorder kind the shell tests use (spec
+    // 2026-09-08 add-tile §3.2) — `main.rs` registers these from the
+    // roster's kinds in this same slot, before `build_keymap`.
+    crate::defaults::register_add_actions(&mut registry, &["rec"]);
+    let recorder = crate::module::recording::RecordingFactory::new("rec");
+    let log = recorder.log.clone();
+    let mut roster = crate::module::ModuleRoster::new();
+    roster.add(Box::new(recorder));
+    // Module actions exist before `build_keymap`, exactly as `main.rs`
+    // orders it — a binding into the module's own context is what
+    // `services_with_recorder`'s extra layer needs to resolve.
+    roster.register_actions(&mut registry);
     let mod_alias = default_mod();
-    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
-    let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
-    assert!(diags.is_empty(), "{diags:?}");
+    let keymap = test_keymap(&registry, &[]);
     let (theme, warnings) = crate::theme::load_bundled();
     assert!(warnings.is_empty(), "{warnings:?}");
-    ShellServices {
+    let services = ShellServices {
         config,
         builtin,
         registry,
@@ -64,40 +119,34 @@ pub(super) fn test_services() -> ShellServices {
         workspaces: Workspaces::new(),
         theme,
         session_path: None,
-        roster: crate::module::ModuleRoster::default(),
+        roster,
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
-    }
+    };
+    (services, log)
 }
 
-/// `test_services` with a recording module as the default occupant.
+/// [`test_services`] plus a binding into the recording module's own key
+/// context, so a key can be seen to reach an occupant. The roster is the
+/// same one every fixture here builds — a "rec" factory and no default
+/// kind (spec 2026-09-08 add-tile §7.1).
 pub(super) fn services_with_recorder() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    let recorder = crate::module::recording::RecordingFactory::new("rec");
-    let log = recorder.log.clone();
-    let mut services = test_services();
-    let mut roster = crate::module::ModuleRoster::new("rec");
-    roster.add(Box::new(recorder));
-    roster.register_actions(&mut services.registry);
-    // The keymap must be rebuilt after the module's actions exist,
-    // exactly as `main.rs` orders it, plus a binding into the
-    // module's own context so a key can be seen to reach it.
-    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+    let (mut services, log) = services_with_rec_roster();
+    // A binding into the module's own key context, so a key can be seen
+    // to reach it.
     let module_doc = LayerDoc::builtin(
         "keymap",
         "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"j\" = \"rec::noop\"\n",
     )
     .unwrap();
-    let (keymap, diags) = build_keymap(&[doc, module_doc], default_mod(), &services.registry);
-    assert!(diags.is_empty(), "{diags:?}");
-    services.keymap = keymap;
-    services.roster = roster;
+    services.keymap = test_keymap(&services.registry, &[module_doc]);
     (services, log)
 }
 
@@ -299,18 +348,15 @@ pub(super) fn filter_is_focused(
 /// direct to `ctrl+alt+arrows`), so this isolated binding is the way
 /// tests exercise a pending keystroke at all.
 pub(super) fn test_services_with_gg_binding() -> ShellServices {
-    let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
-    let mut registry = ActionRegistry::default();
-    register_builtin_actions(&mut registry);
-    registry
+    let mut services = test_services();
+    services
+        .registry
         .register(crate::actions::ActionDef {
             id: crate::actions::ActionId("test::gg".to_string()),
             title: "Test gg".to_string(),
             category: "Test".to_string(),
         })
         .unwrap();
-    let mod_alias = default_mod();
-    let builtin_doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let user_doc = LayerDoc {
         layer: geode_core::config::Layer::User,
         name: "keymap".to_string(),
@@ -319,27 +365,8 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
             .parse()
             .unwrap(),
     };
-    let (keymap, diags) = build_keymap(&[builtin_doc, user_doc], mod_alias, &registry);
-    assert!(diags.is_empty(), "{diags:?}");
-    let (theme, warnings) = crate::theme::load_bundled();
-    assert!(warnings.is_empty(), "{warnings:?}");
-    ShellServices {
-        config,
-        builtin,
-        registry,
-        keymap,
-        mod_alias,
-        workspaces: Workspaces::new(),
-        theme,
-        session_path: None,
-        roster: crate::module::ModuleRoster::default(),
-        restored_tiles: crate::session::TileRecords::new(),
-        restored_frame: None,
-        log: None,
-        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
-            crate::diagnostics::ActionTail::new(),
-        )),
-    }
+    services.keymap = test_keymap(&services.registry, &[user_doc]);
+    services
 }
 /// `apply_reload` is `ShellView`'s real config-hot-reload apply path
 /// (Task 1c-1); the watcher task is just what schedules calling it —

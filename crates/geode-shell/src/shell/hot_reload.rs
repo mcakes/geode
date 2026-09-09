@@ -180,6 +180,12 @@ impl ShellView {
         // exactly like any other invalid config — `decide` only ever
         // looks at `new_config.diagnostics`.
         new_config.diagnostics.extend(mod_diags);
+        // A reload that adds (or keeps) `[app] modules.default` says so
+        // too — the key is no longer read (spec 2026-09-08 add-tile
+        // §7.1), and a warning is the only thing standing between a desk
+        // file and silent rot. An `Option` extends as zero or one.
+        let modules_default = crate::defaults::modules_default_diagnostic(&new_config);
+        new_config.diagnostics.extend(modules_default);
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
@@ -315,6 +321,7 @@ impl ShellView {
             // Cheap re-derive; `render` applies it only when it changed.
             self.font_size = FontSize::from_config(&self.services.config);
             self.find_style = FindStyle::from_config(&self.services.config);
+            self.add_direction = crate::tileadd::AddDirection::from_config(&self.services.config);
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);

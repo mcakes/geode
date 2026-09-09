@@ -20,11 +20,19 @@ use super::ShellView;
 
 impl ShellView {
     /// Every non-placeholder occupant's tile record, gathered fresh from
-    /// `serialize` (Task 4, Phase 3 §3.5). A placeholder tile carries no
-    /// module of its own — it exists only until something opens on it —
-    /// so it is never written.
+    /// `serialize` (Task 4, Phase 3 §3.5), plus every *unplaced* record —
+    /// one this build had no factory for, so the tile paints a
+    /// placeholder while the record it was restored from rides through
+    /// untouched (spec 2026-09-08 add-tile §7.2). A placeholder tile
+    /// carries no module state of its own, so it is never written from
+    /// the occupant side; without the unplaced records the very next
+    /// flush would drop a session saved by a build with more modules.
+    /// A live occupant always wins the id — `or_insert_with` never
+    /// overwrites one — and `ensure_occupants`/`add_tile` retain the map
+    /// to tiles that are still both live and unfilled.
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
-        self.occupants
+        let mut tiles: session::TileRecords = self
+            .occupants
             .iter()
             .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
             .map(|(id, o)| {
@@ -36,7 +44,11 @@ impl ShellView {
                     },
                 )
             })
-            .collect()
+            .collect();
+        for (id, record) in &self.unplaced_records {
+            tiles.entry(*id).or_insert_with(|| record.clone());
+        }
+        tiles
     }
 
     /// The module kind occupying `tile`, or `None` if it has no occupant
@@ -173,31 +185,13 @@ impl ShellView {
         let mut active = std::mem::take(&mut self.scratch_active_tiles);
         self.fill_active_tiles(&mut active);
 
-        // Phase 4b Task 5: `open_module` sets this right after splitting a
-        // fresh tile for a kind with no existing occupant. Consumed by the
-        // ONE tile below that both lacks an occupant already AND carries
-        // no restored record — a restored tile's kind always comes from
-        // the session file instead (see `matched` just below), and any
-        // other tile without a restored record already got an occupant on
-        // an earlier render (this loop only ever sees a tile once). `take`
-        // here, not read: whether or not a matching factory turns up, the
-        // request is spent the moment this render's creation loop looks
-        // for a candidate to spend it on.
-        let mut pending_kind = self.pending_kind_for_new_tile.take();
-
-        // MIN-6 (final review): `all` is a `HashSet<TileId>`, so its
-        // iteration order is not deterministic. In the normal flow
-        // exactly one tile below is both occupant-less and carries no
-        // restored record, so which order this loop visits `all` in
-        // never matters — but two tiles can go occupant-less in one pass
-        // (a plain split followed by an `open_module` call that itself
-        // splits again, since no occupant of the requested kind exists
-        // yet to focus), and `pending_kind` above is a single value spent
-        // by the FIRST such tile this loop reaches. Sorting makes that
-        // choice deterministic (the lower `TileId`) rather than a coin
-        // flip on the hasher's internal state — a separate `Vec`, not a
-        // reassignment of `all` itself, since `all` (the `HashSet`) is
-        // still needed below (`self.scratch_all_tiles = all`).
+        // `all` is a `HashSet<TileId>`, so its iteration order is not
+        // deterministic. Sorting makes the order tiles are created in
+        // (and so the order their ids are handed to factories) stable
+        // rather than a coin flip on the hasher's internal state — a
+        // separate `Vec`, not a reassignment of `all` itself, since
+        // `all` (the `HashSet`) is still needed below
+        // (`self.scratch_all_tiles = all`).
         let mut creation_order: Vec<TileId> = all.iter().copied().collect();
         creation_order.sort();
 
@@ -206,31 +200,53 @@ impl ShellView {
                 continue;
             }
             let restored = self.services.restored_tiles.remove(&id.0);
+            let pending = self.pending_tiles.remove(id);
             // A factory found by the record's own `kind` is a real match —
             // its `kind()` equals `restored.kind` by construction, so the
-            // restored state is meant for it. Any fallback (no factory
-            // registered for that kind, or no record at all) hands the
-            // chosen factory a tile it does not recognise, so it must not
-            // see state shaped for a different module (fix-round finding).
+            // restored state is meant for it (fix-round finding). A
+            // restored record outranks a pending request (they cannot
+            // coexist for one id in practice — restore never allocates a
+            // new id and `add_tile` never targets a restored one).
             let matched = restored
                 .as_ref()
                 .and_then(|r| self.services.roster.factory(&r.kind));
-            let state = matched.and(restored.as_ref()).map(|r| &r.state);
-            let pending_kind_for_this_tile =
-                restored.is_none().then(|| pending_kind.take()).flatten();
-            let pending_factory = pending_kind_for_this_tile.as_deref().and_then(|kind| {
-                let f = self.services.roster.factory(kind);
+            let restored_state = matched.and(restored.as_ref()).map(|r| &r.state);
+            let pending_factory = pending.as_ref().and_then(|p| {
+                let f = self.services.roster.factory(&p.kind);
                 if f.is_none() {
                     tracing::warn!(
                         target: "geode::shell",
-                        "diagnostics::open (or another open_module caller) asked for kind '{kind}', which has no registered factory — falling back to the default kind"
+                        "add_tile asked for kind '{}', which has no registered factory — painting a placeholder",
+                        p.kind
                     );
                 }
                 f
             });
-            let factory = matched
-                .or(pending_factory)
-                .or_else(|| self.services.roster.default_factory());
+            let pending_state = pending_factory
+                .and(pending.as_ref())
+                .and_then(|p| p.state.as_ref());
+            // Restored beats pending beats placeholder (spec 2026-09-08
+            // add-tile §7.2). There is no default kind to fall back to:
+            // a tile nothing claims paints a placeholder, and if the
+            // reason is a restored record this build has no module for,
+            // that record is kept verbatim so the next session flush
+            // cannot forget it. (A pending request cannot coexist with a
+            // restored record for one id — see `matched`'s comment above
+            // — so "unmatched restored record" really does mean "this
+            // tile is about to be a placeholder".)
+            if let (Some(record), None) = (&restored, matched) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
+                    id.0, record.kind
+                );
+                self.unplaced_records.insert(id.0, record.clone());
+            }
+            let (factory, state) = match (matched, pending_factory) {
+                (Some(f), _) => (Some(f), restored_state),
+                (None, Some(f)) => (Some(f), pending_state),
+                (None, None) => (None, None),
+            };
             let occupant = match factory {
                 Some(f) => f.create(
                     *id,
@@ -258,6 +274,22 @@ impl ShellView {
             occupant.content.set_visible(active.contains(id), cx);
             self.occupants.insert(*id, occupant);
         }
+        // A request whose tile closed before this render is dropped, not
+        // re-aimed (spec 2026-09-08 add-tile §4.3).
+        self.pending_tiles.retain(|id, p| {
+            let live = all.contains(id);
+            if !live {
+                tracing::debug!(target: "geode::shell", "dropping a pending '{}' request for closed tile {}", p.kind, id.0);
+            }
+            live
+        });
+        // An unplaced record outlives only its own tile: once the tile is
+        // gone from every workspace there is nothing left to write it
+        // back for (§7.2). Filling the tile in place drops it too —
+        // `add_tile` does that, since the live occupant's own record
+        // supersedes it.
+        self.unplaced_records
+            .retain(|id, _| all.contains(&TileId(*id)));
         self.scratch_all_tiles = all;
 
         for id in self.visible_tiles.difference(&active) {

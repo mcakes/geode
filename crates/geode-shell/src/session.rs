@@ -72,8 +72,9 @@
 //! main tree over): a structurally invalid dock node drops that dock's
 //! tree, a duplicate tile claim (already in a main tree or an earlier dock
 //! tree, this workspace or any other) is removed from the dock's tree, a
-//! `region` pointing at a hidden/empty dock falls back to `Main`, and an
-//! out-of-range/NaN `size` resets to the default — see
+//! `region` pointing at a hidden dock falls back to `Main` (an empty
+//! but visible dock is a legal focus target — spec 2026-09-08 add-tile
+//! §8), and an out-of-range/NaN `size` resets to the default — see
 //! `Workspace::from_parts` / `Workspaces::from_parts` for the cross-tree
 //! healing seams themselves.
 //!
@@ -119,14 +120,16 @@ pub const SESSION_CONFIG_VERSION: i64 = 1;
 /// module roster to check it against, so a `kind` from an unregistered or
 /// downgraded module round-trips here unchanged. Resolution happens one
 /// layer up, in `occupants::ensure_occupants`: when the roster has no
-/// factory for `kind`, it falls back to the default factory with `state`
-/// discarded (a factory must never see state shaped for a different
-/// module), so the occupant it creates is really the *default* kind with
-/// empty state. `to_toml`'s flush then serializes whatever the live
-/// occupant reports (`current_tiles`), so that healed default silently
-/// overwrites the original unknown-kind record on the very next save —
-/// acceptable healing (M15, 3b final review), but real state loss for a
-/// misconfigured or downgraded run, worth knowing rather than discovering.
+/// factory for `kind`, the tile paints the placeholder (spec 2026-09-08
+/// add-tile §7.2). No other module is handed the record — a factory must
+/// never see state shaped for a different module — and there is no
+/// default kind for it to fall back to. The record itself is *kept*, in
+/// `ShellView::unplaced_records`, and `current_tiles` writes it back
+/// verbatim on every flush, so a session saved by a build with more
+/// modules survives a run of a build with fewer: turn the module back on
+/// and the tile comes back with its own state. The record is dropped only
+/// when its tile closes, or when the trader fills that placeholder with
+/// something else — then the live occupant's own record takes the id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,
@@ -572,8 +575,8 @@ fn parse_workspace(
     let docks = parse_docks(ix, ws_table.get("docks"), warnings);
     let region = parse_region(ix, ws_table.get("region"), warnings);
 
-    // Per-workspace healing (duplicate claims against this tree, an
-    // unfocusable region) lives in `Workspace::from_parts`; the
+    // Per-workspace healing (duplicate claims against this tree, a
+    // region naming a hidden dock) lives in `Workspace::from_parts`; the
     // cross-workspace pass runs later in `Workspaces::from_parts`.
     let (workspace, heal_warnings) = Workspace::from_parts(tree, docks, region);
     warnings.extend(
@@ -1025,12 +1028,12 @@ mod tests {
 
     /// Two tiles side by side in workspace 1 — the simplest fixture with
     /// more than one tile to hang a `TileRecord` on. The first
-    /// `split_right` on an empty tree only creates the first tile (nothing
-    /// to split yet); the second actually splits it in two.
+    /// `split_active` on an empty tree only creates the first tile
+    /// (nothing to split yet); the second actually splits it in two.
     fn two_tile_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         ws
     }
 
@@ -1155,11 +1158,11 @@ mod tests {
     #[test]
     fn round_trips_a_multi_workspace_layout() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Vertical);
         ws.switch(3);
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
@@ -1530,8 +1533,8 @@ mod tests {
         let path = dir.path().join("session.toml");
 
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
 
         save(&path, &ws, &TileRecords::new(), None).unwrap();
         assert!(path.exists());
@@ -1580,9 +1583,9 @@ mod tests {
     #[test]
     fn a_restored_session_then_splitting_does_not_collide_tile_ids() {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         let table = to_toml(&ws, &TileRecords::new(), None);
         let Restored {
             workspaces: mut restored,
@@ -1594,7 +1597,7 @@ mod tests {
         let before_ids: std::collections::HashSet<_> =
             restored.active().tree().tiles().into_iter().collect();
 
-        apply_workspace_action(&mut restored, &act("workspace::split_right"));
+        restored.split_active(Orientation::Horizontal);
         let after_ids: Vec<_> = restored.active().tree().tiles();
         let new_id = after_ids
             .iter()
@@ -1618,10 +1621,10 @@ mod tests {
     /// exercises the recursive dock encoding, not just a single leaf.
     fn docked_workspaces() -> Workspaces {
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
+        ws.split_active(Orientation::Horizontal);
         apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::split_down"));
+        ws.split_active(Orientation::Vertical);
         apply_workspace_action(&mut ws, &act("workspace::resize_right"));
         ws
     }
@@ -1666,11 +1669,55 @@ mod tests {
         );
     }
 
+    /// Final-review Important 1: a *visible but empty* focused dock is a
+    /// legal state (spec 2026-09-08 add-tile §8 — `ctrl+[` shows and
+    /// focuses the left dock whether or not it holds tiles), so a session
+    /// written in that state must come back exactly as written, with no
+    /// warning. `Workspaces::from_parts`'s cross-workspace pass used to
+    /// heal on `focusable()` ("hidden *or empty*"), which moved focus
+    /// back to `Main` and made `main.rs` print a restore warning at every
+    /// launch after that entirely ordinary quit.
+    #[test]
+    fn an_empty_but_visible_focused_dock_round_trips_without_a_warning() {
+        let mut ws = Workspaces::new();
+        ws.split_active(Orientation::Horizontal);
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "fixture sanity: toggling shows and focuses the empty left dock"
+        );
+        assert!(
+            ws.active().docks().get(DockSide::Left).tree().is_empty(),
+            "fixture sanity: the dock really is empty"
+        );
+
+        let table = to_toml(&ws, &TileRecords::new(), None);
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "an empty visible dock is legal; nothing to heal: {warnings:?}"
+        );
+        assert_eq!(
+            restored.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "the region must survive the restore"
+        );
+        assert!(
+            restored.active().docks().get(DockSide::Left).visible(),
+            "and the dock is still visible"
+        );
+    }
+
     #[test]
     fn a_default_dock_session_writes_no_dock_keys() {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
         let mut ws = Workspaces::new();
-        apply_workspace_action(&mut ws, &act("workspace::split_right"));
+        ws.split_active(Orientation::Horizontal);
         let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
@@ -1696,7 +1743,7 @@ mod tests {
         // fresh split lands in the main tree (a dock-focused split would
         // work too — same allocator — but Main keeps the assertion simple).
         apply_workspace_action(&mut restored, &act("workspace::focus_right"));
-        apply_workspace_action(&mut restored, &act("workspace::split_right"));
+        restored.split_active(Orientation::Horizontal);
         let new_id = restored
             .active()
             .tree()
@@ -1741,8 +1788,9 @@ mod tests {
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
         assert_eq!(
             ws.active().region(),
-            FocusRegion::Main,
-            "the region pointing at the dropped claim must heal to Main"
+            FocusRegion::Dock(DockSide::Left),
+            "the dock is emptied but still visible, so it keeps the region \
+             (spec 2026-09-08 add-tile §8)"
         );
     }
 

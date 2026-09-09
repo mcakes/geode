@@ -13,7 +13,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{KeyContext, MatchResult};
-use crate::tiling::apply_workspace_action;
+use crate::tiling::{Orientation, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -276,6 +276,17 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
+            // A palette row from `register_add_actions` (spec 2026-09-08
+            // add-tile §3.2) — "Add <Kind>" follows the setting; the
+            // suffixed pair say where. Always adds (or fills); never
+            // focuses an existing tile — that is `open_module`'s job.
+            let kind = kind.to_string();
+            self.add_tile(&kind, direction, None, window, cx);
+        } else if action.0 == "workspace::duplicate_horizontal" {
+            self.duplicate_tile(Orientation::Horizontal, window, cx);
+        } else if action.0 == "workspace::duplicate_vertical" {
+            self.duplicate_tile(Orientation::Vertical, window, cx);
         } else if action.0 == "diagnostics::open" {
             // mod+shift+d (Phase 4b Task 5, spec §4.6) — opens by kind
             // through the shell, not through the module (see
@@ -413,6 +424,22 @@ impl ShellView {
             .detach();
     }
 
+    /// Persist `[tiles] add`, off the UI thread — the exact contract of
+    /// [`Self::persist_find_style`] just above.
+    pub(super) fn persist_add_direction(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let direction = self.add_direction;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
+                    tracing::warn!(target: "geode::config", "add direction not saved: {e}");
+                }
+            })
+            .detach();
+    }
+
     /// `mod+/` (spec §3.11): move focus into the scope bar's live text
     /// field from anywhere in the shell. The field's own `InputEvent::
     /// Focus` subscription (`ShellView::new`) is what actually opens the
@@ -432,8 +459,8 @@ impl ShellView {
         // Task 9 instant-modal redesign (see `dialog`'s module doc): while
         // Geode's own modal (`self.modal`) OR a gpui-component `Dialog`
         // layer is open, the shell's own keymap `Matcher` must not see a
-        // single keystroke — otherwise e.g. `ctrl+v` typed inside the
-        // settings dialog would *also* dispatch `workspace::split_right`
+        // single keystroke — otherwise e.g. `ctrl+w` typed inside the
+        // settings dialog would *also* dispatch `workspace::close_tile`
         // behind it (the modal paints above the tile surface, but this
         // on_key_down listener sits on the ShellView root and still
         // receives every raw KeyDownEvent that bubbles up the dispatch
@@ -548,14 +575,14 @@ impl ShellView {
         // its `Escape` action handler calls `cx.propagate()` whenever there
         // is no popover/inline-completion/IME-marked-text/`clean_on_escape`
         // to consume it (the plain-filter case, always, here) — and any key
-        // with *no* action binding at all in that context (e.g. `ctrl+h`,
+        // with *no* action binding at all in that context (e.g. `ctrl+w`,
         // `ctrl+k`, bare typed letters) skips the action system entirely.
         // Both cases still deliver the raw `KeyDownEvent` to every
         // `on_key_down` listener up the dispatch path, this one included
         // (verified against the pinned gpui rev's `Window::
         // finish_dispatch_key_event`/`dispatch_key_down_up_event`), so
-        // without this guard e.g. `ctrl+h` typed into the filter would
-        // *also* dispatch `workspace::split_down`. Esc is the one key this
+        // without this guard e.g. `ctrl+w` typed into the filter would
+        // *also* dispatch `workspace::close_tile`. Esc is the one key this
         // view still acts on itself: it hands focus back to the shell root
         // so hjkl and friends resume working immediately.
         if self

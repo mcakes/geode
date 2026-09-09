@@ -149,7 +149,7 @@ fn an_ambiguous_enter_and_a_failing_command_show_inline_and_stay_open(
 ) {
     let (mut services, log) = services_with_recorder();
     // Make the recorder's `command` fail.
-    let mut roster = crate::module::ModuleRoster::new("rec");
+    let mut roster = crate::module::ModuleRoster::new();
     let mut rec = crate::module::recording::RecordingFactory::new("rec");
     rec.command_result = Err("no such column".into());
     let log2 = rec.log.clone();
