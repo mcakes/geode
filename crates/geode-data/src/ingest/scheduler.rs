@@ -105,6 +105,37 @@ fn wait_until(stop: &(Mutex<bool>, Condvar), until: Instant) -> bool {
     }
 }
 
+/// Which of one poll's two events the sink refused. Both are always
+/// attempted (fix round 1, MIN-4), so the warning can name what was
+/// actually dropped instead of saying "a discovery event" for either.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Refused {
+    health: bool,
+    polled: bool,
+}
+
+impl Refused {
+    /// A poll that never got as far as its `Polled` — the discovery
+    /// error and panic arms, which report health and nothing else.
+    fn health(refused: bool) -> Refused {
+        Refused {
+            health: refused,
+            polled: false,
+        }
+    }
+
+    /// What to name in the log, or `None` when everything landed. A pure
+    /// function so the message is testable without a scheduler thread.
+    fn what(self) -> Option<&'static str> {
+        match (self.health, self.polled) {
+            (true, true) => Some("the health report and the poll result"),
+            (true, false) => Some("the health report"),
+            (false, true) => Some("the poll result"),
+            (false, false) => None,
+        }
+    }
+}
+
 fn run(
     sources: Vec<SourceSpec>,
     conn: duckdb::Connection,
@@ -138,7 +169,7 @@ fn run(
         // being polled with nothing on the sink to say so — exactly the
         // silence spec §5.7 forbids.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || -> Result<bool, crate::store::StoreError> {
+            || -> Result<Refused, crate::store::StoreError> {
                 geode_core::panic::contained(|| {
                     let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
                     let health = worst_health(&candidates);
@@ -153,7 +184,7 @@ fn run(
                     // stayed latched even after the scheduler's own next
                     // clean poll — the scheduler thought it had already
                     // said `Ok`.
-                    let ok = match health {
+                    let health_delivered = match health {
                         Some((worst, detail)) => sink(SchedulerEvent::Health {
                             source: spec.name.clone(),
                             worst,
@@ -170,41 +201,49 @@ fn run(
                     if ready > 0 {
                         ingest.submit(plan);
                     }
-                    Ok(ok
-                        && sink(SchedulerEvent::Polled {
-                            source: spec.name.clone(),
-                            ready,
-                            next_in: spec.poll_interval,
-                        }))
+                    // Attempted unconditionally, never `health_delivered
+                    // && …` (fix round 1, MIN-4): a poll's two events are
+                    // independent, and short-circuiting meant one full
+                    // channel lost both while the caller's `dropped`
+                    // counter — and the warning below — knew about one.
+                    let polled_delivered = sink(SchedulerEvent::Polled {
+                        source: spec.name.clone(),
+                        ready,
+                        next_in: spec.poll_interval,
+                    });
+                    Ok(Refused {
+                        health: !health_delivered,
+                        polled: !polled_delivered,
+                    })
                 })
             },
         ));
 
-        let delivered = match outcome {
-            Ok(Ok(delivered)) => delivered,
-            Ok(Err(e)) => sink(SchedulerEvent::Health {
+        let refused = match outcome {
+            Ok(Ok(refused)) => refused,
+            Ok(Err(e)) => Refused::health(!sink(SchedulerEvent::Health {
                 source: spec.name.clone(),
                 worst: Health::Failed {
                     reason: e.to_string(),
                 },
                 detail: format!("discovery failed: {e}"),
-            }),
-            Err(_) => sink(SchedulerEvent::Health {
+            })),
+            Err(_) => Refused::health(!sink(SchedulerEvent::Health {
                 source: spec.name.clone(),
                 worst: Health::Failed {
                     reason: "discovery panicked".into(),
                 },
                 detail: "discovery panicked".into(),
-            }),
+            })),
         };
-        if !delivered {
+        if let Some(what) = refused.what() {
             // One refused event is one dropped diagnostic, not the end of
             // discovery for every source (Phase 4b follow-up, Task 1).
             // Not retried: the health transition the tracker cares about
             // is re-offered on the next report.
             tracing::warn!(
                 target: "geode::ingest",
-                "event channel refused a discovery event for source '{}': dropped, polling continues",
+                "event channel refused {what} for source '{}': dropped, polling continues",
                 spec.name,
             );
         }
@@ -359,6 +398,63 @@ mod tests {
         assert!(
             later.is_some(),
             "the source must be polled again after a refused event"
+        );
+    }
+
+    #[test]
+    fn the_warning_names_which_of_a_polls_events_was_refused() {
+        assert_eq!(Refused::default().what(), None);
+        assert_eq!(
+            Refused {
+                health: true,
+                polled: false
+            }
+            .what(),
+            Some("the health report")
+        );
+        assert_eq!(
+            Refused {
+                health: false,
+                polled: true
+            }
+            .what(),
+            Some("the poll result")
+        );
+        assert_eq!(
+            Refused {
+                health: true,
+                polled: true
+            }
+            .what(),
+            Some("the health report and the poll result")
+        );
+    }
+
+    #[test]
+    fn a_refused_health_does_not_swallow_that_polls_result() {
+        // The two events of one poll are independent (fix round 1,
+        // MIN-4): a refused `Health` used to short-circuit the `Polled`
+        // that follows it, so one full-channel moment lost two events
+        // while `dropped` counted one. The first event to actually
+        // arrive must therefore be THIS poll's `Polled`, not the next
+        // poll's `Health`.
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(20), Duration::from_secs(3600));
+        let (sink, sched_rx, refusals) =
+            refusing_events_sink(|e| matches!(e, SchedulerEvent::Health { .. }));
+        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+
+        let first = sched_rx.recv_timeout(Duration::from_secs(30));
+        sched.shutdown();
+        let first = first.expect("a poll whose Health was refused must still report its result");
+        assert!(
+            matches!(first, SchedulerEvent::Polled { .. }),
+            "expected this poll's own Polled, not the next poll's Health: {first:?}"
+        );
+        assert_eq!(
+            refusals.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one Health was refused"
         );
     }
 
