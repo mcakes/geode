@@ -1078,3 +1078,35 @@ either. The larger win from a real, high-generation-count archive (the
 543 ms case above) is exactly what the summary table exists for, and
 is no longer reachable through this crate's own benches: the compile
 that used to scale with 3000 generations is now a fixed-cost lookup.
+
+## Phase 4c: the config merge is in the keystroke path (`cargo bench -p geode-core --bench config_merge`)
+
+Config dialogs apply a field edit **instantly** (spec §7.1): the edited
+object is written into the in-memory user-layer `LayerDoc`, the whole
+set is re-merged through `Config::from_docs` — the loader's own merge,
+the only one that exists — and the result goes through the same
+`hot_reload::apply_reload` the watcher uses. That puts a full config
+merge inside a keystroke, where PHILOSOPHY's <8 ms pure-UI budget
+applies, so it was measured before the design was accepted rather than
+assumed free.
+
+Fixture: the real demo desk (`examples/demo-config`, the largest config
+this repo ships — a 7.8 KB `datasets.toml` and a 6.8 KB `views.toml`,
+five builtin docs) plus the two user-layer docs a Views edit actually
+writes.
+
+| Bench | time |
+|---|---|
+| `config_from_docs_demo_desk` (merge alone) | **63.0 µs** |
+| `config_all_docs_then_from_docs` (what one keystroke pays) | **63.3 µs** |
+
+**0.8% of the 8 ms budget**, and cloning the documents out of the live
+`Config` is free at this scale — the two numbers are inside each other's
+noise. No debounce is needed on the merge; the 250 ms debounce
+`objectdialog::apply` carries is on the *file write* only, and exists
+because a held key repeats at the OS key-repeat rate (~100 ms on macOS)
+and each repeat is a real edit that would otherwise rewrite the file.
+
+Not measured here: the applier itself (`apply_reload`), which was
+already in the reload path and is unchanged by this design — only its
+input's source moved from disk to memory.

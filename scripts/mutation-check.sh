@@ -3258,30 +3258,164 @@ run_mutation "objectdialog: validation runs against the merged doc, not the draf
   geode-shell \
   validation_sees_the_draft_and_not_the_rest_of_the_config
 
-# Field edits STAGE (spec §3.2). Writing on every keystroke leaves every
-# state assertion green — the draft still holds the change, the row still
-# repaints — while firing the 500 ms mtime watcher mid-edit, so the config
-# reloads a half-finished object and the browse list re-derives underneath
-# the user. Only a test asserting that NOTHING was written before `s` can
-# see it.
-run_mutation "objectdialog: a field edit writes immediately instead of staging" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                revalidate(shell);' \
-  '                revalidate(shell); save_draft(shell, cx);' \
+# ---- Phase 4c: instant config edits (spec §3.2/§7.1)
+#
+# Two entries were REMOVED here rather than re-anchored, because the
+# behaviour they defended is gone rather than moved:
+#
+#   * "a field edit writes immediately instead of staging" — staging is
+#     what this design deletes. Its covering test
+#     (`a_field_edit_stages_and_writes_nothing_until_save`) asserted the
+#     opposite of the requirement and is replaced by
+#     `a_field_edit_applies_instantly_and_the_file_follows`, defended by
+#     the entry below.
+#   * "escape on a dirty draft skips the confirm" — `leave_or_confirm`
+#     and `Confirm::Discard` no longer exist. With every edit applied on
+#     its own keystroke there is no unsaved work for `escape` to
+#     discard, so there is no branch left to break.
+#
+# THE requirement ("changing a config field is INSTANT"), and the one
+# mutation that puts the old design back: apply the change by writing the
+# file and letting the loader read it home. Every assertion about the
+# resulting VALUE stays green — a round trip through disk produces the
+# same merged config in the end — and what silently returns is the half
+# second between the keystroke and the screen, plus a config rebuilt from
+# whatever else happens to be in the user's directory. Only a fixture
+# whose disk DISAGREES with memory can tell the two apart, which is why
+# the covering test plants a decoy `views.toml` the running config has
+# never read.
+run_mutation "objectdialog: an edit round-trips through disk instead of merging in memory" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let mut docs = shell.services.config.all_docs();
+    for ((doc, object), value) in edits {
+        docs = docs_with_object(docs, user_dir, doc, object, value.clone());
+    }
+    let carried = shell.services.config.diagnostics.clone();
+    let mut config = Config::from_docs(docs);' \
+  '    let _ = edits;
+    let carried = shell.services.config.diagnostics.clone();
+    let mut config = Config::load(&geode_core::config::ConfigSources {
+        builtin: shell.services.builtin.clone(),
+        desk: None,
+        user: Some(user_dir.to_path_buf()),
+    });' \
   geode-shell \
-  a_field_edit_stages_and_writes_nothing_until_save
+  an_edit_merges_in_memory_without_reading_disk
 
-# `escape` on a dirty draft asks first. Without the dirty check every
-# escape test still passes — the stage still goes back, the modal still
-# closes on the next one — and the only thing that changes is that a
-# trader's unsaved reordering is gone with one keystroke and nothing on
-# screen ever said so.
-run_mutation "objectdialog: escape on a dirty draft skips the confirm" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        .is_some_and(|draft| draft.is_dirty());' \
-  '        .is_some_and(|_| false);' \
+# Applying stays singular (spec §7.1). Assigning `services.config`
+# directly is the tempting shortcut — the dialog is the thing that
+# changed, and it re-derives from `services.config` on every render, so
+# BOTH stages repaint correctly and every value assertion here stays
+# green. What is skipped is everything else `apply_reload` does: the
+# `ShellEvent::ConfigReloaded` the app bridge turns into the `ViewSpec`s
+# the data thread runs on. The trader hides a column, the dialog agrees
+# it is hidden, and every blotter tile keeps querying the old view.
+run_mutation "objectdialog: an edit assigns the config instead of going through apply_reload" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    shell.apply_reload(config, cx);' \
+  '    shell.services.config = config;' \
   geode-shell \
-  escape_on_a_dirty_draft_confirms_before_discarding
+  an_edit_reaches_the_shells_one_applier
+
+# The empty-table ruling. `views::presentation_table` renders an EMPTY
+# table whenever the trader's presentation matches the view's own doc —
+# which is one keystroke away, every time the last hidden column is
+# unhidden — and writing it produces a bare `[tree]` in
+# `view_presentation.toml`: a table that says nothing, which
+# `ViewPresentationSpec::apply` then reports as a stale entry naming a
+# view. Green against every other assertion, because an empty table
+# merges to the same result as no table at all. Only a test asserting the
+# object is ABSENT can see it.
+run_mutation "objectdialog: an empty object table is written instead of removed" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    if table.is_empty() {
+        return None;
+    }' \
+  '    if false {
+        return None;
+    }' \
+  geode-shell \
+  unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table
+
+# Hazard 1: a failed background write leaves memory ahead of disk. Logging
+# and moving on is what every other persist path in this crate does, and
+# it was right there — those paths write what the user already asked for
+# and nothing on screen depends on the result. Here memory has ALREADY
+# applied the change, so a swallowed failure leaves the trader looking at
+# a value that exists nowhere but this process, with no notice and no way
+# to find out. Every green-path test stays green: the failure only happens
+# when the file cannot be written at all.
+run_mutation "objectdialog: a failed write is logged instead of reverting memory" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            this.update(cx, |shell, cx| revert_failed_write(shell, message, cx))
+                .ok();' \
+  '            eprintln!("[config] warning: {message}");' \
+  geode-shell \
+  a_failed_write_reverts_the_in_memory_change_and_says_so
+
+# The write debounce. Without it every value assertion still passes — the
+# file ends up holding the same final state — and what returns is a write
+# per keystroke: a held `shift+j` reordering a column at the OS key-repeat
+# rate rewrites `view_presentation.toml` ten times a second, each one
+# firing the mtime watcher. Only a test asserting that NOTHING reached
+# disk while the keys were still coming can see it.
+run_mutation "objectdialog: the config write fires per keystroke instead of coalescing" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        cx.background_executor().timer(WRITE_DEBOUNCE).await;' \
+  '' \
+  geode-shell \
+  edits_inside_the_debounce_window_coalesce_into_one_write
+
+# Hazard 2's proof, and the one line it rests on. A user-layer document
+# memory creates for a file that does not exist yet has to carry the same
+# `config_version` stamp `config_write::edit` puts at the top of a file it
+# creates — otherwise the document memory holds and the document the
+# watcher reads back a moment later differ by one key, `apply_reload`'s
+# `changed(..)` answers true, and the self-write reload stops being the
+# no-op this design chose to prove instead of suppress: a `ConfigReloaded`
+# emit and every tile requerying, a beat after a keystroke that had
+# already finished. Invisible to every test that only reads values.
+run_mutation "objectdialog: a user doc created in memory carries no config_version" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    table.insert(
+        "config_version".to_string(),
+        toml::Value::Integer(CONFIG_VERSION),
+    );' \
+  '' \
+  geode-shell \
+  the_watchers_reload_of_our_own_write_changes_nothing
+
+# The one edit that still asks first. Forking is instant and irreversible
+# in the direction that matters — a user-layer copy of a desk view stops
+# receiving the desk's changes — and applying it without the confirm is
+# green against every test that only checks the value landed: it DID
+# land, in the user's own `views.toml`, weeks before anyone notices the
+# desk's new column never arrived.
+run_mutation "objectdialog: a definitional change forks without asking" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if super::apply::would_fork(shell, domain) {' \
+  '    if false {' \
+  geode-shell \
+  a_definitional_change_to_a_desk_view_confirms_before_forking
+
+# `Config::all_docs` is the other half of the loader split: it is what
+# hands `from_docs` the documents to merge, and dropping the layers below
+# the user's is the plausible "we only changed the user layer" shortcut.
+# The merged result is still a valid config and still contains the edit,
+# so a value assertion passes; what vanishes is every desk and builtin
+# document — the exact shape of the shipped reload bug this codebase
+# already paid for once, one function further in.
+run_mutation "config: all_docs hands the merge the user layer alone" \
+  crates/geode-core/src/config/mod.rs \
+  '        self.layered.values().flatten().cloned().collect()' \
+  '        self.layered
+            .values()
+            .flatten()
+            .filter(|d| d.layer == Layer::User)
+            .cloned()
+            .collect()' \
+  geode-core \
+  from_docs_merges_exactly_as_load_does
 
 # The edit stage is always normal mode. `enter` opens an object from
 # FILTER mode too, and a stage left in `Filter` sends the next `escape`

@@ -43,15 +43,24 @@
 //! [`EscapeStep::PreviousStage`] rather than silently spending itself on
 //! `ClearQuery`.
 //!
-//! ## Nothing here applies anything
+//! ## Applying is instant; it is still the watcher's applier
 //!
-//! A save writes files on the background executor and stops. The 500 ms
-//! mtime watcher reloads, and both stages — deriving fresh from `Config` —
-//! update themselves (spec §7.1). That is why a dialog cannot disagree
-//! with the file it wrote, and why every notice a write produces is in the
-//! unconfirmed tense: "saving", not "saved".
+//! There is no save key. A field edit moves memory on the keystroke —
+//! [`super::apply::commit_edit`] merges the change through the loader's
+//! own `Config::from_docs` and hands the result to `hot_reload::
+//! apply_reload`, the same applier the 500 ms watcher uses — and queues
+//! the file write on a debounce behind it (spec §7.1, and
+//! [`super::apply`]'s module doc for the merge measurement, the
+//! self-write reasoning and the failed-write revert). Both stages still
+//! derive fresh from `Config`, so what they show after the keystroke is
+//! the merged truth rather than the draft's opinion of it.
+//!
+//! One edit still asks first, and only one: a change that would **fork**
+//! the object into the user layer (spec §4.1), because a fork freezes the
+//! desk's copy out. That is [`Confirm::Fork`], and it is why the action
+//! bar's remaining verbs are exactly the destructive and structural
+//! ones.
 
-use std::path::PathBuf;
 use std::rc::Rc;
 
 use geode_core::config::Layer;
@@ -440,8 +449,8 @@ fn enter_edit_stage(
 ///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
 ///    bar rather than adding a row, so nothing above it moves;
 /// 2. `escape` walks the ladder, whose `PreviousStage` rung this stage
-///    exists to reach — going back a stage, or arming the discard confirm
-///    when the draft is dirty;
+///    exists to reach — going back a stage, with nothing to discard
+///    because every edit already applied;
 /// 3. everything else goes through [`dialogmode::normal_command`], and a
 ///    key it does not claim is swallowed, exactly as in browse.
 ///
@@ -474,7 +483,7 @@ fn handle_edit_key(
             disarm_confirm(shell);
             run_confirmed(shell, confirm, window, cx);
         } else if ks.key == "escape" || (bare && ks.key == "n") {
-            disarm_confirm(shell);
+            cancel_confirm(shell);
         }
         // Anything else is claimed and dropped: while a destructive
         // question is on screen, a stray letter must not act on the
@@ -492,7 +501,12 @@ fn handle_edit_key(
             )
         });
         if step == Some(EscapeStep::PreviousStage) {
-            leave_or_confirm(shell, window, cx);
+            // Straight back, with no discard question: there is nothing
+            // unsaved to discard. Every field edit applied on the
+            // keystroke that made it, and a fork the user has not
+            // confirmed was taken back off the draft when they declined
+            // it, so leaving the stage abandons exactly nothing.
+            leave_edit(shell, window, cx);
             return true;
         }
         // `LeaveFilter` and `ClearQuery` are both unreachable here, and
@@ -524,6 +538,7 @@ fn handle_edit_key(
             let changed = draft_mut(shell).is_some_and(|draft| draft.toggle_selected());
             if changed {
                 revalidate(shell);
+                commit_or_confirm(shell, cx);
             } else {
                 set_notice(shell, "nothing on this row changes with space".to_string());
             }
@@ -538,11 +553,11 @@ fn handle_edit_key(
                     .map(|draft| draft.selected)
                     .unwrap_or(0);
                 shell.object_dialog_scroll.scroll_to_item(selected);
+                commit_or_confirm(shell, cx);
             } else {
                 set_notice(shell, "that is as far as this row goes".to_string());
             }
         }
-        NormalCommand::Verb('s') => save_draft(shell, cx),
         NormalCommand::Verb('d') => arm_delete(shell),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::EnterFilter => {
@@ -560,7 +575,7 @@ fn handle_edit_key(
             set_notice(shell, "press space to change the selected row".to_string());
         }
         // A letter this stage has no verb for. Named rather than
-        // dropped: `s`, `d` and `r` have just taught the user that
+        // dropped: `d` and `r` have just taught the user that
         // letters act here, so a silent `x` reads as the dialog having
         // stopped responding — and it is the one branch where the key
         // that did nothing is not otherwise on screen to explain itself.
@@ -593,6 +608,61 @@ fn disarm_confirm(shell: &mut ShellView) {
     }
 }
 
+/// Say no to whatever is armed — the one door for `escape`, `n` and the
+/// Cancel button, because a declined [`Confirm::Fork`] has a second half:
+/// the keystroke that armed it already changed the draft, and leaving
+/// that showing would be the one value on screen that is neither applied
+/// nor persisted.
+fn cancel_confirm(shell: &mut ShellView) {
+    let armed = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .and_then(|draft| draft.confirm);
+    disarm_confirm(shell);
+    if armed == Some(Confirm::Fork)
+        && let Some(draft) = draft_mut(shell)
+    {
+        draft.revert_to_baseline();
+    }
+}
+
+/// Apply the change the keystroke just made — **now** — or ask first if
+/// applying it would fork the object.
+///
+/// The one door every field edit leaves through, so there is one answer
+/// to "does this apply instantly?" and one place the fork question is
+/// asked. [`super::apply::commit_edit`] does the applying: the loader's
+/// merge into memory, then the debounced file write behind it.
+///
+/// The fork check runs on the draft *after* the keystroke has changed it
+/// (that is what makes `writes_by_destination` able to see a `Doc`
+/// change at all), so declining the confirm has to put the field back —
+/// `handle_edit_key`'s cancel branch does, from the baseline.
+fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) else {
+        return;
+    };
+    let dirty = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.is_dirty());
+    if !dirty {
+        return;
+    }
+    if super::apply::would_fork(shell, domain) {
+        if let Some(draft) = draft_mut(shell) {
+            draft.confirm = Some(Confirm::Fork);
+        }
+        cx.notify();
+        return;
+    }
+    if let Some(notice) = super::apply::commit_edit(shell, cx) {
+        set_notice(shell, notice);
+    }
+}
+
 /// Re-run [`Domain::validate`] over the draft as it now stands.
 fn revalidate(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
@@ -608,29 +678,6 @@ fn revalidate(shell: &mut ShellView) {
     let diagnostics = domain.validate(draft, &shell.services.config);
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
-    }
-}
-
-/// `escape` on the edit stage: back to the browse list, or — on a dirty
-/// draft — the discard confirm first.
-///
-/// Abandoning unsaved work has to be a deliberate second keystroke (spec
-/// §3.2). Without the dirty check, one `escape` would silently throw away
-/// every change made since the object was opened, and nothing on screen
-/// would ever have said so.
-fn leave_or_confirm(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    let dirty = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .is_some_and(|draft| draft.is_dirty());
-    if dirty {
-        if let Some(draft) = draft_mut(shell) {
-            draft.confirm = Some(Confirm::Discard);
-        }
-        cx.notify();
-    } else {
-        leave_edit(shell, window, cx);
     }
 }
 
@@ -669,84 +716,6 @@ fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
         _ => return None,
     };
     derive_rows(shell).into_iter().find(|row| row.name == name)
-}
-
-/// `s`: write the draft's changes, one `config_write::edit` per
-/// destination, on the background executor.
-///
-/// Nothing is applied here. The files change, the 500 ms watcher reloads,
-/// and both stages re-derive (spec §7.1) — so the notice is in the
-/// unconfirmed tense the keybinding dialog settled on: the write has been
-/// *dispatched*, and only stderr will hear if it fails.
-///
-/// Grouping by destination is what keeps a presentation-only edit out of
-/// `views.toml` entirely: a clean field contributes no group, and an empty
-/// group means that file is never opened.
-fn save_draft(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let Some(state) = shell.object_dialog.as_ref() else {
-        return;
-    };
-    let domain = state.domain;
-    let Some(draft) = state.draft.as_ref() else {
-        return;
-    };
-    let groups = draft.writes_by_destination();
-    if groups.is_empty() {
-        set_notice(shell, "nothing has changed".to_string());
-        return;
-    }
-    let name = draft.name.clone();
-    let writes: Vec<(&'static str, toml_edit::Table)> = groups
-        .keys()
-        .map(|dest| (dest.doc(domain), domain.to_table(draft, *dest)))
-        .collect();
-    let files: Vec<String> = writes
-        .iter()
-        .map(|(doc, _)| format!("{doc}.toml"))
-        .collect();
-
-    let Some(user_dir) = shell.user_dir.clone() else {
-        // The contract every persist path in this crate shares: no
-        // writable user config dir means nothing is attempted, and the
-        // user is told rather than left believing it saved.
-        set_notice(
-            shell,
-            "no writable user config directory — nothing was saved".to_string(),
-        );
-        return;
-    };
-    spawn_writes(user_dir, name.clone(), writes, cx);
-    if let Some(draft) = draft_mut(shell) {
-        draft.mark_saved();
-    }
-    set_notice(shell, format!("saving {name} to {}…", files.join(" and ")));
-}
-
-/// Run the staged writes off the render thread — `ShellView::persist_theme`'s
-/// contract exactly: cheap staging on the UI thread, the file I/O in a
-/// detached background task, a failure logged as a warning from inside it
-/// (PHILOSOPHY: nothing may stall the render thread).
-fn spawn_writes(
-    user_dir: PathBuf,
-    name: String,
-    writes: Vec<(&'static str, toml_edit::Table)>,
-    cx: &mut Context<ShellView>,
-) {
-    cx.background_executor()
-        .spawn(async move {
-            for (doc, table) in writes {
-                // `edit`, never `write`: a read-modify-write through
-                // `toml_edit` keeps the user's comments and every other
-                // object in the file, and refuses a file it cannot parse
-                // instead of replacing it.
-                if let Err(e) = config_write::edit(&user_dir, Layer::User, doc, |document| {
-                    super::set_object(document, &name, table);
-                }) {
-                    eprintln!("[config] warning: {e}");
-                }
-            }
-        })
-        .detach();
 }
 
 /// Remove `name` from each of `docs` in the user layer, off the render
@@ -880,7 +849,14 @@ fn run_confirmed(
         None => return,
     };
     match confirm {
-        Confirm::Discard => leave_edit(shell, window, cx),
+        // The fork was the point of the question; answering yes applies
+        // exactly the edit that armed it, down the one commit path.
+        Confirm::Fork => {
+            if let Some(notice) = super::apply::commit_edit(shell, cx) {
+                set_notice(shell, notice);
+            }
+            cx.notify();
+        }
         Confirm::Delete | Confirm::Revert => {
             let docs = [
                 Destination::Doc.doc(domain),
@@ -918,39 +894,26 @@ struct Action {
 /// The actions available on the object being edited, in the order they are
 /// painted.
 ///
-/// `Save changes` appears only while the draft is dirty, and on an object
-/// the user's layer does not yet define it says `Copy to user layer`
-/// instead — because that is what saving a **definitional** change to a
-/// desk view does: it forks the view. A presentation-only change to that
-/// same desk view still reads `Save changes`, and truthfully so: it writes
-/// `view_presentation.toml` and forks nothing. Spec §3.2 sketched the copy
-/// verb as *replacing* save on a non-user object; that would have made a
-/// desk view's presentation unsavable, which is the one thing §4.1 exists
-/// to make cheap, so the label varies and the verb does not.
+/// **No save.** There is nothing to save: a field edit applied on the
+/// keystroke that made it. What is left is exactly the verbs that are
+/// destructive or structural — `d` deletes the user's copy, `r` throws a
+/// personal override away — plus, as a confirm rather than a standing
+/// button, `Copy to user layer` ([`Confirm::Fork`]), which the first
+/// definitional edit to a desk object arms.
+///
+/// An earlier build put `Save changes` here whenever the draft was dirty,
+/// relabelled `Copy to user layer` when saving would fork. The fork
+/// warning survives; the save does not, because "dirty" is no longer a
+/// state this dialog can be in.
 fn actions(shell: &ShellView) -> Vec<Action> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();
     };
-    let Some(draft) = state.draft.as_ref() else {
+    if state.draft.is_none() {
         return Vec::new();
-    };
+    }
     let row = editing_row(shell);
     let mut out = Vec::new();
-    if draft.is_dirty() {
-        let forks = draft
-            .writes_by_destination()
-            .contains_key(&Destination::Doc)
-            && row.as_ref().is_some_and(|r| r.layer != Layer::User);
-        out.push(Action {
-            key: "s",
-            label: if forks {
-                "Copy to user layer".to_string()
-            } else {
-                "Save changes".to_string()
-            },
-            destructive: false,
-        });
-    }
     if row.as_ref().is_some_and(|r| r.layer == Layer::User) {
         out.push(Action {
             key: "d",
@@ -1539,9 +1502,9 @@ fn confirm_row(
                 .small()
                 .danger()
                 .label(match confirm {
-                    Confirm::Discard => "Discard",
                     Confirm::Delete => "Delete",
                     Confirm::Revert => "Revert",
+                    Confirm::Fork => "Copy to user layer",
                 })
                 .on_click(move |_event, window, cx| {
                     go_ahead.update(cx, |shell, cx| {
@@ -1564,7 +1527,7 @@ fn confirm_row(
                 .label("Cancel")
                 .on_click(move |_event, _window, cx| {
                     leave_it.update(cx, |shell, cx| {
-                        disarm_confirm(shell);
+                        cancel_confirm(shell);
                         cx.notify();
                     });
                 }),
@@ -1581,7 +1544,6 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
         cx.notify();
     }
     match key {
-        "s" => save_draft(shell, cx),
         "d" => arm_delete(shell),
         "r" => arm_revert(shell),
         _ => {}

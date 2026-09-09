@@ -48,6 +48,7 @@
 //! source of truth to derive from — it is the object as the user has it
 //! so far, which is on disk nowhere until they save.
 
+pub mod apply;
 pub mod render;
 mod views;
 
@@ -389,15 +390,26 @@ pub enum EditRow {
     Item { field: usize, item: usize },
 }
 
-/// What a destructive keystroke is waiting to have confirmed. Each of the
-/// three is unrecoverable — discarding an edit, deleting the user's copy
-/// of an object, or throwing away a personal override — so each takes a
-/// second, deliberate keystroke rather than happening under one letter.
+/// What a keystroke is waiting to have confirmed. Each of the three is
+/// unrecoverable in its own direction — deleting the user's copy of an
+/// object, throwing away a personal override, or forking an object out of
+/// the layer that maintains it — so each takes a second, deliberate
+/// keystroke rather than happening under one letter.
+///
+/// There is no `Discard`. It existed to guard the staged-draft model's
+/// unsaved work; with every field edit applying on the keystroke that
+/// makes it, leaving the stage abandons nothing and a confirm there would
+/// be a question about a state that cannot arise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
-    Discard,
     Delete,
     Revert,
+    /// A definitional change to an object the user's layer does not own.
+    /// Applying it copies the object into the user layer — which
+    /// **freezes** it: the desk's later changes stop reaching this trader
+    /// (spec §4.1). The one edit in this dialog that asks before acting,
+    /// and the reason it asks is that the cost lands weeks later.
+    Fork,
 }
 
 impl Confirm {
@@ -406,23 +418,32 @@ impl Confirm {
     /// gpui-component's design guide's.
     pub fn prompt(self, name: &str) -> String {
         match self {
-            Confirm::Discard => "Discard unsaved changes?".to_string(),
             Confirm::Delete => format!("Delete '{name}' from your config?"),
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
+            Confirm::Fork => {
+                format!("Copy '{name}' to your config? It stops following the desk.")
+            }
         }
     }
 }
 
-/// One object being edited, unsaved.
+/// One object being edited.
 ///
-/// The only thing this dialog stores rather than derives (see this
-/// module's own "Rows are derived, never cached"), because it is the only
-/// thing with no source of truth to derive from: field edits **stage
-/// here and never write** (spec §3.2). That is the one place these
-/// dialogs deliberately differ from `settings_view`, where a step applies
-/// instantly — a setting is one scalar with a live preview, while an
-/// object is coherent only once, and a write per keystroke would fire the
-/// 500 ms watcher mid-edit and reload a half-finished object.
+/// The edit **buffer**, not a staging area: a keystroke changes a field
+/// here and [`apply::commit_edit`] immediately merges that change into
+/// the live `Config` and queues its file write (spec §7.1). The buffer
+/// still exists because the cursor, the confirm and the row structure
+/// live on it, and because it is what the difference against
+/// [`Draft::baseline`] is taken from — that difference is precisely
+/// "what this keystroke changed", which is what decides the files a
+/// write touches.
+///
+/// An earlier build staged here and wrote only on `s`, reasoning that a
+/// write per keystroke would fire the 500 ms watcher mid-edit and reload
+/// a half-finished object. What actually removes that hazard is applying
+/// in memory rather than through the disk: the watcher's reload of our
+/// own write is a no-op (see [`apply`]), and nothing a trader sees waits
+/// on a file.
 ///
 /// There is no `is_new` flag, which spec §3.1 sketches: nothing creates
 /// an object in this task (`n` is Part 2's), so a flag nothing can set
@@ -438,10 +459,12 @@ pub struct Draft {
     /// Rendering a Doc override from the fields alone would silently
     /// delete all of it.
     pub source: toml::Table,
-    /// The fields as they were when the draft was built (or last saved).
-    /// Dirtiness — and therefore which files a save touches — is this
+    /// The fields as they were when the draft was built, or as the last
+    /// applied edit left them. Which files an edit touches is this
     /// comparison and nothing else, so a keystroke that puts a value back
-    /// where it started leaves the draft clean and writes nothing.
+    /// where it started changes nothing and writes nothing — and a
+    /// declined [`Confirm::Fork`] restores from here
+    /// ([`Draft::revert_to_baseline`]).
     baseline: Vec<Field>,
     /// Cursor over [`Draft::rows`]. The edit stage's only cursor;
     /// `ObjectDialogState::selected` is the browse stage's. One per
@@ -485,11 +508,23 @@ impl Draft {
         self.rows().get(self.selected).copied()
     }
 
-    /// Has anything actually changed? Compared against the baseline rather
-    /// than tracked with a flag, so putting a value back where it started
-    /// makes the draft clean again and a save writes nothing.
+    /// Has anything changed since the last applied edit? Compared against
+    /// the baseline rather than tracked with a flag, so putting a value
+    /// back where it started changes nothing and writes nothing.
+    ///
+    /// Between keystrokes this is always `false` — [`apply::commit_edit`]
+    /// moves the baseline as it applies. It is `true` only *within* the
+    /// keystroke that changed a field, and while a [`Confirm::Fork`] is
+    /// waiting on its answer.
     pub fn is_dirty(&self) -> bool {
         self.fields != self.baseline
+    }
+
+    /// Put every field back to the last applied state — what a declined
+    /// [`Confirm::Fork`] leaves behind, so the screen never shows a value
+    /// that is neither applied nor persisted.
+    pub fn revert_to_baseline(&mut self) {
+        self.fields = self.baseline.clone();
     }
 
     /// The items of the ordered-list field named `key`.
@@ -622,13 +657,15 @@ impl Draft {
         out
     }
 
-    /// Accept the draft as written: the current fields become the
-    /// baseline, so the draft reads clean and `s` pressed twice does not
-    /// write twice.
+    /// Accept the draft as applied: the current fields become the
+    /// baseline, so the next keystroke's difference is that keystroke's
+    /// alone.
     ///
-    /// Called when the write is *dispatched*, not when it lands — the
-    /// write is on the background executor and only stderr hears about a
-    /// failure, the same contract `keybindings_view`'s verbs keep.
+    /// Called when the change reaches **memory**, not when the file
+    /// lands: memory is what the trader is looking at. A failed write
+    /// puts both back together (`apply::revert_failed_write` rebuilds the
+    /// draft from the reverted config), which is the only path that can
+    /// move the baseline backwards.
     pub fn mark_saved(&mut self) {
         self.baseline = self.fields.clone();
     }
@@ -1734,9 +1771,14 @@ mod tests {
     /// asking "are you sure".
     #[test]
     fn a_confirm_names_the_object_and_the_consequence() {
-        assert!(Confirm::Discard.prompt("tree").contains("Discard"));
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
+        // The fork prompt has to name the consequence that lands weeks
+        // later, not the act: "copy this" sounds free, and the cost is
+        // that the desk's next column never arrives.
+        let fork = Confirm::Fork.prompt("tree");
+        assert!(fork.contains("tree"), "{fork}");
+        assert!(fork.contains("desk"), "{fork}");
     }
     /// Rows are ordered by name, not by the order three separate files
     /// happen to list them in.

@@ -325,6 +325,38 @@ fn open_tree_edit_stage(
     (shell, cx)
 }
 
+/// Let the debounced config write reach disk.
+///
+/// `objectdialog::apply` applies an edit to memory on the keystroke and
+/// queues the file behind a [`apply::WRITE_DEBOUNCE`] timer; a test that
+/// asserts on FILES has to close that window. The margin is deliberate
+/// and small: the watcher's own poll is 500 ms, so one flush never
+/// advances the clock far enough to make the reload fire by accident —
+/// the tests that want the reload run it explicitly.
+fn flush_config_write(cx: &mut gpui::VisualTestContext) {
+    cx.executor()
+        .advance_clock(objectdialog::apply::WRITE_DEBOUNCE + std::time::Duration::from_millis(10));
+    cx.run_until_parked();
+}
+
+/// The merged `view_presentation` table for `object`, as the live config
+/// holds it — the in-memory truth an instant edit has to have moved
+/// before any file exists.
+fn presentation_of(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+    object: &str,
+) -> Option<toml::Value> {
+    shell.read_with(cx, |shell, _| {
+        shell
+            .services
+            .config
+            .doc("view_presentation")
+            .and_then(|doc| doc.value.get(object))
+            .cloned()
+    })
+}
+
 fn edit_draft<T>(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
@@ -380,15 +412,16 @@ fn enter_opens_the_edit_stage_and_paints_every_column(cx: &mut gpui::TestAppCont
 /// configured"), the edit appeared to do nothing, and only a restart
 /// brought the views back.
 ///
-/// This drives the save through real keys and then runs the two steps the
-/// watcher schedules (`reload::load_config` off the live `services.
-/// builtin`, then `apply_reload`) — its timer cannot be advanced from a
-/// gpui test, see `ShellView::apply_reload`'s doc comment.
+/// This drives the edit through real keys, lets the debounced write land,
+/// and then runs the two steps the watcher schedules
+/// (`reload::load_config` off the live `services.builtin`, then
+/// `apply_reload`) — its timer cannot be advanced from a gpui test, see
+/// `ShellView::apply_reload`'s doc comment.
 ///
 /// It also pins the written file across the reload: `hidden` is what the
 /// trader asked for, and a reload must not be able to launder it away.
 #[gpui::test]
-fn the_reload_a_save_triggers_leaves_the_views_and_the_hidden_column_intact(
+fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
     cx: &mut gpui::TestAppContext,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -396,8 +429,7 @@ fn the_reload_a_save_triggers_leaves_the_views_and_the_hidden_column_intact(
 
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    cx.simulate_keystrokes("s");
-    cx.run_until_parked();
+    flush_config_write(&mut cx);
 
     let builtin = shell.read_with(&cx, |shell, _| shell.services.builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
@@ -421,8 +453,60 @@ fn the_reload_a_save_triggers_leaves_the_views_and_the_hidden_column_intact(
         .expect("view_presentation.toml should have been written");
     assert!(
         presentation.contains("hidden = [\"book\"]"),
-        "the hidden column must survive the reload the save triggered:\n{presentation}"
+        "the hidden column must survive the reload the edit triggered:\n{presentation}"
     );
+}
+
+/// **Hazard 2, decided by proof rather than by suppression.** The 500 ms
+/// watcher WILL see the file this dialog just wrote. That reload must not
+/// fight the edit — and it does not, because it produces documents
+/// identical to the ones memory already holds, so every `changed(..)`
+/// predicate in `apply_reload` answers false and nothing is rebuilt,
+/// re-emitted or closed.
+///
+/// This asserts the identity the proof rests on: the layered documents
+/// before the self-triggered reload and after it are the same documents,
+/// field for field — including the `file` path and the `config_version`
+/// stamp of a user-layer document memory created without ever reading it
+/// back. Get either of those wrong and the reload silently becomes a
+/// real one: a `ConfigReloaded` emit, every tile requerying, a beat after
+/// a keystroke that had already finished.
+#[gpui::test]
+fn the_watchers_reload_of_our_own_write_changes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    let before = layered_fingerprint(&shell, &cx);
+    let builtin = shell.read_with(&cx, |shell, _| shell.services.builtin.clone());
+    let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
+    let after = layered_fingerprint(&shell, &cx);
+
+    assert_eq!(
+        before, after,
+        "the reload our own write triggers has to be a no-op — if these differ, \
+         `apply_reload` sees a change and rebuilds the world a beat after the keystroke"
+    );
+}
+
+/// Every layered document of the two docs a Views edit can touch, as the
+/// tuple `shell::docs_equal` compares — the thing that has to be
+/// identical across a self-triggered reload.
+fn layered_fingerprint(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> Vec<(Layer, String, std::path::PathBuf, toml::Table)> {
+    shell.read_with(cx, |shell, _| {
+        ["views", "view_presentation"]
+            .into_iter()
+            .flat_map(|name| shell.services.config.layered_docs(name))
+            .map(|d| (d.layer, d.name.clone(), d.file.clone(), d.table.clone()))
+            .collect()
+    })
 }
 
 /// **The assertion this whole task exists for.** Hiding a column on a
@@ -443,8 +527,7 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
         "space hides the column under the cursor"
     );
 
-    cx.simulate_keystrokes("s");
-    cx.run_until_parked();
+    flush_config_write(&mut cx);
 
     let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("view_presentation.toml should have been written");
@@ -458,46 +541,316 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
          views.toml — a forked view is frozen, and the desk's next column \
          would never reach this trader"
     );
-    // And the dialog says so in the unconfirmed tense: the write is on the
-    // background executor and the watcher has not reloaded yet.
-    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
-    assert!(
-        notice.is_some_and(|n| n.contains("saving")),
-        "the save has to acknowledge itself without claiming it landed"
-    );
+    // And there is nothing to announce: the change was applied on the
+    // keystroke, so a notice would be reporting on something the screen
+    // already shows.
+    assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
 }
 
-/// A field edit **stages** and writes nothing (spec §3.2). Writing on
-/// every keystroke would fire the 500 ms watcher mid-edit and reload a
-/// half-finished object.
+/// **The requirement, in one test.** Changing a config field is INSTANT:
+/// the keystroke moves the live `Config`, with no save key, no disk read
+/// and no file yet — and the file follows on its own, in the background,
+/// a debounce later.
+///
+/// The first build of this dialog staged the change in a draft and wrote
+/// only on `s`, so the value a trader had just changed did not exist
+/// anywhere but the draft until they pressed another key and the watcher
+/// noticed the file half a second after that.
 #[gpui::test]
-fn a_field_edit_stages_and_writes_nothing_until_save(cx: &mut gpui::TestAppContext) {
+fn a_field_edit_applies_instantly_and_the_file_follows(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
 
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    assert!(
-        edit_draft(&shell, &cx, |d| d.is_dirty()),
-        "the change is staged in the draft"
+
+    // Memory, on the keystroke.
+    let applied = presentation_of(&shell, &cx, "tree")
+        .expect("the edit has to be in the live config immediately");
+    assert_eq!(
+        applied
+            .get("hidden")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(1),
+        "hiding a column must reach the merged config on the keystroke, got {applied:?}"
     );
-    let written: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.file_name())
-        .collect();
+    // And there is no save row to press, because there is nothing to save.
+    assert!(cx.debug_bounds("objectdialog-action-s").is_none());
+
+    // Disk, a debounce later — and not before.
     assert!(
-        written.is_empty(),
-        "a field edit must write nothing at all, found {written:?}"
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "the write is debounced: a keystroke must not touch the file"
     );
-    // The bar now offers the save it did not perform.
-    assert!(cx.debug_bounds("objectdialog-action-s").is_some());
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("the debounced write has to land on its own");
+    assert!(text.contains("hidden = [\"book\"]"), "{text}");
 }
 
-/// `escape` on a dirty draft asks first. Abandoning unsaved work has to be
-/// a deliberate second keystroke, not a keystroke that silently discards.
+/// **Applying stays singular.** The edit's `Config` reaches the screen
+/// through `hot_reload::apply_reload` — the one applier the 500 ms
+/// watcher uses — and not through a second path of the dialog's own.
+///
+/// `ShellEvent::ConfigReloaded` is what proves it, and it is the reason
+/// this matters rather than a tidiness argument: the bridge turns that
+/// event into the `ViewSpec`s the data thread runs on
+/// (`geode_core::config::load_views`). An edit that assigned
+/// `services.config` directly would repaint this dialog perfectly and
+/// leave every blotter tile querying the view the trader just changed.
 #[gpui::test]
-fn escape_on_a_dirty_draft_confirms_before_discarding(cx: &mut gpui::TestAppContext) {
+fn an_edit_reaches_the_shells_one_applier(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    let fired = std::rc::Rc::new(std::cell::RefCell::new(0usize));
+    let f = fired.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
+            if matches!(event, ShellEvent::ConfigReloaded) {
+                *f.borrow_mut() += 1;
+            }
+        })
+        .detach();
+    });
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+
+    assert_eq!(
+        *fired.borrow(),
+        1,
+        "hiding a column changes the ViewSpecs every tile runs on — the edit \
+         has to go through the applier that tells the rest of the app so"
+    );
+}
+
+/// **The edit merges in memory and never reads disk.** Proved by putting
+/// a decoy `views.toml` in the user directory that the running config has
+/// never read: if the edit path went back to the loader's disk half, the
+/// decoy would merge in and `tree` would suddenly select `decoy_dataset`.
+///
+/// This is the whole shape of the design — "if I change a value I have to
+/// write to disk, read from disk and save to memory instead of just
+/// moving the memory directly?" — and it is invisible to every other
+/// assertion here, because a round trip through disk produces the same
+/// value in the end. Only a disk that disagrees with memory can tell them
+/// apart.
+#[gpui::test]
+fn an_edit_merges_in_memory_without_reading_disk(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    std::fs::write(
+        dir.path().join("views.toml"),
+        "config_version = 1\n[tree]\ndataset = \"decoy_dataset\"\n",
+    )
+    .unwrap();
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+
+    let dataset = shell.read_with(&cx, |shell, _| {
+        shell
+            .services
+            .config
+            .get("views", "tree.dataset")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+    assert_eq!(
+        dataset.as_deref(),
+        Some("risk_snapshot"),
+        "the edit re-read the user directory instead of merging the documents \
+         it was already holding — a file nothing had loaded became live"
+    );
+    // The edit itself still applied, through the one merge.
+    assert!(
+        presentation_of(&shell, &cx, "tree").is_some(),
+        "and the change the keystroke made is in the merged config"
+    );
+}
+
+/// **Hazard 1.** A background write that fails leaves memory ahead of
+/// disk — a trader looking at a value that is not persisted, with nothing
+/// on screen saying so. The in-memory change reverts, and the notice says
+/// why.
+///
+/// The failure is the real one this write door produces: an existing file
+/// that does not parse is refused *untouched* (`config_write::edit` —
+/// a user's hand-edited file, however broken, is theirs).
+#[gpui::test]
+fn a_failed_write_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // Unparseable, and never loaded by this shell — so memory applies the
+    // edit happily and only the write can discover the problem.
+    std::fs::write(dir.path().join("view_presentation.toml"), "[tree\nhidden =").unwrap();
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(
+        presentation_of(&shell, &cx, "tree").is_some(),
+        "the edit applies to memory first — that is the whole design"
+    );
+
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        presentation_of(&shell, &cx, "tree"),
+        None,
+        "a failed write has to take the in-memory change back out, or the \
+         trader is looking at a value that is not persisted anywhere"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
+            .included),
+        "and the row has to paint the reverted value, not the refused one"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("reverted")),
+        "and it has to say so rather than fail silently, got {notice:?}"
+    );
+    // The user's broken file is still their broken file.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap(),
+        "[tree\nhidden =",
+    );
+}
+
+/// **The empty-table ruling.** A user's `view_presentation.toml` was found
+/// holding a bare `[tree]` — a table that says nothing, which
+/// `ViewPresentationSpec::apply` then warns about as a stale entry.
+///
+/// Under the staged model that took a save whose draft excluded nothing.
+/// Under this one it is one keystroke: `views::presentation_table`
+/// renders EMPTY whenever the trader's presentation matches the view's
+/// own doc, so hiding a column and unhiding it produces exactly that
+/// table — every time, instantly. So an empty rendering is written as an
+/// **absence**: the object is removed from the user's document rather
+/// than written as a table with nothing in it, in memory and on disk
+/// alike.
+#[gpui::test]
+fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert!(presentation_of(&shell, &cx, "tree").is_some());
+
+    // Back where it started: nothing of the trader's is left to record.
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        presentation_of(&shell, &cx, "tree"),
+        None,
+        "an empty presentation is an absence in memory, not an empty table"
+    );
+
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(
+        !text.contains("[tree]"),
+        "and an absence on disk too — a bare `[tree]` is the artefact this \
+         ruling exists to make unwritable:\n{text}"
+    );
+}
+
+/// A held key must not thrash the file. Three edits inside the debounce
+/// window touch disk zero times; the window closing writes the final
+/// state once.
+#[gpui::test]
+fn edits_inside_the_debounce_window_coalesce_into_one_write(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    // Hide `book`, hide `npv`, unhide `book` — three applied edits.
+    cx.simulate_keystrokes("space j space k space");
+    cx.run_until_parked();
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "not one of them may have reached the file yet"
+    );
+
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("the coalesced write has to land");
+    assert!(
+        text.contains("hidden = [\"npv\"]"),
+        "and it has to be the FINAL state, not the first edit of the run:\n{text}"
+    );
+    // Memory and the file agree, which is the only thing a coalesced
+    // write is allowed to change about the result.
+    let applied = presentation_of(&shell, &cx, "tree").expect("still personalised");
+    assert_eq!(
+        applied
+            .get("hidden")
+            .and_then(|v| v.as_array())
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+/// A **definitional** change to an object the user's layer does not own
+/// forks it into the user layer, and a fork freezes: the desk's next
+/// column never reaches this trader (spec §4.1). It is the one edit that
+/// still asks before acting — and declining takes the value back off the
+/// screen, because a painted value that is neither applied nor persisted
+/// is precisely what instant editing must never produce.
+#[gpui::test]
+fn a_definitional_change_to_a_desk_view_confirms_before_forking(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A second dataset, so the `Dataset` choice has somewhere to step to.
+    let services = desk_view_services(&[(
+        "datasets",
+        "[other_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    // The cursor opens on `Dataset`, the one `Doc`-destined field.
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "forking a desk view has to ask first"
+    );
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "and nothing may be applied or written while it asks"
+    );
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
+        Some("risk_snapshot".to_string()),
+        "declining puts the field back — the screen may not keep a value \
+         that was neither applied nor persisted"
+    );
+
+    cx.simulate_keystrokes("space enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("views.toml"))
+        .expect("confirming forks the view into the user layer");
+    assert!(text.contains("other_snapshot"), "{text}");
+}
+
+/// `escape` on the edit stage goes straight back, because there is
+/// nothing unsaved to discard. The staged model asked first — it had to,
+/// since one `escape` would have thrown away every change since the
+/// object was opened. With every edit applied on its own keystroke, that
+/// question is about a state that cannot arise, and asking it anyway
+/// would teach a trader that their changes might not have landed.
+#[gpui::test]
+fn escape_leaves_the_edit_stage_with_nothing_to_discard(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
     cx.simulate_keystrokes("space");
@@ -506,41 +859,22 @@ fn escape_on_a_dirty_draft_confirms_before_discarding(cx: &mut gpui::TestAppCont
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("objectdialog-confirm").is_some(),
-        "a dirty draft asks before it is thrown away"
-    );
-    assert!(
-        matches!(
-            dialog_state(&shell, &cx, |s| s.stage.clone()),
-            objectdialog::Stage::Edit { .. }
-        ),
-        "and stays in the edit stage while it asks"
-    );
-    // The action bar is REPLACED, not joined — nothing above it moved.
-    assert!(cx.debug_bounds("objectdialog-action-s").is_none());
-
-    cx.simulate_keystrokes("n");
-    cx.run_until_parked();
-    assert!(
         cx.debug_bounds("objectdialog-confirm").is_none(),
-        "declining leaves the draft alone"
+        "there is nothing to confirm: the edit already applied"
     );
-    assert!(
-        edit_draft(&shell, &cx, |d| d.is_dirty()),
-        "with the change still staged"
-    );
-
-    cx.simulate_keystrokes("escape enter");
-    cx.run_until_parked();
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse,
-        "confirming discards the draft and goes back a stage"
+        "escape goes back a stage"
     );
-    assert!(
-        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-        "and a discard writes nothing"
-    );
+    // And the edit outlives the stage it was made in, on disk as well as
+    // in memory — closing the dialog inside the debounce window must not
+    // lose the write.
+    assert!(presentation_of(&shell, &cx, "tree").is_some());
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("a write queued before the stage closed still has to land");
+    assert!(text.contains("hidden"), "{text}");
 }
 
 /// The ladder's `PreviousStage` rung, which this dialog is the design's
@@ -630,7 +964,7 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
     );
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
-        "with the field blurred to match, or `s` would type instead of save"
+        "with the field blurred to match, or `d` would type instead of act"
     );
 
     cx.simulate_keystrokes("escape");
@@ -651,8 +985,8 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
 /// `space` on a row with no value). A letter that is claimed, does
 /// nothing and says nothing is the precise inert keystroke the
 /// interaction model exists to eliminate — and it is worse in this stage
-/// than in browse, because `s`/`d`/`r` have taught the user that letters
-/// act here.
+/// than in browse, because `d`/`r` have taught the user that letters act
+/// here.
 #[gpui::test]
 fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

@@ -61,3 +61,7 @@ geode-core = { path = ".", features = ["test-support"] }
 [[bench]]
 name = "tree"
 harness = false
+
+[[bench]]
+name = "config_merge"
+harness = false

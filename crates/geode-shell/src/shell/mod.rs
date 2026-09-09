@@ -687,6 +687,20 @@ pub struct ShellView {
     /// Scroll state for the object dialog's row list — the
     /// `keybindings_scroll`/`settings_scroll` split, one dialog over.
     object_dialog_scroll: ScrollHandle,
+    /// Config edits applied to memory and not yet flushed to disk (Phase
+    /// 4c, `objectdialog::apply`): the debounce's accumulated batch, plus
+    /// the layered documents a failed write restores memory from.
+    ///
+    /// It lives on `ShellView` rather than on `ObjectDialogState` because
+    /// it must outlive the dialog: a trader can close the dialog inside
+    /// the 250 ms debounce window, and the write — and its failure
+    /// handling — still has to happen.
+    pending_config_write: Option<objectdialog::apply::PendingConfigWrite>,
+    /// Which scheduled config-write flush is the current one. Bumped by
+    /// every applied edit; a flush task that wakes holding an older value
+    /// has been superseded and does nothing, which is how N keystrokes
+    /// coalesce into one write.
+    config_write_seq: u64,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -1106,6 +1120,8 @@ impl ShellView {
             as_of_dialog: None,
             object_dialog: None,
             object_dialog_scroll: ScrollHandle::new(),
+            pending_config_write: None,
+            config_write_seq: 0,
         }
     }
 
