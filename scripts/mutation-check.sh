@@ -4256,6 +4256,101 @@ run_mutation "commands: diagnostics completions split words on the shell's delim
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
 
+# ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
+#
+# The split verbs are gone: a tile is *added* by kind, and the split is
+# only how the add is placed. Nearly every behaviour below is silent when
+# wrong — a tile that lands on the wrong side, a request that fills the
+# wrong tile, a session record quietly dropped on the next flush — so
+# each one gets an entry.
+
+run_mutation "add-tile: auto splits along the longer side (w >= h → right)" \
+  crates/geode-shell/src/tileadd.rs \
+  '                Some(r) if r.h > r.w => Orientation::Vertical,' \
+  '                Some(r) if r.h < r.w => Orientation::Vertical,' \
+  geode-shell auto_splits_along_the_longer_side_and_a_square_or_missing_rect_goes_right
+
+run_mutation "add-tile: an explicit direction beats the setting" \
+  crates/geode-shell/src/tileadd.rs \
+  '        if let Some(o) = explicit {' \
+  '        if let Some(o) = explicit.filter(|_| false) {' \
+  geode-shell an_explicit_direction_beats_the_setting
+
+run_mutation "add-tile: a focused placeholder is filled in place, not split" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '            && self.occupant_kind(tile) == Some(PLACEHOLDER_KIND)' \
+  '            && self.occupant_kind(tile) == Some("never")' \
+  geode-shell add_on_a_placeholder_tile_fills_it_in_place
+
+run_mutation "add-tile: the pending request is keyed by the id split_active returned" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        id
+    }' \
+  '        TileId(id.0 + 1)
+    }' \
+  geode-shell a_pending_request_lands_on_exactly_the_tile_that_asked
+
+run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '        self.add_tile(&kind, Some(direction), Some(state), window, cx);' \
+  '        let _ = state; self.add_tile(&kind, Some(direction), None, window, cx);' \
+  geode-shell shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
+
+run_mutation "docks: showing a dock focuses it" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            self.enter_region(FocusRegion::Dock(side));' \
+  '            self.docks.get_mut(side).set_visible(true);' \
+  geode-shell toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty
+
+run_mutation "add-tile: an unknown restored kind keeps its record through a flush" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                self.unplaced_records.insert(id.0, record.clone());' \
+  '                let _ = record;' \
+  geode-shell a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
+
+run_mutation "add-tile: a pending request for a closed tile is dropped, not re-aimed" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.pending_tiles.retain(|id, p| {
+            let live = all.contains(id);
+            if !live {
+                tracing::debug!(target: "geode::shell", "dropping a pending '"'"'{}'"'"' request for closed tile {}", p.kind, id.0);
+            }
+            live
+        });' \
+  '        self.pending_tiles.retain(|id, p| {
+            let _ = (id, p);
+            true
+        });' \
+  geode-shell a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
+
+run_mutation "add-tile: an unplaced record dies with its tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.unplaced_records
+            .retain(|id, _| all.contains(&TileId(*id)));' \
+  '        self.unplaced_records.retain(|id, _| {
+            let _ = id;
+            true
+        });' \
+  geode-shell closing_an_unknown_kind_tile_drops_its_unplaced_record
+
+run_mutation "add-tile: filling a placeholder in place drops its unplaced record" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '            self.unplaced_records.remove(&tile.0);' \
+  '            let _ = tile.0;' \
+  geode-shell a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
+
+run_mutation "add-tile: the _vertical suffix means stacked" \
+  crates/geode-shell/src/defaults.rs \
+  '        (k, Some(Orientation::Vertical))' \
+  '        (k, Some(Orientation::Horizontal))' \
+  geode-shell parse_add_action_peels_the_direction_suffix_before_the_kind
+
+run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
+  crates/geode-shell/src/defaults.rs \
+  '            &format!("tile::add_{kind}_vertical"),' \
+  '            &format!("tile::add_{kind}_vertical_"),' \
+  geode-shell register_add_actions_registers_three_rows_per_kind_in_the_tiles_category
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
