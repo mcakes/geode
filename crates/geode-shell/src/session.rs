@@ -72,8 +72,9 @@
 //! main tree over): a structurally invalid dock node drops that dock's
 //! tree, a duplicate tile claim (already in a main tree or an earlier dock
 //! tree, this workspace or any other) is removed from the dock's tree, a
-//! `region` pointing at a hidden/empty dock falls back to `Main`, and an
-//! out-of-range/NaN `size` resets to the default — see
+//! `region` pointing at a hidden dock falls back to `Main` (an empty
+//! but visible dock is a legal focus target — spec 2026-09-08 add-tile
+//! §8), and an out-of-range/NaN `size` resets to the default — see
 //! `Workspace::from_parts` / `Workspaces::from_parts` for the cross-tree
 //! healing seams themselves.
 //!
@@ -576,8 +577,8 @@ fn parse_workspace(
     let docks = parse_docks(ix, ws_table.get("docks"), warnings);
     let region = parse_region(ix, ws_table.get("region"), warnings);
 
-    // Per-workspace healing (duplicate claims against this tree, an
-    // unfocusable region) lives in `Workspace::from_parts`; the
+    // Per-workspace healing (duplicate claims against this tree, a
+    // region naming a hidden dock) lives in `Workspace::from_parts`; the
     // cross-workspace pass runs later in `Workspaces::from_parts`.
     let (workspace, heal_warnings) = Workspace::from_parts(tree, docks, region);
     warnings.extend(
@@ -1698,6 +1699,50 @@ mod tests {
         );
     }
 
+    /// Final-review Important 1: a *visible but empty* focused dock is a
+    /// legal state (spec 2026-09-08 add-tile §8 — `ctrl+[` shows and
+    /// focuses the left dock whether or not it holds tiles), so a session
+    /// written in that state must come back exactly as written, with no
+    /// warning. `Workspaces::from_parts`'s cross-workspace pass used to
+    /// heal on `focusable()` ("hidden *or empty*"), which moved focus
+    /// back to `Main` and made `main.rs` print a restore warning at every
+    /// launch after that entirely ordinary quit.
+    #[test]
+    fn an_empty_but_visible_focused_dock_round_trips_without_a_warning() {
+        let mut ws = Workspaces::new();
+        ws.split_active(Orientation::Horizontal);
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "fixture sanity: toggling shows and focuses the empty left dock"
+        );
+        assert!(
+            ws.active().docks().get(DockSide::Left).tree().is_empty(),
+            "fixture sanity: the dock really is empty"
+        );
+
+        let table = to_toml(&ws, &TileRecords::new(), None);
+        let Restored {
+            workspaces: restored,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "an empty visible dock is legal; nothing to heal: {warnings:?}"
+        );
+        assert_eq!(
+            restored.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "the region must survive the restore"
+        );
+        assert!(
+            restored.active().docks().get(DockSide::Left).visible(),
+            "and the dock is still visible"
+        );
+    }
+
     #[test]
     fn a_default_dock_session_writes_no_dock_keys() {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
@@ -1773,8 +1818,9 @@ mod tests {
         assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
         assert_eq!(
             ws.active().region(),
-            FocusRegion::Main,
-            "the region pointing at the dropped claim must heal to Main"
+            FocusRegion::Dock(DockSide::Left),
+            "the dock is emptied but still visible, so it keeps the region \
+             (spec 2026-09-08 add-tile §8)"
         );
     }
 

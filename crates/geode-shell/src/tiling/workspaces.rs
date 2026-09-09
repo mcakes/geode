@@ -72,6 +72,12 @@ impl Workspace {
     /// tiles). `None` when nothing is focused — an empty tree, or focus
     /// resting on an empty visible dock. `AddDirection::Auto`'s input
     /// (spec 2026-09-08 add-tile §4.1); not called per frame.
+    ///
+    /// Under a fullscreen tile the layout returns that tile over the
+    /// whole tree area, so `Auto` reads the fullscreen shape, not the
+    /// tile's real slot; `Tree::split` exits fullscreen before splitting.
+    /// Accepted: a fullscreened tile being split is rare and the result
+    /// is still a valid split.
     pub fn focused_tile_rect(&self, area: Rect) -> Option<Rect> {
         let focused = self.focused_tile()?;
         let (tree_area, dock_rects) = super::docks::layout(&self.docks, area);
@@ -838,8 +844,10 @@ impl Workspace {
     /// in this workspace's own tree or an earlier of its own docks is
     /// removed from the dock's tree (the tree/earlier dock wins — a
     /// `TileId` lives in exactly one of the four trees), and a `region`
-    /// pointing at a dock that isn't focusable falls back to `Main`. Each
-    /// healing step contributes a warning string; none is ever an error.
+    /// pointing at a dock that is hidden falls back to `Main` (spec
+    /// 2026-09-08 add-tile §8: an *empty* visible dock is a legal focus
+    /// target). Each healing step contributes a warning string; none is
+    /// ever an error.
     pub fn from_parts(tree: Tree, docks: Docks, region: FocusRegion) -> (Workspace, Vec<String>) {
         let mut warnings = Vec::new();
         let mut tree = tree;
@@ -1066,13 +1074,21 @@ impl Workspaces {
                 &format!("workspace {ix}: "),
                 &mut warnings,
             );
-            // A removed claim can empty the dock the region pointed at.
+            // Defence in depth for a workspace that did not come through
+            // `Workspace::from_parts` (which heals this locally): only a
+            // *hidden* dock loses the region. A removed claim above can
+            // empty the dock the region pointed at, and an empty visible
+            // dock is a legal focus target (spec 2026-09-08 add-tile §8
+            // relaxed the invariant to "the region may name a dock only
+            // while that dock is VISIBLE") — healing on `focusable()`
+            // here used to warn and fall back on every launch after
+            // `ctrl+[` had focused an empty left dock.
             if let FocusRegion::Dock(side) = ws.region
-                && !ws.docks.get(side).focusable()
+                && !ws.docks.get(side).visible()
             {
                 warnings.push(format!(
                     "workspace {ix}: focus region points at the {side:?} dock, \
-                     which is hidden or empty; falling back"
+                     which is hidden; falling back"
                 ));
                 ws.region = ws.fallback_region();
             }
@@ -1506,8 +1522,10 @@ mod tests {
     fn from_parts_drops_a_dock_claim_duplicated_in_another_workspace() {
         // Workspace 1's tree holds tile 7; workspace 2's left dock tree
         // claims the same id. The tree wins; the duplicate leaf is removed
-        // from the dock's tree with a warning, and workspace 2's region
-        // (which pointed at that now-empty dock) falls back to Main.
+        // from the dock's tree with a warning. Workspace 2's region keeps
+        // pointing at that now-empty dock: the dock is still *visible*,
+        // and spec 2026-09-08 add-tile §8 relaxed the invariant to
+        // "visible", so emptying it is no longer a reason to fall back.
         let mut tree = Tree::default();
         tree.split(TileId(7), Orientation::Horizontal);
         let mut docks = Docks::default();
@@ -1523,9 +1541,13 @@ mod tests {
         spaces.insert(1, Workspace::from(tree));
         spaces.insert(2, dup_ws);
         let (ws, warnings) = Workspaces::from_parts(spaces, 2).unwrap();
-        assert_eq!(warnings.len(), 2, "{warnings:?}"); // removed leaf + region fallback
+        assert_eq!(warnings.len(), 1, "{warnings:?}"); // the removed leaf, nothing else
         assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(
+            ws.active().region(),
+            FocusRegion::Dock(DockSide::Left),
+            "an emptied but visible dock keeps the region (add-tile §8)"
+        );
     }
 
     #[test]
@@ -1701,7 +1723,7 @@ mod tests {
     }
 
     #[test]
-    fn workspace_from_parts_heals_a_region_pointing_at_an_unfocusable_dock() {
+    fn workspace_from_parts_heals_a_region_pointing_at_a_hidden_dock() {
         let mut tree = Tree::default();
         tree.split(TileId(1), Orientation::Horizontal);
         // Region points at the (empty, hidden) bottom dock.
@@ -1711,7 +1733,7 @@ mod tests {
         assert_eq!(
             ws.region(),
             FocusRegion::Main,
-            "an unfocusable-dock region must heal to Main"
+            "a hidden-dock region must heal to Main"
         );
     }
 

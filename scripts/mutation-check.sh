@@ -4334,11 +4334,29 @@ run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   '        let _ = state; self.add_tile(&kind, Some(direction), None, window, cx);' \
   geode-shell shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
 
+# Two-line anchor on purpose (final review, Minor 2): the bare
+# `self.enter_region(FocusRegion::Dock(side));` line occurs four times in
+# this file (`toggle_dock`, both `move_to_dock` arms, the drag drop) and
+# `run_mutation` replaces the FIRST match — the pairing with the
+# preceding `exit_fullscreen()` is unique to `toggle_dock`'s show branch.
+# The mutation keeps `exit_fullscreen()` and only makes showing NOT focus.
 run_mutation "docks: showing a dock focuses it" \
   crates/geode-shell/src/tiling/workspaces.rs \
-  '            self.enter_region(FocusRegion::Dock(side));' \
-  '            self.docks.get_mut(side).set_visible(true);' \
+  '            self.tree.exit_fullscreen();
+            self.enter_region(FocusRegion::Dock(side));' \
+  '            self.tree.exit_fullscreen();
+            self.docks.get_mut(side).set_visible(true);' \
   geode-shell toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty
+
+# Final review, Important 1: the cross-workspace restore pass must heal
+# only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
+# OR empty") drags focus back to `Main` and prints a launch-time warning
+# after the entirely ordinary "ctrl+[ on an empty left dock, then quit".
+run_mutation "add-tile: a restored region survives an empty but visible dock" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '                && !ws.docks.get(side).visible()' \
+  '                && !ws.docks.get(side).focusable()' \
+  geode-shell an_empty_but_visible_focused_dock_round_trips_without_a_warning
 
 run_mutation "add-tile: an unknown restored kind keeps its record through a flush" \
   crates/geode-shell/src/shell/occupants.rs \
