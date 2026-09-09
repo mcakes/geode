@@ -243,9 +243,10 @@ struct Lanes {
     discovery: Option<LaneValue>,
     /// What each BATCH's last publish (or load failure) reported, keyed
     /// by batch. Seeded at `DataService::open` from the health the
-    /// catalog persisted for the generations LIVE at that moment
-    /// (`Catalog::live_health`), so a restart does not forget a still-
-    /// live degraded generation; empty after that only for a source
+    /// catalog persisted for the generations live at open — no time
+    /// bound, exactly what `AsOf::Live` serves (`Catalog::live_health`) —
+    /// so a restart does not forget a still-live degraded generation;
+    /// empty after that only for a source
     /// whose live generations are all clean, until its first load
     /// report.
     load: std::collections::HashMap<String, LaneValue>,

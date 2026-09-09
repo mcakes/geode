@@ -4339,7 +4339,7 @@ run_mutation "service: open seeds the health load lane from the catalog" \
   crates/geode-data/src/service.rs \
   '        for dataset in datasets {
             let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
-  '        for dataset in datasets.iter().take(0) {
+  '        for dataset in datasets.into_iter().take(0) {
             let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
   geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
 
