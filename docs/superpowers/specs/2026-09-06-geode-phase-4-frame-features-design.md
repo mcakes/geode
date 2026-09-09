@@ -1004,45 +1004,79 @@ perf` on the shell's existing ~500 ms reload-poll tick and only while
 `watchers() > 0` (open question 2, resolved) — see `docs/perf.md`'s
 Phase 4b section for the allocation contract this pins in tests.
 
-**Known gaps, deferred (recorded in the round-5 re-review, 2026-09-08;
-both to be fixed together on their own branch, not this one).**
+**Known gaps, deferred (recorded in the round-5 re-review, 2026-09-08).
+Both were fixed on the follow-up branch, 2026-09-08.**
 
-1. **An `EventSink` returning `false` means "receiver gone" to both
-   consumers, and a momentarily full channel is indistinguishable from
-   it.** `ingest/runner.rs`'s `if !delivered { return; }` ends the
-   ingest runner thread and `ingest/scheduler.rs`'s ends the scheduler
-   thread — the latter stopping polling for EVERY source, not just the
-   one being polled. But the production sink
-   (`geode-app::bridge::make_sink`) returns `false` for any refused
-   `try_send`, and the event channel is bounded at 256, so one
-   cold-start burst that momentarily fills it silently ends ingest and
-   discovery for the session, with only the `dropped` count in the
-   status summary to say so. The sources section then shows whatever
-   health it last had, forever. Pre-existing since Phase 3a, and it
-   contradicts the scheduler's own `catch_unwind` comment, which
-   forbids exactly this outcome ("every other source would stop being
-   polled with nothing on the sink to say so"). The fix is to
-   distinguish `TrySendError::Full` (a dropped event; keep running)
-   from `Closed` (genuinely gone; stop) — one `match` in `make_sink`,
-   plus the consumers' expectations — and it is deliberately NOT
-   attempted here: the round-5 conditional commit above at least means
-   a health transition refused this way is re-offered rather than lost,
-   which is as far as the health seam can get on its own.
-2. **The load lane is in-process only, so a restart false-cleans a
-   still-live degraded generation.** `generations.health` /
-   `health_reason` are persisted (`store/catalog.rs`) but nothing ever
-   reads them back. On restart the load lane is empty, the first poll
-   finds the CSV `Unchanged` (so nothing reloads and nothing
-   republishes), `worst_health` returns `None`, the scheduler sends
-   `Ok`, and the source reads **ok** while the still-live degraded
-   generation is exactly what the blotter is summing. Same false-clean
-   family as MAJ-2/NEW-4/NEW-6, one level up — and NEW-6's own
-   justification ("its rows are still live, so it must keep showing
-   degraded") is what makes this a contradiction rather than a policy.
-   The fix is to seed the load lane at `DataService::open` from the
-   live generations' persisted health, which is already keyed by batch,
-   exactly the lane's key. Until then, source health as built is
-   per-process.
+1. ~~An `EventSink` returning `false` means "receiver gone" to both
+   consumers.~~ **Fixed (follow-up branch, Task 1, 2026-09-08.)** `false`
+   now means only "this event was not delivered" — full or closed — and no
+   producer inside the service stops on one. The ingest runner carries on
+   to its next item (all three of its sites: the idle announcement, the
+   undeclared-dataset failure, the load outcome), the scheduler re-arms its
+   poll, and — the fourth consumer this note missed — a query pool worker
+   takes its next request, which used to exit and, with `query_workers =
+   1`, left the app with no worker at all. Each logs the refusal once
+   (`geode::ingest` / `geode::query`) and drops the event; nothing is
+   retried, since a refused health transition is re-offered by
+   `HealthTracker` on the next report and a missed result is requeried by
+   the tile that wanted it. `make_sink` now matches `TrySendError::Full`
+   against `Closed`: both refuse and bump `dropped`, and `Closed`
+   additionally logs once per sink (an `AtomicBool` latch) on
+   `geode::shell`, so a genuinely gone receiver is visible in the log while
+   a full channel is only counted. Shutdown is, and always was,
+   `IngestHandle::shutdown`, the scheduler's stop condvar, and the pool's
+   `shutdown`.
+2. ~~The load lane is in-process only, so a restart false-cleans a
+   still-live degraded generation.~~ **Fixed (follow-up branch, Task 2,
+   2026-09-08.)** `DataService::open` now seeds the load lane from the
+   health `file_generations` persisted for the generations that are
+   LIVE, through `Catalog::live_health` — `resolve_generations`'
+   resolution off the same summary table (newest `source_time` per
+   `(batch, book)`, ties by `gen_id` descending, with the
+   `archived_only` guard in the join so a generation that never went
+   live is neither picked nor allowed to hide the one that is), joined
+   to the catalog, one entry per batch whose live generation is not
+   `ok`, worst-across-books by `severity_rank`'s label order. Each is
+   reported through the same `report_load_and_emit` door and the same
+   emit closure the ingest sink's `Published` arm uses, keyed by batch —
+   which is the lane's own key, so a later clean republish of that batch
+   clears exactly it and nothing else. The seed runs before
+   `Scheduler::spawn`: it must be in the tracker before the first poll
+   reports, or that poll's `Ok` becomes the last-reported value and the
+   seed that follows reads as a spurious transition rather than the
+   state. A corrected republish that landed while the app was down is
+   simply not seeded — its batch's live generation is the clean one.
+
+   Three details the fix-round-1 review pinned down. **No time bound**
+   (MIN-3): the seed must agree with what the query path serves, and
+   `AsOf::Live` carries no generation predicate at all — `Era::live()`
+   leaves `generations: None` and `Era::relation` reads the live table
+   whole — so a generation stamped ahead of the host clock (publish
+   applies no upper bound either) is live, is summed, and must be
+   reported. `Utc::now()` as an upper bound would have answered with the
+   previous generation's health: a false clean. **The `gen_id`
+   tie-break is load-bearing** (MIN-1): the backfill guard is
+   strictly-older precisely so a file re-dropped with the same sentinel
+   `as_of` REPLACES rather than becoming history, which is the ordinary
+   shape of a correction, so the two generations tie on `source_time`
+   and only `gen_id` separates them. **The filter names the four
+   unhealthy labels** rather than excluding `'ok'` (MIN-4), because
+   `Health::from_parts` maps anything it does not recognise to
+   `Health::Ok`: a label from a future build used to be seeded as a
+   spurious `Ok` before any producer had spoken, taking `last_reported`
+   with it and swallowing the first genuine discovery `Ok`.
+
+   The ruling that makes this expressible: health is persisted per
+   DATASET (the only grain the catalog records) and the tracker is keyed
+   per SOURCE, so the seed reads by dataset and files the result under
+   every source configured for it. Two sources on one dataset both get
+   the seed — one is told about the other's degraded batch — and a
+   dataset with no configured source is not seeded at all, there being
+   no source key to file it under. That over-reports and never
+   false-cleans, which is the direction every fix on this seam has gone.
+   A `StoreError` from the seed propagates out of `open`: the failure
+   mode of swallowing it is a service that opens quietly and reports
+   clean, which is the defect itself.
 
 ### 4.5 `Request::Catalog`
 

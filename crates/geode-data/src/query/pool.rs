@@ -16,6 +16,7 @@ use crate::store::Store;
 use geode_core::query::QueryKey;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -26,8 +27,11 @@ pub struct ViewId(pub String);
 
 pub type QueryId = u64;
 
-/// Where results go. Returns `false` when nothing is listening any more,
-/// which stops the worker.
+/// Where results go. `false` means "this result was not delivered" — the
+/// caller's bounded channel was full, or its receiver is gone. It never
+/// stops the worker (Phase 4b follow-up, Task 1: one refused result used
+/// to end a worker for the session, and with `query_workers = 1` that
+/// left the app with none); `Queue::shutdown` is the stop.
 ///
 /// Called with the queue's own lock held (see the worker's delivery site),
 /// so a sink must not block and must not call back into this pool:
@@ -245,6 +249,11 @@ fn worker(
     run: RunFn,
 ) {
     let handle = conn.interrupt_handle();
+    // One line per worker, not one per refused result (final review,
+    // MIN-3): before Task 1 a refusal ended this worker, so the warning
+    // could not repeat. `dropped` on the caller's side remains the
+    // authoritative count of what was lost.
+    let refusal_logged = AtomicBool::new(false);
 
     loop {
         let (id, req) = {
@@ -323,10 +332,29 @@ fn worker(
             snapshot: outcome,
             kind: req.kind.clone(),
         });
+        // The queue lock is released before logging: formatting a warning
+        // under it would block `submit`/`cancel` on the UI thread.
+        drop(q);
         if !delivered {
-            return;
+            log_refused_result(&refusal_logged, &req.view.0);
         }
     }
+}
+
+/// A refused result is one dropped frame of data, not the end of this
+/// worker (Phase 4b follow-up, Task 1). The requesting tile requeries;
+/// nothing is retried here. Logged once per worker — `latched` (final
+/// review, MIN-3) — and a free function so a test can reach it without a
+/// pool thread.
+fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target: "geode::query",
+        "event channel refused the result for view '{view}': dropped, the worker \
+         keeps working (further refusals are counted, not logged)",
+    );
 }
 
 /// The message out of a caught panic payload, which is a `&str` for a
@@ -439,6 +467,75 @@ mod tests {
         assert_eq!(result.view, ViewId("v1".into()));
         assert_eq!(result.snapshot.unwrap().rows(), 1);
         pool.shutdown();
+    }
+
+    /// Records logged while `f` runs, on this thread only — the same
+    /// scoped-subscriber pattern `ingest/runner.rs`'s test module uses.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_worker_not_once_per_result() {
+        // Unlatched, a gone receiver turns every requery into another
+        // copy of this line (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_result(&latch, "positions");
+            log_refused_result(&latch, "positions");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::query");
+        assert!(records[0].message.contains("positions"), "{records:?}");
+    }
+
+    #[test]
+    fn a_refused_result_does_not_stop_the_worker() {
+        // One refused result used to end the worker for the session —
+        // with `query_workers = 1`, the app then had no query worker at
+        // all. `false` means "not delivered", never "stop" (Phase 4b
+        // follow-up, Task 1); `q.shutdown` is the stop.
+        let (_d, store) = fixture(100);
+        let (tx, rx) = channel();
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&refusals);
+        let sink: ResultSink = Arc::new(move |r: QueryResult| {
+            // Claimed atomically (fix round 1, nit): one refusal, no
+            // matter how many workers call this.
+            if counter
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                return false;
+            }
+            tx.send(r).is_ok()
+        });
+        let pool = QueryPool::spawn_with_sink(&store, 1, sink).unwrap();
+
+        pool.submit(request(1, "v1", "select sum(v) as v from t"));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && refusals.load(Ordering::SeqCst) == 0 {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            refusals.load(Ordering::SeqCst),
+            1,
+            "the first result must have been refused"
+        );
+
+        pool.submit(request(2, "v2", "select sum(v) as v from t"));
+        let r = rx.recv_timeout(Duration::from_secs(30));
+        pool.shutdown();
+        let r = r.expect("the single worker must still deliver the next result");
+        assert_eq!(r.key, QueryKey(2));
     }
 
     #[test]
