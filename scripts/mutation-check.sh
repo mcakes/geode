@@ -755,8 +755,10 @@ run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
-  '                         and coalesce(fg.archived_only, false) = false' \
-  '                         and true'
+  '                       where fg.dataset = ?
+                         and coalesce(fg.archived_only, false) = false' \
+  '                       where fg.dataset = ?
+                         and true'
 
 run_mutation "ingest: the publish event names the partitions written" \
   crates/geode-data/src/ingest/runner.rs \
@@ -1086,10 +1088,13 @@ run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
             });
             clear_in_flight(&queue);
             if !failed {
-                log_refused_event(&format!(
-                    "the undeclared-dataset failure for {}/{}",
-                    item.dataset, item.batch
-                ));
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
             }
             continue;' \
   '            clear_in_flight(&queue);
@@ -4033,7 +4038,8 @@ run_mutation "service: an ingest failure is keyed by the source name, not the da
 
 run_mutation "service: a degraded publish also reaches the entity as Health" \
   crates/geode-data/src/service.rs \
-  '                        |reported| match reported {
+  '                        format!("{batch}: {reason}"),
+                        |reported| match reported {
                             Some((worst, detail)) => {
                                 log_health_event(&source, &worst, &detail);
                                 sink(DataEvent::Health {
@@ -4044,7 +4050,8 @@ run_mutation "service: a degraded publish also reaches the entity as Health" \
                             }
                             None => true,
                         },' \
-  '                        |reported| match reported {
+  '                        format!("{batch}: {reason}"),
+                        |reported| match reported {
                             Some((worst, detail)) => {
                                 log_health_event(&source, &worst, &detail);
                                 true
@@ -4264,7 +4271,7 @@ run_mutation "commands: diagnostics completions split words on the shell's delim
 run_mutation "runner: a refused idle announcement drops the event, it does not stop the runner" \
   crates/geode-data/src/ingest/runner.rs \
   '                        drop(q);
-                        log_refused_event("the queue-drained announcement");
+                        log_refused_event(&refusal_logged, "the queue-drained announcement");
                         q = lock.lock().unwrap_or_else(|e| e.into_inner());
                         continue;' \
   '                        return;' \
@@ -4273,10 +4280,13 @@ run_mutation "runner: a refused idle announcement drops the event, it does not s
 run_mutation "runner: a refused undeclared-dataset failure does not stop the runner" \
   crates/geode-data/src/ingest/runner.rs \
   '            if !failed {
-                log_refused_event(&format!(
-                    "the undeclared-dataset failure for {}/{}",
-                    item.dataset, item.batch
-                ));
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
             }' \
   '            if !failed {
                 return;
@@ -4286,10 +4296,10 @@ run_mutation "runner: a refused undeclared-dataset failure does not stop the run
 run_mutation "runner: a refused load outcome does not stop the runner" \
   crates/geode-data/src/ingest/runner.rs \
   '        if !delivered {
-            log_refused_event(&format!(
-                "the load outcome for {}/{}",
-                item.dataset, item.batch
-            ));
+            log_refused_event(
+                &refusal_logged,
+                &format!("the load outcome for {}/{}", item.dataset, item.batch),
+            );
         }' \
   '        if !delivered {
             return;
@@ -4298,21 +4308,13 @@ run_mutation "runner: a refused load outcome does not stop the runner" \
 
 run_mutation "scheduler: a refused event does not stop polling every source" \
   crates/geode-data/src/ingest/scheduler.rs \
-  '            tracing::warn!(
-                target: "geode::ingest",
-                "event channel refused {what} for source '"'"'{}'"'"': dropped, polling continues",
-                spec.name,
-            );' \
+  '            log_refused_discovery(&refusal_logged, what, &spec.name);' \
   '            return;' \
   geode-data a_refused_event_does_not_stop_the_scheduler
 
 run_mutation "pool: a refused result does not stop the worker" \
   crates/geode-data/src/query/pool.rs \
-  '            tracing::warn!(
-                target: "geode::query",
-                "event channel refused the result for view '"'"'{}'"'"': dropped, the worker keeps working",
-                req.view.0,
-            );' \
+  '            log_refused_result(&refusal_logged, &req.view.0);' \
   '            return;' \
   geode-data a_refused_result_does_not_stop_the_worker
 
@@ -4404,6 +4406,48 @@ run_mutation "scheduler: worst_health compares by rank, not Health's derived Ord
             _ => worst = vec![(h, name)],
         }' \
   geode-data two_orphaned_candidates_with_different_reasons_are_both_named
+
+run_mutation "scheduler: a higher-rank candidate REPLACES the names kept at a lower rank" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            _ => worst = vec![(h, name)],' \
+  '            _ => worst.push((h, name)),' \
+  geode-data a_higher_rank_candidate_replaces_the_names_accumulated_at_a_lower_rank
+
+run_mutation "runner: the refusal warning is latched once per runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  'fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_runner_not_once_per_event
+
+run_mutation "scheduler: the refusal warning is latched once per scheduler" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  'fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_scheduler_not_once_per_poll
+
+run_mutation "pool: the refusal warning is latched once per worker" \
+  crates/geode-data/src/query/pool.rs \
+  'fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_worker_not_once_per_result
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
