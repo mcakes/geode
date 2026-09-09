@@ -491,8 +491,22 @@ impl Render for ShellView {
             // the advice reads the same from the main tree and from a
             // focused dock — the old state-aware "return" variants, which
             // existed because the split chords could not fill this area
-            // from a dock, collapse into it.
-            let hint = "ctrl+k → Add a tile";
+            // from a dock, collapse into it. One selector, one verb; a
+            // dock-focused empty tree only appends where the add would
+            // actually land (final-review Ruling J), because the hint
+            // paints over the *tree's* area and would otherwise read as
+            // an offer to fill the space the reader is looking at.
+            let hint = match region {
+                crate::tiling::FocusRegion::Main => "ctrl+k → Add a tile".to_string(),
+                crate::tiling::FocusRegion::Dock(side) => {
+                    let side = match side {
+                        crate::tiling::DockSide::Left => "left",
+                        crate::tiling::DockSide::Right => "right",
+                        crate::tiling::DockSide::Bottom => "bottom",
+                    };
+                    format!("ctrl+k → Add a tile · focus is in the {side} dock")
+                }
+            };
             let selector = "empty-hint";
             surface = surface.child(
                 div()

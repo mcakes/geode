@@ -718,6 +718,11 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
     // stops firing until something claims focus again. Claim it through
     // the shell's own recovery path so the `alt-1` below still travels
     // the real key pipeline.
+    //
+    // TODO(focus-trap): production never re-arms this when the focused
+    // occupant is unmounted by a workspace switch (see progress ledger /
+    // follow-up); the RecordingView tracks its own focus, so this test
+    // arms it by hand.
     shell.update(&mut cx, |shell, _| shell.pending_focus_restore = true);
     cx.update(|window, cx| {
         let _ = window.draw(cx);

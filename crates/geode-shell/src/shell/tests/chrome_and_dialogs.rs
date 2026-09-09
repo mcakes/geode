@@ -1234,6 +1234,45 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     );
 }
 
+/// Final-review Minor 3: the *reload* half of the `[app] modules.default`
+/// diagnostic (spec 2026-09-08 add-tile §7.1). `defaults::modules_
+/// default_diagnostic` has a pure test of its own, but nothing checked
+/// that `apply_reload` actually folds it into `new_config.diagnostics`
+/// and forwards it to the diagnostics entity — and, being a *warning*,
+/// that it does not reject the reload the way an error diagnostic does.
+#[gpui::test]
+fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+
+    let cfg = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(cfg, cx));
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("modules.default"))
+        .unwrap_or_else(|| panic!("expected a modules.default diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Warning,
+        "the key is dead config, not invalid config: {hit:?}"
+    );
+
+    shell.read_with(&cx, |shell, _| match &shell.last_reload {
+        crate::reload::ReloadOutcome::Applied { warnings } => assert!(
+            warnings.iter().any(|w| w.contains("modules.default")),
+            "a warning must not reject the reload, and must be reported: {warnings:?}"
+        ),
+        other => panic!("a warning-only reload must still apply, got {other:?}"),
+    });
+}
+
 /// `settings_view::set_add_direction` (the add-direction row's setter,
 /// driven directly for the same reason `set_theme`'s and `set_find_
 /// style`'s tests drive the handler rather than the control) updates

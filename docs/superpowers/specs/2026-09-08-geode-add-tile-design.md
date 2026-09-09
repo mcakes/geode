@@ -281,7 +281,13 @@ longer exists:
 | empty main tree              | `ctrl+k → Add a tile`                             |
 | placeholder tile             | `ctrl+k → Add a tile`                             |
 | empty dock (left/right/bottom) | `ctrl+k → Add a tile here · ctrl+shift+[ moves one` (bracket per side) |
-| empty main tree, dock focused | `ctrl+k → Add a tile` (the "return" variants collapse into this one) |
+| empty main tree, dock focused | `ctrl+k → Add a tile · focus is in the left dock` (`right`/`bottom` per side) |
+
+The dock-focused row keeps the single `empty-hint` selector and the same
+verb; it only appends where the add would actually land, because the
+hint paints over the *tree's* area and would otherwise read as an offer
+to fill the space the reader is looking at (final review, Ruling J). The
+old state-aware "return" variants are still gone.
 
 `PlaceholderContent::command`'s error text is unchanged.
 
@@ -358,9 +364,11 @@ Weight follows spec §10.3: pure cores first.
 - The settings dialog shows the "Add tile" row, stepping cycles the
   three values and persists.
 
-**Integration:** `tests/tiling_integration.rs`'s two tests are
-rewritten to drive the palette rows / `shift+d` through the real
-matcher against `BUILTIN_KEYMAP`.
+**Integration:** `tests/tiling_integration.rs`'s two tests are rewritten
+to drive `shift+d` through the real matcher against `BUILTIN_KEYMAP`.
+The palette rows themselves are not reachable there — see §13(d): a
+matcher-only test has no palette, so the tiles those tests need are
+created by calling `Workspaces::split_active` directly.
 
 **Mutation harness** (`scripts/mutation-check.sh`, one entry per
 behaviour, 6th argument naming the test): auto's `w >= h` comparison
@@ -396,7 +404,7 @@ layer's first entries.
 
 ## 13. Implementation notes (2026-09-08)
 
-Three things the build settled that the design above did not say:
+Four things the build settled that the design above did not say:
 
 (a) `Workspace::toggle_dock`'s show branch exits main-tree fullscreen
 first. A fullscreen tile plus a focused dock is a state `render` cannot
@@ -417,3 +425,10 @@ exist without one. The fixtures also bind `ctrl+v`/`ctrl+h` to
 (c) `[modules] default` was removed from `examples/demo-config/app.toml`
 (§7.1); the key now only produces the "no default kind" diagnostic if a
 user config still sets it.
+
+(d) `tests/tiling_integration.rs` drives only `shift+d` through the real
+matcher and creates its tiles by calling `Workspaces::split_active`
+directly. That file tests the keymap-to-`Workspaces` seam with no
+`ShellView` and therefore no palette, so §10's "the palette rows … through
+the real matcher" is not something it can do; the palette rows are covered
+by the `#[gpui::test]`s in `shell/tests/` instead.
