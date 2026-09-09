@@ -36,7 +36,7 @@
 //! the same reason, that keeps `KeybindingsState` free of the scroll
 //! handle that sits beside it on `ShellView`.
 //!
-//! ## Rows are derived, never cached
+//! ## Browse rows are derived; the edit stage paints its draft
 //!
 //! [`Domain::objects`] runs fresh on every render and every keystroke.
 //! That is the contract `keybindings_view::derive_rows` and
@@ -44,9 +44,18 @@
 //! cannot show a stale value: a config reload lands in
 //! `ShellView::services.config` with no notification to any dialog, so
 //! anything cached here would be wrong from the next 500 ms watcher tick
-//! onward. Only a [`Draft`] is stored, because only a draft has no
-//! source of truth to derive from — it is the object as the user has it
-//! so far, which is on disk nowhere until they save.
+//! onward.
+//!
+//! The **edit stage** is the deliberate exception: its rows come from the
+//! stored [`Draft`], not from `Config`. That is not a cache, and it is
+//! what makes a config edit instant. A keystroke records its change on a
+//! pending batch that is merged and applied 250 ms later ([`apply`]), so
+//! `services.config` is knowingly up to one debounce behind — a row
+//! derived from it would show the trader their own keystroke a quarter of
+//! a second late, which is the lag this whole design exists to remove.
+//! The draft is the same value the flush is about to merge, rendered
+//! through the same [`Domain::to_table`], and a failed write rebuilds it
+//! from the reverted config, so the two cannot drift apart.
 
 pub mod apply;
 pub mod render;
@@ -286,11 +295,11 @@ fn derive_rows(
 ///
 /// It is an enum on the field rather than a rule inside the adapter so
 /// the split is mechanical: [`Draft::writes_by_destination`] groups by
-/// it, and the save path makes one `config_write::edit` call per group
+/// it, and the flush makes one `config_write::edit` call per group
 /// without knowing what either file is for. Nothing in the scaffold
 /// besides [`Destination::doc`] knows `view_presentation.toml` exists.
 ///
-/// `Ord` because the groups are collected into a `BTreeMap`, so a save
+/// `Ord` because the groups are collected into a `BTreeMap`, so a flush
 /// writes its files in a fixed order rather than a hash-random one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Destination {
@@ -397,8 +406,9 @@ pub enum EditRow {
 /// keystroke rather than happening under one letter.
 ///
 /// There is no `Discard`. It existed to guard the staged-draft model's
-/// unsaved work; with every field edit applying on the keystroke that
-/// makes it, leaving the stage abandons nothing and a confirm there would
+/// unsaved work; now every field edit is recorded the moment it is made,
+/// on a batch that outlives the stage and the dialog and reaches disk on
+/// its own timer, so leaving abandons nothing and a confirm there would
 /// be a question about a state that cannot arise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confirm {
@@ -429,21 +439,21 @@ impl Confirm {
 
 /// One object being edited.
 ///
-/// The edit **buffer**, not a staging area: a keystroke changes a field
-/// here and [`apply::commit_edit`] immediately merges that change into
-/// the live `Config` and queues its file write (spec §7.1). The buffer
-/// still exists because the cursor, the confirm and the row structure
-/// live on it, and because it is what the difference against
-/// [`Draft::baseline`] is taken from — that difference is precisely
-/// "what this keystroke changed", which is what decides the files a
-/// write touches.
+/// The edit **buffer**, and what the edit stage actually paints: a
+/// keystroke changes a field here — so the trader sees it at once — and
+/// [`apply::commit_edit`] puts that change on the pending batch the next
+/// flush merges, applies and writes (spec §7.1). The buffer also carries
+/// the cursor, the confirm and the row structure, and it is what the
+/// difference against [`Draft::baseline`] is taken from — that difference
+/// is precisely "what this keystroke changed", which is what decides the
+/// files a flush touches.
 ///
 /// An earlier build staged here and wrote only on `s`, reasoning that a
 /// write per keystroke would fire the 500 ms watcher mid-edit and reload
-/// a half-finished object. What actually removes that hazard is applying
-/// in memory rather than through the disk: the watcher's reload of our
-/// own write is a no-op (see [`apply`]), and nothing a trader sees waits
-/// on a file.
+/// a half-finished object. What actually removes that hazard is that the
+/// change never travels through the disk to reach the screen: the flush
+/// merges the documents already in hand, and the watcher's reload of our
+/// own write is a no-op (see [`apply`]).
 ///
 /// There is no `is_new` flag, which spec §3.1 sketches: nothing creates
 /// an object in this task (`n` is Part 2's), so a flag nothing can set
@@ -513,9 +523,9 @@ impl Draft {
     /// back where it started changes nothing and writes nothing.
     ///
     /// Between keystrokes this is always `false` — [`apply::commit_edit`]
-    /// moves the baseline as it applies. It is `true` only *within* the
-    /// keystroke that changed a field, and while a [`Confirm::Fork`] is
-    /// waiting on its answer.
+    /// moves the baseline as it records the change. It is `true` only
+    /// *within* the keystroke that changed a field, and while a
+    /// [`Confirm::Fork`] is waiting on its answer.
     pub fn is_dirty(&self) -> bool {
         self.fields != self.baseline
     }
@@ -551,7 +561,7 @@ impl Draft {
             })
     }
 
-    /// `space`: change the value under the cursor, staging it into the
+    /// `space`: change the value under the cursor, recording it in the
     /// draft. `false` when the row has no value `space` can change, which
     /// the caller turns into a notice — a key that appears inert is the
     /// defect class this interaction model exists to remove.
@@ -628,7 +638,7 @@ impl Draft {
     }
 
     /// Which files this draft's changes have to be written to, and which
-    /// field keys sent them there — the grouping a save turns into one
+    /// field keys sent them there — the grouping a flush turns into one
     /// `config_write::edit` call per destination, never a write per field.
     ///
     /// A clean field contributes nothing, which is what keeps a
@@ -661,11 +671,13 @@ impl Draft {
     /// baseline, so the next keystroke's difference is that keystroke's
     /// alone.
     ///
-    /// Called when the change reaches **memory**, not when the file
-    /// lands: memory is what the trader is looking at. A failed write
-    /// puts both back together (`apply::revert_failed_write` rebuilds the
-    /// draft from the reverted config), which is the only path that can
-    /// move the baseline backwards.
+    /// Called when the keystroke is **recorded** — before the flush
+    /// merges, applies or writes anything — because the batch carries the
+    /// whole rendered object rather than a delta, so the baseline's only
+    /// job is to keep the next keystroke's difference to itself. A failed
+    /// write is the one path that moves the baseline backwards:
+    /// `apply::revert_failed_write` rebuilds the draft from the reverted
+    /// config, baseline and all.
     pub fn mark_saved(&mut self) {
         self.baseline = self.fields.clone();
     }
@@ -745,7 +757,7 @@ impl Domain {
 
 /// Put `table` in `document` under `name`, replacing whatever was there.
 ///
-/// The one spelling of what a save does to a file, shared by the write
+/// The one spelling of what a flush does to a file, shared by the write
 /// path and by [`object_text`]. Whole-table replacement, never a
 /// key-by-key merge: every doc these dialogs edit is atomic at depth one
 /// (`config::merge::atomic_depth`), so a stale `hidden` left behind by a
@@ -865,9 +877,9 @@ pub struct ObjectDialogState {
     /// nothing says so, because a key that appears inert is the defect
     /// class this interaction model exists to remove.
     pub notice: Option<String>,
-    /// The object being edited, unsaved. `None` in [`Stage::Browse`], and
-    /// the only state this dialog stores rather than derives — see
-    /// [`Draft`].
+    /// The object being edited. `None` in [`Stage::Browse`], and the only
+    /// state this dialog stores rather than derives — deliberately, since
+    /// it is also what the edit stage paints; see [`Draft`].
     pub draft: Option<Draft>,
 }
 
@@ -904,7 +916,7 @@ impl ObjectDialogState {
     ///   object from filter mode too, and a stage left in `Filter` sends
     ///   the next `escape` down the `LeaveFilter` rung — which the edit
     ///   handler does not claim, so the shell's modal branch closes the
-    ///   whole dialog and takes the unsaved draft with it, without ever
+    ///   whole dialog instead of stepping back to the list, without ever
     ///   asking.
     ///
     /// Neither is worth anything on its own: the shared `Input` has to be
@@ -959,8 +971,8 @@ impl ObjectDialogState {
     /// nothing in `render` had to remember to change. A `false` spelled
     /// at the call site is exactly the shape that gets left behind when a
     /// stage arrives, and the failure is silent — `escape` in the edit
-    /// stage would close the whole dialog, discarding an unsaved draft,
-    /// instead of going back one stage and asking.
+    /// stage would close the whole dialog out from under the object being
+    /// edited, instead of going back one stage.
     pub fn has_previous_stage(&self) -> bool {
         matches!(self.stage, Stage::Edit { .. })
     }

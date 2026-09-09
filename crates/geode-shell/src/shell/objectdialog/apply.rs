@@ -1,5 +1,5 @@
-//! Applying a field edit **instantly**, in memory, and persisting it in
-//! the background (spec §7.1).
+//! Applying a field edit without a save key: instant in the dialog,
+//! merged and persisted on one short timer behind it (spec §7.1).
 //!
 //! ## Why there is no save key
 //!
@@ -12,23 +12,17 @@
 //! field should see it change; instead they pressed a key, waited half a
 //! second, and hoped.
 //!
-//! So an edit now moves memory first. [`commit_edit`] writes the changed
+//! So an edit never travels through the disk to reach the screen.
+//! [`commit_edit`] records the keystroke in one pending batch, and when
+//! the [`WRITE_DEBOUNCE`] window closes [`promote`] writes the changed
 //! object into the in-memory user-layer `LayerDoc`, re-merges through
 //! `Config::from_docs` — **the loader's own merge, the only one that
 //! exists** — and hands the result to the same
-//! `hot_reload::apply_reload` the watcher hands its own reloads to. The
-//! only thing that differs between a watcher reload and a dialog edit is
-//! where the documents came from; the merge and the application are
-//! byte-identical code paths, so a dialog cannot apply a change the
-//! watcher would have applied differently.
-//!
-//! Merging is not free and is not assumed to be: `cargo bench -p
-//! geode-core --bench config_merge` measures `all_docs` + `from_docs` on
-//! the largest config this repo ships (the demo desk: a 7.8 KB
-//! `datasets.toml`, a 6.8 KB `views.toml`, seven documents across two
-//! layers) at **63 µs**, which is 0.8% of PHILOSOPHY's 8 ms pure-UI
-//! budget. A merge per keystroke is affordable; that is a measurement,
-//! not a hope.
+//! `hot_reload::apply_reload` the watcher hands its own reloads to. What
+//! differs between a watcher reload and a dialog edit is where the
+//! documents came from and when they are applied; the merge and the
+//! application are byte-identical code paths, so a dialog cannot apply a
+//! change the watcher would have applied differently.
 //!
 //! ## What is instant, and what rides the timer
 //!
@@ -47,6 +41,17 @@
 //! timer. The blotter updating a beat after the dialog is correct, not a
 //! compromise.
 //!
+//! Both halves are measured, not assumed (`docs/perf.md`, "Phase 4c";
+//! `cargo bench -p geode-shell -- config_edit`). A **keystroke** costs
+//! **37 µs** — toggle the row, revalidate, render the object, turn it
+//! into the value memory and the file both take — which is 0.46% of
+//! PHILOSOPHY's 8 ms pure-UI budget, and no merge appears in it. A
+//! **flush** pays **70 µs** to merge a builtin layer including the real
+//! keymap, plus **20 µs** for the `build_keymap` `apply_reload` runs
+//! unconditionally, once per 250 ms. An earlier build merged and applied
+//! per keystroke; the arithmetic was affordable and the behaviour was
+//! not, which is why the numbers are split the way the work is.
+//!
 //! Memory and disk both derive from the same rendered
 //! `toml_edit::Table` — [`object_value`] parses exactly the text
 //! [`super::object_text`] would write — so the write is a *copy* of the
@@ -54,10 +59,12 @@
 //! updates memory. Its **failure** does: see [`revert_failed_write`].
 //!
 //! One consequence, stated rather than hidden: a quit inside the
-//! debounce window loses the pending write. The exposure is 250 ms of
-//! one object's fields, and closing it would mean either writing per
-//! keystroke (the thrash this exists to prevent) or a shutdown hook this
-//! shell does not have.
+//! debounce window loses the pending batch **entirely** — not merely its
+//! write. Nothing has been merged or applied yet either, so the edit is
+//! gone rather than half-landed, which is the better of the two failures
+//! but is still a loss. The exposure is 250 ms of one object's fields,
+//! and closing it would mean either writing per keystroke (the thrash
+//! this exists to prevent) or a shutdown hook this shell does not have.
 //!
 //! ## The watcher will see our own write
 //!
@@ -99,8 +106,11 @@ use crate::shell::ShellView;
 /// * it is half the watcher's own 500 ms poll
 ///   (`hot_reload::RELOAD_POLL_INTERVAL`), so a flush and the poll that
 ///   observes it never interleave with a second flush;
-/// * it delays only the *file*. Memory applied on the keystroke, so
-///   nothing a trader can see waits for it.
+/// * it delays the merge, the application and the file **together** —
+///   everything except the dialog itself, which paints from the
+///   [`Draft`](super::Draft) and so has already moved. Nothing a trader
+///   is looking at waits for this timer; the blotter and the rest of the
+///   app do, deliberately (see the module header).
 ///
 /// Write-on-field-commit was the alternative and was rejected: the Views
 /// stage has no commit moment — `space` and `shift+j` act on a row and
@@ -119,14 +129,19 @@ pub(crate) const WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// `hidden`, and every width the doc already declares), and writing an
 /// empty table would leave `[tree]` alone in `view_presentation.toml` —
 /// a table that says nothing, which is exactly the artefact seen in a
-/// user's file before this design. Under the old staging model that
+/// user's file before this design. Under the old staged-save model that
 /// needed a save whose draft excluded nothing; under this one it is one
 /// keystroke away, every time a trader unhides the last hidden column.
 /// So the empty rendering means "I have no personalisation of this
 /// object" and is written as an absence, in memory and on disk alike.
 pub type ObjectEdit = Option<toml::Value>;
 
-/// Config writes applied to memory and not yet on disk.
+/// Edits recorded by keystrokes and not yet merged, applied or written —
+/// everything the next [`promote`] owes the rest of the app.
+///
+/// Each entry is the whole rendered object as of the last keystroke that
+/// touched it, not a delta, so promoting the batch twice is idempotent
+/// and a superseded flush costs nothing.
 ///
 /// Keyed by `(doc, object)` rather than by doc alone: the debounce can
 /// span a trader leaving one object and editing another, and two objects
@@ -152,8 +167,9 @@ pub(crate) struct PendingConfigWrite {
 /// produces — and parses it back, rather than converting
 /// `toml_edit::Table` to `toml::Value` field by field. One rendering,
 /// two destinations: memory cannot end up holding something the file
-/// would not have said. It is a parse of a few hundred bytes, inside a
-/// 63 µs merge, inside an 8 ms budget.
+/// would not have said. It is a parse of a few hundred bytes, and it is
+/// part of the keystroke rather than of the flush — measured inside that
+/// keystroke's 37 µs, against an 8 ms budget.
 pub fn object_value(object: &str, table: toml_edit::Table) -> ObjectEdit {
     if table.is_empty() {
         return None;
@@ -248,7 +264,13 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
 /// *freezes*: a user-layer `views.toml` copy of a desk view stops
 /// receiving the column the desk adds next week (spec §4.1). Everything
 /// else — order, inclusion, width — is presentation, forks nothing, and
-/// applies on the keystroke.
+/// goes onto the batch unasked.
+///
+/// It reads `services.config`, which the debounce leaves up to 250 ms
+/// behind, so two definitional edits inside one window each ask rather
+/// than the second seeing the first already applied. That is the safe
+/// direction — asking twice loses nothing — and it needs a `Choice`
+/// stepped twice inside a quarter second to happen at all.
 pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
     let Some(draft) = shell
         .object_dialog
@@ -279,10 +301,12 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
 /// keystroke. See this module's header.
 ///
 /// Returns the notice the caller should show, or `None` when nothing
-/// changed. A missing user directory is a notice and nothing else — the
-/// contract every persist path in this crate shares — and, deliberately,
-/// no in-memory apply either: memory ahead of a disk that can never
-/// catch up is precisely the state hazard 1 exists to prevent.
+/// changed. A missing user directory is a notice and **nothing queued** —
+/// the contract every persist path in this crate shares — so no flush is
+/// ever scheduled and the change is never applied: memory ahead of a
+/// disk that can never catch up is precisely the state hazard 1 exists
+/// to prevent. The draft keeps the value, and the row still paints it,
+/// which is the honest picture of a shell with nowhere to write.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
     let edits = edits_for(shell);
     if edits.is_empty() {

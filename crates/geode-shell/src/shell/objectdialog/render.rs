@@ -17,8 +17,8 @@
 //! `ShellView::dialog_input` **blurred** (`focus_filter: false`), because
 //! a focused gpui-component `Input` consumes bare letters as text before
 //! any raw key listener sees them — which is the whole reason `j`/`k` can
-//! move here at all, and the reason the edit stage's `s`/`d`/`r` verbs
-//! are reachable. `/` focuses the field and enters [`DialogMode::Filter`];
+//! move here at all, and the reason the edit stage's `d`/`r` verbs are
+//! reachable. `/` focuses the field and enters [`DialogMode::Filter`];
 //! `escape` blurs it again. While the field is blurred the query paints
 //! as static muted text rather than a live caret
 //! ([`dialog::filter_row`]'s `frozen` argument): a caret in a field that
@@ -43,17 +43,31 @@
 //! [`EscapeStep::PreviousStage`] rather than silently spending itself on
 //! `ClearQuery`.
 //!
-//! ## Applying is instant; it is still the watcher's applier
+//! ## The dialog is instant; the merge and the applier ride one timer
 //!
-//! There is no save key. A field edit moves memory on the keystroke —
-//! [`super::apply::commit_edit`] merges the change through the loader's
-//! own `Config::from_docs` and hands the result to `hot_reload::
-//! apply_reload`, the same applier the 500 ms watcher uses — and queues
-//! the file write on a debounce behind it (spec §7.1, and
-//! [`super::apply`]'s module doc for the merge measurement, the
-//! self-write reasoning and the failed-write revert). Both stages still
-//! derive fresh from `Config`, so what they show after the keystroke is
-//! the merged truth rather than the draft's opinion of it.
+//! There is no save key. A keystroke changes the [`super::Draft`] and
+//! puts the change on a pending batch ([`super::apply::commit_edit`]);
+//! 250 ms later that batch is merged through the loader's own
+//! `Config::from_docs`, applied through `hot_reload::apply_reload` — the
+//! same applier the 500 ms watcher uses — and written to the file, all
+//! together (spec §7.1, and [`super::apply`]'s module doc for the
+//! measurements, the self-write reasoning and the failed-write revert).
+//!
+//! **The edit stage's rows are painted from the draft, and that is what
+//! makes the edit instant.** It is not a cache and it must not be
+//! "fixed" into reading `services.config`: that config is deliberately up
+//! to one debounce behind, so a row derived from it would show the
+//! trader's own keystroke a quarter of a second late — the exact lag this
+//! design exists to remove. The draft is not an opinion the config might
+//! contradict either; it is the same value the flush is about to merge,
+//! rendered by the same [`Domain::to_table`](super::Domain::to_table)
+//! call, and a failed write rebuilds it from the reverted config
+//! (`apply::revert_failed_write`) so the two cannot drift apart.
+//!
+//! The **browse** stage still derives fresh from `Config`, because it has
+//! no draft to derive from and nothing it shows is one keystroke old. Its
+//! rows can therefore trail an edit by up to one debounce window; they
+//! self-correct on the flush.
 //!
 //! One edit still asks first, and only one: a change that would **fork**
 //! the object into the user layer (spec §4.1), because a fork freezes the
@@ -418,7 +432,8 @@ fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
 /// (`an_object_opened_from_filter_mode_still_escapes_back_a_stage`): a
 /// stage whose mode and focus disagree sends the next `escape` down a
 /// rung the edit handler does not claim, and the shell closes the whole
-/// dialog with the draft still unsaved.
+/// dialog out from under the object being edited instead of stepping
+/// back to the list.
 ///
 /// So the halves are not offered separately: `enter_edit` is visible only
 /// inside this module's subtree and its doc points here, and this is the
@@ -502,10 +517,12 @@ fn handle_edit_key(
         });
         if step == Some(EscapeStep::PreviousStage) {
             // Straight back, with no discard question: there is nothing
-            // unsaved to discard. Every field edit applied on the
-            // keystroke that made it, and a fork the user has not
-            // confirmed was taken back off the draft when they declined
-            // it, so leaving the stage abandons exactly nothing.
+            // to discard. Every field edit is already on the pending
+            // batch, which outlives this stage and the whole dialog
+            // (`ShellView::pending_config_write`) and still merges,
+            // applies and writes on its own timer; and a fork the user
+            // has not confirmed was taken back off the draft when they
+            // declined it. Leaving abandons exactly nothing.
             leave_edit(shell, window, cx);
             return true;
         }
@@ -627,13 +644,16 @@ fn cancel_confirm(shell: &mut ShellView) {
     }
 }
 
-/// Apply the change the keystroke just made — **now** — or ask first if
-/// applying it would fork the object.
+/// Record the change the keystroke just made — or ask first, if applying
+/// it would fork the object.
 ///
-/// The one door every field edit leaves through, so there is one answer
-/// to "does this apply instantly?" and one place the fork question is
-/// asked. [`super::apply::commit_edit`] does the applying: the loader's
-/// merge into memory, then the debounced file write behind it.
+/// The one door every field edit leaves through, so there is one place
+/// the fork question is asked and one place a change joins the pending
+/// batch. [`super::apply::commit_edit`] does that recording; the merge,
+/// the application and the file write happen together on the debounce
+/// behind it. The trader sees the change immediately regardless — the row
+/// under the cursor is painted from the draft this function was called
+/// after mutating.
 ///
 /// The fork check runs on the draft *after* the keystroke has changed it
 /// (that is what makes `writes_by_destination` able to see a `Doc`
@@ -894,8 +914,9 @@ struct Action {
 /// The actions available on the object being edited, in the order they are
 /// painted.
 ///
-/// **No save.** There is nothing to save: a field edit applied on the
-/// keystroke that made it. What is left is exactly the verbs that are
+/// **No save.** There is nothing to save: a field edit is already
+/// recorded, and merges, applies and reaches disk on its own timer with
+/// no further keystroke. What is left is exactly the verbs that are
 /// destructive or structural — `d` deletes the user's copy, `r` throws a
 /// personal override away — plus, as a confirm rather than a standing
 /// button, `Copy to user layer` ([`Confirm::Fork`]), which the first
@@ -903,8 +924,11 @@ struct Action {
 ///
 /// An earlier build put `Save changes` here whenever the draft was dirty,
 /// relabelled `Copy to user layer` when saving would fork. The fork
-/// warning survives; the save does not, because "dirty" is no longer a
-/// state this dialog can be in.
+/// warning survives; the save does not, because between keystrokes the
+/// draft is never dirty — [`Draft::is_dirty`](super::Draft::is_dirty)
+/// can only be true inside the keystroke that changed a field, or while
+/// a fork confirm is waiting on its answer, and the bar is never built
+/// in either moment with a save to offer.
 fn actions(shell: &ShellView) -> Vec<Action> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();

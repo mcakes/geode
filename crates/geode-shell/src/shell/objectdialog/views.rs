@@ -340,7 +340,7 @@ fn doc_width(column: &toml_edit::Table) -> Option<f32> {
 /// is the reload's to report (spec §7.1).
 ///
 /// The rendered text is what is parsed, not an in-memory shortcut, so
-/// what is validated is byte-for-byte what a save would write.
+/// what is validated is byte-for-byte what the flush will write.
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     let table = rendered_doc_table(draft);
     let doc = merge_docs(
