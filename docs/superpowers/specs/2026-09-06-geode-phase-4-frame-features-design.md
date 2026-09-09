@@ -1005,8 +1005,7 @@ perf` on the shell's existing ~500 ms reload-poll tick and only while
 Phase 4b section for the allocation contract this pins in tests.
 
 **Known gaps, deferred (recorded in the round-5 re-review, 2026-09-08).
-Item 1 was fixed on the follow-up branch, 2026-09-08; item 2 is still
-open.**
+Both were fixed on the follow-up branch, 2026-09-08.**
 
 1. ~~An `EventSink` returning `false` means "receiver gone" to both
    consumers.~~ **Fixed (follow-up branch, Task 1, 2026-09-08.)** `false`
@@ -1027,21 +1026,38 @@ open.**
    a full channel is only counted. Shutdown is, and always was,
    `IngestHandle::shutdown`, the scheduler's stop condvar, and the pool's
    `shutdown`.
-2. **The load lane is in-process only, so a restart false-cleans a
-   still-live degraded generation.** `generations.health` /
-   `health_reason` are persisted (`store/catalog.rs`) but nothing ever
-   reads them back. On restart the load lane is empty, the first poll
-   finds the CSV `Unchanged` (so nothing reloads and nothing
-   republishes), `worst_health` returns `None`, the scheduler sends
-   `Ok`, and the source reads **ok** while the still-live degraded
-   generation is exactly what the blotter is summing. Same false-clean
-   family as MAJ-2/NEW-4/NEW-6, one level up — and NEW-6's own
-   justification ("its rows are still live, so it must keep showing
-   degraded") is what makes this a contradiction rather than a policy.
-   The fix is to seed the load lane at `DataService::open` from the
-   live generations' persisted health, which is already keyed by batch,
-   exactly the lane's key. Until then, source health as built is
-   per-process.
+2. ~~The load lane is in-process only, so a restart false-cleans a
+   still-live degraded generation.~~ **Fixed (follow-up branch, Task 2,
+   2026-09-08.)** `DataService::open` now seeds the load lane from the
+   health `file_generations` persisted for the generations LIVE at that
+   moment, through `Catalog::live_health` — the generations
+   `query::as_of::resolve_generations` would resolve at `now` (newest
+   `source_time` per `(batch, book)`, ties by `gen_id`, with the
+   `archived_only` guard in the join so a generation that never went
+   live is neither picked nor allowed to hide the one that is), joined
+   to the catalog, one entry per batch whose live generation is not
+   `ok`, worst-across-books by `severity_rank`'s label order. Each is
+   reported through the same `report_load_and_emit` door and the same
+   emit closure the ingest sink's `Published` arm uses, keyed by batch —
+   which is the lane's own key, so a later clean republish of that batch
+   clears exactly it and nothing else. The seed runs before
+   `Scheduler::spawn`: it must be in the tracker before the first poll
+   reports, or that poll's `Ok` becomes the last-reported value and the
+   seed that follows reads as a spurious transition rather than the
+   state. A corrected republish that landed while the app was down is
+   simply not seeded — its batch's live generation is the clean one.
+
+   The ruling that makes this expressible: health is persisted per
+   DATASET (the only grain the catalog records) and the tracker is keyed
+   per SOURCE, so the seed reads by dataset and files the result under
+   every source configured for it. Two sources on one dataset both get
+   the seed — one is told about the other's degraded batch — and a
+   dataset with no configured source is not seeded at all, there being
+   no source key to file it under. That over-reports and never
+   false-cleans, which is the direction every fix on this seam has gone.
+   A `StoreError` from the seed propagates out of `open`: the failure
+   mode of swallowing it is a service that opens quietly and reports
+   clean, which is the defect itself.
 
 ### 4.5 `Request::Catalog`
 
