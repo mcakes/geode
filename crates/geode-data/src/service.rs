@@ -242,7 +242,12 @@ struct Lanes {
     /// discovery report for this source.
     discovery: Option<LaneValue>,
     /// What each BATCH's last publish (or load failure) reported, keyed
-    /// by batch. Empty until the first load report for this source.
+    /// by batch. Seeded at `DataService::open` from the health the
+    /// catalog persisted for the generations LIVE at that moment
+    /// (`Catalog::live_health`), so a restart does not forget a still-
+    /// live degraded generation; empty after that only for a source
+    /// whose live generations are all clean, until its first load
+    /// report.
     load: std::collections::HashMap<String, LaneValue>,
     /// Monotonic within this source. Bumped only when a slot's value
     /// actually changes, and stamped onto that slot — see
@@ -628,6 +633,63 @@ impl DataService {
         // tracker scoped to just one of the two producers cannot close
         // the latch MAJ-3 reopened.
         let health_tracker = Arc::new(HealthTracker::default());
+
+        // Phase 4b's deferred gap 2 (spec §4.4): seed the LOAD lane from
+        // what the catalog persisted, before anything else can speak for
+        // these sources. The lane is otherwise in-process only, so a
+        // restart forgot a still-live degraded generation completely —
+        // nothing republishes a file that has not changed, so the first
+        // content-blind discovery poll's `Ok` was the only word on the
+        // source, and it read `ok` while the blotter summed degraded
+        // rows.
+        //
+        // Placed HERE, before `Scheduler::spawn`, for that ordering: the
+        // seed must be in the tracker before the first poll reports, or
+        // the poll's `Ok` becomes the last-reported value and the seed
+        // that follows it is a spurious transition rather than the
+        // state.
+        //
+        // Ruling: keyed by SOURCE (as the whole tracker is) but read per
+        // DATASET, which is the only grain the catalog records. Two
+        // sources on one dataset therefore both get the same seed, and a
+        // dataset with no configured source gets none — there is no
+        // source key to file it under. That over-reports (a source is
+        // told about a sibling's degraded batch) and never false-cleans,
+        // which is the direction this whole seam has been fixed in five
+        // times.
+        //
+        // A `StoreError` here is propagated, not swallowed: the failure
+        // mode of a swallowed one is a service that opens quietly and
+        // reports clean.
+        for spec in &config.sources {
+            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {
+                let (_, reason) = health.to_parts();
+                let detail = format!("{batch}: {}", reason.unwrap_or_default());
+                let source = spec.name.clone();
+                let sink = Arc::clone(&sink);
+                // The ingest sink's `Published` arm's emit closure,
+                // verbatim: the same door, the same log line, the same
+                // verbatim forwarding of the DECIDING slot's pair.
+                health_tracker.report_load_and_emit(
+                    &spec.name,
+                    &batch,
+                    health,
+                    detail,
+                    |reported| match reported {
+                        Some((worst, detail)) => {
+                            log_health_event(&source, &worst, &detail);
+                            sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            })
+                        }
+                        None => true,
+                    },
+                );
+            }
+        }
+
         let result_sink: ResultSink = {
             let sink = Arc::clone(&sink);
             Arc::new(move |r: QueryResult| match r.kind {
@@ -2009,6 +2071,222 @@ source_name = "NPV"
             !saw_ok,
             "a routine, content-blind discovery poll must never clear a \
              real, unfixed degraded publish back to Ok"
+        );
+        svc.shutdown();
+    }
+
+    /// The `carried_schema` source, over `src`, polling at `poll`.
+    fn carried_source(src: &std::path::Path, poll: Duration) -> crate::source::SourceSpec {
+        crate::source::SourceSpec {
+            name: "eod_risk".into(),
+            dataset: "risk_snapshot".into(),
+            paths: vec![format!("{}/*.csv", src.display())],
+            readiness: crate::source::Readiness::Sentinel,
+            priority: crate::source::Priority::LatestRisk,
+            poll_interval: poll,
+            pending_timeout: Duration::from_secs(3600),
+            batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+        }
+    }
+
+    /// One file's worth of rows for `carried_schema`, with its sentinel.
+    fn write_carried_csv(src: &std::path::Path, rows: &str) {
+        std::fs::write(
+            src.join("risk_2026-08-24_BK0.csv"),
+            format!("Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n{rows}"),
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("risk_2026-08-24_BK0.csv.done"),
+            r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
+        )
+        .unwrap();
+    }
+
+    fn carried_config(
+        db_path: PathBuf,
+        src: &std::path::Path,
+        poll: Duration,
+    ) -> DataServiceConfig {
+        let mut schema = SchemaSpec::default();
+        schema.datasets.push(carried_schema());
+        DataServiceConfig {
+            db_path,
+            schema,
+            views: Vec::new(),
+            dimensions: DerivedDimensions::default(),
+            query_workers: 1,
+            sources: vec![carried_source(src, poll)],
+        }
+    }
+
+    /// Run `svc` until a `Health` event for `eod_risk` whose worst is not
+    /// `Ok` arrives, or the deadline passes.
+    fn await_unhealthy(
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        within: Duration,
+    ) -> Option<Health> {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(DataEvent::Health {
+                    source,
+                    worst: Health::Ok,
+                    ..
+                }) => assert_eq!(source, "eod_risk"),
+                Ok(DataEvent::Health { source, worst, .. }) => {
+                    assert_eq!(source, "eod_risk");
+                    return Some(worst);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation() {
+        // Phase 4b's deferred gap 2 (spec §4.4): the load lane was in
+        // process only. `file_generations.health` persisted the
+        // degradation, but nothing read it back, so after a restart the
+        // first poll found the CSV `Unchanged` (nothing republishes),
+        // the tracker was empty, and the scheduler's content-blind `Ok`
+        // was the only word on the source — reading `ok` while the
+        // blotter summed the still-live degraded rows.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("geode.duckdb");
+        write_carried_csv(
+            src.path(),
+            "BK0,L0,P1,C,I1,USD,100\nBK0,L0,P1,C,I1,EUR,100\n",
+        );
+
+        // First run: publish the degraded generation, then go away.
+        {
+            let (svc, rx) = DataService::open_channel(carried_config(
+                db_path.clone(),
+                src.path(),
+                Duration::from_secs(3600),
+            ))
+            .unwrap();
+            let worst = await_unhealthy(&rx, Duration::from_secs(30));
+            assert!(
+                matches!(worst, Some(Health::Degraded { .. })),
+                "setup: the file must degrade, got {worst:?}"
+            );
+            svc.shutdown();
+            // Dropped, not merely shut down: the reopen below is a real
+            // second `Store::open` on the same file, which cannot happen
+            // while this service still holds the database handle.
+            drop(svc);
+        }
+
+        // The restart. Nothing on disk changed, so nothing republishes —
+        // which is what makes the seed the only possible source of a
+        // `Degraded` here.
+        let (svc, rx) = DataService::open_channel(carried_config(
+            db_path,
+            src.path(),
+            Duration::from_millis(30),
+        ))
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut seeded = None;
+        while Instant::now() < deadline && seeded.is_none() {
+            match rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(DataEvent::Published { .. }) => {
+                    panic!("nothing changed on disk: a republish would make this test a tautology")
+                }
+                Ok(DataEvent::Health {
+                    source,
+                    worst: Health::Degraded { reason },
+                    detail,
+                }) => {
+                    assert_eq!(source, "eod_risk", "keyed by the source, not the dataset");
+                    assert!(reason.contains("currency"), "{reason}");
+                    assert!(
+                        detail.starts_with("BK0: "),
+                        "the batch's own detail: {detail}"
+                    );
+                    seeded = Some(reason);
+                }
+                Ok(_) | Err(_) => {}
+            }
+        }
+        assert!(
+            seeded.is_some(),
+            "a restart must re-report the still-live degraded generation"
+        );
+
+        // And the tracker HOLDS it: the polls that keep firing here are
+        // content-blind `Unchanged` polls, exactly the ones NEW-4 showed
+        // must never clear a load-set problem.
+        let mut saw_ok = false;
+        let deadline = Instant::now() + Duration::from_millis(600);
+        while Instant::now() < deadline {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_millis(100))
+                && source == "eod_risk"
+            {
+                saw_ok = true;
+            }
+        }
+        assert!(
+            !saw_ok,
+            "the seeded load lane must outlive a clean discovery poll, \
+             the same as a freshly published one"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_restart_after_a_clean_publish_seeds_nothing() {
+        // The other half: the seed reads the health of the generation
+        // that is LIVE, so a database whose live generations are all
+        // clean must produce no problem report at all. Without this,
+        // "seed everything the catalog ever recorded" would pass the
+        // test above and cry wolf on every restart.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("geode.duckdb");
+        write_carried_csv(src.path(), "BK0,L0,P1,C,I1,USD,100\n");
+
+        {
+            let (svc, rx) = DataService::open_channel(carried_config(
+                db_path.clone(),
+                src.path(),
+                Duration::from_secs(3600),
+            ))
+            .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut published = false;
+            while Instant::now() < deadline && !published {
+                match rx.recv_timeout(Duration::from_millis(200)) {
+                    Ok(DataEvent::Published { .. }) => published = true,
+                    Ok(DataEvent::Health { worst, detail, .. }) => {
+                        assert_eq!(worst, Health::Ok, "setup: a clean load — {detail}")
+                    }
+                    Ok(_) | Err(_) => {}
+                }
+            }
+            assert!(published, "setup: the clean file must publish");
+            svc.shutdown();
+            drop(svc);
+        }
+
+        let (svc, rx) = DataService::open_channel(carried_config(
+            db_path,
+            src.path(),
+            Duration::from_millis(30),
+        ))
+        .unwrap();
+        let worst = await_unhealthy(&rx, Duration::from_millis(600));
+        assert!(
+            worst.is_none(),
+            "a clean database seeds nothing, got {worst:?}"
         );
         svc.shutdown();
     }
