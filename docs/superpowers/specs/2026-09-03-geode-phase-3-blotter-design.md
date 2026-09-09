@@ -215,7 +215,10 @@ pub trait ModuleFactory {
 `ShellServices`. Day one the roster is the blotter. A new tile (a split,
 a restored session entry, or the first tile of an empty workspace) is
 filled by the module named in `[app] modules.default`, `"blotter"` when
-unset. A restored tile whose module kind is not in the roster, or a
+unset. (Superseded 2026-09-08 by `2026-09-08-geode-add-tile-design.md`
+§7: there is no default kind; a new tile is always an add of a named
+kind, and a tile nothing claims is the placeholder.) A restored tile
+whose module kind is not in the roster, or a
 tile with no session entry, is painted as an empty tile with a hint
 naming the palette — never a panic, never a silent blank.
 

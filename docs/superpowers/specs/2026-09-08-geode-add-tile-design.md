@@ -77,11 +77,20 @@ needs no change: every registered action is already a row.
 Dispatch strips the `tile::add_` prefix (the same pattern
 `frame::pick_`/`scope::` use in `ShellView::dispatch`), then peels a
 trailing `_horizontal`/`_vertical` into an explicit direction, and
-resolves the remainder against the roster. A remainder the roster does
-not know is not an add (falls through, as any unknown action does);
-this ordering means a kind can never be misparsed by its own suffix,
-since the suffix is peeled before the roster lookup and a kind string
-is `&'static str` from the roster itself.
+takes the remainder as the kind. This ordering means a kind can never
+be misparsed by its own suffix, since the suffix is peeled first.
+
+*Amended 2026-09-08 (as built):* dispatch does **not** consult the
+roster. Only *registered* action ids ever reach `ShellView::dispatch`
+(the palette and the keymap both resolve through `ActionRegistry`), and
+registration is `register_add_actions` over the roster's own kinds — so
+"the remainder names a real kind" holds by construction rather than by
+a lookup. `defaults::parse_add_action` is therefore pure string work
+(`Option<(&str, Option<Orientation>)>`, `None` for an empty kind or a
+non-`tile::add_` id). The kind is checked once, later and in one place:
+`ensure_occupants` warns (`target: "geode::shell"`) and paints the
+placeholder if a pending request's kind has no factory — which is also
+what the tests rely on to exercise the placeholder path.
 
 ### 3.3 Duplicate
 
@@ -384,3 +393,27 @@ layer's first entries.
    `workspace::duplicate_*`, keymap changes, hints.
 4. Setting: field, hot reload, dialog row, persist.
 5. Integration tests, mutation entries, docs.
+
+## 13. Implementation notes (2026-09-08)
+
+Three things the build settled that the design above did not say:
+
+(a) `Workspace::toggle_dock`'s show branch exits main-tree fullscreen
+first. A fullscreen tile plus a focused dock is a state `render` cannot
+paint (no docks while fullscreen, no focus ring outside `Main`) and
+`toggle_fullscreen` refuses to undo while a dock is focused, so `mod+f`
+was left dead — the same precedent `move_to_dock`'s `Main` arm already
+set.
+
+(b) The shell's test fixtures carry a `rec` recording factory in their
+roster (`shell/tests/mod.rs`). With §4.2's "an add on a focused
+placeholder fills it in place", an empty roster makes every add after
+the first collapse into the first tile, so no two-tile fixture could
+exist without one. The fixtures also bind `ctrl+v`/`ctrl+h` to
+`tile::add_rec_horizontal`/`_vertical` in a test keymap layer
+(`TEST_ADD_KEYMAP`) — the shipped keymap has no create-a-tile chord
+(§3.1), and these are exactly the shape a desk keymap would ship.
+
+(c) `[modules] default` was removed from `examples/demo-config/app.toml`
+(§7.1); the key now only produces the "no default kind" diagnostic if a
+user config still sets it.

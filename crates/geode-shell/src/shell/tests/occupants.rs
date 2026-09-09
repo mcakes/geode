@@ -159,13 +159,15 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     );
 }
 
-/// Spec 2026-09-08 add-tile §7.2: a restored record whose kind the
-/// roster does not know paints the placeholder (never some other
-/// module, never that module's state), and the record rides through
-/// `current_tiles` verbatim so the next flush cannot forget it.
-#[gpui::test]
-fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives(
-    cx: &mut gpui::TestAppContext,
+/// A session holding exactly one tile, id 1, whose module kind nothing
+/// in the fixture's roster registers — the §7.2 unplaced-record fixture,
+/// shared by the two tests below. Hands back the services to open a
+/// shell on, the recorder's log, and the record exactly as it was
+/// restored (what `current_tiles` must write back verbatim).
+fn services_with_an_unknown_restored_kind() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    session::TileRecord,
 ) {
     let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
     let ws1: toml::Table = r#"
@@ -189,6 +191,18 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
     let (mut services, log) = services_with_recorder();
     services.workspaces = restored.workspaces;
     services.restored_tiles = restored.tiles;
+    (services, log, original)
+}
+
+/// Spec 2026-09-08 add-tile §7.2: a restored record whose kind the
+/// roster does not know paints the placeholder (never some other
+/// module, never that module's state), and the record rides through
+/// `current_tiles` verbatim so the next flush cannot forget it.
+#[gpui::test]
+fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log, original) = services_with_an_unknown_restored_kind();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     assert_eq!(
@@ -211,6 +225,15 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
     let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
     assert_eq!(tiles.get(&1).map(|r| r.kind.as_str()), Some("rec"));
+    // `current_tiles` alone cannot see a stale entry here — the live
+    // occupant wins id 1 through `or_insert_with` — so the map itself is
+    // the assertion: `add_tile` drops the record the moment the tile is
+    // claimed (§7.2), rather than leaving it to shadow-box with the
+    // occupant for the rest of the session.
+    assert!(
+        shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()),
+        "filling the placeholder in place drops the record it rode in on"
+    );
     assert_eq!(
         shell.read_with(&cx, |s, _| s
             .services
@@ -221,6 +244,40 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
             .len()),
         1
     );
+}
+
+/// The other end of §7.2's lifetime: an unplaced record outlives only
+/// its own tile. Close the tile and there is nothing left to write the
+/// record back for — riding through `current_tiles` anyway would
+/// resurrect, on the next flush, a tile the trader just closed.
+#[gpui::test]
+fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestAppContext) {
+    let (services, _log, _original) = services_with_an_unknown_restored_kind();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.current_tiles(cx).len()),
+        1,
+        "the record rode through the first render"
+    );
+
+    cx.simulate_keystrokes("ctrl-w");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(
+        shell
+            .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+            .is_empty(),
+        "the tile is gone"
+    );
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert!(
+        !tiles.contains_key(&1),
+        "a record whose tile closed is not written back: {tiles:?}"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()));
 }
 
 /// I2, final review: `fill_all_tiles` walks every workspace, so the
@@ -975,5 +1032,75 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
         Some(crate::module::placeholder::PLACEHOLDER_KIND),
         "the plain split asked for nothing, and there is no default kind \
          to guess with (§7.1) — it gets a placeholder"
+    );
+}
+
+/// The other half of §4.3's addressing rule: a request whose tile closed
+/// before the render that would have filled it is *dropped*, never
+/// re-aimed at some surviving tile. It is not merely tidiness — a stale
+/// entry keeps `open_module`'s "already pending" guard
+/// (`pending_tiles.values().any(|p| p.kind == kind)`) true forever, so
+/// that kind could never be opened again for the rest of the session.
+#[gpui::test]
+fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let kept = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+
+    // Both inside ONE `cx.update` block, so no render happens between
+    // them: `open_module` splits and records a request under the new
+    // (now focused) id, and `close_tile` removes that very tile before
+    // `ensure_occupants` ever sees it.
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+            s.services.workspaces.active_mut().close_tile();
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles, vec![kept], "only the original tile is left");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(kept)),
+        Some("rec"),
+        "the survivor keeps its own occupant — the request was not re-aimed"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_tiles.is_empty()),
+        "the request for the closed tile is dropped"
+    );
+
+    // …and the guard did not latch: asking again really does open one.
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let diagnostics: Vec<TileId> = shell
+        .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+        .into_iter()
+        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("diagnostics"))
+        .collect();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "a dropped request leaves the kind openable: {diagnostics:?}"
     );
 }
