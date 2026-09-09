@@ -24,6 +24,7 @@ pub mod scopebar;
 pub mod session;
 pub mod shell;
 pub mod theme;
+pub mod tileadd;
 pub mod tiling;
 pub mod vimfind;
 pub mod vimnav;
