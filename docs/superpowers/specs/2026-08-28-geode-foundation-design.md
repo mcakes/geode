@@ -93,7 +93,7 @@ The app owns one global set of numbered, nameable **workspaces**
 workspace is a tree of splits whose leaves are **tiles**; each tile hosts one
 module instance. Core verbs, chord-driven, i3 as the default map:
 
-- split vertical/horizontal (`mod+v` / `mod+s`)
+- split vertical/horizontal (`mod+v` / `mod+s`) — superseded by `docs/superpowers/specs/2026-09-08-geode-add-tile-design.md`: tiles are added by kind, and the split is how an add is placed.
 - focus movement (`mod+h/j/k/l`)
 - move tile (`mod+shift+h/j/k/l`)
 - resize mode (`mod+r`, then hjkl, `Esc` to exit)

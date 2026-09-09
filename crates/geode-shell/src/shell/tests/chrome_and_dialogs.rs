@@ -7,7 +7,7 @@ use super::*;
 
 /// Cheap evidence the new chrome actually paints something, on a
 /// window with zero tiles open — before this task, an empty workspace
-/// painted no quads at all (just the "ctrl+h / ctrl+v" placeholder
+/// painted no quads at all (just the "ctrl+k → Add a tile" placeholder
 /// text). The title bar and sidebar now fill their own background
 /// regardless of tile state, so this is a real regression check, not a
 /// tautology.
@@ -108,9 +108,9 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
 
 /// Focus interplay (brief): while the filter input has focus, a shell
 /// chord that has no key binding at all in the input's own gpui action
-/// context (`ctrl+h` = `workspace::split_down`) must not reach the
-/// shell's keymap `Matcher` — it stays with the input instead of
-/// splitting the workspace.
+/// context (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`)
+/// must not reach the shell's keymap `Matcher` — it stays with the
+/// input instead of adding a tile to the workspace.
 #[gpui::test]
 fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
@@ -151,8 +151,8 @@ fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::Test
     });
     assert_eq!(
         tile_count, 0,
-        "ctrl+h (workspace::split_down) must not dispatch while the filter \
-         input has focus"
+        "ctrl+h (the test layer's tile::add_rec_vertical) must not dispatch \
+         while the filter input has focus"
     );
 }
 
@@ -378,7 +378,8 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
 
 /// Fix wave, Fix 1 regression, carried forward by the Task 9
 /// instant-modal redesign: while the settings modal is open, `ctrl+v`
-/// (`workspace::split_right`) must not reach the shell's keymap
+/// (the fixture layer's `tile::add_rec_horizontal`) must not reach the
+/// shell's keymap
 /// `Matcher` at all — modeled on the filter-input guard this mirrors
 /// (`handle_key_down`'s early return while the filter field is
 /// focused). Before the original fix, `ShellView::handle_key_down`'s
@@ -432,8 +433,8 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     });
     assert_eq!(
         tile_count, 0,
-        "ctrl+v (workspace::split_right) must not reach the matcher while \
-         the settings modal is open"
+        "ctrl+v (the test layer's tile::add_rec_horizontal) must not reach \
+         the matcher while the settings modal is open"
     );
 
     cx.simulate_keystrokes("ctrl-k");
@@ -1230,6 +1231,133 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
         shell.read_with(&cx, |shell, _| shell.find_style),
         FindStyle::Vim,
         "a reload without [ui] find_style should re-resolve to the default"
+    );
+}
+
+/// Final-review Minor 3: the *reload* half of the `[app] modules.default`
+/// diagnostic (spec 2026-09-08 add-tile §7.1). `defaults::modules_
+/// default_diagnostic` has a pure test of its own, but nothing checked
+/// that `apply_reload` actually folds it into `new_config.diagnostics`
+/// and forwards it to the diagnostics entity — and, being a *warning*,
+/// that it does not reject the reload the way an error diagnostic does.
+#[gpui::test]
+fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+
+    let cfg = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(cfg, cx));
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("modules.default"))
+        .unwrap_or_else(|| panic!("expected a modules.default diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Warning,
+        "the key is dead config, not invalid config: {hit:?}"
+    );
+
+    shell.read_with(&cx, |shell, _| match &shell.last_reload {
+        crate::reload::ReloadOutcome::Applied { warnings } => assert!(
+            warnings.iter().any(|w| w.contains("modules.default")),
+            "a warning must not reject the reload, and must be reported: {warnings:?}"
+        ),
+        other => panic!("a warning-only reload must still apply, got {other:?}"),
+    });
+}
+
+/// `settings_view::set_add_direction` (the add-direction row's setter,
+/// driven directly for the same reason `set_theme`'s and `set_find_
+/// style`'s tests drive the handler rather than the control) updates
+/// `ShellView::add_direction` immediately and persists `[tiles] add` to
+/// `<user_dir>/app.toml` off the UI thread — mirrors `set_find_style_
+/// updates_the_shell_state` plus the persistence half `persist_find_
+/// style` has no dedicated test for, since `add_direction`'s own spec
+/// task (2026-09-08 add-tile §5) calls it out explicitly.
+#[gpui::test]
+fn set_add_direction_updates_the_shell_state_and_persists(cx: &mut gpui::TestAppContext) {
+    use crate::tileadd::AddDirection;
+    let dir = tempfile::tempdir().unwrap();
+    let (window, mut cx) = open_shell_with_user_dir(cx, test_services(), dir.path());
+    let shell = shell_of(&window, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.add_direction),
+        AddDirection::Auto
+    );
+    cx.update(|_window, cx| settings_view::set_add_direction(&shell, AddDirection::Vertical, cx));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.add_direction),
+        AddDirection::Vertical
+    );
+    cx.run_until_parked();
+    let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+    assert!(
+        text.contains("[tiles]") && text.contains("add = \"vertical\""),
+        "{text}"
+    );
+}
+
+/// `[tiles] add` resolves at startup and re-resolves on hot reload — the
+/// same two paths `find_style` rides just above.
+#[gpui::test]
+fn a_configured_add_direction_resolves_at_startup_and_on_reload(cx: &mut gpui::TestAppContext) {
+    use crate::tileadd::AddDirection;
+    let mut services = test_services();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[tiles]\nadd = \"horizontal\"\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.add_direction),
+        AddDirection::Horizontal,
+        "[tiles] add = \"horizontal\" should resolve at startup"
+    );
+    let new_config = config_with_mod("alt");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.add_direction),
+        AddDirection::Auto,
+        "a reload without [tiles] add should re-resolve to the default"
+    );
+}
+
+/// The settings dialog's `tab` stepping reaches the fifth (last) row
+/// too: with no filter narrowing the list, four `down`s land on Add
+/// tile, and `tab` steps `Auto → Horizontal` — [`step`]'s wrap, since
+/// `Auto` is `AddDirection::ALL`'s last value. Companion to `tab_steps_
+/// every_remaining_apply_setting_arm` above, which drives the first
+/// four rows through a filtered query each; this one exercises the row
+/// `apply_setting`'s `SettingId::AddDirection` arm dispatches to.
+#[gpui::test]
+fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
+    use crate::tileadd::AddDirection;
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.add_direction),
+        AddDirection::Auto,
+        "sanity: Auto is the default"
+    );
+    cx.simulate_keystrokes("down down down down");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
+        4,
+        "sanity: four downs land on the fifth row"
+    );
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.add_direction),
+        AddDirection::Horizontal,
+        "tab on the Add tile row should wrap Auto -> Horizontal"
     );
 }
 

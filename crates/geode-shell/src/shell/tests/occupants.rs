@@ -6,6 +6,7 @@ use super::*;
 // glob-imported `crate::session`, so the bare `session::` paths below need
 // this to resolve to the real module rather than to the sibling test file.
 use crate::session;
+use crate::tiling::Orientation;
 
 /// A minimal `ModuleFactory` that calls `Diagnostics::watch`/`unwatch`
 /// from `set_visible` — the same thing `geode_diagnostics::DiagnosticsTile`
@@ -115,21 +116,19 @@ mod watching {
 #[gpui::test]
 fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let mut roster = crate::module::ModuleRoster::new("watching");
+    let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(watching::WatchingFactory));
     roster.register_actions(&mut services.registry);
-    let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
-    let (keymap, diags) = build_keymap(&[doc], default_mod(), &services.registry);
-    assert!(diags.is_empty(), "{diags:?}");
-    services.keymap = keymap;
+    // This roster has no "rec", so the fixture layer's `ctrl+v` would
+    // paint a placeholder; the watching tile is added by its own kind's
+    // row instead (spec 2026-09-08 add-tile §3.2).
+    crate::defaults::register_add_actions(&mut services.registry, &["watching"]);
+    services.keymap = test_keymap(&services.registry, &[]);
     services.roster = roster;
 
     let (window, mut cx) = open_shell(cx, services);
-    cx.simulate_keystrokes("ctrl-v");
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
     let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_watching");
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     let tile = shell.read_with(&cx, |s, _| {
         s.services.workspaces.active().focused_tile().unwrap()
@@ -160,47 +159,125 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     );
 }
 
-#[gpui::test]
-fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(cx: &mut gpui::TestAppContext) {
-    // The record names a kind nothing in the roster registers, so
-    // `ensure_occupants` falls back to the roster's default ("rec")
-    // — but the fallback factory did not produce that state and must
-    // not be handed it (fix-round finding).
+/// A session holding exactly one tile, id 1, whose module kind nothing
+/// in the fixture's roster registers — the §7.2 unplaced-record fixture,
+/// shared by the two tests below. Hands back the services to open a
+/// shell on, the recorder's log, and the record exactly as it was
+/// restored (what `current_tiles` must write back verbatim).
+fn services_with_an_unknown_restored_kind() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    session::TileRecord,
+) {
+    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let ws1: toml::Table = r#"
+        focused = 1
+        [node]
+        kind = "leaf"
+        id = 1
+        [tiles.1]
+        module = "unregistered-kind"
+        [tiles.1.state]
+        last_command = "state for a different module"
+    "#
+    .parse()
+    .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+    }
+    let restored = session::from_toml(&table).unwrap();
+    let original = restored.tiles.get(&1).unwrap().clone();
+
     let (mut services, log) = services_with_recorder();
-    let mut state = toml::Table::new();
-    state.insert(
-        "last_command".into(),
-        toml::Value::String("state for a different module".into()),
-    );
-    services.restored_tiles.insert(
-        1,
-        crate::session::TileRecord {
-            kind: "unregistered-kind".into(),
-            state,
-        },
-    );
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    (services, log, original)
+}
+
+/// Spec 2026-09-08 add-tile §7.2: a restored record whose kind the
+/// roster does not know paints the placeholder (never some other
+/// module, never that module's state), and the record rides through
+/// `current_tiles` verbatim so the next flush cannot forget it.
+#[gpui::test]
+fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log, original) = services_with_an_unknown_restored_kind();
     let (window, mut cx) = open_shell(cx, services);
-    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(TileId(1))),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "no factory was asked to host the unknown record: {:?}",
+        log.borrow()
+    );
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert_eq!(
+        tiles.get(&1),
+        Some(&original),
+        "the record rides through: {tiles:?}"
+    );
+
+    // Filling it in place replaces the record with the live occupant's.
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert_eq!(tiles.get(&1).map(|r| r.kind.as_str()), Some("rec"));
+    // `current_tiles` alone cannot see a stale entry here — the live
+    // occupant wins id 1 through `or_insert_with` — so the map itself is
+    // the assertion: `add_tile` drops the record the moment the tile is
+    // claimed (§7.2), rather than leaving it to shadow-box with the
+    // occupant for the rest of the session.
+    assert!(
+        shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()),
+        "filling the placeholder in place drops the record it rode in on"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .tiles()
+            .len()),
+        1
+    );
+}
+
+/// The other end of §7.2's lifetime: an unplaced record outlives only
+/// its own tile. Close the tile and there is nothing left to write the
+/// record back for — riding through `current_tiles` anyway would
+/// resurrect, on the next flush, a tile the trader just closed.
+#[gpui::test]
+fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestAppContext) {
+    let (services, _log, _original) = services_with_an_unknown_restored_kind();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.current_tiles(cx).len()),
+        1,
+        "the record rode through the first render"
+    );
+
+    cx.simulate_keystrokes("ctrl-w");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
-    assert_eq!(tile, TileId(1), "the first split always allocates tile 1");
-    assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
-        Some("rec"),
-        "the default factory still hosts the tile"
-    );
+
     assert!(
-        log.borrow().iter().any(
-            |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
-        ),
-        "the fallback factory got no state: {:?}",
-        log.borrow()
+        shell
+            .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+            .is_empty(),
+        "the tile is gone"
     );
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert!(
+        !tiles.contains_key(&1),
+        "a record whose tile closed is not written back: {tiles:?}"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.unplaced_records.is_empty()));
 }
 
 /// I2, final review: `fill_all_tiles` walks every workspace, so the
@@ -271,7 +348,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
 }
 
 #[gpui::test]
-fn a_split_creates_an_occupant_of_the_default_kind_and_paints_it(cx: &mut gpui::TestAppContext) {
+fn an_add_creates_an_occupant_of_the_requested_kind_and_paints_it(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
@@ -525,18 +602,18 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     );
 }
 
-/// MIN-7 (Phase 4b Task 5 fix round 1): two `open_module` calls for the
-/// same kind within one render (a double `mod+shift+d` press, or
-/// key-repeat) — before the fix, both calls miss the "existing occupant"
-/// search (the first call's split tile has no occupant yet;
-/// `ensure_occupants` only creates one at the top of the *next* render),
-/// so a second call split a second tile and overwrote
-/// `pending_kind_for_new_tile`, leaving one tile hosting the requested
-/// kind and a stray second one hosting the roster's default. Two calls
-/// with no render between them must still yield exactly one split, one
-/// tile.
+/// MIN-7 (Phase 4b Task 5 fix round 1), carried forward to the addressed
+/// pending map (spec 2026-09-08 add-tile §4.3): two `open_module` calls
+/// for the same kind within one render (a double `mod+shift+d` press, or
+/// key-repeat) both miss the "existing occupant" search (the first
+/// call's new tile has no occupant yet; `ensure_occupants` only creates
+/// one at the top of the *next* render), so without the pending-kind
+/// guard the second call would add a second tile and leave one hosting
+/// the requested kind and a stray one hosting the roster's default. Two
+/// presses with no render between them must still yield exactly one add,
+/// one tile.
 #[gpui::test]
-fn two_open_module_calls_for_the_same_kind_before_any_render_split_only_once(
+fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut services, _log) = services_with_recorder();
@@ -548,6 +625,11 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_split_only_once(
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
 
+    // Both calls inside ONE `cx.update` block: gpui flushes effects (and
+    // so redraws a dirty window) at the end of every `update`, so two
+    // `simulate_keystrokes` presses would render in between and prove
+    // nothing — the guard under test only fires while a request is still
+    // pending.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.open_module("diagnostics", window, cx);
@@ -563,7 +645,7 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_split_only_once(
         tiles.len(),
         1,
         "two open_module('diagnostics') calls with no render between them \
-         must split only once: {tiles:?}"
+         must add only once: {tiles:?}"
     );
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tiles[0])),
@@ -572,11 +654,11 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_split_only_once(
 }
 
 /// The other half of `open_module`'s contract: a kind with no registered
-/// factory (`services_with_recorder`'s roster only knows "rec") falls back
-/// to the roster's default kind rather than leaving the split tile
-/// occupant-less, and logs a warning naming the requested kind.
+/// factory (`services_with_recorder`'s roster only knows "rec") paints a
+/// placeholder rather than leaving the added tile occupant-less, and logs
+/// a warning naming the requested kind.
 #[gpui::test]
-fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns(
+fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
     cx: &mut gpui::TestAppContext,
 ) {
     use geode_core::log::{Ring, RingLayer};
@@ -606,8 +688,8 @@ fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns
     });
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
-        Some("rec"),
-        "no 'diagnostics' factory is registered, so the default kind hosts the tile"
+        Some(crate::module::placeholder::PLACEHOLDER_KIND),
+        "no 'diagnostics' factory is registered, so the tile is a placeholder"
     );
 
     let mut records = Vec::new();
@@ -620,19 +702,347 @@ fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns
     );
 }
 
-/// MIN-6 (final review): a plain `ctrl+v` split and a same-render
-/// `open_module("diagnostics")` (which itself splits again, since no
-/// occupant of that kind exists yet to focus) leave TWO occupant-less
-/// tiles for one `ensure_occupants` pass to fill — `pending_kind_for_
-/// new_tile` is consumed by the first one the `for id in &all` loop
-/// happens to visit, which used to be whichever order `HashSet<TileId>`
-/// iterated in. `all` is now sorted before that loop, so the outcome is
-/// deterministic — pinned here as "the lower TileId gets the pending
-/// kind", not merely "the same tile every time" (a test that only
-/// checked determinism would pass on a stable-but-still-arbitrary
-/// order).
+/// Dispatch an action id straight into the shell and draw once — the
+/// add rows are palette rows, and `dispatch` is exactly what a palette
+/// `enter` calls (`palette_ctl::dispatch_palette_item`).
+fn dispatch_and_draw(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext, id: &str) {
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.dispatch(&ActionId(id.to_string()), None, window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+}
+
+fn tile_rects(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> Vec<(TileId, Rect)> {
+    shell.read_with(cx, |s, _| {
+        s.services.workspaces.active().tree().layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 1000.0,
+            h: 1000.0,
+        })
+    })
+}
+
 #[gpui::test]
-fn a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass(
+fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 1);
+    let tile = tiles[0];
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(tile)
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        Some("rec")
+    );
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
+        )
+    );
+}
+
+#[gpui::test]
+fn add_on_a_placeholder_tile_fills_it_in_place(cx: &mut gpui::TestAppContext) {
+    // `test_services`'s default kind is "placeholder", so a tile created
+    // by a bare `split_active` — no pending request of its own — is one;
+    // the fixture's recorder is what "Add Rec" fills it with.
+    let (services, log) = test_services_with_log();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    shell.update(&mut cx, |s, cx| {
+        s.services.workspaces.split_active(Orientation::Horizontal);
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let tile = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
+    );
+
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(
+        tiles,
+        vec![tile],
+        "no split: the placeholder's own tile was filled"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
+        Some("rec")
+    );
+    assert!(
+        log.borrow().iter().any(
+            |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
+        )
+    );
+}
+
+#[gpui::test]
+fn an_explicit_direction_beats_the_setting_and_lands_where_it_says(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let first = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec_vertical");
+    let below = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let rects = tile_rects(&shell, &mut cx);
+    let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
+    assert!(
+        r(below).y > r(first).y && (r(below).x - r(first).x).abs() < 1e-3,
+        "{rects:?}"
+    );
+
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec_horizontal");
+    let right = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let rects = tile_rects(&shell, &mut cx);
+    let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
+    assert!(
+        r(right).x > r(below).x && (r(right).y - r(below).y).abs() < 1e-3,
+        "{rects:?}"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(right)),
+        Some("rec")
+    );
+}
+
+#[gpui::test]
+fn auto_splits_a_wide_tile_to_the_right_and_a_tall_one_below(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    // 1500×700 viewport → a 1460×640 content area (sidebar 40, toolbar
+    // ~34, status 26): the first tile is wide → the second lands to the
+    // right; each half (730×640) is still wide → the third lands right
+    // again (equalised thirds, 487×640); a third is taller than wide →
+    // the fourth lands below it. Every comparison has >100px of margin.
+    cx.simulate_resize(gpui::size(px(1500.0), px(700.0)));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+    let viewport = cx.update(|window, _| window.viewport_size());
+    assert_eq!(viewport.width, px(1500.0), "sanity: the resize took");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.add_direction),
+        crate::tileadd::AddDirection::Auto
+    );
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let a = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let b = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let c = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let d = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let rects = tile_rects(&shell, &mut cx);
+    let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
+    assert!(r(b).x > r(a).x, "second add: side by side, {rects:?}");
+    assert!(r(c).x > r(b).x, "third add: still side by side, {rects:?}");
+    assert!(
+        r(d).y > r(c).y && (r(d).x - r(c).x).abs() < 1e-3,
+        "fourth add: below, {rects:?}"
+    );
+}
+
+#[gpui::test]
+fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let original = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    // Give the recorder some state through its own `:` command.
+    cx.simulate_keystrokes(":");
+    cx.simulate_input("sort delta01"); // an exact completion word runs as typed (commandline.rs §3.4)
+    cx.simulate_keystrokes("enter");
+
+    cx.simulate_keystrokes("shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let copy = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    assert_ne!(copy, original);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(copy)),
+        Some("rec")
+    );
+    let carried = log.borrow().iter().find_map(|r| match r {
+        crate::module::recording::Recorded::Created(t, Some(state)) if *t == copy => {
+            Some(state.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(
+        carried.and_then(|s| s
+            .get("last_command")
+            .and_then(|v| v.as_str().map(str::to_string))),
+        Some("sort delta01".to_string()),
+        "the duplicate's factory received the original's serialized state: {:?}",
+        log.borrow()
+    );
+    let rects = tile_rects(&shell, &mut cx);
+    let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
+    assert!(
+        r(copy).x > r(original).x,
+        "shift+d: side by side, {rects:?}"
+    );
+
+    cx.simulate_keystrokes("ctrl-shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let stacked = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let rects = tile_rects(&shell, &mut cx);
+    let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
+    assert!(r(stacked).y > r(copy).y, "ctrl+shift+d: below, {rects:?}");
+}
+
+#[gpui::test]
+fn duplicate_on_an_empty_workspace_or_a_placeholder_is_a_no_op(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().is_empty()));
+    // A placeholder — what a bare `split_active` leaves behind, since
+    // the fixture's default kind is "placeholder" — has nothing to
+    // duplicate either.
+    shell.update(&mut cx, |s, cx| {
+        s.services.workspaces.split_active(Orientation::Horizontal);
+        cx.notify();
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.simulate_keystrokes("shift-d");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .tiles()
+            .len()),
+        1
+    );
+}
+
+#[gpui::test]
+fn add_into_a_focused_empty_dock_lands_in_the_dock(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    cx.simulate_keystrokes("ctrl-[");
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    shell.read_with(&cx, |s, _| {
+        let ws = s.services.workspaces.active();
+        assert_eq!(
+            ws.region(),
+            crate::tiling::FocusRegion::Dock(DockSide::Left)
+        );
+        assert_eq!(ws.docks().get(DockSide::Left).tree().tiles().len(), 1);
+        assert_eq!(ws.tree().tiles().len(), 1, "the main tree did not grow");
+        assert_eq!(s.occupant_kind(ws.focused_tile().unwrap()), Some("rec"));
+    });
+}
+
+/// Spec 2026-09-08 add-tile §4.3: a pending request is addressed to
+/// the tile that asked, so two tiles going occupant-less in one render
+/// (a plain split, then an `open_module` that splits again) each get
+/// exactly what was asked of them — no "lower id wins" rule.
+#[gpui::test]
+fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestAppContext) {
+    let (mut services, _log) = services_with_recorder();
+    services
+        .roster
+        .add(Box::new(crate::module::recording::RecordingFactory::new(
+            "diagnostics",
+        )));
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            // A plain split (no request of its own), then an
+            // `open_module` that splits again: two tiles go
+            // occupant-less in one render pass.
+            s.services.workspaces.split_active(Orientation::Horizontal);
+            s.open_module("diagnostics", window, cx);
+        });
+    });
+    let asked = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles.len(), 2);
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(asked)),
+        Some("diagnostics")
+    );
+    let other = tiles.into_iter().find(|t| *t != asked).unwrap();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.occupant_kind(other)),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND),
+        "the plain split asked for nothing, and there is no default kind \
+         to guess with (§7.1) — it gets a placeholder"
+    );
+}
+
+/// The other half of §4.3's addressing rule: a request whose tile closed
+/// before the render that would have filled it is *dropped*, never
+/// re-aimed at some surviving tile. It is not merely tidiness — a stale
+/// entry keeps `open_module`'s "already pending" guard
+/// (`pending_tiles.values().any(|p| p.kind == kind)`) true forever, so
+/// that kind could never be opened again for the rest of the session.
+#[gpui::test]
+fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module(
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut services, _log) = services_with_recorder();
@@ -643,47 +1053,54 @@ fn a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_o
         )));
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let kept = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
 
-    // Both before any render: `ensure_occupants` only ever runs inside
-    // `ShellView::render`, so nothing below is visible to it until the
-    // one `window.draw` at the end. `open_shell`'s harness starts the
-    // active workspace's tree empty, so the first split creates only the
-    // first tile (nothing to split yet — `session.rs`'s own comment on
-    // `split_right` covers this); the SECOND split (`open_module`'s own,
-    // since no occupant of "diagnostics" exists yet to focus) is a real
-    // split of that first tile, leaving both halves occupant-less.
+    // Both inside ONE `cx.update` block, so no render happens between
+    // them: `open_module` splits and records a request under the new
+    // (now focused) id, and `close_tile` removes that very tile before
+    // `ensure_occupants` ever sees it.
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
-            s.dispatch(
-                &crate::actions::ActionId("workspace::split_right".into()),
-                None,
-                window,
-                cx,
-            );
             s.open_module("diagnostics", window, cx);
+            s.services.workspaces.active_mut().close_tile();
         });
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
 
-    let mut tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
-    tiles.sort();
+    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    assert_eq!(tiles, vec![kept], "only the original tile is left");
     assert_eq!(
-        tiles.len(),
-        2,
-        "one real split of the first tile: {tiles:?}"
-    );
-    let lower = tiles[0];
-    let higher = tiles[1];
-    assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(lower)),
-        Some("diagnostics"),
-        "the lower TileId of the two occupant-less tiles gets the pending kind"
-    );
-    assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(higher)),
+        shell.read_with(&cx, |s, _| s.occupant_kind(kept)),
         Some("rec"),
-        "the other one falls back to the roster's default kind"
+        "the survivor keeps its own occupant — the request was not re-aimed"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_tiles.is_empty()),
+        "the request for the closed tile is dropped"
+    );
+
+    // …and the guard did not latch: asking again really does open one.
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let diagnostics: Vec<TileId> = shell
+        .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+        .into_iter()
+        .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("diagnostics"))
+        .collect();
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "a dropped request leaves the kind openable: {diagnostics:?}"
     );
 }

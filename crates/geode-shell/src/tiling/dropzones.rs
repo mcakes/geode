@@ -207,7 +207,7 @@ pub fn resolve_drop_target<'a>(
 /// runs per-frame (and the eager per-dock layouts built here are a
 /// per-drop cost, not a per-frame one). Deriving from live state at drop
 /// time (rather than a snapshot captured at mouse-down) is deliberate:
-/// the keyboard stays hot during a drag, so a `ctrl+v` split mid-drag
+/// the keyboard stays hot during a drag, so a tile added mid-drag
 /// changes the layout — the drop must land on the layout the user *sees*
 /// at release.
 ///

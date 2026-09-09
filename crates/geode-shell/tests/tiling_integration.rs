@@ -6,7 +6,9 @@ use geode_core::config::LayerDoc;
 use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults;
 use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
-use geode_shell::tiling::{DockSide, FocusRegion, Rect, Workspaces, apply_workspace_action};
+use geode_shell::tiling::{
+    DockSide, FocusRegion, Orientation, Rect, Workspaces, apply_workspace_action,
+};
 
 #[test]
 fn keystrokes_drive_the_tiling_tree() {
@@ -35,15 +37,18 @@ fn keystrokes_drive_the_tiling_tree() {
         }
     };
 
-    // ctrl+v twice: two tiles side by side (workspace::split_right).
-    press(&mut matcher, &mut ws, "ctrl+v");
-    press(&mut matcher, &mut ws, "ctrl+v");
+    // Two tiles side by side. There is no split chord any more (spec
+    // 2026-09-08 add-tile §3.1) — the shell adds tiles through
+    // `ShellView::add_tile`, which calls this same door — so the tiles
+    // this keyboard pipeline then drives are made directly.
+    ws.split_active(Orientation::Horizontal);
+    ws.split_active(Orientation::Horizontal);
     assert_eq!(ws.active().tree().tiles().len(), 2);
 
-    // mod+h: focus left tile (direct binding);
-    // ctrl+h: split it stacked (workspace::split_down).
+    // mod+h: focus left tile (direct binding); then stack a third tile
+    // under it.
     press(&mut matcher, &mut ws, "mod+h");
-    press(&mut matcher, &mut ws, "ctrl+h");
+    ws.split_active(Orientation::Vertical);
     assert_eq!(ws.active().tree().tiles().len(), 3);
     let rects = ws.active().tree().layout(Rect::UNIT);
     assert_eq!(rects.len(), 3);
@@ -87,6 +92,23 @@ fn keystrokes_drive_the_tiling_tree() {
         ws.active().tree().layout(Rect::UNIT).len(),
         layout_before.len()
     );
+
+    // shift+d reaches the matcher like any other chord, but
+    // `workspace::duplicate_horizontal` is a *shell* verb (it carries the
+    // focused occupant's serialized state into the new tile, spec
+    // 2026-09-08 add-tile §3.3/§6) — the tiling router must decline it
+    // rather than quietly turn it into a bare split.
+    let ks = parse_keystroke("shift+d", mod_alias).unwrap();
+    match matcher.press(&keymap, ks, &stack) {
+        MatchResult::Matched { action, .. } => {
+            assert_eq!(action.0, "workspace::duplicate_horizontal");
+            assert!(
+                !apply_workspace_action(&mut ws, &action),
+                "duplicate is the shell's verb, not the tiling router's"
+            );
+        }
+        other => panic!("expected a match for shift+d, got {other:?}"),
+    }
 }
 
 /// Dock-regions task: the dock verbs run through the exact same pipeline.
@@ -120,16 +142,16 @@ fn keystrokes_drive_the_docks() {
     };
 
     // Two tiles; ctrl+{ parks the focused one in the left dock.
-    press(&mut matcher, &mut ws, "ctrl+v");
-    press(&mut matcher, &mut ws, "ctrl+v");
+    ws.split_active(Orientation::Horizontal);
+    ws.split_active(Orientation::Horizontal);
     press(&mut matcher, &mut ws, "ctrl+{");
     assert!(!ws.active().docks().get(DockSide::Left).tree().is_empty());
     assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     assert_eq!(ws.active().tree().tiles().len(), 1);
 
-    // ctrl+h splits *inside* the focused dock (dock-trees task): the
-    // dock's tree gains a second, stacked tile through the same pipeline.
-    press(&mut matcher, &mut ws, "ctrl+h");
+    // A split lands *inside* the focused dock (dock-trees task): the
+    // dock's tree gains a second, stacked tile.
+    ws.split_active(Orientation::Vertical);
     assert_eq!(
         ws.active().docks().get(DockSide::Left).tree().tiles().len(),
         2

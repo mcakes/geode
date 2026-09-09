@@ -101,17 +101,19 @@ pub trait ModuleFactory {
 }
 
 /// The only place the app knows which modules exist (§9.1).
+///
+/// There is no default kind (spec 2026-09-08 add-tile §7.1): a tile is
+/// added by naming the kind it should host, and a tile nothing claims
+/// paints the [`placeholder`] instead of silently becoming whichever
+/// module a config key happened to name.
+#[derive(Default)]
 pub struct ModuleRoster {
     factories: Vec<Box<dyn ModuleFactory>>,
-    default_kind: String,
 }
 
 impl ModuleRoster {
-    pub fn new(default_kind: impl Into<String>) -> ModuleRoster {
-        ModuleRoster {
-            factories: Vec::new(),
-            default_kind: default_kind.into(),
-        }
+    pub fn new() -> ModuleRoster {
+        ModuleRoster::default()
     }
 
     pub fn add(&mut self, factory: Box<dyn ModuleFactory>) {
@@ -131,24 +133,14 @@ impl ModuleRoster {
             .map(|f| f.as_ref())
     }
 
-    pub fn default_factory(&self) -> Option<&dyn ModuleFactory> {
-        self.factory(&self.default_kind)
-    }
-
     pub fn kinds(&self) -> Vec<&'static str> {
         self.factories.iter().map(|f| f.kind()).collect()
     }
 }
 
-impl Default for ModuleRoster {
-    fn default() -> Self {
-        ModuleRoster::new("placeholder")
-    }
-}
-
 /// The occupant of a tile nothing else claims: an unknown session kind,
-/// or a roster with no default. Paints a hint naming the palette; never
-/// a blank, never a panic.
+/// or a pending request for a kind with no factory. Paints a hint naming
+/// the palette; never a blank, never a panic.
 pub mod placeholder {
     use super::*;
     use gpui::prelude::*;
@@ -181,7 +173,7 @@ pub mod placeholder {
                 .justify_center()
                 .text_color(cx.theme().muted_foreground)
                 .debug_selector(|| format!("tile-content-{}", self.tile.0))
-                .child("ctrl+k → open a view")
+                .child("ctrl+k → Add a tile")
         }
     }
 
@@ -388,20 +380,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_roster_finds_factories_by_kind_and_names_the_default() {
-        let mut roster = ModuleRoster::new("rec");
-        assert!(roster.default_factory().is_none(), "nothing added yet");
+    fn a_roster_finds_factories_by_kind_and_lists_them() {
+        let mut roster = ModuleRoster::new();
+        assert!(roster.kinds().is_empty());
         roster.add(Box::new(recording::RecordingFactory::new("rec")));
         roster.add(Box::new(placeholder::PlaceholderFactory));
         assert_eq!(roster.kinds(), vec!["rec", "placeholder"]);
         assert_eq!(roster.factory("rec").map(|f| f.kind()), Some("rec"));
-        assert_eq!(roster.default_factory().map(|f| f.kind()), Some("rec"));
         assert!(roster.factory("nonesuch").is_none());
     }
 
     #[test]
     fn registering_actions_delegates_to_every_factory_once() {
-        let mut roster = ModuleRoster::new("rec");
+        let mut roster = ModuleRoster::new();
         roster.add(Box::new(recording::RecordingFactory::new("rec")));
         let mut registry = ActionRegistry::default();
         roster.register_actions(&mut registry);

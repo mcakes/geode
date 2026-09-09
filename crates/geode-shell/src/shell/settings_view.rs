@@ -23,10 +23,11 @@
 //!
 //! ## The row model
 //!
-//! Four rows, derived FRESH from `ShellView` state on every render and
+//! Five rows, derived FRESH from `ShellView` state on every render and
 //! every keystroke ([`derive_rows`] via [`rows_for`] — same no-caching
 //! contract as `keybindings_view::derive_rows`): Theme, Dark mode, and
-//! Font size under **Appearance**, Find style under **Keyboard**. Each row
+//! Font size under **Appearance**, Find style under **Keyboard**, Add
+//! tile under **Tiling**. Each row
 //! is one enumerated setting — an ordered list of value labels plus the
 //! index of the currently-active one — and editing is *stepping*:
 //! `tab`/`shift+tab` step the selected row's value forward/back (wrapping
@@ -104,6 +105,7 @@ use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
 use crate::theme::Mode;
+use crate::tileadd::AddDirection;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
 
@@ -123,6 +125,7 @@ pub enum SettingId {
     DarkMode,
     FontSize,
     FindStyle,
+    AddDirection,
 }
 
 /// One row of the settings dialog: an enumerated setting — its displayed
@@ -155,6 +158,7 @@ pub fn derive_rows(
     dark: bool,
     font_size: FontSize,
     find_style: FindStyle,
+    add_direction: AddDirection,
 ) -> Vec<SettingRow> {
     vec![
         SettingRow {
@@ -199,6 +203,19 @@ pub fn derive_rows(
                 .iter()
                 .position(|&s| s == find_style)
                 .expect("find_style is always one of FindStyle::ALL"),
+        },
+        SettingRow {
+            id: SettingId::AddDirection,
+            title: "Add tile",
+            category: "Tiling",
+            values: AddDirection::ALL
+                .iter()
+                .map(|d| d.label().to_string())
+                .collect(),
+            current: AddDirection::ALL
+                .iter()
+                .position(|&d| d == add_direction)
+                .expect("add_direction is always one of AddDirection::ALL"),
         },
     ]
 }
@@ -348,6 +365,11 @@ fn apply_setting(
                 set_find_style_on(shell, style, cx);
             }
         }
+        SettingId::AddDirection => {
+            if let Some(&d) = AddDirection::ALL.get(value_ix) {
+                set_add_direction_on(shell, d, cx);
+            }
+        }
     }
 }
 
@@ -395,6 +417,14 @@ fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<S
     cx.notify();
 }
 
+/// [`set_theme_on`]'s sibling for the add direction (spec 2026-09-08
+/// add-tile §5). Read by `ShellView::add_tile` on the next add.
+fn set_add_direction_on(shell: &mut ShellView, d: AddDirection, cx: &mut Context<ShellView>) {
+    shell.add_direction = d;
+    shell.persist_add_direction(cx);
+    cx.notify();
+}
+
 /// Apply a theme by name — the `Entity<ShellView>`-taking seam kept from
 /// the pre-rewrite dialog (its doc'd purpose — a directly drivable
 /// handler for tests, since the old dropdown's popup overlay couldn't be
@@ -432,6 +462,13 @@ pub(crate) fn set_find_style(view: &Entity<ShellView>, style: FindStyle, cx: &mu
     view.update(cx, |shell, cx| set_find_style_on(shell, style, cx));
 }
 
+/// Set the add direction and persist it (`[tiles] add`) — same survival
+/// story as [`set_theme`].
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn set_add_direction(view: &Entity<ShellView>, d: AddDirection, cx: &mut App) {
+    view.update(cx, |shell, cx| set_add_direction_on(shell, d, cx));
+}
+
 /// The `[keymap] mod` value that produces `mods` (see
 /// `defaults::mod_alias_from_config`) — falls back to `"alt"`, matching
 /// `defaults::default_mod`, for anything that isn't exactly one of the
@@ -455,9 +492,9 @@ fn mod_alias_label(mods: Modifiers) -> &'static str {
 /// muted category) — same non-load-bearing caveat as
 /// `keybindings_view::ROW_HEIGHT`.
 const ROW_HEIGHT: f32 = 44.0;
-/// Rows visible before the list scrolls. Four rows today, so nothing
+/// Rows visible before the list scrolls. Five rows today, so nothing
 /// scrolls — kept anyway so the list's sizing arithmetic stays identical
-/// to keybindings' and a fifth setting never needs layout thought.
+/// to keybindings' and a sixth setting never needs layout thought.
 const VISIBLE_ROWS: usize = 10;
 /// Target dialog content width in pixels — same as the keybinding
 /// dialog's, so the two sibling dialogs read as one family.
@@ -474,6 +511,7 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
         shell.services.theme.active_mode().is_dark(),
         shell.font_size,
         shell.find_style,
+        shell.add_direction,
     )
 }
 
@@ -802,6 +840,7 @@ mod tests {
             true,
             FontSize::Medium,
             FindStyle::Vim,
+            AddDirection::Auto,
         )
     }
 
@@ -819,6 +858,7 @@ mod tests {
                 (SettingId::DarkMode, "Dark mode", "Appearance"),
                 (SettingId::FontSize, "Font size", "Appearance"),
                 (SettingId::FindStyle, "Find style", "Keyboard"),
+                (SettingId::AddDirection, "Add tile", "Tiling"),
             ]
         );
     }
@@ -834,11 +874,20 @@ mod tests {
         assert_eq!(rows[2].current, 1, "FontSize::Medium is ALL[1]");
         assert_eq!(rows[3].values, names(&["Vim", "Fzf"]));
         assert_eq!(rows[3].current, 0, "FindStyle::Vim is ALL[0]");
+        assert_eq!(rows[4].values, vec!["Horizontal", "Vertical", "Auto"]);
+        assert_eq!(rows[4].current, 2, "AddDirection::Auto is ALL[2]");
     }
 
     #[test]
     fn a_light_mode_shell_reads_dark_mode_off() {
-        let rows = derive_rows(&names(&["A"]), "A", false, FontSize::Small, FindStyle::Fzf);
+        let rows = derive_rows(
+            &names(&["A"]),
+            "A",
+            false,
+            FontSize::Small,
+            FindStyle::Fzf,
+            AddDirection::Auto,
+        );
         assert_eq!(rows[1].current, 0, "dark = false reads as 'off'");
         assert_eq!(rows[2].current, 0);
         assert_eq!(rows[3].current, 1);
@@ -852,11 +901,31 @@ mod tests {
             false,
             FontSize::Medium,
             FindStyle::Vim,
+            AddDirection::Auto,
         );
         assert_eq!(
             rows[0].current, 0,
             "deterministic fallback, never an out-of-range index"
         );
+    }
+
+    #[test]
+    fn the_fifth_row_is_the_add_direction_in_the_tiling_category() {
+        let rows = derive_rows(
+            &names(&["A"]),
+            "A",
+            false,
+            FontSize::Small,
+            FindStyle::Vim,
+            AddDirection::Vertical,
+        );
+        assert_eq!(rows.len(), 5);
+        let row = &rows[4];
+        assert_eq!(row.id, SettingId::AddDirection);
+        assert_eq!(row.title, "Add tile");
+        assert_eq!(row.category, "Tiling");
+        assert_eq!(row.values, vec!["Horizontal", "Vertical", "Auto"]);
+        assert_eq!(row.current, 1);
     }
 
     // -- step ----------------------------------------------------------

@@ -232,9 +232,9 @@ mod tests {
         let km = keymap(
             &[(
                 Layer::Builtin,
-                "[[bindings]]\n[bindings.keys]\n\"ctrl+w h\" = \"a::left\"\n\"ctrl+w l\" = \"a::right\"\n\"ctrl+v\" = \"a::split\"\n",
+                "[[bindings]]\n[bindings.keys]\n\"ctrl+w h\" = \"a::left\"\n\"ctrl+w l\" = \"a::right\"\n\"ctrl+t\" = \"a::other\"\n",
             )],
-            &["a::left", "a::right", "a::split"],
+            &["a::left", "a::right", "a::other"],
         );
         let got = continuations(&km, &[ks("ctrl+w")], &[]);
         assert_eq!(
@@ -248,9 +248,9 @@ mod tests {
         let km = keymap(
             &[(
                 Layer::Builtin,
-                "[[bindings]]\n[bindings.keys]\n\"ctrl+w h\" = \"a::left\"\n\"ctrl+v\" = \"a::split\"\n\"g\" = \"a::g\"\n",
+                "[[bindings]]\n[bindings.keys]\n\"ctrl+w h\" = \"a::left\"\n\"ctrl+t\" = \"a::other\"\n\"g\" = \"a::g\"\n",
             )],
-            &["a::left", "a::split", "a::g"],
+            &["a::left", "a::other", "a::g"],
         );
         let got = continuations(&km, &[ks("ctrl+w")], &[]);
         assert_eq!(got, vec![(ks("h"), action("a::left"))]);

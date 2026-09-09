@@ -1642,19 +1642,46 @@ run_mutation "hosting: a closed tile drops its occupant" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# Re-anchored 2026-09-08 (add-tile): the bare
+# `o.content.set_visible(false, cx);` line matched the FIRST of two
+# occurrences — MAJ-2's vanished-occupant loop, which the MAJ-2 entry
+# below already owns — so this entry never reached the visibility diff
+# its name and its test are about, and read `caught*`. The whole diff
+# loop is the anchor now.
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                o.content.set_visible(false, cx);' \
-  '                let _ = o;' \
+  '        for id in self.visible_tiles.difference(&active) {
+            if let Some(o) = self.occupants.get(id) {
+                o.content.set_visible(false, cx);
+            }
+        }' \
+  '        for id in self.visible_tiles.difference(&active) {
+            let _ = id;
+        }' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
-run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
+# Rewritten 2026-09-08 (add-tile): there is no fallback factory any more
+# (spec 2026-09-08 add-tile §7.1), so `matched.and(restored)` is no
+# longer the guard — the `match (matched, pending_factory)` below only
+# reads `restored_state` in the arm where `matched` is `Some`, which
+# makes the old mutation a no-op. The live behaviour is one step
+# earlier: a restored record matches a factory of its OWN kind, or none.
+run_mutation "hosting: a restored record only ever matches a factory of its own kind" \
   crates/geode-shell/src/shell/occupants.rs \
-  '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
-  '            let state = restored.as_ref().map(|r| &r.state);' \
+  '            let matched = restored
+                .as_ref()
+                .and_then(|r| self.services.roster.factory(&r.kind));' \
+  '            let matched = restored.as_ref().and_then(|_| {
+                self.services
+                    .roster
+                    .kinds()
+                    .first()
+                    .copied()
+                    .and_then(|k| self.services.roster.factory(k))
+            });' \
   geode-shell \
-  a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
+  a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
 
 run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -3797,8 +3824,10 @@ run_mutation "diagnostics module: the diagnostics observer rebuilds on every not
         // MIN-7 (final review)' \
   geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
 
+# Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
+# into `shell/add_tile.rs` beside the one door it now goes through.
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/add_tile.rs \
   '        let ws = self.services.workspaces.active();
         let found: Option<(TileId, Option<DockSide>)> = ws
             .tree()
@@ -3924,14 +3953,18 @@ run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but nev
     }' \
   geode-diagnostics set_visible_false_unwatches_and_notifies
 
+# Re-homed and re-anchored 2026-09-08 (add-tile): `open_module` moved to
+# `shell/add_tile.rs`, the guard now scans the addressed `pending_tiles`
+# map rather than a single `pending_kind_for_new_tile`, and its test was
+# renamed `..._add_only_once` (it is an add, not a split).
 run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
-  crates/geode-shell/src/shell/mod.rs \
-  '        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+  crates/geode-shell/src/shell/add_tile.rs \
+  '        if self.pending_tiles.values().any(|p| p.kind == kind) {
             return;
         }
-        self.services' \
-  '        self.services' \
-  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_split_only_once
+        self.add_tile(kind, None, None, window, cx);' \
+  '        self.add_tile(kind, None, None, window, cx);' \
+  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
 
 run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
   crates/geode-diagnostics/src/tile.rs \
@@ -4230,11 +4263,16 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
                     && part.resolved_gen == Some(generation.gen_id);' \
   geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
 
-run_mutation "occupants: pending_kind_for_new_tile is spent on the lowest TileId, deterministically" \
-  crates/geode-shell/src/shell/occupants.rs \
-  '        creation_order.sort();' \
-  '        creation_order.sort_by(|a, b| b.cmp(a));' \
-  geode-shell a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass
+# Retired 2026-09-08 (add-tile): this guarded "a single
+# `pending_kind_for_new_tile` is spent on the LOWEST TileId when two
+# tiles go occupant-less in one pass", and both halves are gone — the
+# request map is addressed by `TileId` now (spec §4.3), so no ordering
+# decides who gets it, and the test it named went with the mechanism.
+# `creation_order.sort()` survives, but only to keep the order factories
+# are constructed in stable; nothing observable turns on it, so an entry
+# here would be one with no test behind it. What replaced this defence
+# is "add-tile: the pending request is keyed by the id split_active
+# returned" in the add-tile block below.
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
@@ -4265,6 +4303,119 @@ run_mutation "commands: diagnostics completions split words on the shell's delim
   '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
   '        .split('"'"' '"'"')' \
   geode-diagnostics completions_split_words_the_way_the_shell_does
+
+# ---- 2026-09-08 add-tile (spec 2026-09-08-geode-add-tile-design.md)
+#
+# The split verbs are gone: a tile is *added* by kind, and the split is
+# only how the add is placed. Nearly every behaviour below is silent when
+# wrong — a tile that lands on the wrong side, a request that fills the
+# wrong tile, a session record quietly dropped on the next flush — so
+# each one gets an entry.
+
+run_mutation "add-tile: auto splits along the longer side (w >= h → right)" \
+  crates/geode-shell/src/tileadd.rs \
+  '                Some(r) if r.h > r.w => Orientation::Vertical,' \
+  '                Some(r) if r.h < r.w => Orientation::Vertical,' \
+  geode-shell auto_splits_along_the_longer_side_and_a_square_or_missing_rect_goes_right
+
+run_mutation "add-tile: an explicit direction beats the setting" \
+  crates/geode-shell/src/tileadd.rs \
+  '        if let Some(o) = explicit {' \
+  '        if let Some(o) = explicit.filter(|_| false) {' \
+  geode-shell an_explicit_direction_beats_the_setting
+
+run_mutation "add-tile: a focused placeholder is filled in place, not split" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '            && self.occupant_kind(tile) == Some(PLACEHOLDER_KIND)' \
+  '            && self.occupant_kind(tile) == Some("never")' \
+  geode-shell add_on_a_placeholder_tile_fills_it_in_place
+
+run_mutation "add-tile: the pending request is keyed by the id split_active returned" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        id
+    }' \
+  '        TileId(id.0 + 1)
+    }' \
+  geode-shell a_pending_request_lands_on_exactly_the_tile_that_asked
+
+run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '        self.add_tile(&kind, Some(direction), Some(state), window, cx);' \
+  '        let _ = state; self.add_tile(&kind, Some(direction), None, window, cx);' \
+  geode-shell shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
+
+# Two-line anchor on purpose (final review, Minor 2): the bare
+# `self.enter_region(FocusRegion::Dock(side));` line occurs four times in
+# this file (`toggle_dock`, both `move_to_dock` arms, the drag drop) and
+# `run_mutation` replaces the FIRST match — the pairing with the
+# preceding `exit_fullscreen()` is unique to `toggle_dock`'s show branch.
+# The mutation keeps `exit_fullscreen()` and only makes showing NOT focus.
+run_mutation "docks: showing a dock focuses it" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            self.tree.exit_fullscreen();
+            self.enter_region(FocusRegion::Dock(side));' \
+  '            self.tree.exit_fullscreen();
+            self.docks.get_mut(side).set_visible(true);' \
+  geode-shell toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty
+
+# Final review, Important 1: the cross-workspace restore pass must heal
+# only a region naming a *hidden* dock. Healing on `focusable()` ("hidden
+# OR empty") drags focus back to `Main` and prints a launch-time warning
+# after the entirely ordinary "ctrl+[ on an empty left dock, then quit".
+run_mutation "add-tile: a restored region survives an empty but visible dock" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '                && !ws.docks.get(side).visible()' \
+  '                && !ws.docks.get(side).focusable()' \
+  geode-shell an_empty_but_visible_focused_dock_round_trips_without_a_warning
+
+run_mutation "add-tile: an unknown restored kind keeps its record through a flush" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                self.unplaced_records.insert(id.0, record.clone());' \
+  '                let _ = record;' \
+  geode-shell a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
+
+run_mutation "add-tile: a pending request for a closed tile is dropped, not re-aimed" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.pending_tiles.retain(|id, p| {
+            let live = all.contains(id);
+            if !live {
+                tracing::debug!(target: "geode::shell", "dropping a pending '"'"'{}'"'"' request for closed tile {}", p.kind, id.0);
+            }
+            live
+        });' \
+  '        self.pending_tiles.retain(|id, p| {
+            let _ = (id, p);
+            true
+        });' \
+  geode-shell a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
+
+run_mutation "add-tile: an unplaced record dies with its tile" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        self.unplaced_records
+            .retain(|id, _| all.contains(&TileId(*id)));' \
+  '        self.unplaced_records.retain(|id, _| {
+            let _ = id;
+            true
+        });' \
+  geode-shell closing_an_unknown_kind_tile_drops_its_unplaced_record
+
+run_mutation "add-tile: filling a placeholder in place drops its unplaced record" \
+  crates/geode-shell/src/shell/add_tile.rs \
+  '            self.unplaced_records.remove(&tile.0);' \
+  '            let _ = tile.0;' \
+  geode-shell a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
+
+run_mutation "add-tile: the _vertical suffix means stacked" \
+  crates/geode-shell/src/defaults.rs \
+  '        (k, Some(Orientation::Vertical))' \
+  '        (k, Some(Orientation::Horizontal))' \
+  geode-shell parse_add_action_peels_the_direction_suffix_before_the_kind
+
+run_mutation "add-tile: register_add_actions registers the suffixed pair too" \
+  crates/geode-shell/src/defaults.rs \
+  '            &format!("tile::add_{kind}_vertical"),' \
+  '            &format!("tile::add_{kind}_vertical_"),' \
+  geode-shell register_add_actions_registers_three_rows_per_kind_in_the_tiles_category
 
 # ---- a refused event never stops a producer (Phase 4b follow-up, Task 1)
 

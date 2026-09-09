@@ -84,8 +84,8 @@ fn ctrl_bracket_keystroke_toggles_the_left_dock_and_paints_its_hint(cx: &mut gpu
     assert!(visible, "ctrl+[ should have shown the left dock");
     assert_eq!(
         region,
-        crate::tiling::FocusRegion::Main,
-        "showing an empty dock must not move focus into it"
+        crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left),
+        "showing a dock focuses it (spec 2026-09-08 add-tile §8), empty or not"
     );
 
     let hint_bounds = cx.debug_bounds("dock-empty-hint-left");
@@ -162,28 +162,28 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
     });
 }
 
-/// End-to-end (dock-trees task): splits work *inside* a focused dock
-/// through gpui's real key pipeline. ctrl+v parks a tile via ctrl+{,
-/// then a second ctrl+v splits within the dock's tree (the old
-/// build refused this) — two tiles in the dock, session dirty — and
-/// ctrl+w closes one, leaving the dock visible with the
-/// survivor.
+/// End-to-end (dock-trees task): an add lands *inside* a focused dock
+/// through gpui's real key pipeline. A first tile (the test layer's
+/// ctrl+v = `tile::add_rec_horizontal`) is parked via ctrl+{, then a
+/// second add splits within the dock's tree (the old build refused
+/// this) — two tiles in the dock, session dirty — and ctrl+w closes
+/// one, leaving the dock visible with the survivor.
 #[gpui::test]
-fn splits_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
+fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);
 
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-{"); // tile → left dock, dock focused
     shell.update(&mut cx, |shell, _| shell.session_dirty = false);
 
-    cx.simulate_keystrokes("ctrl-v"); // split inside the dock
+    cx.simulate_keystrokes("ctrl-v"); // add inside the dock
     shell.read_with(&cx, |shell, _| {
         let ws = shell.services.workspaces.active();
         let dock = ws.docks().get(crate::tiling::DockSide::Left);
         assert_eq!(
             dock.tree().tiles().len(),
             2,
-            "ctrl+v must split within the focused dock's tree"
+            "the add must land within the focused dock's tree"
         );
         assert_eq!(
             ws.region(),
@@ -236,16 +236,14 @@ fn a_literal_ctrl_shift_bracket_shape_does_not_move_the_tile(cx: &mut gpui::Test
     });
 }
 
-/// Review nit (re-grounded for dock-trees): with the tree empty and
-/// the workspace's only tile parked in a focused dock, the tree area
-/// must NOT show the "ctrl+h / ctrl+v to open a tile" hint — a
-/// dock-focused split now lands in the *dock's* tree, so that advice
-/// would not fill the empty main area. It shows the move-back hint for
-/// the focused dock instead (physical-key spelling, like the dock
-/// hints). Same `debug_bounds` honesty limits as the other hint tests:
-/// selectors, not text.
+/// Spec 2026-09-08 add-tile §7.3: the empty-tree hint is now one hint
+/// whatever holds focus — `ctrl+k` adds a tile into the focused region,
+/// so the same advice is true from a focused dock as from the main
+/// tree, and the old state-aware "return" variants are gone. Same
+/// `debug_bounds` honesty limits as the other hint tests: selectors,
+/// not text.
 #[gpui::test]
-fn empty_tree_hint_is_state_aware_while_a_dock_holds_focus(cx: &mut gpui::TestAppContext) {
+fn empty_tree_hint_paints_whichever_region_holds_focus(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) = dock_test_shell(cx);
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-{"); // only tile → left dock, tree empty, dock focused
@@ -261,30 +259,23 @@ fn empty_tree_hint_is_state_aware_while_a_dock_holds_focus(cx: &mut gpui::TestAp
         );
     });
 
-    let return_hint = cx.debug_bounds("empty-hint-return-left");
+    let hint = cx.debug_bounds("empty-hint");
     assert!(
-        return_hint.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
-        "the dock-focused empty tree should paint the move-back hint, got {return_hint:?}"
-    );
-    assert_eq!(
-        cx.debug_bounds("empty-hint"),
-        None,
-        "the split hint must not paint while a dock holds focus (a split lands in the dock)"
+        hint.is_some_and(|b| b.size.width > px(0.0) && b.size.height > px(0.0)),
+        "the dock-focused empty tree still paints the add-a-tile hint, got {hint:?}"
     );
 
-    // Back in Main over the still-empty tree, the ordinary split hint
-    // returns (region falls back to the dock being the only occupant —
-    // so go through move-back, then close, leaving a truly empty
-    // Main-focused workspace).
+    // Back in Main over a truly empty workspace (move the tile back,
+    // then close it), the same hint paints.
     cx.simulate_keystrokes("ctrl-{"); // tile returns to the tree
     cx.simulate_keystrokes("ctrl-w"); // close it: empty workspace, Main
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let split_hint = cx.debug_bounds("empty-hint");
+    let hint = cx.debug_bounds("empty-hint");
     assert!(
-        split_hint.is_some_and(|b| b.size.width > px(0.0)),
-        "with Main focused the ordinary split hint returns, got {split_hint:?}"
+        hint.is_some_and(|b| b.size.width > px(0.0)),
+        "with Main focused the same hint paints, got {hint:?}"
     );
 }
 

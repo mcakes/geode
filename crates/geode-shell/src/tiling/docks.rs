@@ -120,9 +120,10 @@ impl Dock {
         self.size
     }
 
-    /// Visible AND occupied (the tree has at least one tile) — the only
-    /// state in which a dock can hold focus or be a directional-focus
-    /// target.
+    /// Visible AND occupied — the state in which a dock is a
+    /// directional-focus target and a `fallback_region` candidate. Not
+    /// the region invariant any more: a visible empty dock may hold the
+    /// focus region (spec 2026-09-08 add-tile §8) so an add can fill it.
     pub fn focusable(&self) -> bool {
         self.visible && !self.tree.is_empty()
     }
