@@ -253,9 +253,26 @@ fn run(
     }
 }
 
-/// The worst candidate state and a detail line naming the files in it.
+/// The worst candidate state and a detail line naming EVERY file at that
+/// worst severity, ordered by [`crate::health::severity_rank`] — never
+/// `Health`'s derived `Ord`. Two `Orphaned` candidates (both lower to
+/// `Degraded`) with different reasons are the same variant, so `Ord`
+/// falls through to comparing the `reason` STRING: the alphabet would
+/// decide which candidate's `*w == h` / `*w > h` comparison kept it, and
+/// the other file's name was dropped from the detail entirely — the
+/// same failure `severity_rank`'s own doc explains for `service.rs`'s
+/// `HealthTracker` rollup (NEW-5), here between two discovery
+/// candidates instead of two health lanes.
+///
+/// Equal rank keeps every candidate at that rank. The returned `Health`
+/// carries the FIRST such candidate's reason, in candidate order. When
+/// the kept candidates' reasons differ, the detail names each file with
+/// its own reason (`degraded: a.csv (expected value at line 1), b.csv
+/// (no header)`); when they agree — including `PendingTooLong`, which
+/// has none — the detail keeps today's plain shape (`pending_too_long:
+/// a.csv, b.csv`).
 fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, String)> {
-    let mut worst: Option<(Health, Vec<String>)> = None;
+    let mut worst: Vec<(Health, String)> = Vec::new();
     for c in candidates {
         let h = match &c.state {
             CandidateState::PendingTooLong => Health::PendingTooLong,
@@ -271,16 +288,28 @@ fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, Stri
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        match &mut worst {
-            Some((w, names)) if *w == h => names.push(name),
-            Some((w, _)) if *w > h => {}
-            _ => worst = Some((h, vec![name])),
+        let incumbent_rank = worst.first().map(|(w, _)| crate::health::severity_rank(w));
+        match incumbent_rank {
+            Some(r) if r == crate::health::severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > crate::health::severity_rank(&h) => {}
+            _ => worst = vec![(h, name)],
         }
     }
-    worst.map(|(h, names)| {
-        let detail = format!("{}: {}", h.label(), names.join(", "));
-        (h, detail)
-    })
+    let first = worst.first()?.0.clone();
+    let first_reason = first.to_parts().1;
+    let reasons_differ = worst.iter().any(|(h, _)| h.to_parts().1 != first_reason);
+    let names = worst.iter().map(|(h, name)| {
+        if reasons_differ && let Some(r) = h.to_parts().1 {
+            return format!("{name} ({r})");
+        }
+        name.clone()
+    });
+    let detail = format!(
+        "{}: {}",
+        first.label(),
+        names.collect::<Vec<_>>().join(", ")
+    );
+    Some((first, detail))
 }
 
 #[cfg(test)]
@@ -364,6 +393,77 @@ mod tests {
             tx.send(e).is_ok()
         });
         (sink, rx, refusals)
+    }
+
+    /// A candidate at `name`'s path in the given state; every other
+    /// field is filler `worst_health` never reads.
+    fn candidate(name: &str, state: CandidateState) -> crate::source::Candidate {
+        crate::source::Candidate {
+            csv_path: std::path::PathBuf::from(name),
+            sentinel_path: std::path::PathBuf::from(format!("{name}.done")),
+            batch: "b".into(),
+            size: 0,
+            mtime: SystemTime::now(),
+            state,
+        }
+    }
+
+    #[test]
+    fn two_orphaned_candidates_with_different_reasons_are_both_named() {
+        // Same severity (both `Orphaned` -> `Degraded`), different
+        // reasons: `Health`'s derived `Ord` would fall through to
+        // comparing the reason STRING and, with "b" sorting after "a",
+        // silently drop "a.csv" from the detail entirely (not even
+        // merged in) under the old `*w == h` / `*w > h` comparison.
+        let candidates = vec![
+            candidate(
+                "b.csv",
+                CandidateState::Orphaned {
+                    reason: "no header".into(),
+                },
+            ),
+            candidate(
+                "a.csv",
+                CandidateState::Orphaned {
+                    reason: "expected value at line 1".into(),
+                },
+            ),
+        ];
+        let (health, detail) = worst_health(&candidates).expect("both candidates are unhealthy");
+        assert_eq!(
+            health,
+            Health::Degraded {
+                reason: "no header".into(),
+            },
+            "the health carries the FIRST candidate's reason, in candidate order"
+        );
+        assert_eq!(
+            detail,
+            "degraded: b.csv (no header), a.csv (expected value at line 1)"
+        );
+    }
+
+    #[test]
+    fn an_orphaned_candidate_outranks_a_pending_too_long_one_by_rank_not_reason_text() {
+        // Picked so alphabetic order would have chosen the OTHER file if
+        // this still fell back to `Health`'s derived `Ord`: "a" sorts
+        // before "pending_too_long" has no reason to compare against
+        // anyway, so this pins that a higher-rank `Degraded` always wins
+        // over `PendingTooLong`, named alone.
+        let candidates = vec![
+            candidate(
+                "orphan.csv",
+                CandidateState::Orphaned { reason: "a".into() },
+            ),
+            candidate("stuck.csv", CandidateState::PendingTooLong),
+        ];
+        let (health, detail) = worst_health(&candidates).expect("both candidates are unhealthy");
+        assert_eq!(
+            health,
+            Health::Degraded { reason: "a".into() },
+            "Degraded outranks PendingTooLong regardless of processing order"
+        );
+        assert_eq!(detail, "degraded: orphan.csv");
     }
 
     #[test]

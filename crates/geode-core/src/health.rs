@@ -11,7 +11,7 @@
 //! That was Phase 4b's NEW-5, and this doc's earlier wording ("Ord is
 //! severity order so a rollup can take the worst") is what invited it.
 //! Roll up with an explicit rank over the variants —
-//! `geode_data::service::severity_rank` is the one in use — and keep
+//! `geode_data::health::severity_rank` is the one in use — and keep
 //! the derive for what it is fit for: sorting a list of states for
 //! display, and the equality half.
 //!

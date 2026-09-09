@@ -5,7 +5,7 @@
 //! detail, which is what makes the future sidecar-process split an
 //! evolution rather than a rewrite (§2).
 
-use crate::health::Health;
+use crate::health::{Health, severity_rank};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
 use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
@@ -259,28 +259,6 @@ struct Lanes {
     /// real change in the COMBINED (worst-of-all-slots) value apart
     /// from a slot merely being overwritten with an equally-severe one.
     last_reported: Option<(Health, String)>,
-}
-
-/// The severity ordering `HealthTracker` compares by, and the only one
-/// (round 4, NEW-5).
-///
-/// [`Health`]'s own derived `Ord` must never be used for this. Its
-/// variant order IS severity order, but once two values share a variant
-/// it falls through to comparing the `reason` STRING — so between a
-/// discovery `Degraded { reason: "expected value at line 1" }` and a
-/// load `Degraded { reason: "currency varies within instrument key" }`
-/// the winner was whichever reason sorted later, and the loser was
-/// dropped without ever reaching the surface. That is the same
-/// "a real problem is never shown" failure MAJ-3 and NEW-4 were raised
-/// for, arriving through the tie-break instead.
-fn severity_rank(h: &Health) -> u8 {
-    match h {
-        Health::Failed { .. } => 4,
-        Health::Degraded { .. } => 3,
-        Health::PendingTooLong => 2,
-        Health::Pending => 1,
-        Health::Ok => 0,
-    }
 }
 
 /// One slot's current value, its producer's own explanation of it, and
