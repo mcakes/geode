@@ -1634,19 +1634,46 @@ run_mutation "hosting: a closed tile drops its occupant" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# Re-anchored 2026-09-08 (add-tile): the bare
+# `o.content.set_visible(false, cx);` line matched the FIRST of two
+# occurrences — MAJ-2's vanished-occupant loop, which the MAJ-2 entry
+# below already owns — so this entry never reached the visibility diff
+# its name and its test are about, and read `caught*`. The whole diff
+# loop is the anchor now.
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                o.content.set_visible(false, cx);' \
-  '                let _ = o;' \
+  '        for id in self.visible_tiles.difference(&active) {
+            if let Some(o) = self.occupants.get(id) {
+                o.content.set_visible(false, cx);
+            }
+        }' \
+  '        for id in self.visible_tiles.difference(&active) {
+            let _ = id;
+        }' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
-run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
+# Rewritten 2026-09-08 (add-tile): there is no fallback factory any more
+# (spec 2026-09-08 add-tile §7.1), so `matched.and(restored)` is no
+# longer the guard — the `match (matched, pending_factory)` below only
+# reads `restored_state` in the arm where `matched` is `Some`, which
+# makes the old mutation a no-op. The live behaviour is one step
+# earlier: a restored record matches a factory of its OWN kind, or none.
+run_mutation "hosting: a restored record only ever matches a factory of its own kind" \
   crates/geode-shell/src/shell/occupants.rs \
-  '            let state = matched.and(restored.as_ref()).map(|r| &r.state);' \
-  '            let state = restored.as_ref().map(|r| &r.state);' \
+  '            let matched = restored
+                .as_ref()
+                .and_then(|r| self.services.roster.factory(&r.kind));' \
+  '            let matched = restored.as_ref().and_then(|_| {
+                self.services
+                    .roster
+                    .kinds()
+                    .first()
+                    .copied()
+                    .and_then(|k| self.services.roster.factory(k))
+            });' \
   geode-shell \
-  a_restored_tile_of_an_unknown_kind_falls_back_without_its_state
+  a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
 
 run_mutation "hosting: an occupant created outside the active set is told it is hidden (I2, final review)" \
   crates/geode-shell/src/shell/occupants.rs \
@@ -3789,8 +3816,10 @@ run_mutation "diagnostics module: the diagnostics observer rebuilds on every not
         // MIN-7 (final review)' \
   geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
 
+# Re-homed 2026-09-08 (add-tile): `open_module` moved from `shell/mod.rs`
+# into `shell/add_tile.rs` beside the one door it now goes through.
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/add_tile.rs \
   '        let ws = self.services.workspaces.active();
         let found: Option<(TileId, Option<DockSide>)> = ws
             .tree()
@@ -3916,14 +3945,18 @@ run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but nev
     }' \
   geode-diagnostics set_visible_false_unwatches_and_notifies
 
+# Re-homed and re-anchored 2026-09-08 (add-tile): `open_module` moved to
+# `shell/add_tile.rs`, the guard now scans the addressed `pending_tiles`
+# map rather than a single `pending_kind_for_new_tile`, and its test was
+# renamed `..._add_only_once` (it is an add, not a split).
 run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
-  crates/geode-shell/src/shell/mod.rs \
-  '        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+  crates/geode-shell/src/shell/add_tile.rs \
+  '        if self.pending_tiles.values().any(|p| p.kind == kind) {
             return;
         }
-        self.services' \
-  '        self.services' \
-  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_split_only_once
+        self.add_tile(kind, None, None, window, cx);' \
+  '        self.add_tile(kind, None, None, window, cx);' \
+  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_add_only_once
 
 run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
   crates/geode-diagnostics/src/tile.rs \
@@ -4220,11 +4253,16 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
                     && part.resolved_gen == Some(generation.gen_id);' \
   geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
 
-run_mutation "occupants: pending_kind_for_new_tile is spent on the lowest TileId, deterministically" \
-  crates/geode-shell/src/shell/occupants.rs \
-  '        creation_order.sort();' \
-  '        creation_order.sort_by(|a, b| b.cmp(a));' \
-  geode-shell a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass
+# Retired 2026-09-08 (add-tile): this guarded "a single
+# `pending_kind_for_new_tile` is spent on the LOWEST TileId when two
+# tiles go occupant-less in one pass", and both halves are gone — the
+# request map is addressed by `TileId` now (spec §4.3), so no ordering
+# decides who gets it, and the test it named went with the mechanism.
+# `creation_order.sort()` survives, but only to keep the order factories
+# are constructed in stable; nothing observable turns on it, so an entry
+# here would be one with no test behind it. What replaced this defence
+# is "add-tile: the pending request is keyed by the id split_active
+# returned" in the add-tile block below.
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
