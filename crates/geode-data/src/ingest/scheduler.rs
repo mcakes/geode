@@ -347,8 +347,18 @@ mod tests {
         let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&refusals);
         let sink: SchedulerSink = Arc::new(move |e: SchedulerEvent| {
-            if refuse(&e) && counter.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Claimed atomically (fix round 1, nit): load-then-add
+            // could refuse twice if two threads ever shared this sink.
+            if refuse(&e)
+                && counter
+                    .compare_exchange(
+                        0,
+                        1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
                 return false;
             }
             tx.send(e).is_ok()

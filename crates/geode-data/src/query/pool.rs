@@ -465,8 +465,12 @@ mod tests {
         let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&refusals);
         let sink: ResultSink = Arc::new(move |r: QueryResult| {
-            if counter.load(Ordering::SeqCst) == 0 {
-                counter.fetch_add(1, Ordering::SeqCst);
+            // Claimed atomically (fix round 1, nit): one refusal, no
+            // matter how many workers call this.
+            if counter
+                .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
                 return false;
             }
             tx.send(r).is_ok()

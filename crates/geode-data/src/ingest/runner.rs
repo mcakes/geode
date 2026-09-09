@@ -283,7 +283,17 @@ fn run(
                 if !announced_idle {
                     announced_idle = true;
                     if !sink(IngestEvent::PlanComplete) {
+                        // Logged with the lock released, the same rule
+                        // `query::pool`'s delivery site follows (fix
+                        // round 1, MIN-5): formatting a warning under
+                        // the queue mutex blocks `submit`. Re-acquired
+                        // and re-checked from the top, so a shutdown or
+                        // an item that landed meanwhile is seen at once
+                        // rather than after the 50 ms wait.
+                        drop(q);
                         log_refused_event("the queue-drained announcement");
+                        q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        continue;
                     }
                 }
                 let (guard, _) = cvar
@@ -562,8 +572,19 @@ mod tests {
         let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = Arc::clone(&refusals);
         let sink: IngestSink = Arc::new(move |e: IngestEvent| {
-            if refuse(&e) && counter.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // One `compare_exchange` rather than load-then-add: the
+            // refusal is claimed atomically, so "the first match only"
+            // holds however many threads call this.
+            if refuse(&e)
+                && counter
+                    .compare_exchange(
+                        0,
+                        1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
                 return false;
             }
             tx.send(e).is_ok()
@@ -643,9 +664,14 @@ mod tests {
     #[test]
     fn a_refused_undeclared_dataset_failure_does_not_stop_the_runner() {
         let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
         let mut undeclared = plan.items[0].clone();
         undeclared.dataset = "not_declared_anywhere".into();
-        let good = plan.items[0].clone();
+        // A DIFFERENT file: sharing `plan.items[0]`'s `(csv_path, size,
+        // source_time)` races `clear_in_flight`, which runs after the
+        // sink call this test waits on, so the resubmission could be
+        // dropped as an in-flight duplicate (fix round 1, MIN-1).
+        let good = plan.items[1].clone();
 
         let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::Failed { .. }));
         let handle = IngestRunner::spawn(store, schema_of(ds), sink);
