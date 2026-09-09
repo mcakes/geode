@@ -29,6 +29,7 @@ use crate::store::{Catalog, Store};
 use chrono::{DateTime, Utc};
 use geode_core::schema::SchemaSpec;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -261,6 +262,14 @@ fn run(
     // working to idle — not on every wakeup. An idle runner would otherwise
     // push an event every poll interval, forever, into an unbounded channel.
     let mut announced_idle = false;
+    // One line per runner, not one per refused event (final review,
+    // MIN-3): before Task 1 a gone receiver ended this thread after a
+    // single refusal, so it could never repeat. Now the thread lives
+    // on, and an unlatched warning would fill the 4,096-entry log ring
+    // — the one in-process log a diagnostics tile reads — with copies
+    // of itself. The caller's `dropped` counter stays the
+    // authoritative count.
+    let refusal_logged = AtomicBool::new(false);
 
     loop {
         let item = {
@@ -291,7 +300,7 @@ fn run(
                         // an item that landed meanwhile is seen at once
                         // rather than after the 50 ms wait.
                         drop(q);
-                        log_refused_event("the queue-drained announcement");
+                        log_refused_event(&refusal_logged, "the queue-drained announcement");
                         q = lock.lock().unwrap_or_else(|e| e.into_inner());
                         continue;
                     }
@@ -355,10 +364,13 @@ fn run(
             });
             clear_in_flight(&queue);
             if !failed {
-                log_refused_event(&format!(
-                    "the undeclared-dataset failure for {}/{}",
-                    item.dataset, item.batch
-                ));
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
             }
             continue;
         };
@@ -430,10 +442,10 @@ fn run(
         // duplicate submitted mid-load harmless.
         clear_in_flight(&queue);
         if !delivered {
-            log_refused_event(&format!(
-                "the load outcome for {}/{}",
-                item.dataset, item.batch
-            ));
+            log_refused_event(
+                &refusal_logged,
+                &format!("the load outcome for {}/{}", item.dataset, item.batch),
+            );
         }
     }
 }
@@ -443,12 +455,20 @@ fn run(
 /// going (Phase 4b follow-up, Task 1: exit-on-false was never the shutdown
 /// path — `IngestHandle::shutdown` + `Drop` is, and one cold-start burst
 /// filling a 256-slot channel used to end ingest for the session). Logged
-/// once per refusal, never retried: the health transitions that matter are
-/// re-offered by `HealthTracker` on the next report.
-fn log_refused_event(what: &str) {
+/// once per RUNNER, never retried: the health transitions that matter are
+/// re-offered by `HealthTracker` on the next report, and `latched` keeps a
+/// permanently gone receiver from filling the log ring with copies of this
+/// line (final review, MIN-3). A free function for the same reason
+/// `log_ingest_panic` is one: it fires on the runner's own thread, so a
+/// test can only reach it directly.
+fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
     tracing::warn!(
         target: "geode::ingest",
-        "event channel refused {what}: dropped, the runner keeps working",
+        "event channel refused {what}: dropped, the runner keeps working \
+         (further refusals are counted, not logged)",
     );
 }
 
@@ -1073,6 +1093,26 @@ mod tests {
         let mut out = Vec::new();
         ring.drain_since(0, &mut out);
         out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_runner_not_once_per_event() {
+        // A gone receiver refuses every event for the rest of the
+        // session; unlatched, this line alone would evict the 4,096-entry
+        // ring a diagnostician came to read (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_event(&latch, "the first thing");
+            log_refused_event(&latch, "the second thing");
+            log_refused_event(&latch, "the third thing");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(
+            records[0].message.contains("the first thing"),
+            "{records:?}"
+        );
     }
 
     #[test]

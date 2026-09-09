@@ -16,6 +16,7 @@ use crate::store::Store;
 use geode_core::query::QueryKey;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -248,6 +249,11 @@ fn worker(
     run: RunFn,
 ) {
     let handle = conn.interrupt_handle();
+    // One line per worker, not one per refused result (final review,
+    // MIN-3): before Task 1 a refusal ended this worker, so the warning
+    // could not repeat. `dropped` on the caller's side remains the
+    // authoritative count of what was lost.
+    let refusal_logged = AtomicBool::new(false);
 
     loop {
         let (id, req) = {
@@ -330,16 +336,25 @@ fn worker(
         // under it would block `submit`/`cancel` on the UI thread.
         drop(q);
         if !delivered {
-            // A refused result is one dropped frame of data, not the end
-            // of this worker (Phase 4b follow-up, Task 1). The requesting
-            // tile requeries; nothing is retried here.
-            tracing::warn!(
-                target: "geode::query",
-                "event channel refused the result for view '{}': dropped, the worker keeps working",
-                req.view.0,
-            );
+            log_refused_result(&refusal_logged, &req.view.0);
         }
     }
+}
+
+/// A refused result is one dropped frame of data, not the end of this
+/// worker (Phase 4b follow-up, Task 1). The requesting tile requeries;
+/// nothing is retried here. Logged once per worker — `latched` (final
+/// review, MIN-3) — and a free function so a test can reach it without a
+/// pool thread.
+fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target: "geode::query",
+        "event channel refused the result for view '{view}': dropped, the worker \
+         keeps working (further refusals are counted, not logged)",
+    );
 }
 
 /// The message out of a caught panic payload, which is a `&str` for a
@@ -452,6 +467,34 @@ mod tests {
         assert_eq!(result.view, ViewId("v1".into()));
         assert_eq!(result.snapshot.unwrap().rows(), 1);
         pool.shutdown();
+    }
+
+    /// Records logged while `f` runs, on this thread only — the same
+    /// scoped-subscriber pattern `ingest/runner.rs`'s test module uses.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_worker_not_once_per_result() {
+        // Unlatched, a gone receiver turns every requery into another
+        // copy of this line (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_result(&latch, "positions");
+            log_refused_result(&latch, "positions");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::query");
+        assert!(records[0].message.contains("positions"), "{records:?}");
     }
 
     #[test]

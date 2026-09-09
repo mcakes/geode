@@ -12,6 +12,7 @@ use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
 use crate::source::{CandidateState, SourceSpec, discover};
 use crate::store::Catalog;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
@@ -146,6 +147,12 @@ fn run(
     if sources.is_empty() {
         return;
     }
+    // One line per scheduler, not one per poll (final review, MIN-3):
+    // before Task 1 a refusal ended this thread, so the warning could not
+    // repeat. Now the thread polls on every `poll_interval` for the rest
+    // of the session, and an unlatched line would fill the 4,096-entry
+    // log ring. `dropped` remains the authoritative count.
+    let refusal_logged = AtomicBool::new(false);
     // Everything is due now: the first sweep is the cold start.
     let mut due: Vec<(Instant, usize)> = (0..sources.len()).map(|i| (Instant::now(), i)).collect();
 
@@ -237,20 +244,29 @@ fn run(
             })),
         };
         if let Some(what) = refused.what() {
-            // One refused event is one dropped diagnostic, not the end of
-            // discovery for every source (Phase 4b follow-up, Task 1).
-            // Not retried: the health transition the tracker cares about
-            // is re-offered on the next report.
-            tracing::warn!(
-                target: "geode::ingest",
-                "event channel refused {what} for source '{}': dropped, polling continues",
-                spec.name,
-            );
+            log_refused_discovery(&refusal_logged, what, &spec.name);
         }
         // Re-arm from *now*, not from `when`: a slow share must not make
         // the next poll immediately due and spin.
         due[0] = (Instant::now() + spec.poll_interval, i);
     }
+}
+
+/// A refused event is one dropped diagnostic, not the end of discovery
+/// for every source (Phase 4b follow-up, Task 1). Nothing is retried: the
+/// health transition the tracker cares about is re-offered on the next
+/// report. Logged once per scheduler — `latched` (final review, MIN-3) —
+/// and a free function so a test can reach it without a scheduler thread,
+/// the same reason `runner::log_refused_event` is one.
+fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target: "geode::ingest",
+        "event channel refused {what} for source '{source}': dropped, polling \
+         continues (further refusals are counted, not logged)",
+    );
 }
 
 /// The worst candidate state and a detail line naming EVERY file at that
@@ -547,6 +563,35 @@ mod tests {
             later.is_some(),
             "the source must be polled again after a refused event"
         );
+    }
+
+    /// Records logged while `f` runs, on this thread only — the same
+    /// scoped-subscriber pattern `runner.rs`'s own test module uses.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_scheduler_not_once_per_poll() {
+        // The default poll interval is 30 s and the thread no longer
+        // exits on a refusal, so an unlatched line repeats for the rest
+        // of the session (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_discovery(&latch, "the health report", "risk");
+            log_refused_discovery(&latch, "the poll result", "risk");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(records[0].message.contains("risk"), "{records:?}");
     }
 
     #[test]
