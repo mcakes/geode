@@ -701,6 +701,16 @@ pub struct ShellView {
     /// has been superseded and does nothing, which is how N keystrokes
     /// coalesce into one write.
     config_write_seq: u64,
+    /// The last config write that failed and had to be rolled back out of
+    /// memory, as the status bar shows it (`objectdialog::apply::
+    /// revert_failed_write`), or `None` once a later write succeeds.
+    ///
+    /// The status bar rather than the dialog's own notice, because
+    /// `pending_config_write` outlives the dialog on purpose: a trader can
+    /// close the dialog inside the 250 ms debounce window, which is the
+    /// commonest way to reach the failure path with no dialog left on
+    /// screen to carry a notice.
+    pub(crate) config_write_error: Option<String>,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -1122,6 +1132,7 @@ impl ShellView {
             object_dialog_scroll: ScrollHandle::new(),
             pending_config_write: None,
             config_write_seq: 0,
+            config_write_error: None,
         }
     }
 

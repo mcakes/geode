@@ -281,21 +281,31 @@ still wait half a second to see whether anything had happened.
 The cure is to apply in memory (§7.1). A field edit now:
 
 1. changes the draft — still the edit buffer, still where the cursor and
-   the row structure live;
-2. writes the changed object into the in-memory user-layer `LayerDoc`,
-   re-merges through the loader's own `Config::from_docs`, and hands the
-   result to the same applier the watcher uses;
-3. queues the file write behind a 250 ms debounce, on the background
-   executor.
+   the row structure live, and **what the edit stage paints**, so the
+   dialog shows the change on the keystroke;
+2. folds the changed object into one pending batch;
+3. and when the 250 ms window closes, that batch is written into the
+   in-memory user-layer `LayerDoc`, re-merged through the loader's own
+   `Config::from_docs`, handed to the same applier the watcher uses, and
+   written to the file — all together.
+
+**"Instant" is the dialog, not every downstream consumer.** Applying the
+merged config per keystroke would emit `ShellEvent::ConfigReloaded` per
+keystroke, and the app bridge turns that into fresh `ViewSpec`s — so a
+held key would make every blotter tile requery at the OS key-repeat rate,
+against a §7.1 budget of 50 ms at 1M rows. The dialog's own response is
+free; the world catching up is not, so the world catches up on the same
+timer the file does. The blotter updating a beat after the dialog is
+correct behaviour, not a compromise.
 
 Nothing a trader can see waits on a file. The half-finished-object
 hazard is gone rather than deferred: the object never travels through
 disk to reach the screen, and the watcher's reload of our own write is a
 no-op (§7.1).
 
-The draft's **baseline** moves in step 2 — as the change reaches memory,
-not as the file lands — so "dirty" is a state that exists only within
-the keystroke that changed a field. That is why the bar has no save row
+The draft's **baseline** moves in step 2 — as the keystroke is
+accounted for, not as the flush lands — so "dirty" is a state that
+exists only within the keystroke that changed a field. That is why the bar has no save row
 and why the row list no longer reflows as you edit.
 
 `escape` follows the interaction model's ladder (§5 there): filter mode
@@ -500,8 +510,10 @@ What is kept, unchanged and deliberately so, is the **applier**.
 `shell::hot_reload::apply_reload` is still the only thing that turns a
 `Config` into a running state — keymap, theme, pickables, grouping
 slots, saved scopes, the frame's `ConfigReloaded`, the restart banner —
-and a dialog edit goes through it exactly as a watcher reload does. Only
-the *source* of the `Config` differs.
+and a dialog edit goes through it exactly as a watcher reload does. What
+differs between the two is the `Config`'s **source** (memory, not disk)
+and **when** it is applied (on the debounce, not on a poll). Nothing
+about the merge or the application differs.
 
 What is new is that the loader's two halves are separable
 (`geode-core::config`):
@@ -527,32 +539,75 @@ path — patching the already-merged doc in place rather than re-merging
 the layers, say — would be free to disagree with the loader about
 override order, atomic depth or provenance, and the disagreement would
 surface only as a config that behaves differently depending on whether
-it was last touched by a dialog or by a file. The merge is not expensive
-enough to be worth that risk: `cargo bench -p geode-core --bench
-config_merge` measures `all_docs` + `from_docs` on the largest config
-this repo ships at **63 µs**, 0.8% of the 8 ms pure-UI budget.
+it was last touched by a dialog or by a file.
 
-Three consequences, each decided rather than accepted:
+Costs, measured rather than assumed (`docs/perf.md`, "Phase 4c"): a
+keystroke's pure core is **37 µs** — it merges nothing and applies
+nothing — and the debounced flush pays **70 µs** to merge a builtin layer
+including the real keymap, plus **20 µs** to rebuild that keymap inside
+`apply_reload`, once per 250 ms.
+
+Five consequences, each decided rather than accepted:
 
 - **Persistence is background and feeds nothing back.** The write still
   goes through `config_write::edit`, because the *file* must keep the
   user's comments and unrelated keys — that is what `toml_edit`'s
   read-modify-write is for. Memory and disk both derive from the same
   rendered table; the write's completion never updates memory.
-- **A failed write reverts memory.** It is the one thing that can leave
-  a trader looking at a value that is not persisted, so the in-memory
-  change goes back to where the batch started, through the same applier,
-  and the dialog's notice says so. Logging and moving on — what every
+- **A failed write reverts memory, and says so where it can be seen.**
+  It is the one thing that can leave a trader looking at a value that is
+  not persisted, so the in-memory change goes back to where the batch
+  started, through the same applier. Logging and moving on — what every
   other persist path in this crate does — is right only where memory did
   not already apply the change.
-- **Coalescing is a 250 ms debounce on the write only.** A held
-  `shift+j` repeats at the OS key-repeat rate (~100 ms on macOS), and
-  each repeat is a real edit; without a debounce each would rewrite the
-  file. 250 ms is over twice that period and half the watcher's poll.
+
+  The report goes to the **status bar** (`config not saved — reverted:
+  …`), not only to the dialog's own notice. The pending write outlives
+  the dialog on purpose — a trader can close the dialog inside the
+  debounce window, which is the commonest way to reach this path — so a
+  dialog-only notice would be absent exactly when it is needed. The
+  dialog's notice is still set when one is open, and the next successful
+  write clears the status segment.
+- **Coalescing is a 250 ms debounce on the write *and the fan-out*.**
+  An earlier build debounced the file alone and applied the merged config
+  per keystroke. That protected the cheap side and left the expensive one
+  exposed: every application emits `ConfigReloaded`, the bridge re-derives
+  views, and every blotter tile requeries — the §7.1 <50 ms operation, at
+  the OS key-repeat rate (~100 ms on macOS) under a held key. The
+  fan-out and the write are the same event — "the rest of the world
+  catches up" — so they share one timer. 250 ms is over twice the
+  key-repeat period and half the watcher's poll.
+
   Write-on-field-commit was the alternative and was rejected: this stage
   has no commit moment, so "commit" would mean "when the dialog closes",
   and a crash would lose edits the screen had shown as applied for
-  minutes. A quarter of a second is the whole exposure.
+  minutes. A quarter of a second is the whole exposure — and it is a real
+  one: **a quit inside the debounce window loses the pending write.**
+  Closing that would mean either writing per keystroke (the thrash this
+  exists to prevent) or a shutdown hook this shell does not have.
+
+- **An edit made while a write is in flight is not erased by that
+  write's completion.** Each keystroke bumps a sequence and folds its
+  change into one pending batch; the flush that wakes holding the current
+  sequence owns it. The success arm checks that sequence too — without
+  it, an edit that arrives during a write is folded into the batch the
+  completing write then clears, so it reaches neither memory nor disk,
+  and the watcher (woken by the write that did land) reverts memory to
+  the older on-disk state. The change would disappear with nothing on
+  screen having said so.
+
+- **A pre-existing broken config file does not disable editing.**
+  `reload::decide` rejects any `Config` holding an error diagnostic, so
+  carrying the previous config's diagnostics into an edit's config made
+  one unparseable `*.toml` turn every edit into a silent in-memory no-op
+  — while the write still fired, so memory and disk diverged. Those
+  diagnostics describe files that were *skipped* and contributed no
+  documents, so they are not diagnostics of the documents an edit
+  re-merges, and an edit does not carry them. Last-good still guards what
+  it is for: `apply_reload` derives the keymap and mod-alias diagnostics
+  from the documents themselves, so an edit that really does produce a
+  broken config is still rejected, and the watcher restores the
+  `config: N error(s)` status on its next poll.
 
 **The self-write reload is proved inert, not suppressed.** The watcher
 will see the file this dialog wrote. `apply_reload` decides what a
@@ -890,9 +945,31 @@ the correction.
     calls `hot_reload::apply_reload`. No disk read on that path — pinned
     by a test that plants a decoy `views.toml` the running config has
     never loaded and asserts the edit does not pick it up.
+  - **The merge, the application and the write all ride one 250 ms
+    debounce; only the draft moves on the keystroke.** A first build
+    applied per keystroke and debounced the file alone, which protected
+    the cheap side: `apply_reload` emits `ConfigReloaded`, and every
+    blotter tile requeries on it. Ruling: *instant* means the dialog
+    responds instantly, not that every downstream consumer re-derives per
+    keystroke. Measured after the change (`docs/perf.md`): 37 µs per
+    keystroke, 70 µs merge + 20 µs `build_keymap` per flush.
   - The file write stays `config_write::edit` on the background
-    executor, behind a 250 ms debounce, keyed by `(doc, object)` so a
-    debounce window spanning two objects still lands both.
+    executor, keyed by `(doc, object)` so a debounce window spanning two
+    objects still lands both. Both ends of the flush check the batch's
+    sequence: `promote` before doing the work, and `finish_flush` before
+    clearing it. **The second check is what stops an edit made while a
+    write is in flight from being erased by that write's completion** —
+    without it that edit reaches neither memory nor disk, and the
+    watcher then reverts memory to the older on-disk state.
+  - **An edit carries no diagnostics forward.** `reload::decide` rejects
+    any config holding an error diagnostic, so carrying the previous
+    config's made a single unparseable `*.toml` turn every edit into a
+    silent in-memory no-op while the write still fired. They describe
+    files that were skipped and contributed no documents; they are not
+    diagnostics of the documents being re-merged.
+  - **A failed write reports to the status bar**, not only to the
+    dialog's notice: the pending write outlives the dialog on purpose, so
+    the commonest way to reach that path has no dialog left on screen.
   - `Confirm::Discard`, `Draft`-staging and the `s` verb are deleted.
     `Confirm::Fork` replaces the `Copy to user layer` label.
   - **An empty rendered table is written as an absence.**

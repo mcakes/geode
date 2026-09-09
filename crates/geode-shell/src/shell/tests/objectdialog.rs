@@ -274,6 +274,30 @@ fn services_with_a_desk_view() -> ShellServices {
 /// view while the view itself is still the desk's.
 fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
     let mut services = test_services();
+    let mut layered = desk_view_docs();
+    for (name, text) in extra {
+        layered.push(LayerDoc {
+            layer: Layer::User,
+            name: (*name).to_string(),
+            file: "<test:user>".into(),
+            table: text.parse().expect("fixture TOML parses"),
+        });
+    }
+    // See `services_with_views` on why the two travel together.
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: layered,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The desk-layer documents [`desk_view_services`] is built from: one
+/// dataset and one desk view over it. Factored out so a fixture that
+/// needs the SAME desk with a different `ConfigSources` — a user
+/// directory holding a file that will not parse, say — does not have to
+/// restate the desk and risk it drifting from every other test here.
+fn desk_view_docs() -> Vec<LayerDoc> {
     let datasets = LayerDoc::builtin(
         "datasets",
         "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
@@ -290,22 +314,7 @@ fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
             .parse()
             .unwrap(),
     };
-    let mut layered = vec![datasets, desk];
-    for (name, text) in extra {
-        layered.push(LayerDoc {
-            layer: Layer::User,
-            name: (*name).to_string(),
-            file: "<test:user>".into(),
-            table: text.parse().expect("fixture TOML parses"),
-        });
-    }
-    // See `services_with_views` on why the two travel together.
-    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
-        builtin: layered,
-        desk: None,
-        user: None,
-    });
-    services
+    vec![datasets, desk]
 }
 
 /// Open `config::views` on the desk-layer fixture with a writable user
@@ -548,59 +557,83 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
 }
 
 /// **The requirement, in one test.** Changing a config field is INSTANT:
-/// the keystroke moves the live `Config`, with no save key, no disk read
-/// and no file yet — and the file follows on its own, in the background,
-/// a debounce later.
+/// the keystroke changes what the dialog shows, with no save key — and
+/// the config and the file both follow on their own, together, a
+/// debounce later.
 ///
-/// The first build of this dialog staged the change in a draft and wrote
-/// only on `s`, so the value a trader had just changed did not exist
-/// anywhere but the draft until they pressed another key and the watcher
-/// noticed the file half a second after that.
+/// "Instant" is the **dialog**, not every downstream consumer. Applying
+/// the merged config per keystroke would emit `ShellEvent::ConfigReloaded`
+/// per keystroke, and the app bridge turns that into new `ViewSpec`s —
+/// so a held key would make every blotter tile requery at the OS
+/// key-repeat rate, against a §7.1 budget of 50 ms at 1M rows. The
+/// dialog's own response is free; the world catching up is not, so the
+/// world catches up on the same timer the file does.
 #[gpui::test]
-fn a_field_edit_applies_instantly_and_the_file_follows(cx: &mut gpui::TestAppContext) {
+fn a_field_edit_shows_instantly_and_the_config_and_file_follow_together(
+    cx: &mut gpui::TestAppContext,
+) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
 
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
 
-    // Memory, on the keystroke.
+    // The dialog, on the keystroke.
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
+            .included),
+        "the row the trader just changed has to show the change immediately"
+    );
+    // And there is no save row to press, because there is nothing to save.
+    assert!(cx.debug_bounds("objectdialog-action-s").is_none());
+
+    // The rest of the world has not been disturbed yet — neither the
+    // merged config nor the file.
+    assert_eq!(
+        presentation_of(&shell, &cx, "tree"),
+        None,
+        "the fan-out is debounced with the write: a keystroke must not \
+         make every tile requery"
+    );
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "and it must not touch the file either"
+    );
+
+    flush_config_write(&mut cx);
+
     let applied = presentation_of(&shell, &cx, "tree")
-        .expect("the edit has to be in the live config immediately");
+        .expect("the debounced flush has to reach the merged config");
     assert_eq!(
         applied
             .get("hidden")
             .and_then(|v| v.as_array())
             .map(|a| a.len()),
         Some(1),
-        "hiding a column must reach the merged config on the keystroke, got {applied:?}"
+        "hiding a column has to reach the merged config, got {applied:?}"
     );
-    // And there is no save row to press, because there is nothing to save.
-    assert!(cx.debug_bounds("objectdialog-action-s").is_none());
-
-    // Disk, a debounce later — and not before.
-    assert!(
-        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
-        "the write is debounced: a keystroke must not touch the file"
-    );
-    flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
-        .expect("the debounced write has to land on its own");
+        .expect("and the file, on the same timer");
     assert!(text.contains("hidden = [\"book\"]"), "{text}");
 }
 
-/// **Applying stays singular.** The edit's `Config` reaches the screen
-/// through `hot_reload::apply_reload` — the one applier the 500 ms
-/// watcher uses — and not through a second path of the dialog's own.
+/// **Applying stays singular, and the fan-out rides the write's timer.**
+/// The edit's `Config` reaches the screen through
+/// `hot_reload::apply_reload` — the one applier the 500 ms watcher uses —
+/// and not through a second path of the dialog's own; and three
+/// keystrokes inside one debounce window produce exactly **one**
+/// application, not three.
 ///
-/// `ShellEvent::ConfigReloaded` is what proves it, and it is the reason
-/// this matters rather than a tidiness argument: the bridge turns that
-/// event into the `ViewSpec`s the data thread runs on
-/// (`geode_core::config::load_views`). An edit that assigned
+/// `ShellEvent::ConfigReloaded` is what proves both halves, and it is the
+/// reason this matters rather than a tidiness argument: the bridge turns
+/// that event into the `ViewSpec`s the data thread runs on
+/// (`geode_core::config::load_views`), so every emission is every blotter
+/// tile re-deriving and requerying. An edit that assigned
 /// `services.config` directly would repaint this dialog perfectly and
-/// leave every blotter tile querying the view the trader just changed.
+/// leave those tiles on the old view; an edit that applied per keystroke
+/// would requery them at the OS key-repeat rate.
 #[gpui::test]
-fn an_edit_reaches_the_shells_one_applier(cx: &mut gpui::TestAppContext) {
+fn the_config_fan_out_is_debounced_and_goes_through_the_one_applier(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
 
@@ -615,14 +648,22 @@ fn an_edit_reaches_the_shells_one_applier(cx: &mut gpui::TestAppContext) {
         .detach();
     });
 
-    cx.simulate_keystrokes("space");
+    // Three real edits, inside one window: hide `book`, hide `npv`,
+    // unhide `book`.
+    cx.simulate_keystrokes("space j space k space");
     cx.run_until_parked();
+    assert_eq!(
+        *fired.borrow(),
+        0,
+        "not one keystroke may fan out on its own — that is a tile requery each"
+    );
 
+    flush_config_write(&mut cx);
     assert_eq!(
         *fired.borrow(),
         1,
-        "hiding a column changes the ViewSpecs every tile runs on — the edit \
-         has to go through the applier that tells the rest of the app so"
+        "hiding a column changes the ViewSpecs every tile runs on, so the edit \
+         has to go through the applier that tells the rest of the app — once"
     );
 }
 
@@ -649,6 +690,10 @@ fn an_edit_merges_in_memory_without_reading_disk(cx: &mut gpui::TestAppContext) 
 
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
+    // The merge rides the debounce with the write (see the fan-out test);
+    // this is the flush that performs it, and the decoy is what proves it
+    // merged the documents in hand rather than re-reading the directory.
+    flush_config_write(&mut cx);
 
     let dataset = shell.read_with(&cx, |shell, _| {
         shell
@@ -690,10 +735,13 @@ fn a_failed_write_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAp
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert!(
-        presentation_of(&shell, &cx, "tree").is_some(),
-        "the edit applies to memory first — that is the whole design"
+        !edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
+            .included),
+        "the dialog shows the change immediately, as it does for any edit"
     );
 
+    // The flush applies to memory and *then* writes, so the failure
+    // happens with the change already live — which is the hazard.
     flush_config_write(&mut cx);
 
     assert_eq!(
@@ -716,6 +764,171 @@ fn a_failed_write_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAp
     assert_eq!(
         std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap(),
         "[tree\nhidden =",
+    );
+}
+
+/// **CRITICAL: an edit made while a write is in flight must not be
+/// erased by that write's completion.**
+///
+/// Every keystroke folds its change into one pending batch and bumps a
+/// sequence; the flush that wakes holding the current sequence owns the
+/// batch. The success arm has to respect that sequence too. Clearing the
+/// batch unconditionally loses any edit that arrived while the write was
+/// in flight: the older write completes, erases the batch, and the newer
+/// edit's own flush finds nothing to do — so it reaches neither memory
+/// nor disk, and the watcher (woken by the write that *did* land) then
+/// reverts memory to the older on-disk state. The trader's change
+/// disappears with nothing on screen having said so.
+///
+/// **The race cannot be scheduled in a gpui test**, and pretending
+/// otherwise would make this a test of the executor rather than of the
+/// guard: the test executor polls a `background_executor().spawn` inline,
+/// so `run_writes` and `finish_flush` run inside a single `tick()` with
+/// no gap for a keystroke however finely the ticks are driven (measured —
+/// an earlier version of this test ticked until the file appeared and
+/// still found the success arm had already run). So the stale completion
+/// is applied directly: a real `ShellView`, a real pending batch from a
+/// real keystroke, the real `finish_flush`, and only the *scheduling*
+/// synthesized. Then the batch is flushed for real and has to reach disk.
+#[gpui::test]
+fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let file = dir.path().join("view_presentation.toml");
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    let seq = shell.read_with(&cx, |shell, _| {
+        shell
+            .pending_config_write
+            .as_ref()
+            .expect("the keystroke has to have queued a batch");
+        shell.config_write_seq
+    });
+
+    // An older flush completing successfully, exactly as it would if this
+    // keystroke had landed while that flush's write was in flight.
+    shell.update(&mut cx, |shell, cx| {
+        objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), cx);
+    });
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_some()),
+        "a superseded flush's completion must not clear the batch a newer \
+         edit is sitting in — that edit would reach neither memory nor disk"
+    );
+
+    flush_config_write(&mut cx);
+
+    let text = std::fs::read_to_string(&file)
+        .expect("the batch a stale completion left alone still has to be written");
+    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        presentation_of(&shell, &cx, "tree").is_some(),
+        "and it has to have been applied, not just written"
+    );
+    // The flush that DID own the batch clears it, so a later edit starts
+    // a fresh one rather than rewriting this object forever.
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_none()),
+        "the owning flush still has to clear what it wrote"
+    );
+}
+
+/// **A broken config file elsewhere must not silently disable editing.**
+///
+/// `reload::decide` rejects any `Config` holding an error diagnostic, and
+/// carrying the previous config's diagnostics into an edit's config fed
+/// exactly that: one unparseable `*.toml` present at startup made every
+/// dialog edit a no-op in memory **while the file write still fired**, so
+/// memory and disk diverged and nothing said why. The trader most likely
+/// to open a config dialog is precisely the one with a broken config
+/// file.
+///
+/// Those diagnostics describe files that were **skipped** — they
+/// contributed no documents — so they are not diagnostics of the
+/// documents an edit re-merges, and an edit does not carry them. Last-good
+/// still guards what it is for: a diagnostic the edit's own documents
+/// produce (a refused `keymap.mod`, say) still rejects, because
+/// `apply_reload` derives that from the documents themselves.
+#[gpui::test]
+fn an_edit_applies_even_when_another_config_file_is_broken(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("broken.toml"),
+        "this is = = not toml
+",
+    )
+    .unwrap();
+
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: desk_view_docs(),
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    assert!(
+        services
+            .config
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == geode_core::config::Severity::Error),
+        "the fixture has to actually start with a broken config file"
+    );
+
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter j j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert!(
+        presentation_of(&shell, &cx, "tree").is_some(),
+        "an unrelated broken file must not make every edit a silent no-op — \
+         the write fires either way, so memory and disk would diverge"
+    );
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("and the file is written, as it always was");
+    assert!(text.contains("hidden"), "{text}");
+}
+
+/// **A write that fails after the dialog closed still reports itself.**
+///
+/// `PendingConfigWrite` lives on `ShellView` precisely so a write survives
+/// the dialog that started it — a trader can close the dialog inside the
+/// debounce window. That makes "the dialog's notice says so" untrue on
+/// exactly the path the design exists to cover, so the failure also lands
+/// in the status bar, where a closed dialog can still be seen.
+#[gpui::test]
+fn a_write_that_fails_after_the_dialog_closed_still_reports_itself(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    std::fs::write(dir.path().join("view_presentation.toml"), "[tree\nhidden =").unwrap();
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    // Out of the edit stage, then out of the dialog entirely — all still
+    // inside the debounce window.
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "the dialog is closed before the write is even attempted"
+    );
+
+    flush_config_write(&mut cx);
+
+    let reported = shell.read_with(&cx, |s, _| s.config_write_error.clone());
+    assert!(
+        reported
+            .as_deref()
+            .is_some_and(|m| m.contains("view_presentation")),
+        "a failure with no dialog open has to reach somewhere the trader can \
+         see it, got {reported:?}"
+    );
+    assert!(
+        cx.debug_bounds("config-write-error").is_some(),
+        "and the status bar has to actually paint it"
     );
 }
 
@@ -746,13 +959,13 @@ fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_tabl
     // Back where it started: nothing of the trader's is left to record.
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
+    flush_config_write(&mut cx);
     assert_eq!(
         presentation_of(&shell, &cx, "tree"),
         None,
         "an empty presentation is an absence in memory, not an empty table"
     );
 
-    flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
     assert!(
         !text.contains("[tree]"),
@@ -867,11 +1080,10 @@ fn escape_leaves_the_edit_stage_with_nothing_to_discard(cx: &mut gpui::TestAppCo
         objectdialog::Stage::Browse,
         "escape goes back a stage"
     );
-    // And the edit outlives the stage it was made in, on disk as well as
-    // in memory — closing the dialog inside the debounce window must not
-    // lose the write.
-    assert!(presentation_of(&shell, &cx, "tree").is_some());
+    // And the edit outlives the stage it was made in: the flush queued
+    // before the stage closed still applies and still writes.
     flush_config_write(&mut cx);
+    assert!(presentation_of(&shell, &cx, "tree").is_some());
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("a write queued before the stage closed still has to land");
     assert!(text.contains("hidden"), "{text}");

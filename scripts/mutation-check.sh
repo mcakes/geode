@@ -3315,7 +3315,75 @@ run_mutation "objectdialog: an edit assigns the config instead of going through 
   '    shell.apply_reload(config, cx);' \
   '    shell.services.config = config;' \
   geode-shell \
-  an_edit_reaches_the_shells_one_applier
+  the_config_fan_out_is_debounced_and_goes_through_the_one_applier
+
+# The fan-out rides the write's timer (spec §7.1, review ruling). Applying
+# on the keystroke is what the first build did and it is invisible to
+# every value assertion — the config ends up identical, just sooner and N
+# times instead of once. What it costs is a `ConfigReloaded` per
+# keystroke: the bridge re-derives views and EVERY blotter tile requeries,
+# a §7.1 <50 ms operation, at the OS key-repeat rate under a held key.
+# Only a test counting the events can see it.
+run_mutation "objectdialog: the config fan-out fires per keystroke instead of riding the debounce" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    schedule_flush(shell, user_dir, edits, revert, cx);' \
+  '    apply_in_memory(shell, &user_dir, &edits, cx);
+    schedule_flush(shell, user_dir, edits, revert, cx);' \
+  geode-shell \
+  the_config_fan_out_is_debounced_and_goes_through_the_one_applier
+
+# CRITICAL, and a data-loss path: the success arm has to respect the
+# sequence it was launched with. Clearing the pending batch
+# unconditionally erases any edit that arrived while the write was in
+# flight — that edit reaches neither memory nor disk, and the watcher,
+# woken by the write that DID land, then reverts memory to the older
+# on-disk state. Every ordinary test stays green, because in the test
+# executor a `background_executor().spawn` is polled inline and no
+# keystroke can land inside the window at all; the covering test drives
+# `finish_flush` with a stale sequence on real state for exactly that
+# reason.
+run_mutation "objectdialog: a stale write completion clears a newer edit's batch" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            if shell
+                .pending_config_write
+                .as_ref()
+                .is_some_and(|pending| pending.seq == seq)
+            {
+                shell.pending_config_write = None;
+            }' \
+  '            let _ = seq;
+            shell.pending_config_write = None;' \
+  geode-shell \
+  a_stale_write_completion_does_not_erase_a_newer_edit
+
+# `reload::decide` rejects any config holding an error diagnostic, so
+# carrying the previous config's forward makes ONE unparseable file in
+# the user directory turn every dialog edit into a silent in-memory
+# no-op — while the write still fires, so memory and disk diverge with
+# nothing on screen saying why. Every test with a healthy config stays
+# green; only a fixture that starts with a broken file can see it.
+run_mutation "objectdialog: an edit carries the previous config's diagnostics forward" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let config = Config::from_docs(docs);
+    shell.apply_reload(config, cx);' \
+  '    let mut config = Config::from_docs(docs);
+    config.diagnostics = shell.services.config.diagnostics.clone();
+    shell.apply_reload(config, cx);' \
+  geode-shell \
+  an_edit_applies_even_when_another_config_file_is_broken
+
+# A failed write with no dialog open. `PendingConfigWrite` lives on
+# `ShellView` precisely so a write outlives the dialog that started it —
+# a trader can close the dialog inside the 250 ms window — so the
+# dialog-only notice is absent on exactly the path this exists to cover,
+# and the revert would happen in silence. The dialog-open test stays
+# green either way.
+run_mutation "objectdialog: a failed write reports only through the dialog notice" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    shell.config_write_error = Some(format!("config not saved — reverted: {message}"));' \
+  '' \
+  geode-shell \
+  a_write_that_fails_after_the_dialog_closed_still_reports_itself
 
 # The empty-table ruling. `views::presentation_table` renders an EMPTY
 # table whenever the trader's presentation matches the view's own doc —
@@ -3347,9 +3415,8 @@ run_mutation "objectdialog: an empty object table is written instead of removed"
 # when the file cannot be written at all.
 run_mutation "objectdialog: a failed write is logged instead of reverting memory" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '            this.update(cx, |shell, cx| revert_failed_write(shell, message, cx))
-                .ok();' \
-  '            eprintln!("[config] warning: {message}");' \
+  '        Err(message) => revert_failed_write(shell, message, cx),' \
+  '        Err(message) => eprintln!("[config] warning: {message}"),' \
   geode-shell \
   a_failed_write_reverts_the_in_memory_change_and_says_so
 

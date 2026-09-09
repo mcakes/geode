@@ -30,18 +30,34 @@
 //! budget. A merge per keystroke is affordable; that is a measurement,
 //! not a hope.
 //!
-//! ## The file write is background, debounced, and feeds nothing back
+//! ## What is instant, and what rides the timer
+//!
+//! **The dialog is instant. The rest of the world catches up on one
+//! timer.** A keystroke changes the [`Draft`](super::Draft), which is
+//! what the edit stage paints, so the trader sees their change with
+//! nothing in between. What it does *not* do is apply the merged config:
+//! `apply_reload` emits `ShellEvent::ConfigReloaded`, the app bridge
+//! turns that into fresh `ViewSpec`s, and every blotter tile requeries —
+//! a §7.1 <50 ms operation at 1M rows. Doing that per keystroke means
+//! doing it at the OS key-repeat rate under a held key.
+//!
+//! So the merge, the application and the file write all happen together
+//! when the [`WRITE_DEBOUNCE`] window closes ([`promote`]). They are one
+//! event — "the rest of the world catches up" — and they belong on one
+//! timer. The blotter updating a beat after the dialog is correct, not a
+//! compromise.
 //!
 //! Memory and disk both derive from the same rendered
 //! `toml_edit::Table` — [`object_value`] parses exactly the text
 //! [`super::object_text`] would write — so the write is a *copy* of the
 //! decision, never its source. Nothing about the write's completion
-//! updates memory. Its **failure** does: see [`flush`].
+//! updates memory. Its **failure** does: see [`revert_failed_write`].
 //!
-//! Writes coalesce on a [`WRITE_DEBOUNCE`] timer rather than firing per
-//! keystroke, because a held `shift+j` repeats at the OS key-repeat rate
-//! (~100 ms on macOS defaults) and each repeat is a real edit. The
-//! debounce is on the *write only* — memory is always current.
+//! One consequence, stated rather than hidden: a quit inside the
+//! debounce window loses the pending write. The exposure is 250 ms of
+//! one object's fields, and closing it would mean either writing per
+//! keystroke (the thrash this exists to prevent) or a shutdown hook this
+//! shell does not have.
 //!
 //! ## The watcher will see our own write
 //!
@@ -108,7 +124,7 @@ pub(crate) const WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// keystroke away, every time a trader unhides the last hidden column.
 /// So the empty rendering means "I have no personalisation of this
 /// object" and is written as an absence, in memory and on disk alike.
-type ObjectEdit = Option<toml::Value>;
+pub type ObjectEdit = Option<toml::Value>;
 
 /// Config writes applied to memory and not yet on disk.
 ///
@@ -138,7 +154,7 @@ pub(crate) struct PendingConfigWrite {
 /// two destinations: memory cannot end up holding something the file
 /// would not have said. It is a parse of a few hundred bytes, inside a
 /// 63 µs merge, inside an 8 ms budget.
-pub(super) fn object_value(object: &str, table: toml_edit::Table) -> ObjectEdit {
+pub fn object_value(object: &str, table: toml_edit::Table) -> ObjectEdit {
     if table.is_empty() {
         return None;
     }
@@ -254,14 +270,18 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         .is_some_and(|row| row.layer != Layer::User)
 }
 
-/// Apply the draft's changes **now**: into memory through the loader's
-/// own merge and the shell's one applier, and onto the debounced write
-/// queue for the disk.
+/// Record the draft's change and put it on the debounced queue.
+///
+/// The keystroke's whole job. It does **not** merge and does **not**
+/// apply — [`promote`] does both when the window closes — because the
+/// dialog already shows the change (it is painted from the draft) and
+/// everything else the application would touch is expensive per
+/// keystroke. See this module's header.
 ///
 /// Returns the notice the caller should show, or `None` when nothing
-/// changed. A missing user directory is a notice and no write at all —
-/// the contract every persist path in this crate shares — and no
-/// in-memory apply either, because memory ahead of a disk that can never
+/// changed. A missing user directory is a notice and nothing else — the
+/// contract every persist path in this crate shares — and, deliberately,
+/// no in-memory apply either: memory ahead of a disk that can never
 /// catch up is precisely the state hazard 1 exists to prevent.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
     let edits = edits_for(shell);
@@ -272,8 +292,11 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         return Some("no writable user config directory — nothing was changed".to_string());
     };
 
-    // The draft's baseline moves here, not when the file lands: the
-    // baseline is "what has been applied", and memory has applied it.
+    // The draft's baseline moves here, not when the flush lands: the
+    // baseline is "what this keystroke has already accounted for", so the
+    // next keystroke's difference is that keystroke's alone. The batch
+    // below carries the whole rendered object either way, so a flush is
+    // idempotent over it.
     if let Some(draft) = shell
         .object_dialog
         .as_mut()
@@ -289,7 +312,6 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         None => shell.services.config.all_docs(),
     };
 
-    apply_in_memory(shell, &user_dir, &edits, cx);
     schedule_flush(shell, user_dir, edits, revert, cx);
     None
 }
@@ -297,10 +319,25 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
 /// Re-merge the documents with `edits` folded in, and hand the result to
 /// the same applier the watcher uses.
 ///
-/// The previous config's diagnostics travel with it: nothing was re-read,
-/// so nothing new was learned about the files, and dropping them would
-/// clear a "config: 2 errors — keeping last good" status the very next
-/// watcher tick puts back.
+/// **The previous config's diagnostics deliberately do NOT travel with
+/// it.** An earlier build carried them forward, reasoning that nothing
+/// had been re-read so nothing new had been learned. That was true and
+/// the conclusion was still wrong: `reload::decide` rejects any config
+/// holding an error-severity diagnostic, so a single unparseable or
+/// unsupported `*.toml` sitting in the user's directory at startup made
+/// every dialog edit a silent no-op in memory — while the file write
+/// still fired, so memory and disk diverged, and nothing on screen said
+/// why. The trader most likely to open a config dialog is precisely the
+/// one whose config is broken.
+///
+/// The diagnostics are not lost so much as not applicable: they describe
+/// files that were **skipped**, which contributed no documents, so they
+/// are not diagnostics of the documents being re-merged here. Last-good
+/// still guards what it is for — `apply_reload` derives `mod_diags` and
+/// `keymap_diags` from the documents themselves, so an edit that really
+/// does produce a broken config is still rejected. And the watcher, woken
+/// by this flush's own write, re-reads the broken file and restores the
+/// `config: N error(s) — keeping last good` status within its next poll.
 fn apply_in_memory(
     shell: &mut ShellView,
     user_dir: &Path,
@@ -311,20 +348,26 @@ fn apply_in_memory(
     for ((doc, object), value) in edits {
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
-    let carried = shell.services.config.diagnostics.clone();
-    let mut config = Config::from_docs(docs);
-    config.diagnostics = carried;
+    let config = Config::from_docs(docs);
     shell.apply_reload(config, cx);
 }
 
 /// Fold `edits` into the pending batch and schedule the flush that will
-/// write it.
+/// apply and write it.
 ///
 /// Every keystroke bumps the sequence and spawns a fresh timer; whichever
 /// task wakes holding the current sequence owns the whole accumulated
 /// batch, and every superseded task finds a newer sequence and returns.
 /// That is the coalescing: N keystrokes inside the debounce window
-/// produce N timers and one write per touched document.
+/// produce N timers, **one** application, and one write per touched
+/// document.
+///
+/// The sequence guards both ends of the flush. [`promote`] checks it
+/// before doing the work, and [`finish_flush`] checks it before clearing
+/// the batch — the second check is not symmetry for its own sake: without
+/// it, an edit made while a write is in flight is folded into the batch
+/// that the completing write then erases, and it reaches neither memory
+/// nor disk.
 fn schedule_flush(
     shell: &mut ShellView,
     user_dir: PathBuf,
@@ -347,37 +390,90 @@ fn schedule_flush(
 
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(WRITE_DEBOUNCE).await;
-        let Ok(Some((user_dir, edits))) = this.update(cx, |shell, _| take_flush(shell, seq)) else {
+        let Ok(Some((user_dir, edits))) = this.update(cx, |shell, cx| promote(shell, seq, cx))
+        else {
             return;
         };
         let outcome = cx
             .background_executor()
             .spawn(async move { run_writes(&user_dir, edits) })
             .await;
-        if let Err(message) = outcome {
-            this.update(cx, |shell, cx| revert_failed_write(shell, message, cx))
-                .ok();
-        } else {
-            this.update(cx, |shell, _| shell.pending_config_write = None)
-                .ok();
-        }
+        this.update(cx, |shell, cx| finish_flush(shell, seq, outcome, cx))
+            .ok();
     })
     .detach();
 }
 
-/// The batch a flush of `seq` owns, or `None` when a later keystroke has
-/// taken it over. The batch stays on `ShellView` (rather than being taken
-/// here) so a failure still has its `revert` documents to restore from.
+/// The debounce window has closed: apply the accumulated batch to memory
+/// through the one applier, and hand back the writes the file half owes.
+///
+/// `None` when a later keystroke has taken the batch over — that
+/// keystroke's own timer carries everything, including this one's edits,
+/// so doing the work twice would be one extra whole-app fan-out for
+/// nothing.
+///
+/// The batch stays on `ShellView` rather than being taken here, for two
+/// reasons: a failure still needs its `revert` documents to restore from,
+/// and an edit arriving during the write has to have somewhere to land.
 #[allow(clippy::type_complexity)]
-fn take_flush(
+fn promote(
     shell: &mut ShellView,
     seq: u64,
+    cx: &mut Context<ShellView>,
 ) -> Option<(PathBuf, BTreeMap<(&'static str, String), ObjectEdit>)> {
     let pending = shell.pending_config_write.as_ref()?;
     if pending.seq != seq {
         return None;
     }
-    Some((pending.user_dir.clone(), pending.edits.clone()))
+    let user_dir = pending.user_dir.clone();
+    let edits = pending.edits.clone();
+    apply_in_memory(shell, &user_dir, &edits, cx);
+    Some((user_dir, edits))
+}
+
+/// The write is done, one way or the other.
+///
+/// **The sequence check on the success arm is load-bearing.** Clearing
+/// the batch unconditionally erases any edit that arrived while this
+/// write was in flight: that edit was folded into the pending batch, its
+/// own flush then finds nothing, and it reaches neither memory nor disk —
+/// after which the watcher, woken by the write that *did* land, reverts
+/// memory to the older on-disk state and the change disappears with
+/// nothing on screen having said so. Only the flush that still owns the
+/// batch may clear it; a superseded one leaves it for its successor.
+///
+/// `pub(crate)` for one reason, stated so it is not mistaken for a leak:
+/// the race the sequence check guards cannot be **scheduled** in a gpui
+/// test. The test executor polls a `background_executor().spawn` inline,
+/// so `run_writes` and this function run inside one `tick()` and no
+/// keystroke can be dispatched between them, however finely the ticks are
+/// driven (measured). The covering test therefore calls this directly
+/// with a stale sequence — real `ShellView`, real pending batch, real
+/// function, synthesized scheduling — and then asserts the batch still
+/// reaches disk.
+pub(crate) fn finish_flush(
+    shell: &mut ShellView,
+    seq: u64,
+    outcome: Result<(), String>,
+    cx: &mut Context<ShellView>,
+) {
+    match outcome {
+        Err(message) => revert_failed_write(shell, message, cx),
+        Ok(()) => {
+            if shell
+                .pending_config_write
+                .as_ref()
+                .is_some_and(|pending| pending.seq == seq)
+            {
+                shell.pending_config_write = None;
+            }
+            // A write that succeeds clears whatever the last failure left
+            // on the status bar — the config on disk is current again.
+            if shell.config_write_error.take().is_some() {
+                cx.notify();
+            }
+        }
+    }
 }
 
 /// The file half, off the render thread: one `config_write::edit` per
@@ -446,14 +542,18 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     let Some(pending) = shell.pending_config_write.take() else {
         return;
     };
-    let carried = shell.services.config.diagnostics.clone();
     // Named apart from the apply path's own `config` on purpose: these
     // two `apply_reload` calls are the only ones in this module, they
     // differ only in which documents they carry, and a mutation entry
-    // that anchors on one must not silently land on the other.
-    let mut restored = Config::from_docs(pending.revert);
-    restored.diagnostics = carried;
+    // that anchors on one must not silently land on the other. No
+    // carried diagnostics here either, for `apply_in_memory`'s reasons.
+    let restored = Config::from_docs(pending.revert);
     shell.apply_reload(restored, cx);
+    // The status bar, not just the dialog: `PendingConfigWrite` lives on
+    // `ShellView` exactly so a write survives the dialog that started it,
+    // so the commonest way to hit this path is with nothing of the
+    // dialog's left on screen to carry a notice.
+    shell.config_write_error = Some(format!("config not saved — reverted: {message}"));
     // The draft is the edit buffer the reverted value has to show through,
     // so it is rebuilt from the config that just went back — otherwise the
     // row keeps painting the value the file refused.

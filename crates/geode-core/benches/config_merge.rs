@@ -22,6 +22,7 @@ const DATASETS: &str = include_str!("../../../examples/demo-config/datasets.toml
 const DIMENSIONS: &str = include_str!("../../../examples/demo-config/dimensions.toml");
 const GROUPINGS: &str = include_str!("../../../examples/demo-config/groupings.toml");
 const VIEWS: &str = include_str!("../../../examples/demo-config/views.toml");
+const SCOPES: &str = "[eu_books]\nbook = [\"EU_RATES\", \"EU_CREDIT\"]\n";
 
 fn docs() -> Vec<LayerDoc> {
     let mut out = vec![
@@ -30,6 +31,17 @@ fn docs() -> Vec<LayerDoc> {
         LayerDoc::builtin("dimensions", DIMENSIONS).unwrap(),
         LayerDoc::builtin("groupings", GROUPINGS).unwrap(),
         LayerDoc::builtin("views", VIEWS).unwrap(),
+        // A saved scope, which the demo desk does not ship but a real
+        // user layer routinely carries.
+        //
+        // The `keymap` doc — by far the largest in the config model — is
+        // NOT here, and its absence made this an underestimate. It lives
+        // as a Rust const in `geode-shell`, which `geode-core` must not
+        // depend on (the layering runs the other way), so the
+        // keymap-inclusive merge is measured in `geode-shell`'s own
+        // `shell_cores` bench (`config_edit/flush_merge_full_layer`)
+        // instead. That is the number `docs/perf.md` reports for a flush.
+        LayerDoc::builtin("scopes", SCOPES).unwrap(),
     ];
     // The two user-layer docs a Views edit actually writes.
     for (name, text) in [
