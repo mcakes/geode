@@ -584,6 +584,12 @@ pub struct ShellView {
     /// render each land where they were asked. Touched only on dispatch
     /// and in `ensure_occupants` — never per frame.
     pending_tiles: BTreeMap<TileId, PendingTile>,
+    /// Restored `tiles` records `ensure_occupants` could not place (no
+    /// factory for their kind — spec 2026-09-08 add-tile §7.2), keyed
+    /// like `session::TileRecords`. Written back verbatim by
+    /// `current_tiles` so a flush never thins a session saved by a build
+    /// with more modules; dropped when the tile closes or is filled.
+    unplaced_records: crate::session::TileRecords,
     /// `[tiles] add` (spec 2026-09-08 add-tile §5): resolved at startup,
     /// re-derived on hot reload, stepped by the settings row.
     pub(super) add_direction: crate::tileadd::AddDirection,
@@ -1207,6 +1213,7 @@ impl ShellView {
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
+            unplaced_records: crate::session::TileRecords::new(),
             add_direction,
             last_flip_versions,
             occupants: HashMap::new(),

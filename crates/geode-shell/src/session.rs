@@ -121,14 +121,16 @@ pub const SESSION_CONFIG_VERSION: i64 = 1;
 /// module roster to check it against, so a `kind` from an unregistered or
 /// downgraded module round-trips here unchanged. Resolution happens one
 /// layer up, in `occupants::ensure_occupants`: when the roster has no
-/// factory for `kind`, it falls back to the default factory with `state`
-/// discarded (a factory must never see state shaped for a different
-/// module), so the occupant it creates is really the *default* kind with
-/// empty state. `to_toml`'s flush then serializes whatever the live
-/// occupant reports (`current_tiles`), so that healed default silently
-/// overwrites the original unknown-kind record on the very next save —
-/// acceptable healing (M15, 3b final review), but real state loss for a
-/// misconfigured or downgraded run, worth knowing rather than discovering.
+/// factory for `kind`, the tile paints the placeholder (spec 2026-09-08
+/// add-tile §7.2). No other module is handed the record — a factory must
+/// never see state shaped for a different module — and there is no
+/// default kind for it to fall back to. The record itself is *kept*, in
+/// `ShellView::unplaced_records`, and `current_tiles` writes it back
+/// verbatim on every flush, so a session saved by a build with more
+/// modules survives a run of a build with fewer: turn the module back on
+/// and the tile comes back with its own state. The record is dropped only
+/// when its tile closes, or when the trader fills that placeholder with
+/// something else — then the live occupant's own record takes the id.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TileRecord {
     pub kind: String,

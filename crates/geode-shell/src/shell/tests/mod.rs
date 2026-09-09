@@ -51,7 +51,7 @@ pub(super) fn test_services_with_log() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    services_with_default_kind("placeholder")
+    services_with_rec_roster()
 }
 
 /// The shell fixtures' one roster: a `RecordingFactory` of kind "rec" —
@@ -59,13 +59,10 @@ pub(super) fn test_services_with_log() -> (
 /// built here really can add a tile twice and get two tiles (an add
 /// onto a *placeholder* fills it in place, spec 2026-09-08 add-tile
 /// §4.2, so a roster with no "rec" would collapse every second add into
-/// the first tile). `default_kind` decides only what a tile created by
-/// some *other* path gets — a direct `Workspaces::split_active`, or a
-/// session record naming a kind nothing registered: "placeholder" for
-/// [`test_services`], "rec" for [`services_with_recorder`].
-fn services_with_default_kind(
-    default_kind: &str,
-) -> (
+/// the first tile). There is no default kind (§7.1): a tile created by
+/// some *other* path — a direct `Workspaces::split_active`, or a session
+/// record naming a kind nothing registered — is a placeholder.
+fn services_with_rec_roster() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
@@ -91,7 +88,7 @@ fn services_with_default_kind(
     crate::defaults::register_add_actions(&mut registry, &["rec"]);
     let recorder = crate::module::recording::RecordingFactory::new("rec");
     let log = recorder.log.clone();
-    let mut roster = crate::module::ModuleRoster::new(default_kind);
+    let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(recorder));
     // Module actions exist before `build_keymap`, exactly as `main.rs`
     // orders it — a binding into the module's own context is what
@@ -120,13 +117,15 @@ fn services_with_default_kind(
     (services, log)
 }
 
-/// `test_services` with the recording module as the *default* occupant:
-/// every tile, however it was created, is a recorder.
+/// [`test_services`] plus a binding into the recording module's own key
+/// context, so a key can be seen to reach an occupant. The roster is the
+/// same one every fixture here builds — a "rec" factory and no default
+/// kind (spec 2026-09-08 add-tile §7.1).
 pub(super) fn services_with_recorder() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    let (mut services, log) = services_with_default_kind("rec");
+    let (mut services, log) = services_with_rec_roster();
     // A binding into the module's own key context, so a key can be seen
     // to reach it.
     let module_doc = LayerDoc::builtin(

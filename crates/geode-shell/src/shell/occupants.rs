@@ -20,11 +20,19 @@ use super::ShellView;
 
 impl ShellView {
     /// Every non-placeholder occupant's tile record, gathered fresh from
-    /// `serialize` (Task 4, Phase 3 §3.5). A placeholder tile carries no
-    /// module of its own — it exists only until something opens on it —
-    /// so it is never written.
+    /// `serialize` (Task 4, Phase 3 §3.5), plus every *unplaced* record —
+    /// one this build had no factory for, so the tile paints a
+    /// placeholder while the record it was restored from rides through
+    /// untouched (spec 2026-09-08 add-tile §7.2). A placeholder tile
+    /// carries no module state of its own, so it is never written from
+    /// the occupant side; without the unplaced records the very next
+    /// flush would drop a session saved by a build with more modules.
+    /// A live occupant always wins the id — `or_insert_with` never
+    /// overwrites one — and `ensure_occupants`/`add_tile` retain the map
+    /// to tiles that are still both live and unfilled.
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
-        self.occupants
+        let mut tiles: session::TileRecords = self
+            .occupants
             .iter()
             .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
             .map(|(id, o)| {
@@ -36,7 +44,11 @@ impl ShellView {
                     },
                 )
             })
-            .collect()
+            .collect();
+        for (id, record) in &self.unplaced_records {
+            tiles.entry(*id).or_insert_with(|| record.clone());
+        }
+        tiles
     }
 
     /// The module kind occupying `tile`, or `None` if it has no occupant
@@ -213,10 +225,27 @@ impl ShellView {
             let pending_state = pending_factory
                 .and(pending.as_ref())
                 .and_then(|p| p.state.as_ref());
+            // Restored beats pending beats placeholder (spec 2026-09-08
+            // add-tile §7.2). There is no default kind to fall back to:
+            // a tile nothing claims paints a placeholder, and if the
+            // reason is a restored record this build has no module for,
+            // that record is kept verbatim so the next session flush
+            // cannot forget it. (A pending request cannot coexist with a
+            // restored record for one id — see `matched`'s comment above
+            // — so "unmatched restored record" really does mean "this
+            // tile is about to be a placeholder".)
+            if let (Some(record), None) = (&restored, matched) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
+                    id.0, record.kind
+                );
+                self.unplaced_records.insert(id.0, record.clone());
+            }
             let (factory, state) = match (matched, pending_factory) {
                 (Some(f), _) => (Some(f), restored_state),
                 (None, Some(f)) => (Some(f), pending_state),
-                (None, None) => (self.services.roster.default_factory(), None),
+                (None, None) => (None, None),
             };
             let occupant = match factory {
                 Some(f) => f.create(
@@ -254,6 +283,13 @@ impl ShellView {
             }
             live
         });
+        // An unplaced record outlives only its own tile: once the tile is
+        // gone from every workspace there is nothing left to write it
+        // back for (§7.2). Filling the tile in place drops it too —
+        // `add_tile` does that, since the live occupant's own record
+        // supersedes it.
+        self.unplaced_records
+            .retain(|id, _| all.contains(&TileId(*id)));
         self.scratch_all_tiles = all;
 
         for id in self.visible_tiles.difference(&active) {

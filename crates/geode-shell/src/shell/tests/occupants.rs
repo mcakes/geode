@@ -116,7 +116,7 @@ mod watching {
 #[gpui::test]
 fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let mut roster = crate::module::ModuleRoster::new("watching");
+    let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(watching::WatchingFactory));
     roster.register_actions(&mut services.registry);
     // This roster has no "rec", so the fixture layer's `ctrl+v` would
@@ -159,46 +159,67 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     );
 }
 
+/// Spec 2026-09-08 add-tile §7.2: a restored record whose kind the
+/// roster does not know paints the placeholder (never some other
+/// module, never that module's state), and the record rides through
+/// `current_tiles` verbatim so the next flush cannot forget it.
 #[gpui::test]
-fn a_restored_tile_of_an_unknown_kind_falls_back_without_its_state(cx: &mut gpui::TestAppContext) {
-    // The record names a kind nothing in the roster registers, so
-    // `ensure_occupants` falls back to the roster's default ("rec")
-    // — but the fallback factory did not produce that state and must
-    // not be handed it (fix-round finding).
+fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let ws1: toml::Table = r#"
+        focused = 1
+        [node]
+        kind = "leaf"
+        id = 1
+        [tiles.1]
+        module = "unregistered-kind"
+        [tiles.1.state]
+        last_command = "state for a different module"
+    "#
+    .parse()
+    .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("1".to_string(), toml::Value::Table(ws1));
+    }
+    let restored = session::from_toml(&table).unwrap();
+    let original = restored.tiles.get(&1).unwrap().clone();
+
     let (mut services, log) = services_with_recorder();
-    let mut state = toml::Table::new();
-    state.insert(
-        "last_command".into(),
-        toml::Value::String("state for a different module".into()),
-    );
-    services.restored_tiles.insert(
-        1,
-        crate::session::TileRecord {
-            kind: "unregistered-kind".into(),
-            state,
-        },
-    );
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
     let (window, mut cx) = open_shell(cx, services);
-    cx.simulate_keystrokes("ctrl-v");
-    cx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
-    assert_eq!(tile, TileId(1), "the first split always allocates tile 1");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
-        Some("rec"),
-        "the default factory still hosts the tile"
+        shell.read_with(&cx, |s, _| s.occupant_kind(TileId(1))),
+        Some(crate::module::placeholder::PLACEHOLDER_KIND)
     );
     assert!(
-        log.borrow().iter().any(
-            |r| matches!(r, crate::module::recording::Recorded::Created(t, None) if *t == tile)
-        ),
-        "the fallback factory got no state: {:?}",
+        log.borrow().is_empty(),
+        "no factory was asked to host the unknown record: {:?}",
         log.borrow()
+    );
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert_eq!(
+        tiles.get(&1),
+        Some(&original),
+        "the record rides through: {tiles:?}"
+    );
+
+    // Filling it in place replaces the record with the live occupant's.
+    dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
+    let tiles = shell.read_with(&cx, |s, cx| s.current_tiles(cx));
+    assert_eq!(tiles.get(&1).map(|r| r.kind.as_str()), Some("rec"));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s
+            .services
+            .workspaces
+            .active()
+            .tree()
+            .tiles()
+            .len()),
+        1
     );
 }
 
@@ -270,7 +291,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
 }
 
 #[gpui::test]
-fn a_split_creates_an_occupant_of_the_default_kind_and_paints_it(cx: &mut gpui::TestAppContext) {
+fn an_add_creates_an_occupant_of_the_requested_kind_and_paints_it(cx: &mut gpui::TestAppContext) {
     let (services, log) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
@@ -576,11 +597,11 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
 }
 
 /// The other half of `open_module`'s contract: a kind with no registered
-/// factory (`services_with_recorder`'s roster only knows "rec") falls back
-/// to the roster's default kind rather than leaving the split tile
-/// occupant-less, and logs a warning naming the requested kind.
+/// factory (`services_with_recorder`'s roster only knows "rec") paints a
+/// placeholder rather than leaving the added tile occupant-less, and logs
+/// a warning naming the requested kind.
 #[gpui::test]
-fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns(
+fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
     cx: &mut gpui::TestAppContext,
 ) {
     use geode_core::log::{Ring, RingLayer};
@@ -610,8 +631,8 @@ fn open_module_with_no_matching_factory_falls_back_to_the_default_kind_and_warns
     });
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
-        Some("rec"),
-        "no 'diagnostics' factory is registered, so the default kind hosts the tile"
+        Some(crate::module::placeholder::PLACEHOLDER_KIND),
+        "no 'diagnostics' factory is registered, so the tile is a placeholder"
     );
 
     let mut records = Vec::new();
@@ -951,6 +972,8 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
     let other = tiles.into_iter().find(|t| *t != asked).unwrap();
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(other)),
-        Some("rec")
+        Some(crate::module::placeholder::PLACEHOLDER_KIND),
+        "the plain split asked for nothing, and there is no default kind \
+         to guess with (§7.1) — it gets a placeholder"
     );
 }

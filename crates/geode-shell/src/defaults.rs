@@ -678,6 +678,21 @@ pub fn mod_alias_from_config(config: &Config) -> (Modifiers, Vec<Diagnostic>) {
     }
 }
 
+/// `[app] modules.default` is no longer read (spec 2026-09-08 add-tile
+/// §7.1): tiles are added by kind. A layer that still sets it gets one
+/// warning so the key does not silently rot in a desk file.
+pub fn modules_default_diagnostic(config: &Config) -> Option<Diagnostic> {
+    config.get("app", "modules.default").map(|_| Diagnostic {
+        severity: Severity::Warning,
+        layer: config.explain("app", "modules.default"),
+        file: None,
+        message: "app: modules.default is no longer read — tiles are added by kind \
+                  (ctrl+k → Add …); remove the key"
+            .into(),
+        path: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,6 +799,21 @@ mod tests {
             assert!(diags.is_empty(), "{value}: {diags:?}");
             assert_eq!(alias.ctrl, expect_ctrl);
         }
+    }
+
+    #[test]
+    fn modules_default_in_config_is_a_warning_and_absent_is_silent() {
+        let none = Config::load(&ConfigSources::default());
+        assert!(modules_default_diagnostic(&none).is_none());
+        let set = Config::load(&ConfigSources {
+            builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+            desk: None,
+            user: None,
+        });
+        let diag = modules_default_diagnostic(&set).expect("a diagnostic");
+        assert_eq!(diag.severity, Severity::Warning);
+        assert!(diag.message.contains("modules.default"), "{}", diag.message);
+        assert!(diag.message.contains("Add"), "{}", diag.message);
     }
 
     /// Fix round 1 (review Finding 1): if `mod_alias` were ever

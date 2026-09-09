@@ -38,6 +38,10 @@ impl ShellView {
             if let Some(o) = self.occupants.remove(&tile) {
                 o.content.set_visible(false, cx);
             }
+            // The tile is claimed now, so a record this build could not
+            // place (spec 2026-09-08 add-tile §7.2) is no longer written
+            // back — the occupant about to be created owns the id.
+            self.unplaced_records.remove(&tile.0);
             self.pending_tiles.insert(
                 tile,
                 PendingTile {
