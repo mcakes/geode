@@ -106,8 +106,10 @@ impl ShellView {
     /// Focus an existing occupant of `kind` wherever it lives in the
     /// active workspace (the main tree or a dock), else add one through
     /// [`Self::add_tile`] with the setting's direction (§3.4). A request
-    /// already pending for `kind` counts as "open": a second
-    /// `mod+shift+d` before the render adds nothing.
+    /// already pending for `kind` counts as "open": a second click on the
+    /// status bar's diagnostics summary — the one production caller,
+    /// since `diagnostics::open` was retired (user ruling 2026-09-09) —
+    /// before the render adds nothing.
     pub fn open_module(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
         let ws = self.services.workspaces.active();
         let found: Option<(TileId, Option<DockSide>)> = ws

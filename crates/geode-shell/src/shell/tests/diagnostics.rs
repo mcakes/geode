@@ -72,8 +72,9 @@ fn the_status_bar_shows_the_diagnostics_summary_after_note_health(cx: &mut gpui:
 }
 
 /// Clicking the status bar's diagnostics summary opens the diagnostics
-/// tile — same `open_module("diagnostics", ..)` door `mod+shift+d` uses
-/// (Phase 4b Task 5). `services_with_recorder`'s roster carries no
+/// tile via `open_module("diagnostics", ..)` (Phase 4b Task 5) — the one
+/// production caller since `diagnostics::open` was retired (user ruling
+/// 2026-09-09). `services_with_recorder`'s roster carries no
 /// "diagnostics" factory, so the split tile falls back to the default
 /// ("rec") kind — this test is only about the click reaching
 /// `open_module` at all, not about which factory answers it (that's

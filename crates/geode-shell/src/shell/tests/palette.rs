@@ -185,20 +185,23 @@ fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestA
 
 /// End-to-end command palette flow (Task 6), through the real
 /// key-event pipeline exactly like the tests above: `ctrl+k` opens it,
-/// typing "add rec" filters the list down to the three rows
-/// `register_add_actions` registers for the "rec" kind ("Add Rec",
-/// "Add Rec Horizontal", "Add Rec Vertical" — spec 2026-09-08
-/// add-tile §3.2). All three contain the run as a subsequence; the
-/// plain row leads. Which one lands at index 0 is not a fuzzy-match
-/// property; it is `PaletteState::filtered`'s stable sort preserving
-/// `build_items`' input order, which is `ActionRegistry::iter()`'s
-/// `BTreeMap<ActionId, _>` order — and `"tile::add_rec"` sorts ahead
-/// of `"tile::add_rec_horizontal"`/`"…_vertical"` (a prefix is less
-/// than what extends it). That tie-break is deterministic, so this
-/// test is not flaky. Enter then dispatches the selected item through
-/// the normal chain, closing the palette and adding the (until then
-/// empty) active workspace's first tile — an add through the palette,
-/// end to end.
+/// typing "rec: split" filters the list down to the three rows
+/// `register_add_actions` registers for the "rec" kind ("Rec: Split",
+/// "Rec: Split Horizontal", "Rec: Split Vertical" — the crate's
+/// `Category: Verb` pattern, user ruling 2026-09-09 superseding spec
+/// 2026-09-08 add-tile §3.2's original "Add <Kind>" wording). All three
+/// contain the run as a subsequence, matched entirely within the shared
+/// "Rec: Split" prefix, so all three score identically; the plain row
+/// leads. Which one lands at index 0 is not a fuzzy-match property; it
+/// is `PaletteState::filtered`'s stable sort preserving `build_items`'
+/// input order, which is `ActionRegistry::iter()`'s `BTreeMap<ActionId,
+/// _>` order — and `"tile::add_rec"` sorts ahead of
+/// `"tile::add_rec_horizontal"`/`"…_vertical"` (a prefix is less than
+/// what extends it). That tie-break is deterministic, so this test is
+/// not flaky. Enter then dispatches the selected item through the
+/// normal chain, closing the palette and adding the (until then empty)
+/// active workspace's first tile — an add through the palette, end to
+/// end.
 #[gpui::test]
 fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     cx: &mut gpui::TestAppContext,
@@ -239,7 +242,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
         "ctrl-k (ctrl+k = palette::toggle) should have opened the palette"
     );
 
-    cx.simulate_input("add rec");
+    cx.simulate_input("rec: split");
     let selected_title = shell.read_with(&cx, |shell, _| {
         shell
             .palette
@@ -249,10 +252,10 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     });
     assert_eq!(
         selected_title,
-        Some("Add Rec".to_string()),
-        "typing \"add rec\" should rank the plain \"Add Rec\" row first, \
-         ahead of its Horizontal/Vertical siblings, via the registry's \
-         ActionId order and filtered()'s stable sort"
+        Some("Rec: Split".to_string()),
+        "typing \"rec: split\" should rank the plain \"Rec: Split\" row \
+         first, ahead of its Horizontal/Vertical siblings, via the \
+         registry's ActionId order and filtered()'s stable sort"
     );
 
     cx.update(|window, cx| {
@@ -269,7 +272,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     });
     assert_eq!(
         tile_count, 1,
-        "enter on \"Add Rec\" should have dispatched tile::add_rec \
+        "enter on \"Rec: Split\" should have dispatched tile::add_rec \
          through the normal chain"
     );
 }

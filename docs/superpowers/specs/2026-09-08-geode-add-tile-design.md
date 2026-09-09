@@ -28,9 +28,12 @@ is created. A split is how an add is *placed*, not a verb of its own.
 ## 2. Vocabulary
 
 - **Add**: create a tile hosting a named module kind, placed relative
-  to the focused tile (§4). The palette rows are "Add Blotter", "Add
-  Blotter Horizontal", "Add Blotter Vertical", and the same three for
-  every other kind in the roster.
+  to the focused tile (§4). The palette rows follow the crate's
+  established `Category: Verb` pattern ("Pick: <column>", "Scope:
+  <name>"): "Blotter: Split", "Blotter: Split Horizontal", "Blotter:
+  Split Vertical", and the same three for every other kind in the
+  roster (retitled from the original "Add Blotter"/etc. wording by
+  user ruling 2026-09-09 — see §13(e)).
 - **Horizontal**: tiles arranged left → right; the new tile lands to
   the *right* of the focused one (`Orientation::Horizontal`, what
   `ctrl+v` did). **Vertical**: stacked; the new tile lands *below*
@@ -64,11 +67,11 @@ bindings to unregistered actions), exactly where `register_pick_actions`
 and `register_scope_actions` already run. For each `kind` the roster
 holds it registers, in category `"Tiles"`:
 
-| id                              | title                     |
-|---------------------------------|---------------------------|
-| `tile::add_<kind>`              | `Add <Kind>`              |
-| `tile::add_<kind>_horizontal`   | `Add <Kind> Horizontal`   |
-| `tile::add_<kind>_vertical`     | `Add <Kind> Vertical`     |
+| id                              | title                          |
+|---------------------------------|---------------------------------|
+| `tile::add_<kind>`              | `<Kind>: Split`                 |
+| `tile::add_<kind>_horizontal`   | `<Kind>: Split Horizontal`      |
+| `tile::add_<kind>_vertical`     | `<Kind>: Split Vertical`        |
 
 `<Kind>` is the kind string with its first letter upper-cased
 (`blotter` → `Blotter`, `diagnostics` → `Diagnostics`). The palette
@@ -110,12 +113,11 @@ matcher sees it, so `D` typed into a field never duplicates a tile. A
 shifted letter keeps its `shift` modifier on every platform
 (`defaults.rs`'s platform note), so both keystrokes parse as written.
 
-### 3.4 `diagnostics::open` keeps its meaning
+### 3.4 `diagnostics::open` is retired (user ruling 2026-09-09)
 
-`mod+shift+d` still focuses an existing diagnostics tile wherever it
-lives, and only when there is none adds one — but the add goes through
-§4's door with the *setting's* direction, not an unconditional sideways
-split. "Add Diagnostics" from the palette always adds (or fills).
+The status bar's summary click is the one focus-or-add door, via
+`open_module`; the palette's `Diagnostics: Split` rows always add (or
+fill).
 
 ## 4. One door: `add_tile`
 
@@ -194,8 +196,8 @@ Consequences, all deliberate:
   splitting twice) is retired: a repeated request for the *same* tile
   simply overwrites, and `open_module`'s existing-occupant search
   already treats a pending tile of the requested kind as "open" (it
-  consults `pending_tiles` too, so a second `mod+shift+d` before the
-  render focuses nothing new and adds nothing).
+  consults `pending_tiles` too, so a second `open_module` call for the
+  same kind before the render focuses nothing new and adds nothing).
 - The "lands on the lower tile id when two tiles go occupant-less in
   one pass" rule is moot; that test is replaced by one asserting exact
   addressing.
@@ -356,8 +358,10 @@ Weight follows spec §10.3: pure cores first.
   identical before and after).
 - `ctrl+[` focuses the (empty) left dock; a following "Add Blotter"
   lands inside it; `ctrl+[` again hides it and focus returns to `Main`.
-- `mod+shift+d` twice yields one diagnostics tile, focused (the
-  retired MIN-7 guard's behaviour, now by addressing).
+- Two `open_module("diagnostics", ..)` calls (the status bar's summary
+  click, the door's one production caller since `diagnostics::open`
+  was retired — user ruling 2026-09-09) yield one diagnostics tile,
+  focused (the retired MIN-7 guard's behaviour, now by addressing).
 - A restored record of an unknown kind paints the placeholder and is
   written back verbatim by the next `current_tiles`.
 - `modules.default` in the user layer produces the §7.1 diagnostic.
@@ -432,3 +436,18 @@ directly. That file tests the keymap-to-`Workspaces` seam with no
 `ShellView` and therefore no palette, so §10's "the palette rows … through
 the real matcher" is not something it can do; the palette rows are covered
 by the `#[gpui::test]`s in `shell/tests/` instead.
+
+(e) **User ruling 2026-09-09, follow-up:** the per-kind add rows are
+retitled to the crate's established `Category: Verb` pattern (§2,
+§3.2) — "Blotter: Split", "Blotter: Split Horizontal", "Blotter: Split
+Vertical", and the same for every other kind — superseding this
+document's original "Add <Kind>" wording everywhere it appears. Action
+ids are unchanged. In the same ruling, `diagnostics::open` (§3.4's
+original "keeps its meaning" text) is retired along with its
+`mod+shift+d` binding: the status bar's diagnostics-summary click
+(`render.rs`'s `on_diagnostics_click`, calling `open_module` directly)
+is now the one focus-or-add door, and the palette's `Diagnostics: Split`
+rows always add (or fill) rather than ever focusing an existing tile —
+`register_add_actions`'s rows never did the existing-occupant search
+`open_module` does, so this only removes a second, now-redundant way to
+reach the same tile.
