@@ -3290,11 +3290,9 @@ run_mutation "objectdialog: an edit round-trips through disk instead of merging 
     for ((doc, object), value) in edits {
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
-    let carried = shell.services.config.diagnostics.clone();
-    let mut config = Config::from_docs(docs);' \
+    let config = Config::from_docs(docs);' \
   '    let _ = edits;
-    let carried = shell.services.config.diagnostics.clone();
-    let mut config = Config::load(&geode_core::config::ConfigSources {
+    let config = Config::load(&geode_core::config::ConfigSources {
         builtin: shell.services.builtin.clone(),
         desk: None,
         user: Some(user_dir.to_path_buf()),
