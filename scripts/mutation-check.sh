@@ -4391,10 +4391,10 @@ run_mutation "catalog: live_health rolls a batch up to its worst book" \
 
 run_mutation "scheduler: worst_health compares by rank, not Health's derived Ord" \
   crates/geode-data/src/ingest/scheduler.rs \
-  '        let incumbent_rank = worst.first().map(|(w, _)| crate::health::severity_rank(w));
+  '        let incumbent_rank = worst.first().map(|(w, _)| severity_rank(w));
         match incumbent_rank {
-            Some(r) if r == crate::health::severity_rank(&h) => worst.push((h, name)),
-            Some(r) if r > crate::health::severity_rank(&h) => {}
+            Some(r) if r == severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > severity_rank(&h) => {}
             _ => worst = vec![(h, name)],
         }' \
   '        let incumbent_rank = worst.first().map(|(w, _)| w.clone());
