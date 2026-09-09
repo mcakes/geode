@@ -313,6 +313,7 @@ impl ShellView {
             // Cheap re-derive; `render` applies it only when it changed.
             self.font_size = FontSize::from_config(&self.services.config);
             self.find_style = FindStyle::from_config(&self.services.config);
+            self.add_direction = crate::tileadd::AddDirection::from_config(&self.services.config);
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);

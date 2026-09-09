@@ -418,6 +418,22 @@ impl ShellView {
             .detach();
     }
 
+    /// Persist `[tiles] add`, off the UI thread — the exact contract of
+    /// [`Self::persist_find_style`] just above.
+    pub(super) fn persist_add_direction(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let direction = self.add_direction;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
+                    tracing::warn!(target: "geode::config", "add direction not saved: {e}");
+                }
+            })
+            .detach();
+    }
+
     /// `mod+/` (spec §3.11): move focus into the scope bar's live text
     /// field from anywhere in the shell. The field's own `InputEvent::
     /// Focus` subscription (`ShellView::new`) is what actually opens the
