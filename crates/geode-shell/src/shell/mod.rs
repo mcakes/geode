@@ -6,6 +6,7 @@
 //! them, the tiling tree (Task 3) renders as themed, absolutely-positioned
 //! tiles over whatever rect is left. Task 6 wires the real command palette.
 
+mod add_tile;
 pub mod asof_view;
 mod commandline_ctl;
 pub mod commandline_view;
@@ -31,7 +32,7 @@ pub mod whichkey;
 
 pub use keys::convert_keystroke;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -55,7 +56,7 @@ use crate::perf::FrameHistogram;
 use crate::reload;
 use crate::session;
 use crate::theme::ThemeService;
-use crate::tiling::{DockSide, Orientation, TileId, Workspaces};
+use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
@@ -261,6 +262,14 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
 /// place — nothing about `pub(super)` prevents `shell::mod` itself,
 /// which is `hot_reload`'s parent, from naming and re-exporting it.
 pub use hot_reload::rebuild_saved_scopes as saved_scopes;
+
+/// One addressed occupant request (spec 2026-09-08 add-tile §4.3).
+pub(super) struct PendingTile {
+    pub(super) kind: String,
+    /// The record the factory sees as `restored` — a duplicate's
+    /// serialized state, `None` for a plain add.
+    pub(super) state: Option<toml::Table>,
+}
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution
@@ -567,15 +576,17 @@ pub struct ShellView {
     /// `:level` persistence, the overlay toggle, and the catalog
     /// request.
     diagnostics: Entity<Diagnostics>,
-    /// Set by [`Self::open_module`] right after it splits a fresh tile for
-    /// a kind with no existing occupant in the focused workspace (Phase 4b
-    /// Task 5): `ensure_occupants` (`shell/occupants.rs`) consumes this —
-    /// the ONE new tile it finds with no restored record gets this kind's
-    /// factory instead of the roster's default — and clears it, whether or
-    /// not a matching factory existed (falling back to the default kind
-    /// with a `warn!` when it didn't, same "never a blank, never a panic"
-    /// contract `placeholder` upholds for an unknown session kind).
-    pending_kind_for_new_tile: Option<String>,
+    /// Occupant requests addressed by tile id (spec 2026-09-08 add-tile
+    /// §4.3): `add_tile` records one under the id it just allocated (or
+    /// the placeholder tile it is filling), and `ensure_occupants`
+    /// (`shell/occupants.rs`) takes it when it reaches that tile on the
+    /// next render. Keyed, not a single slot, so two requests in one
+    /// render each land where they were asked. Touched only on dispatch
+    /// and in `ensure_occupants` — never per frame.
+    pending_tiles: BTreeMap<TileId, PendingTile>,
+    /// `[tiles] add` (spec 2026-09-08 add-tile §5): resolved at startup,
+    /// re-derived on hot reload, stepped by the settings row.
+    pub(super) add_direction: crate::tileadd::AddDirection,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -1059,6 +1070,7 @@ impl ShellView {
 
         let font_size = FontSize::from_config(&services.config);
         let find_style = FindStyle::from_config(&services.config);
+        let add_direction = crate::tileadd::AddDirection::from_config(&services.config);
 
         // The shared frame (§4): built from whatever `[groupings]`/
         // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
@@ -1194,7 +1206,8 @@ impl ShellView {
             perf_overlay: false,
             frame,
             diagnostics,
-            pending_kind_for_new_tile: None,
+            pending_tiles: BTreeMap::new(),
+            add_direction,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
@@ -1414,74 +1427,6 @@ impl ShellView {
     /// (Phase 4b §4.4).
     pub fn diagnostics(&self) -> &Entity<Diagnostics> {
         &self.diagnostics
-    }
-
-    /// Open a module tile of `kind` in the focused workspace (Phase 4b
-    /// Task 5, spec ruling: "`diagnostics::open` opens by kind through the
-    /// shell, not through the module"): focus an existing occupant of that
-    /// kind wherever it lives (the main tree or a dock) if one exists,
-    /// else split the focused tile (the same path `ctrl+v`/`workspace::
-    /// split_right` takes — `Tree::split` always focuses the new tile) and
-    /// set [`Self::pending_kind_for_new_tile`], which `ensure_occupants`
-    /// (`shell/occupants.rs`) consumes on its very next call — the same
-    /// render pass, since `ensure_occupants` runs at the top of every
-    /// `render` and this always `cx.notify()`s.
-    pub fn open_module(&mut self, kind: &str, _window: &mut Window, cx: &mut Context<Self>) {
-        let ws = self.services.workspaces.active();
-        let found: Option<(TileId, Option<DockSide>)> = ws
-            .tree()
-            .tiles()
-            .into_iter()
-            .find(|id| self.occupant_kind(*id) == Some(kind))
-            .map(|id| (id, None))
-            .or_else(|| {
-                ws.docks().iter().find_map(|(side, dock)| {
-                    dock.tree()
-                        .tiles()
-                        .into_iter()
-                        .find(|id| self.occupant_kind(*id) == Some(kind))
-                        .map(|id| (id, Some(side)))
-                })
-            });
-        if let Some((tile, side)) = found {
-            let ws = self.services.workspaces.active_mut();
-            match side {
-                Some(side) => {
-                    ws.focus_dock_tile(side, tile);
-                }
-                None => {
-                    ws.focus_main_tile(tile);
-                }
-            }
-            self.session_dirty = true;
-            cx.notify();
-            return;
-        }
-        // MIN-7 (Phase 4b Task 5 fix round 1): two `open_module` calls for
-        // the same kind within one render (a double `mod+shift+d` press,
-        // key-repeat) would otherwise both miss the "existing occupant"
-        // search above — the first call's split tile has no occupant yet
-        // (`ensure_occupants` only creates one at the top of the *next*
-        // render), so the second call splits again and overwrites
-        // `pending_kind_for_new_tile`, leaving one tile hosting `kind` and
-        // a stray second one hosting the default kind. A pending request
-        // for the SAME kind is a no-op — the tile that request will
-        // create is, for all `open_module`'s purposes, already "the one
-        // open occupant of this kind" the moment it's requested, whether
-        // or not `ensure_occupants` has caught up yet. A pending request
-        // for a *different* kind still overwrites, same as before (last
-        // request wins, unambiguous — nothing between two `open_module`
-        // calls for different kinds within one render should silently
-        // drop either).
-        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
-            return;
-        }
-        self.services
-            .workspaces
-            .split_active(Orientation::Horizontal);
-        self.pending_kind_for_new_tile = Some(kind.to_string());
-        self.session_dirty = true;
-        cx.notify();
     }
 
     /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —

@@ -37,6 +37,10 @@ pub(super) fn test_services() -> ShellServices {
     // startup-ordering path itself still runs on every test built from
     // this fixture.
     register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
+    // The add rows for the recorder kind the shell tests use (spec
+    // 2026-09-08 add-tile §3.2) — `main.rs` registers these from the
+    // roster's kinds in this same slot, before `build_keymap`.
+    crate::defaults::register_add_actions(&mut registry, &["rec"]);
     let mod_alias = default_mod();
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);

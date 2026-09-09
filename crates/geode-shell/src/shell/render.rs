@@ -42,6 +42,21 @@ const DIVIDER_GROUP: &str = "divider-strip";
 /// directly under the toolbar while the frame is historical.
 const AS_OF_STRIPE_HEIGHT: f32 = 3.0;
 
+/// The tile surface's pixel area: the viewport minus the sidebar, the
+/// toolbar and the status bar — what `drag.rs` hit-tests against and
+/// what `add_tile` lays out for `AddDirection::Auto`. `render` subtracts
+/// the as-of stripe on top of this itself.
+pub(super) fn content_area(window: &Window) -> Rect {
+    let viewport = window.viewport_size();
+    let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
+    Rect {
+        x: 0.0,
+        y: 0.0,
+        w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
+        h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
+    }
+}
+
 impl Render for ShellView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Frame-time instrumentation (spec §7.4), first thing so the
@@ -223,9 +238,12 @@ impl Render for ShellView {
         };
         let viewport = window.viewport_size();
         let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-        let tile_width = (f32::from(viewport.width) - sidebar::WIDTH).max(0.0);
-        let content_height =
-            (f32::from(viewport.height) - toolbar_height - stripe_height - status::HEIGHT).max(0.0);
+        // The stripe-free surface is the shared `content_area` (the same
+        // one `drag.rs` hit-tests and `add_tile` lays out for `Auto`);
+        // only the stripe subtraction is `render`'s own.
+        let surface = content_area(window);
+        let tile_width = surface.w;
+        let content_height = (surface.h - stripe_height).max(0.0);
 
         // One layout pass for the whole surface (dock-regions task,
         // generalized by dock-trees): the pure `tiling::dock_layout`

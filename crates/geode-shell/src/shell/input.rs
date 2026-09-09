@@ -13,7 +13,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{KeyContext, MatchResult};
-use crate::tiling::apply_workspace_action;
+use crate::tiling::{Orientation, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -270,6 +270,17 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
+            // A palette row from `register_add_actions` (spec 2026-09-08
+            // add-tile §3.2) — "Add <Kind>" follows the setting; the
+            // suffixed pair say where. Always adds (or fills); never
+            // focuses an existing tile — that is `open_module`'s job.
+            let kind = kind.to_string();
+            self.add_tile(&kind, direction, None, window, cx);
+        } else if action.0 == "workspace::duplicate_horizontal" {
+            self.duplicate_tile(Orientation::Horizontal, window, cx);
+        } else if action.0 == "workspace::duplicate_vertical" {
+            self.duplicate_tile(Orientation::Vertical, window, cx);
         } else if action.0 == "diagnostics::open" {
             // mod+shift+d (Phase 4b Task 5, spec §4.6) — opens by kind
             // through the shell, not through the module (see

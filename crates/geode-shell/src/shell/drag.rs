@@ -13,7 +13,7 @@ use crate::tiling::{
     DividerAddress, DockSide, DropTarget, DropZone, Orientation, Rect, TileId, locate_drop_target,
 };
 
-use super::{ShellView, sidebar, status};
+use super::{ShellView, sidebar};
 
 /// What an in-flight divider drag is resizing (drag-splitters task): a
 /// divider inside the main tree, a divider inside one dock's tree, or a
@@ -447,14 +447,8 @@ impl ShellView {
                 .region_of(drag.tile)
                 .is_some()
         {
-            let viewport = window.viewport_size();
             let toolbar_height = f32::from(TITLE_BAR_HEIGHT);
-            let area = Rect {
-                x: 0.0,
-                y: 0.0,
-                w: (f32::from(viewport.width) - sidebar::WIDTH).max(0.0),
-                h: (f32::from(viewport.height) - toolbar_height - status::HEIGHT).max(0.0),
-            };
+            let area = super::render::content_area(window);
             // Mouse events arrive in window coordinates; the tile surface
             // starts below the toolbar, right of the sidebar (same
             // conversion `render` bakes into its drag rects).
