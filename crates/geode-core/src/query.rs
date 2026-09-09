@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Which point in time a query reads (foundation §4.5).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AsOf {
+    #[default]
     Live,
     At(DateTime<Utc>),
 }
@@ -73,6 +74,102 @@ pub struct DistinctOutcome {
     pub column: String,
     /// Sorted by value. `Err` is the failure text.
     pub values: Result<Vec<(String, u64)>, String>,
+}
+
+/// The diagnostics tile's request: what the database holds (Phase 4b
+/// §4.5). Built on the data service thread, from the `generations`
+/// summary table, `file_generations`, and DuckDB's own introspection
+/// functions — never a data-table scan (`geode_data::query::catalog::
+/// build_catalog`'s doc comment says why).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub as_of: AsOf,
+}
+
+/// The catalog request's result, addressed to the key that asked.
+#[derive(Debug)]
+pub struct CatalogOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    /// `Err` is the failure text.
+    pub snapshot: Result<CatalogSnapshot, String>,
+}
+
+/// What the database holds, as of the moment it was read.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct CatalogSnapshot {
+    /// The `AsOf` this snapshot's `resolved_gen` markers were resolved
+    /// under (MIN-5, final review) — carried so a reader can tell a
+    /// snapshot built under a stale as-of apart from the frame's current
+    /// one, rather than trusting `resolved_gen` at face value the moment
+    /// the frame's as-of has moved on but a fresh `CatalogSnapshot`
+    /// hasn't arrived yet.
+    pub as_of: AsOf,
+    pub datasets: Vec<DatasetCatalog>,
+    /// `sum(block_size * total_blocks)` from `pragma_database_size()`.
+    ///
+    /// **Reflects the last checkpoint, not the current WAL.** DuckDB
+    /// only counts a block toward `total_blocks` once it has reached
+    /// disk; `store::retention::sweep`'s own `checkpoint` call is what
+    /// moves this number, not every write. Right after a burst of
+    /// uncommitted ingest this can read `0` — indistinguishable from a
+    /// genuinely empty database — which is the honest answer to "what
+    /// is on disk right now", not a bug in the read.
+    pub database_bytes: u64,
+    /// `sum(used_blocks)` from the same.
+    pub used_blocks: u64,
+    /// `max(block_size)` from the same — the unit `used_blocks` (and
+    /// `total_blocks`, folded into `database_bytes` already) are
+    /// counted in. Exposed separately so a caller can render
+    /// `used_blocks * block_size` without repeating the query, and so
+    /// `total_blocks == 0` (derivable as `database_bytes == 0` while
+    /// `block_size > 0`) is available as an explicit "not yet
+    /// checkpointed" signal distinct from "the type is unknown".
+    pub block_size: u64,
+    /// `sum(memory_usage_bytes)` from `duckdb_memory()`.
+    pub memory_bytes: u64,
+    /// `current_setting('threads')`.
+    pub threads: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct DatasetCatalog {
+    pub name: String,
+    pub partitions: Vec<PartitionCatalog>,
+    /// Summed `estimated_size` (spec: a row *estimate*, labelled
+    /// "rows (est.)") over the dataset's live tables at every grain.
+    pub live_rows: u64,
+    /// The same, over the archive tables.
+    pub archive_rows: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct PartitionCatalog {
+    pub batch: String,
+    /// `None` is the bookless partition (spec §4.4) — a real partition,
+    /// not a missing one.
+    pub book: Option<String>,
+    pub generations: Vec<GenerationInfo>,
+    /// The generation `resolve_generations` names for this partition
+    /// under the request's `as_of`. `None` under `AsOf::Live` — nothing
+    /// is resolved, live is live.
+    pub resolved_gen: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationInfo {
+    pub gen_id: i64,
+    pub source_time: DateTime<Utc>,
+    /// From `file_generations`. `None` when the generation predates that
+    /// table's row (an older database) or was reconstructed rather than
+    /// loaded through the ordinary path.
+    pub loaded_at: Option<DateTime<Utc>>,
+    pub file_rows: Option<u64>,
+    /// The newest generation of this partition, per the same
+    /// `(source_time, gen_id)` tie-break `resolve_generations` uses.
+    pub live: bool,
 }
 
 /// `HH:MM` or `HH:MM:SS` means today at that time on the trader's LOCAL

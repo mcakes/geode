@@ -61,6 +61,16 @@ pub struct FrameVersions {
     pub as_of: u64,
     pub data: u64,
     pub config: u64,
+    /// Bumped by [`Frame::save_scope`] (Phase 4b M11) — deliberately NOT
+    /// `config`: saving a named scope changes nothing about the CURRENT
+    /// scope, grouping or data, so bumping `config` made
+    /// `geode_blotter::tile::BlotterTile::follows_changed` requery every
+    /// visible tile for an edit that touched none of them. Nothing in
+    /// `follows_changed` compares this counter (same reasoning as
+    /// `flip`, just below); the palette's `scope::<name>` list rebuilds
+    /// on every open regardless of any version, so it needs no counter
+    /// of its own to stay current.
+    pub saved_scopes: u64,
     /// Bumped only by the flip barrier's [`Frame::release`](Frame) once
     /// every following tile's outcome for one `(scope, grouping, as_of)`
     /// has arrived or the deadline passed (Phase 4 §3.10). Deliberately
@@ -103,11 +113,48 @@ impl FrameVersions {
 struct FlipBarrier {
     /// The versions this barrier was opened for — only `scope`,
     /// `grouping` and `as_of` are ever compared (via
-    /// [`FrameVersions::same_flip_identity`]), so `data`/`config`/`flip`
-    /// riding along here are inert.
+    /// [`FrameVersions::same_flip_identity`]), so `data`/`config`/`flip`/
+    /// `saved_scopes` (M11) riding along here are all inert.
     versions: FrameVersions,
     awaiting: HashSet<QueryKey>,
     opened: Instant,
+}
+
+/// State for one open text-editing session (spec §3.8): the text field
+/// just took focus. The first mutation of the session pushes `base` onto
+/// `scope_undo`; later ones in the same session push nothing, so a whole
+/// typing burst coalesces into one undo entry. `end_scope_session` (Phase
+/// 4b M2) pops that pushed entry back off when the session ends exactly
+/// where it began — a session that types something and then deletes it
+/// back to nothing must not leave a no-op undo entry behind.
+///
+/// Phase 4b Task 1 fix round 1 (MIN-1, MIN-2) replaced two things a
+/// single `Option<Scope>` used to infer from the undo stack's own shape
+/// with fields tracked explicitly, because a real caller can mutate the
+/// stack mid-session without closing it: the scope bar's chip-close
+/// mouse handler (`shell/render.rs`'s `on_chip_close` -> `Frame::
+/// drop_dimension` -> `set_scope`) never touches `scope_session`, and
+/// nothing blurs the text input just because a chip closed.
+#[derive(Debug, Clone)]
+struct ScopeSession {
+    /// The scope this session began on.
+    base: Scope,
+    /// Whether the session's own push has already happened (MIN-1) — an
+    /// explicit bit, not `scope_undo.last() == Some(&base)`: once a
+    /// mid-session external mutation (the mouse route above) pushes its
+    /// own entry, `base` is no longer the stack top, and the old
+    /// stack-reading check would then push `base` a *second* time on the
+    /// session's next keystroke. This bit is set once and never read off
+    /// the stack, so an external push in between cannot fool it.
+    pushed: bool,
+    /// `scope_redo` as it stood when the session began (MIN-2) —
+    /// restored by `end_scope_session` alongside the undo pop when the
+    /// session nets out to a no-op. The session's own push (like any
+    /// push) clears `scope_redo` via `push_undo`; a session that changes
+    /// nothing in the end must not have destroyed redo history that had
+    /// nothing to do with it (e.g. a `mod+z` pressed just before the text
+    /// field was focused).
+    redo_snapshot: Vec<Scope>,
 }
 
 #[derive(Debug)]
@@ -118,13 +165,9 @@ pub struct Frame {
     /// by `push_undo`, which drops the oldest entry once full.
     scope_undo: Vec<Scope>,
     scope_redo: Vec<Scope>,
-    /// `Some` while the text field has focus (spec §3.8): the first
-    /// mutation of the session pushes the base scope onto `scope_undo`,
-    /// later ones in the same session push nothing, so a whole typing
-    /// burst coalesces into one undo entry. `None`: no session open;
-    /// `Some(Some(base))`: open, not yet pushed; `Some(None)`: open,
-    /// already pushed once.
-    scope_session: Option<Option<Scope>>,
+    /// `Some` while the text field has focus (spec §3.8) — see
+    /// [`ScopeSession`]'s own doc comment for what it tracks and why.
+    scope_session: Option<ScopeSession>,
     slots: GroupingSlots,
     active_slot: Option<u8>,
     as_of: AsOf,
@@ -153,16 +196,18 @@ pub struct Frame {
     /// background write with [`persist_slot_to_user_config`] (§4.2).
     pending_persist: Option<(u8, Vec<String>)>,
     /// Lazy cache for [`bar_model`](Self::bar_model), keyed on
-    /// `versions()` (carried over from the Phase 3c `readout` cache this
-    /// replaces — same reasoning): `render` calls `bar_model` every frame
-    /// (`shell/render.rs`), and building one fresh each time allocates a
-    /// `Vec<Chip>`, several `String`s, for a value that's almost always
-    /// identical to the previous frame's. `RefCell` because `bar_model`
-    /// takes `&self` (every other read-only accessor on `Frame` does) but
-    /// still needs to update this cache; `Rc<ScopeBarModel>` rather than
-    /// an owned clone so a cache hit costs a refcount bump, not a fresh
-    /// allocation.
-    bar_cache: RefCell<Option<(FrameVersions, Rc<ScopeBarModel>)>>,
+    /// `(versions(), today)` (carried over from the Phase 3c `readout`
+    /// cache this replaces — same reasoning; the `today` half of the key
+    /// is Phase 4b M12 — see `bar_model`'s own doc comment for why
+    /// `versions()` alone wasn't enough): `render` calls `bar_model`
+    /// every frame (`shell/render.rs`), and building one fresh each time
+    /// allocates a `Vec<Chip>`, several `String`s, for a value that's
+    /// almost always identical to the previous frame's. `RefCell`
+    /// because `bar_model` takes `&self` (every other read-only accessor
+    /// on `Frame` does) but still needs to update this cache;
+    /// `Rc<ScopeBarModel>` rather than an owned clone so a cache hit
+    /// costs a refcount bump, not a fresh allocation.
+    bar_cache: RefCell<Option<(FrameVersions, chrono::NaiveDate, Rc<ScopeBarModel>)>>,
     /// The open flip barrier (Phase 4 §3.10), if any — see
     /// [`FlipBarrier`]'s own doc comment. `None` when no scope/grouping/
     /// as-of mutation has a barrier waiting on it right now.
@@ -237,9 +282,15 @@ impl Frame {
     /// focus. The base scope is remembered but not yet pushed — only the
     /// session's first actual mutation (`set_scope_in_session`) pushes it,
     /// so opening a session that never edits anything leaves undo
-    /// untouched.
+    /// untouched. Also snapshots `scope_redo` (Phase 4b Task 1 fix round
+    /// 1, MIN-2) so `end_scope_session` can restore it if the session
+    /// turns out to be a no-op — see [`ScopeSession::redo_snapshot`].
     pub fn begin_scope_session(&mut self) {
-        self.scope_session = Some(Some(self.scope.clone()));
+        self.scope_session = Some(ScopeSession {
+            base: self.scope.clone(),
+            pushed: false,
+            redo_snapshot: self.scope_redo.clone(),
+        });
     }
 
     /// Set the scope during an open text-editing session, coalescing every
@@ -251,16 +302,27 @@ impl Frame {
     /// push-every-time behaviour when no session is open — a caller that
     /// forgets `begin_scope_session` still gets correct (if less
     /// convenient) undo semantics rather than silently losing history.
+    ///
+    /// "Already pushed this session" is `ScopeSession::pushed`, an
+    /// explicit bit (Phase 4b Task 1 fix round 1, MIN-1) — an earlier
+    /// version read it off `scope_undo`'s own top instead, which a real
+    /// mid-session external `set_scope` call (the scope bar's chip-close
+    /// mouse handler; see `ScopeSession`'s own doc comment) can move out
+    /// from under the check, causing the session's next mutation to push
+    /// its own base a second time.
     pub fn set_scope_in_session(&mut self, scope: Scope) -> bool {
         if self.scope == scope {
             return false;
         }
-        match self.scope_session.take() {
-            Some(Some(base)) => {
+        match self.scope_session.as_ref() {
+            Some(session) if !session.pushed => {
+                let base = session.base.clone();
                 self.push_undo(base);
-                self.scope_session = Some(None);
+                if let Some(session) = self.scope_session.as_mut() {
+                    session.pushed = true;
+                }
             }
-            Some(None) => self.scope_session = Some(None),
+            Some(_) => {}
             None => {
                 let outgoing = self.scope.clone();
                 self.push_undo(outgoing);
@@ -274,8 +336,29 @@ impl Frame {
     /// Close a text-editing session (spec §3.8): the text field lost
     /// focus. The next `set_scope_in_session` call (if any) starts a fresh
     /// session rather than continuing to coalesce into this one.
+    ///
+    /// Phase 4b M2: if the session actually pushed its base entry (a real
+    /// mutation happened) but the scope it ends on is back to being
+    /// exactly that base (typed something, then deleted it), the pushed
+    /// entry is popped back off — a session that nets out to a no-op must
+    /// not leave a no-op undo entry an unlucky `ctrl+z` would land on.
+    /// `scope_undo.last() == Some(&session.base)` (kept from the original
+    /// M2 fix, Phase 4b Task 1 fix round 1 MIN-1) is what keeps the *pop*
+    /// safe even though `pushed` no longer is: if a mid-session external
+    /// mutation pushed its own entry on top, `base` is no longer the
+    /// stack top and this guard correctly declines to pop something the
+    /// session didn't push. Also restores `scope_redo` from the
+    /// session's own snapshot when the pop happens (MIN-2) — the push
+    /// this undoes was also the thing that cleared it.
     pub fn end_scope_session(&mut self) {
-        self.scope_session = None;
+        if let Some(session) = self.scope_session.take()
+            && session.pushed
+            && self.scope_undo.last() == Some(&session.base)
+            && self.scope == session.base
+        {
+            self.scope_undo.pop();
+            self.scope_redo = session.redo_snapshot;
+        }
     }
 
     /// Walk back one entry in the undo stack (spec §3.6). `false` when the
@@ -475,7 +558,7 @@ impl Frame {
         self.saved_scopes
             .insert(name.to_string(), self.scope.clone());
         self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));
-        self.versions.config += 1;
+        self.versions.saved_scopes += 1;
         Ok(())
     }
 
@@ -519,23 +602,36 @@ impl Frame {
     }
 
     /// What the toolbar's scope bar shows (spec §3.1/§3.6/§4.4). Cached
-    /// (see `bar_cache`'s doc comment) keyed on `versions()`: a call with
-    /// nothing changed since the last one returns the exact same `Rc` — a
-    /// refcount bump, no fresh allocation — rather than rebuilding.
-    pub fn bar_model(&self) -> Rc<ScopeBarModel> {
+    /// (see `bar_cache`'s doc comment) keyed on `versions()` AND
+    /// `today`'s local date (Phase 4b M12): an as-of formats as bare
+    /// `HH:MM` when its date is today (`scopebar::build_model`'s own doc
+    /// comment) — keying on `FrameVersions` alone meant that label
+    /// stayed stale past midnight, showing `HH:MM` for a now-yesterday
+    /// instant until the next unrelated mutation happened to invalidate
+    /// the cache. `today` is a parameter (rather than read from the
+    /// clock in here), same testability reason `scopebar::build_model`
+    /// already takes it explicitly — and passed straight through, so
+    /// this itself never touches the clock. Phase 4b Task 1 fix round 1
+    /// (MIN-9) moved the clock read itself off the render path
+    /// entirely: `shell::render` used to call `chrono::Local::now()`
+    /// fresh on every single paint just to hand this the date; it now
+    /// passes `ShellView::today`, refreshed once per ~500ms reload-poll
+    /// tick instead.
+    pub fn bar_model(&self, today: chrono::NaiveDate) -> Rc<ScopeBarModel> {
         // `flip` alone never changes what the bar shows — keyed out here
         // (rather than relying on it happening to already match) so a
         // flip costs a refcount bump like any other unrelated notify,
         // not a rebuild.
         let mut versions = self.versions();
         versions.flip = 0;
-        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }
-        let built = Rc::new(scopebar::build_model(self, chrono::Local::now()));
-        *self.bar_cache.borrow_mut() = Some((versions, Rc::clone(&built)));
+        let built = Rc::new(scopebar::build_model(self, today));
+        *self.bar_cache.borrow_mut() = Some((versions, today, Rc::clone(&built)));
         built
     }
 
@@ -853,6 +949,96 @@ mod tests {
     }
 
     #[test]
+    fn a_text_session_that_ends_where_it_began_leaves_no_undo_entry() {
+        // Phase 4b M2: typing then deleting back to the session's own
+        // base scope must leave undo exactly where it was before the
+        // session opened — a no-op edit is not an undo-worthy edit.
+        //
+        // Phase 4b Task 1 fix round 1, MIN-2: set up a redo entry BEFORE
+        // the session opens (press mod+z once, leaving one entry on
+        // `scope_redo`) and assert it survives the whole episode. The
+        // session's own push (inside `set_scope_in_session`) clears
+        // `scope_redo` via `push_undo`, same as any other push — a
+        // session that nets out to a no-op must not have destroyed redo
+        // history that had nothing to do with it.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        assert!(f.undo_scope());
+        let redo_before = f.scope_redo.clone();
+        assert!(!redo_before.is_empty(), "fixture must seed a redo entry");
+
+        let depth_before = f.scope_undo.len();
+        f.begin_scope_session();
+        let mut s = f.scope().clone();
+        s.text = Some("a".into());
+        assert!(f.set_scope_in_session(s));
+        let mut s = f.scope().clone();
+        s.text = None;
+        assert!(f.set_scope_in_session(s));
+        f.end_scope_session();
+        assert_eq!(
+            f.scope_undo.len(),
+            depth_before,
+            "the session's own push must be popped once it ends where it began"
+        );
+        assert!(
+            !f.undo_scope(),
+            "nothing to undo: the session never actually changed anything"
+        );
+        assert_eq!(
+            f.scope_redo, redo_before,
+            "a no-op session must not destroy redo history from before it opened"
+        );
+    }
+
+    #[test]
+    fn a_mid_session_external_push_does_not_cause_a_second_session_push() {
+        // Phase 4b Task 1 fix round 1, MIN-1: the pre-fix
+        // `set_scope_in_session` decided "already pushed this session" by
+        // reading `scope_undo`'s own top — but a real caller mutates the
+        // scope mid-session without closing it: the scope bar's
+        // chip-close mouse handler (`shell/render.rs`'s `on_chip_close`
+        // -> `Frame::drop_dimension` -> `set_scope`) never touches
+        // `scope_session`, and nothing blurs the text input just because
+        // a chip closed. Once that external push moves the stack top out
+        // from under the session's base, the *next* session keystroke
+        // saw "top != base" and pushed the base a second time.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let base = f.scope().clone();
+        f.begin_scope_session();
+
+        // The session's own first mutation: pushes `base` once.
+        let mut s = f.scope().clone();
+        s.text = Some("a".into());
+        assert!(f.set_scope_in_session(s));
+        assert_eq!(f.scope_undo.last(), Some(&base));
+        let len_after_first_push = f.scope_undo.len();
+
+        // Mid-session external mutation (the mouse route) — pushes its
+        // own outgoing scope; `base` is no longer the stack top.
+        assert!(f.drop_dimension("book"));
+        assert_ne!(f.scope_undo.last(), Some(&base));
+
+        // A second session mutation must not push `base` again just
+        // because the stack top moved.
+        let mut s = f.scope().clone();
+        s.text = Some("ab".into());
+        assert!(f.set_scope_in_session(s));
+        assert_eq!(
+            f.scope_undo.len(),
+            len_after_first_push + 1,
+            "the session must not re-push its own base after an external \
+             mutation moved the stack top"
+        );
+        assert_eq!(
+            f.scope_undo.iter().filter(|s| *s == &base).count(),
+            1,
+            "the base scope must appear on the undo stack exactly once"
+        );
+    }
+
+    #[test]
     fn a_text_session_coalesces_into_one_undo_entry() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_scope(book_scope("A"));
@@ -923,6 +1109,23 @@ mod tests {
     }
 
     #[test]
+    fn save_scope_bumps_saved_scopes_not_config() {
+        // Phase 4b M11: saving a named scope changes nothing about the
+        // current scope, grouping or data — bumping `config` made every
+        // visible tile requery for an edit that touched none of them.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let before = f.versions();
+        f.save_scope("mine").unwrap();
+        let after = f.versions();
+        assert_eq!(
+            after.config, before.config,
+            "save_scope must not bump config"
+        );
+        assert_eq!(after.saved_scopes, before.saved_scopes + 1);
+    }
+
+    #[test]
     fn drop_dimension_and_set_text_are_undoable_edits() {
         let mut f = Frame::new(slots(), SavedScopes::new(), None);
         f.set_scope(book_scope("A"));
@@ -950,8 +1153,9 @@ mod tests {
         s.text = Some("spx".into());
         s.expression = Some(geode_core::scope::parse_expr("npv > 0").unwrap());
         f.set_scope(s);
-        let m1 = f.bar_model();
-        let m2 = f.bar_model();
+        let today = chrono::Local::now().date_naive();
+        let m1 = f.bar_model(today);
+        let m2 = f.bar_model(today);
         assert!(Rc::ptr_eq(&m1, &m2));
         assert_eq!(m1.slot, Some((1, "book / lhu".into())));
         assert_eq!(m1.chips[0].summary, "book ∈ BK001, BK002");
@@ -960,7 +1164,26 @@ mod tests {
         assert_eq!(m1.expr.as_deref(), Some("npv > 0"));
         assert_eq!(m1.as_of, None);
         f.set_text(None);
-        assert!(!Rc::ptr_eq(&m1, &f.bar_model()));
+        assert!(!Rc::ptr_eq(&m1, &f.bar_model(today)));
+    }
+
+    #[test]
+    fn the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged() {
+        // Phase 4b M12: the cache key used to be `FrameVersions` alone,
+        // so a call after midnight with nothing else having mutated the
+        // frame still returned yesterday's `Rc` — including its as-of
+        // label, formatted `HH:MM` only because it was "today" back when
+        // the cache was built.
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.set_scope(book_scope("A"));
+        let day1 = chrono::Local::now().date_naive();
+        let m1 = f.bar_model(day1);
+        let day2 = day1 + chrono::Duration::days(1);
+        let m2 = f.bar_model(day2);
+        assert!(
+            !Rc::ptr_eq(&m1, &m2),
+            "versions unchanged but the date moved on: must rebuild"
+        );
     }
 
     #[test]
@@ -969,7 +1192,12 @@ mod tests {
         let s = book_scope("A").and_then(&book_scope("B"));
         assert!(s.impossible);
         f.set_scope(s);
-        assert_eq!(f.bar_model().impossible.as_deref(), Some("∅ book"));
+        assert_eq!(
+            f.bar_model(chrono::Local::now().date_naive())
+                .impossible
+                .as_deref(),
+            Some("∅ book")
+        );
     }
 
     #[test]

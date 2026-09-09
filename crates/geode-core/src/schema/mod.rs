@@ -204,6 +204,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ds.name,
                 Grain::UnderlyingPair.key_columns().join(", ")
             ),
+            path: None,
         });
     }
     ds.columns.retain(|c| !bare_outside_key.contains(&c.name));
@@ -245,6 +246,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension; dropped",
                 ds.name
             ),
+            path: None,
         });
     }
     ds.columns
@@ -272,6 +274,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension, so the text filter cannot route it; textual ignored",
                 ds.name
             ),
+            path: None,
         });
     }
     for c in &mut ds.columns {
@@ -289,6 +292,7 @@ fn note(message: String) -> Diagnostic {
         layer: None,
         file: None,
         message,
+        path: None,
     }
 }
 

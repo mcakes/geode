@@ -192,7 +192,13 @@ impl FrameRecord {
                 ),
             );
         }
-        t.insert("dimensions".into(), toml::Value::Table(dims));
+        // Phase 4b M13: omitted, not written empty, when there are no
+        // selections — `from_toml` already treats an absent `dimensions`
+        // key the same as an empty one, so writing it out for the common
+        // "no dimension scope" case only ever added dead bytes.
+        if !dims.is_empty() {
+            t.insert("dimensions".into(), toml::Value::Table(dims));
+        }
         if let Some(text) = &self.scope.text {
             t.insert("text".into(), toml::Value::String(text.clone()));
         }
@@ -2231,6 +2237,26 @@ mod tests {
         } = from_toml(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored, Some(record));
+    }
+
+    #[test]
+    fn a_frame_record_with_no_dimension_selections_writes_no_dimensions_key() {
+        // Phase 4b M13: `to_toml` used to insert an empty `dimensions`
+        // table even when the scope selects nothing — dead bytes on
+        // every save for the (extremely common) "no dimension scope"
+        // case, since `from_toml` already treats an absent key the same
+        // as an empty one.
+        let record = FrameRecord {
+            scope: Scope::default(),
+            active_slot: None,
+            as_of: AsOf::Live,
+        };
+        let table = record.to_toml();
+        assert!(!table.contains_key("dimensions"), "{table:?}");
+        let mut warnings = Vec::new();
+        let restored = FrameRecord::from_toml(&table, &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, record);
     }
 
     #[test]

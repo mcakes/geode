@@ -776,15 +776,36 @@ impl Render for ShellView {
         // is the one place `render` already has `cx` in hand to read it.
         // Moved ahead of `status_bar`'s own construction (Phase 4a §3.6):
         // its `as_of` segment reads `bar_model.as_of`, the same formatted
-        // text the toolbar's own AS OF badge shows.
-        let bar_model = self.frame.read(cx).bar_model();
+        // text the toolbar's own AS OF badge shows. `self.today` (Phase 4b
+        // Task 1 fix round 1, MIN-9), not `chrono::Local::now()` — the
+        // clock read moved to the ~500ms reload-poll tick, so a held key
+        // no longer pays it on every repaint.
+        let bar_model = self.frame.read(cx).bar_model(self.today);
+        // Phase 4b §4.4: the status bar's diagnostics indicator now reads
+        // `Diagnostics::summary()` (cached there, keyed on its own
+        // version, and returning an `Rc<str>` — Task 4 fix round 1,
+        // MAJ-1 — so a cache hit on this render-path call clones a
+        // refcount, never a buffer) rather than the deleted `data_status`
+        // field — an empty summary means nothing to report, same
+        // "`None` clears it" contract `data_status` had.
+        let diagnostics_summary = self.diagnostics.read(cx).summary();
+        // Clicking the summary opens the diagnostics tile (Phase 4b Task
+        // 5), same `cx.entity()`-captured-into-a-closure shape as
+        // `on_chip_close`/`on_chip_open` just below.
+        let diagnostics_click_entity = cx.entity();
+        let on_diagnostics_click = move |window: &mut Window, cx: &mut App| {
+            diagnostics_click_entity.update(cx, |view, cx| {
+                view.open_module("diagnostics", window, cx);
+            });
+        };
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count(),
             reload_message.as_deref(),
             self.config_write_error.as_deref(),
             self.restart_required.as_deref(),
-            self.data_status.as_deref(),
+            (!diagnostics_summary.is_empty()).then_some(diagnostics_summary.as_ref()),
+            on_diagnostics_click,
             bar_model.as_of.as_deref(),
             self.services.theme.active_name(),
             cx,

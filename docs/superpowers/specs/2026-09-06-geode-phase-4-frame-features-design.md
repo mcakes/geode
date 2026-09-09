@@ -70,8 +70,10 @@ Phase 4 is one spec and three implementation plans, sequenced 4a → 4b →
 - A shell-owned `Diagnostics` entity fed by the app bridge: source
   health with history, generations, config diagnostics with provenance,
   dropped-event count, frame and requery histograms.
-- `Request::Catalog` on `DataHandle`: per-dataset generations, rows,
-  live/archive table, bytes, and freshness against an as-of.
+- `Request::Catalog` on `DataHandle`: per-dataset generations, rows
+  (live/archive table estimates), and freshness against an as-of.
+  Database-wide bytes (as built: `database_bytes`/`memory_bytes` on the
+  perf section, not per-dataset — MIN-4, final review round 2).
 - The diagnostics module: five sections (sources, data, config, log,
   perf), each a keyboard-navigable list, including the effective-config
   explainer of §8.
@@ -358,6 +360,18 @@ would otherwise do nothing in `--demo`.
 
 The values list is a `VirtualList`: a real underlying dictionary runs to
 thousands of rows.
+
+**As built (2026-09-08, Phase 4b M14; corrected in Task 1 fix round 1,
+MAJ-1):** the values list is a gpui `uniform_list` rather than
+gpui-component's `VirtualList` — not because no such primitive exists
+(it does: `gpui_component::{VirtualList, v_virtual_list}`), but because
+every row here is the same height. `VirtualList`'s per-item sizing
+buys nothing over rows that never vary, and `uniform_list` is the
+primitive whose scroll handle the rest of the shell already uses:
+`ShellView::picker_scroll` (a `gpui::UniformListScrollHandle`, distinct
+from the plain `ScrollHandle` the other three dialogs use) is what
+keeps keyboard navigation's `selected` index scrolled into view, since
+`uniform_list` only tracks scroll-follow through its own handle type.
 
 `frame::pick_<column>` opens stage two directly for that column. One is
 registered per pickable column at startup, so the palette lists
@@ -682,6 +696,26 @@ The deadline is 250 ms: five times the §7.1 requery budget, so a
 healthy frame never hits it, and short enough that a single slow tile
 delays the rest by less than a beat.
 
+**As built (2026-09-08, Phase 4b M14; corrected in Task 1 fix round 1,
+MIN-5):** the sweep is driven by the shell's existing ~500 ms
+reload-poll tick alone, not also by a fresh `cx.spawn` timer per
+scope/grouping/as-of mutation — an earlier version spawned one such
+detached timer on every mutation (on top of the tick), so a burst of
+keystrokes spawned a burst of timers all racing to sweep the same
+barrier. `on_frame_changed` no longer spawns anything; the
+reload-poll loop calls `Frame::sweep` at the top of its body,
+unconditionally on every tick, before it goes on to flush a dirty
+session and (`.await`) run a background `reload::scan` of the desk and
+user config dirs. The practical effect is a barrier released "on the
+poll loop's next iteration after 250 ms have passed" — normally
+≤ 500 ms, but bounded by that loop's *whole iteration* (the 500 ms
+timer, then the session flush, then the config scan), not by the
+500 ms interval alone: a slow scan (a desk dir on a network mount, say)
+lengthens every barrier's worst case by exactly as much, since the
+sweep already ran earlier in that same iteration and nothing schedules
+a second one until the loop comes back around. A healthy frame still
+never gets near either number.
+
 ### 3.11 Actions and keys
 
 | Action | Default | Effect |
@@ -771,6 +805,34 @@ tracing_subscriber::registry()
 The `reload_handle` and `ring` go into `ShellServices` so the shell can
 change levels and the diagnostics tile can read the tail.
 
+**As built (2026-09-08, Task 2; corrected in fix round 1, MAJ-1/MAJ-2/
+MIN-6):** `geode-data` turned out to already be silent — zero
+`eprintln!` sites, confirmed by grep before migrating — so its three
+`tracing` call sites (a publish, the scheduler's `Health` arm, the
+scheduler's `Polled` arm) are new instrumentation, not a migration; the
+26-site table above is really `geode-app` + `geode-shell` +
+`geode-blotter`. The filter is not a flat `Targets::from(levels)`:
+`LogLevels::to_targets` builds `Targets::new().with_default(Level::
+WARN).with_target("geode", self.default)` before layering per-suffix
+overrides, so a third-party crate's own `tracing` output is capped at
+`warn` regardless of `[log] default` — only `geode::*` targets follow
+the configured level. `Health::Failed` logs through one choke point in
+`geode-data`, `log_health_event`, at `error`; every other `Health`
+variant logs at `warn` or below — the bridge (`geode-app`) does **not**
+also log these events a second time at a different severity: its own
+copies were deleted outright (fix round 1, MAJ-2) rather than dropped
+to `debug`, since `geode-data`'s lines already carry more detail
+(book/row counts) and a disabled `debug!` still costs a level check on
+the UI thread for no benefit. The one UI-thread log site below `warn`
+that remains, `profiling_hook.rs`'s `info!` dump, is called out
+explicitly in that file's module doc as the deliberate exception to
+"code on the UI thread emits at `warn` or above only." The automated
+guard for "no `eprintln!` outside tests"
+(`no_eprintln_outside_tests_in_workspace_src`, `geode-app/src/main.rs`)
+tracks `#[cfg(test)]`/`#[cfg(any(test, feature = "test-support"))]`
+scope by brace depth rather than a plain grep, so a debug `eprintln!`
+legitimately left inside an inline test module doesn't trip it.
+
 ### 4.2 The ring buffer
 
 `geode_core::log::Ring`, capacity 4,096 records, fixed at construction:
@@ -800,6 +862,22 @@ the `Layer`'s `on_event`; the reader allocates nothing on a hit and only
 `clone`s records newer than its `since`. The mutex is held for a copy,
 never for formatting. Overwrite on wrap; nothing blocks a writer.
 
+**As built (2026-09-08, Task 2; corrected in fix round 1, MIN-9):**
+`drain_since` walks backward from the newest slot (descending `seq`)
+and `break`s the moment it reaches a record at-or-before `since` (or an
+unwritten pre-wrap slot) — everything further back is provably older,
+by the ring's own monotonic invariant — rather than scanning all 4,096
+slots on every call; a `#[cfg(test)]` `Ring::drain_visits` counter
+proves the bound directly. `Ring::oldest_seq()` was added beyond the
+spec's original vocabulary: `None` when nothing's been pushed, the
+record at `head` once the ring has wrapped, the record at index 0
+before the first wrap — the diagnostics tile's log section uses it to
+report "N records lost" when the tail it's been following has fallen
+behind a wrap. `a_hit_allocates_nothing_in_the_reader`
+(`crates/geode-core/src/log/mod.rs`) pins the reuse-the-buffer claim
+directly: a second drain returning the same count of records must not
+grow the `Vec`'s capacity.
+
 ### 4.3 Files and levels
 
 The file layer writes `logs/geode.YYYY-MM-DD.log` under the user data
@@ -820,6 +898,28 @@ Keys are the target suffixes; the merged doc becomes a `Targets` filter.
 A reload that changes `[log]` calls the reload handle and nothing else;
 `:level <target> <level>` in the diagnostics tile does the same and
 writes the user layer's `app.toml` through the config write door.
+
+**As built (2026-09-08, Task 2/4; corrected in Task 2 fix round 1,
+MIN-3/MIN-7):** "the user data dir" resolves concretely to
+`config_dirs().1` (`%APPDATA%/geode` or `$HOME/.config/geode`); log
+files land at `<that>/logs/geode.YYYY-MM-DD.log`, trimmed to the newest
+seven at startup (`crash::trim_log_files`). **The daily file rolls on
+the UTC date, not the trader's local one** — `tracing-appender`'s
+`Builder` has no local-clock rotation option to switch to. Phase 4a's
+"times are the trader's local clock throughout" ruling governs every
+*displayed* time (the as-of selector, the scope bar, the status
+segment); it does not reach the log file's own name, which is UTC by
+the library's own constraint, documented rather than worked around
+(the crash file's timestamp, §4.7, is UTC for the identical reason). A
+present-but-non-table `[log]` (the typo `log = "debug"` for `[log]\n
+default = "debug"`) is a warning, not a silent no-op; an unknown target
+key under `[log]` is likewise a warning, and the key is dropped. The
+config write door has no 4b-specific implementation: `:level`'s persist
+(`log_persist::persist_log_level_to_user_config`) reuses
+`theme::write_atomic` and `persist_slot_to_user_config`'s `toml_edit`
+pattern as a seventh caller, exactly as Phase 4c's own config-write-door
+task will later migrate it along with the other six — nothing new was
+built here on purpose.
 
 ### 4.4 The `Diagnostics` entity
 
@@ -843,18 +943,188 @@ rebuilds only on change. `Published`, `Health`, `Diagnostics`, and
 `Catalog` events all land here; `ShellView::set_data_status` is deleted
 and the status bar reads a summary from this entity instead.
 
+**As built (2026-09-08, Task 4; corrected in fix rounds 1–4, CRIT-1,
+MAJ-4/MAJ-5, NEW-1, NEW-4, NEW-5/NEW-6):** `Health` moved from `geode-data` to `geode-core`
+(`geode-data::health` is now a re-export) — the interface above has
+`geode_shell::diagnostics` naming `Health` directly, which would have
+put a `geode-data` dependency on `geode-shell` and broken "shell and
+data never depend on each other" on day one of the entity's existence.
+`SourceState.health` is `Option<Health>`, and `summary()` counts only
+sources with a *real* health note — a configured-but-not-yet-reported
+source is not counted at all, in either direction (CRIT-1: the section
+below shows it separately as "no report yet"). The value a source's
+health note actually carries is the WORSE of two independently-tracked
+lanes, discovery (content-blind: is anything currently stuck or
+malformed on disk) and load (content-aware: did the last publish or
+load attempt succeed) — final review round 3, NEW-4: a single shared
+last-value map let a routine, content-blind clean poll silently clear a
+real, unfixed `Degraded`/`Failed` a publish had set, within about one
+poll interval and with nothing actually corrected. The load lane is
+keyed per BATCH and rolled up as the worst of them (round 4, NEW-6): a
+`Degraded` generation stays live and queryable, so one batch publishing
+cleanly says nothing about another's still-degraded rows, and only that
+batch's own next publish replaces its entry. "Worse" is an explicit
+severity rank, never `Health`'s derived `Ord` — which compares the
+`reason` string once two variants tie, so two simultaneous `Degraded`s
+were ordered by the alphabet and one was dropped — and an equal rank is
+decided by whichever slot changed most recently, with an identical
+re-report changing nothing so that repeated clean polls cannot flap it
+(round 4, NEW-5). Deciding a transition and emitting it happen under one
+lock, since the two producers are separate threads and `note_health` is
+last-write-wins: released in between, two decisions could reach the
+entity in the reverse of the order they were made in and latch it on the
+older one. `config: Vec<Diagnostic>`
+is not an unconditionally-appended log: `note_config` *replaces* the
+current batch wholesale and is a no-op when the new batch is
+byte-identical to the old one (MAJ-5) — an unchanged reload (e.g. the
+one `:level`'s own persist write triggers) must not re-inflate the
+error count — with every real change also appended to a separately
+capped `config_history`. `data_diagnostics` is its own separately
+capped, separately counted population, fed by the app from data-layer
+diagnostics distinct from config diagnostics (NEW-1, fix round 2) — the
+two must never share one count, or a config reload and a data error
+would silently erase each other's number. `summary() -> Rc<str>` is
+cached on `version`, so a repeated read (the status bar, every render)
+clones a refcount rather than rebuilding a string; it composes as
+`"sources 3 ok · 1 degraded · config 2 errors · data 1 error · 5
+dropped"`, every segment omitted at zero — see §4.8's own as-built note
+for why `restart_required` is not one of them any more. `watch()` and
+the later-added `request_catalog()` (§4.6) share one contract worth
+stating plainly: both queue a side effect (`pending_catalog_request =
+true`) but neither calls `cx.notify()` itself — they have no
+`Context`. A caller MUST notify in the same update block
+(`diagnostics.update(cx, |d, cx| { d.watch(); cx.notify(); })`), or the
+queued request sits unseen by the bridge's `cx.observe(&diagnostics,
+..)` drain until some unrelated mutation happens to notify later;
+`watch`'s doc comment states this as the reason it returns `bool`
+(always `true` today) rather than `()` — the return type exists to make
+"a request was queued, you now owe a notify" visible at the signature,
+not just in prose. `Diagnostics.frame_hist` is copied from `ShellView::
+perf` on the shell's existing ~500 ms reload-poll tick and only while
+`watchers() > 0` (open question 2, resolved) — see `docs/perf.md`'s
+Phase 4b section for the allocation contract this pins in tests.
+
+**Known gaps, deferred (recorded in the round-5 re-review, 2026-09-08).
+Both were fixed on the follow-up branch, 2026-09-08.**
+
+1. ~~An `EventSink` returning `false` means "receiver gone" to both
+   consumers.~~ **Fixed (follow-up branch, Task 1, 2026-09-08.)** `false`
+   now means only "this event was not delivered" — full or closed — and no
+   producer inside the service stops on one. The ingest runner carries on
+   to its next item (all three of its sites: the idle announcement, the
+   undeclared-dataset failure, the load outcome), the scheduler re-arms its
+   poll, and — the fourth consumer this note missed — a query pool worker
+   takes its next request, which used to exit and, with `query_workers =
+   1`, left the app with no worker at all. Each logs the refusal once
+   (`geode::ingest` / `geode::query`) and drops the event; nothing is
+   retried, since a refused health transition is re-offered by
+   `HealthTracker` on the next report and a missed result is requeried by
+   the tile that wanted it. `make_sink` now matches `TrySendError::Full`
+   against `Closed`: both refuse and bump `dropped`, and `Closed`
+   additionally logs once per sink (an `AtomicBool` latch) on
+   `geode::shell`, so a genuinely gone receiver is visible in the log while
+   a full channel is only counted. Shutdown is, and always was,
+   `IngestHandle::shutdown`, the scheduler's stop condvar, and the pool's
+   `shutdown`.
+2. ~~The load lane is in-process only, so a restart false-cleans a
+   still-live degraded generation.~~ **Fixed (follow-up branch, Task 2,
+   2026-09-08.)** `DataService::open` now seeds the load lane from the
+   health `file_generations` persisted for the generations that are
+   LIVE, through `Catalog::live_health` — `resolve_generations`'
+   resolution off the same summary table (newest `source_time` per
+   `(batch, book)`, ties by `gen_id` descending, with the
+   `archived_only` guard in the join so a generation that never went
+   live is neither picked nor allowed to hide the one that is), joined
+   to the catalog, one entry per batch whose live generation is not
+   `ok`, worst-across-books by `severity_rank`'s label order. Each is
+   reported through the same `report_load_and_emit` door and the same
+   emit closure the ingest sink's `Published` arm uses, keyed by batch —
+   which is the lane's own key, so a later clean republish of that batch
+   clears exactly it and nothing else. The seed runs before
+   `Scheduler::spawn`: it must be in the tracker before the first poll
+   reports, or that poll's `Ok` becomes the last-reported value and the
+   seed that follows reads as a spurious transition rather than the
+   state. A corrected republish that landed while the app was down is
+   simply not seeded — its batch's live generation is the clean one.
+
+   Three details the fix-round-1 review pinned down. **No time bound**
+   (MIN-3): the seed must agree with what the query path serves, and
+   `AsOf::Live` carries no generation predicate at all — `Era::live()`
+   leaves `generations: None` and `Era::relation` reads the live table
+   whole — so a generation stamped ahead of the host clock (publish
+   applies no upper bound either) is live, is summed, and must be
+   reported. `Utc::now()` as an upper bound would have answered with the
+   previous generation's health: a false clean. **The `gen_id`
+   tie-break is load-bearing** (MIN-1): the backfill guard is
+   strictly-older precisely so a file re-dropped with the same sentinel
+   `as_of` REPLACES rather than becoming history, which is the ordinary
+   shape of a correction, so the two generations tie on `source_time`
+   and only `gen_id` separates them. **The filter names the four
+   unhealthy labels** rather than excluding `'ok'` (MIN-4), because
+   `Health::from_parts` maps anything it does not recognise to
+   `Health::Ok`: a label from a future build used to be seeded as a
+   spurious `Ok` before any producer had spoken, taking `last_reported`
+   with it and swallowing the first genuine discovery `Ok`.
+
+   The ruling that makes this expressible: health is persisted per
+   DATASET (the only grain the catalog records) and the tracker is keyed
+   per SOURCE, so the seed reads by dataset and files the result under
+   every source configured for it. Two sources on one dataset both get
+   the seed — one is told about the other's degraded batch — and a
+   dataset with no configured source is not seeded at all, there being
+   no source key to file it under. That over-reports and never
+   false-cleans, which is the direction every fix on this seam has gone.
+   A `StoreError` from the seed propagates out of `open`: the failure
+   mode of swallowing it is a service that opens quietly and reports
+   clean, which is the defect itself.
+
 ### 4.5 `Request::Catalog`
 
 ```rust
 pub struct CatalogParams { pub key: QueryKey, pub tag: u64, pub as_of: AsOf }
 
 pub struct CatalogSnapshot {
-    pub datasets: Vec<DatasetCatalog>,   // name, per (batch, book): Vec<Generation>, live_bytes, archive_bytes
-    pub database_bytes: u64,
-    pub memory_bytes: u64,
-    pub resolved: Vec<(String, Option<i64>)>,  // per dataset, the gen_id `as_of` resolves to
+    pub datasets: Vec<DatasetCatalog>,   // name, partitions, live_rows/archive_rows (est.)
+    pub database_bytes: u64,             // sum(block_size * total_blocks), pragma_database_size()
+    pub used_blocks: u64,
+    pub block_size: u64,
+    pub memory_bytes: u64,               // sum(memory_usage_bytes), duckdb_memory()
+    pub threads: u64,                    // current_setting('threads')
+}
+
+pub struct DatasetCatalog {
+    pub name: String,
+    pub partitions: Vec<PartitionCatalog>,
+    pub live_rows: u64,      // estimated_size (a row ESTIMATE, not bytes), live tables
+    pub archive_rows: u64,   // the same, over archive tables
+}
+
+pub struct PartitionCatalog {
+    pub batch: String,
+    pub book: Option<String>,        // None is the bookless partition — real, not missing
+    pub generations: Vec<GenerationInfo>,
+    pub resolved_gen: Option<i64>,   // the gen_id `as_of` resolves to; None under AsOf::Live
 }
 ```
+
+**As-built correction (MIN-4, final-review fix):** the original sketch
+above named `live_bytes`/`archive_bytes` and a top-level `CatalogSnapshot.
+resolved: Vec<(String, Option<i64>)>`. The shipped types instead carry a
+row *estimate* (`live_rows`/`archive_rows`, correctly labelled "rows
+(est.)" on screen — DuckDB's `estimated_size` is not a byte count) on
+`DatasetCatalog`, and put `resolved_gen` on each `PartitionCatalog`
+rather than in one dataset-keyed list on the snapshot — the per-
+partition placement is what the data section's marker (below) actually
+needs, since a resolved generation is a property of one partition's
+timeline, not the whole dataset. Three of the five computed catalog
+fields are wired into the perf section — `database_bytes`,
+`memory_bytes` and `threads` (`"database {} (checkpointed) · memory {}
+· threads {}"`) — rather than left computed-and-unread. `used_blocks`
+and `block_size` remain computed (the same `pragma_database_size()`
+round trip already pays for them) but displayed by nothing (MIN-4,
+final review round 2 — recorded as a known gap, not fixed): a future
+reader may wire them in beside `database_bytes` or drop them from
+`CatalogSnapshot` outright.
 
 Built on the data thread from `file_generations`, `pragma_database_size`
 and per-table storage info, and delivered as `DataEvent::Catalog`. The
@@ -864,6 +1134,38 @@ request. The exact DuckDB functions and their output columns are
 verified by execution in the plan, not assumed: this is the class of
 defect Phase 3's prerequisites document warns about, an accessor tested
 against a fixture rather than against what DuckDB produces.
+
+**As built (2026-09-08, Task 3; corrected in fix round 1, MAJ-2/MAJ-3):**
+verification by execution still found two live gaps in the pinned
+DuckDB (1.10505.0). `current_setting('threads')` comes back typed
+`BIGINT`, not `VARCHAR` as originally verified — read via an explicit
+`::varchar` cast so the column type can't surprise the reader again.
+`pragma_database_size()`'s `total_blocks`/`block_size` (and so
+`database_bytes`) read `0` until the database has been checkpointed —
+WAL content not yet flushed to disk isn't counted; `store::
+retention::sweep`'s own cadence is what moves it in real usage, so a
+tile opened right after a burst of uncommitted ingest can legitimately
+show `0 B` until the next sweep. `file_generations_for` is bounded by
+an `exists` join against the `generations` table (MAJ-2) rather than
+reading every row `file_generations` has ever recorded — an orphaned
+row for a generation that no longer exists (superseded, retention-swept)
+must not leak into the catalog. Partitions group by `(batch, book)`
+together, never either half alone (MAJ-3): two same-book partitions in
+different batches, or a bookless partition sharing a batch with a
+booked one, are distinct rows, and a bookless partition is kept as its
+own partition with its own live generation, not dropped. `duckdb_
+tables()` is scoped to `schema_name = 'main'`; `database_bytes`/
+`used_blocks` are `coalesce(sum(...))` over `pragma_database_size()`
+rather than the first row, future-proofing a second `ATTACH`; the
+resulting `CatalogSnapshot` also carries `block_size`. `SchedulerEvent::
+Polled` gained `next_in: Duration`, and the mapped `DataEvent::Polled`'s
+`next` is `at.checked_add(next_in).unwrap_or(at)` — saturating rather
+than panicking on a pathological poll interval. `Request::Catalog`
+answers on the service thread directly, never the query pool, per the
+plan's own ruling — its doc comment says so, and `geode-app::bridge`'s
+event match keeps explicit no-op arms for `Catalog`/`Polled` rather
+than a wildcard, so a future `DataEvent` variant still fails to compile
+unhandled.
 
 ### 4.6 The module
 
@@ -880,8 +1182,9 @@ filtering, rebuilt only when the observed version changes:
 - **sources** — name, path, priority, readiness rule, health with
   detail, since, last poll, next poll. Sorted worst first.
 - **data** — dataset › batch › book, each with generation id, published
-  at, rows, live or archive, bytes; the row the current as-of resolves
-  to marked when historical. Collapsible by dataset with `zo`/`zc`.
+  at, rows (live or archive, row estimates — no per-dataset bytes, MIN-4
+  final review round 2); the row the current as-of resolves to marked
+  when historical. Collapsible by dataset with `zo`/`zc`.
 - **config** — every diagnostic with layer, file, line where known;
   then the effective-config explainer: each doc as a tree, every leaf
   as `path = value  [user]` using `Config::explain`. `/` filters by
@@ -893,7 +1196,83 @@ filtering, rebuilt only when the observed version changes:
   `:overlay` toggles `perf::toggle_overlay`.
 
 The module renders no `DataTable`; these are lists under a few hundred
-rows, and `VirtualList` covers the log.
+rows, and `uniform_list` covers the log (as built: not `VirtualList` —
+see the as-built note below; every row is the same height, so
+`uniform_list`'s cheaper fixed-height model is sufficient and the
+`VirtualList` per-item-sizing cost §3.4's picker pays is not needed
+here).
+
+**As built (2026-09-08, Task 5; corrected in fix rounds 1–2, MAJ-1
+through MAJ-8, MIN-3/MIN-7):** `diagnostics::open` resolves through a
+generic door, `ShellView::open_module(kind)`, not diagnostics-specific
+plumbing — it focuses an existing occupant of the given kind (searched
+across the tree and every dock) or splits the focused tile and stashes
+`pending_kind_for_new_tile` for `ensure_occupants` to consume on the
+next pass; two rapid `mod+shift+d` presses before any render settles
+split only one tile, not two (`open_module` early-returns when a
+request for the same kind is already pending). The config section's
+effective-config explainer walks `Config::doc_names()` (added in fix
+round 1 — an alphabetical iterator over every doc actually loaded)
+rather than a hand-maintained doc-name list, and recurses into TOML
+arrays with indexed paths (`keymap.bindings.0.keys.j`, MAJ-8) instead
+of stringifying an array whole onto one row, capped at 2,000 leaves per
+doc with a trailing "… N more" row. The log and config sections' `/`
+filter is a plain substring match over the whole formatted row/path —
+broader than "filter by target or level" reads literally, but it
+satisfies the given examples and is judged the more useful behaviour
+for a trader typing into `/`. The data section's resolved-generation
+marker refreshes on an as-of change while the tile is visible through
+`Diagnostics::request_catalog()` (MAJ-7, a new method sharing `watch`'s
+own caller-must-notify contract, §4.4); the tile's own frame-relevance
+comparison is narrowed to exactly the two `FrameVersions` fields any
+section reads — `as_of` and `config` — so a scope- or grouping-only
+frame change does not rebuild it (further narrowed per-section by the
+final review's MAJ-4: `as_of` only matters while showing `Data`,
+`config` only while showing `Config`), and `FrameVersions.flip` was
+never among the fields compared (see CLAUDE.md's own maintainer note on
+`flip`). `CatalogSnapshot` also now carries the `AsOf` it was resolved
+under (final review, MIN-5): the marker requires that to equal the
+frame's *current* `as_of`, not just `resolved_gen == gen_id`, so the
+brief window between an `At(T1) -> At(T2)` change and the fresher
+catalog's arrival shows no marker at all rather than momentarily
+marking the generation `T1` resolved to next to a scope bar already
+reading `T2`. Closing a tile now unwatches
+the entity generically, in `ensure_occupants`, for every module kind —
+not a diagnostics-specific fix — closing what had been a real watcher
+leak (MAJ-2). `rows: Rc<Vec<Row>>` on the tile means `render` clones a
+refcount, not the row list, between paints (MAJ-4); the log section's
+own per-render allocation was closed the same way, with a persistent
+`drain_buf: Vec<Record>` reused across drains (MAJ-5) and the tail's row
+builder reading `self.records.make_contiguous()` directly rather than
+cloning it. The log tail scrolls the cursor into view on `move_cursor`/
+`top`/`bottom`/rebuild (MAJ-1, `scroll_to_item`), and reports "N records
+lost" via `Ring::oldest_seq()` when the ring has wrapped past the
+tile's own `since`. `since` is seeded from `ring.latest_seq()` at
+construction, not `0` (MIN-3, final review), so a tile opened after the
+ring already holds more records than its capacity does not report
+records it never had as "lost" on its first drain; `lost_records`
+itself is recomputed on every log-section rebuild that finds new
+records, and left in place — a real, still-true number — on one that
+finds none.
+
+**Two gaps recorded rather than fixed (MIN-11, final review), both
+judged harmless:** `:level` accepts only the six target suffixes
+(`commands.rs`), not `default` — `[log] default` can only be changed by
+editing the file directly, defensible since `default` is a
+whole-process floor, not a per-target override the tile's own
+vocabulary is about. And the log section shows neither the current
+`LogLevels` nor which level is in force for any target — `Diagnostics.
+levels` is carried on the entity and displayed by no section, so a
+trader who runs `:level ingest debug` has no in-tile confirmation it
+took effect beyond watching debug-level lines start appearing.
+
+**Four display checks remain unverified** — no
+display was available in the implementing environment: `mod+shift+d`
+opening a split tile, `]`/`[` cycling sources → data → config → log →
+perf, `:level ingest debug` showing in the log section, and that
+command's write landing in `<user_dir>/app.toml`'s `[log]` table. All
+four are covered by unit/integration tests at every seam they cross;
+none has been looked at on a painted screen.
 
 ### 4.7 Panic boundaries
 
@@ -913,12 +1292,63 @@ prerequisites §2). 4b adds:
   small ring in `ShellView::dispatch`, written to on the UI thread
   without allocation (a fixed array of `ActionId`).
 
+**As built (2026-09-08, Task 6; corrected in fix round 1, MAJ-1/MAJ-2):**
+**an ingest load panic marks the source `Health::Failed`, not
+`Degraded` as written above** — a ruling taken at plan time and kept
+through implementation: a panic is a failed load, not a
+degraded-but-running state, and the last good generation stays live
+regardless. All four background `catch_unwind` boundaries this codebase
+has — the ingest load, its pop-time catalog recheck, a discovery poll,
+and a query pool worker, not only the "one file's load" the bullet
+above names — run under a new `geode_core::panic::contained` (a
+thread-local, depth-counted RAII guard), and the panic hook checks
+`geode_core::panic::is_contained()` before deciding what to do: a
+process panic hook fires before any `catch_unwind` gets a chance, so
+without this check every one of those four boundaries doing exactly
+what it exists for (catching a panic, keeping the app running) would
+still produce a crash file. A **contained** panic logs at `error` and
+writes nothing; only an **uncontained** panic — one nothing caught —
+calls `write_crash_file`. The action tail is FNV-1a hashes
+(`[u64; 32]` in `ActionTail`), not `ActionId`s directly — cloning a
+`String` id on every dispatch would violate the same allocation
+discipline the ring itself follows; `ActionRegistry::hash_names()`
+hands the crash hook a snapshot to resolve hashes back to ids. The
+crash file's name gained millisecond resolution and collision handling
+beyond the `<timestamp>` above: `crash-<YYYYMMDD-HHMMSS-mmm>.log`,
+opened with `OpenOptions::create_new`, retried with a `-1`, `-2`, …
+suffix on a same-instant collision rather than truncating an existing
+file, and pruned to the newest 10 after every write (sharing a
+`prune_files` helper with the log directory's own seven-file trim,
+§4.3). The timestamp is UTC, matching the log files' own daily-rotation
+clock (§4.3's as-built note) rather than the trader's local time. The
+hook's lock acquisitions (the action tail, the resolved-hash names map)
+use `try_lock`/`try_read` with a fallback placeholder rather than
+blocking, so a panic triggered from inside a lock holder cannot
+deadlock the hook itself. Not addressed, and recorded rather than
+fixed: a panic before the hook installs — during config/schema load,
+session read, or demo emission, all of which run earlier in `main` —
+leaves no crash file, only whatever the log file already captured.
+
 ### 4.8 Status bar
 
 The one-line label becomes a summary from `Diagnostics`: `sources 3 ok
 · 1 degraded`, the config error count when non-zero, the dropped-event
 count when non-zero, and the restart message. Clicking it, or
 `diagnostics::open`, opens the tile.
+
+**As built (2026-09-08, Task 4/5; corrected in fix round 1, MAJ-4):**
+the summary does **not** include a `restart required: …` segment as
+written above — `shell/render.rs`'s status bar already paints its own,
+separate `restart_required` segment, and embedding the same message
+inside `Diagnostics::summary()` too duplicated it on screen. The
+implemented shape is `"sources 3 ok · 1 degraded · config 2 errors ·
+data 1 error · 5 dropped"`, config and data error counts kept as two
+separate, never-merged counters (§4.4's as-built note), every segment
+omitted when its count is zero, and the whole string `""` (never
+rendered — the call site's own `(!s.is_empty()).then_some(..)`) when
+there is nothing to report. Clicking the segment and `diagnostics::open`
+both resolve to the same door, `ShellView::open_module("diagnostics",
+..)` (§4.6's as-built note).
 
 ## 5. Phase 4c — the config editor
 

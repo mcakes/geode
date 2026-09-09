@@ -19,6 +19,8 @@ use crate::{fontsize, theme};
 use geode_core::query::AsOf;
 
 use super::keys::convert_keystroke;
+#[cfg(feature = "profiling")]
+use super::profiling_hook;
 use super::{ShellView, asof_view, keybindings_view, objectdialog, picker, settings_view};
 
 impl ShellView {
@@ -103,6 +105,18 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Recorded before matching (Phase 4b Task 6): the crash hook's
+        // only view into "what was the user doing" reads this tail
+        // through the `Arc<Mutex<_>>` it was handed at startup, so every
+        // dispatch — reached or not by the branches below — must land in
+        // it first. A hash, not the `ActionId` itself (`ActionTail::
+        // record`'s own doc comment): no allocation per keypress.
+        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&action.0);
+
         // Every workspace verb below ignores the count; only the module
         // fall-through at the end (Phase 3 §3.3) is count-aware today.
         let handled = apply_workspace_action(&mut self.services.workspaces, action);
@@ -262,6 +276,13 @@ impl ShellView {
                     cx.notify();
                 }
             });
+        } else if action.0 == "diagnostics::open" {
+            // mod+shift+d (Phase 4b Task 5, spec §4.6) — opens by kind
+            // through the shell, not through the module (see
+            // `open_module`'s own doc comment); the status bar's
+            // diagnostics summary dispatches this same action on click
+            // (`render.rs`).
+            self.open_module("diagnostics", window, cx);
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`
@@ -305,9 +326,9 @@ impl ShellView {
     /// changes are infrequent (a user action, not a hot path like key-repeat),
     /// so there's no need for the session-save path's coalescing
     /// dirty-flag/watcher-tick machinery here — a plain spawn per change is
-    /// simple and cheap enough. A write failure surfaces as a `[theme]
-    /// warning:` stderr line from inside the task, never a crash — same
-    /// convention as every other config-write failure in this codebase.
+    /// simple and cheap enough. A write failure surfaces as a `geode::theme`
+    /// warning from inside the task, never a crash — same convention as
+    /// every other config-write failure in this codebase.
     ///
     /// A missing `user_dir` (no writable user config dir — some test setups,
     /// or a platform with neither `$HOME` nor `%APPDATA%`) is a silent
@@ -338,7 +359,7 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
-                    eprintln!("[theme] warning: {e}");
+                    tracing::warn!(target: "geode::theme", "{e}");
                 }
             })
             .detach();
@@ -347,8 +368,8 @@ impl ShellView {
     /// Persist the current font size to `<user_dir>/app.toml`'s `[ui]`
     /// table, off the UI thread — the exact contract of [`Self::
     /// persist_theme`] just above (missing `user_dir` = silently skipped;
-    /// failures are a stderr warning; last-write-wins races accepted for
-    /// the same rare-UI-action reasons).
+    /// failures are a `geode::config` warning; last-write-wins races
+    /// accepted for the same rare-UI-action reasons).
     pub(super) fn persist_font_size(&self, cx: &mut Context<Self>) {
         let Some(dir) = self.user_dir.clone() else {
             return;
@@ -357,7 +378,16 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
-                    eprintln!("[fontsize] warning: {e}");
+                    // MIN-2: `fontsize`/`vimfind`/`theme::persist_to_
+                    // user_config` all write the same `app.toml` and, on
+                    // a parse failure, return byte-identical text — a
+                    // bare `{e}` here and in `persist_find_style` below
+                    // would be indistinguishable at `geode::config`
+                    // (`persist_theme`'s own failure already reads
+                    // apart, since it logs at the `geode::theme` target
+                    // instead). The leading phrase is the only thing
+                    // that tells the two apart.
+                    tracing::warn!(target: "geode::config", "font size not saved: {e}");
                 }
             })
             .detach();
@@ -366,8 +396,8 @@ impl ShellView {
     /// Persist the current find style to `<user_dir>/app.toml`'s `[ui]`
     /// table, off the UI thread — the exact contract of [`Self::
     /// persist_font_size`] just above (missing `user_dir` = silently
-    /// skipped; failures are a stderr warning; last-write-wins races
-    /// accepted for the same rare-UI-action reasons).
+    /// skipped; failures are a `geode::config` warning; last-write-wins
+    /// races accepted for the same rare-UI-action reasons).
     pub(super) fn persist_find_style(&self, cx: &mut Context<Self>) {
         let Some(dir) = self.user_dir.clone() else {
             return;
@@ -376,7 +406,8 @@ impl ShellView {
         cx.background_executor()
             .spawn(async move {
                 if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
-                    eprintln!("[findstyle] warning: {e}");
+                    // MIN-2 — see `persist_font_size`'s comment just above.
+                    tracing::warn!(target: "geode::config", "find style not saved: {e}");
                 }
             })
             .detach();

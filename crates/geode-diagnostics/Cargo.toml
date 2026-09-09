@@ -1,0 +1,25 @@
+[package]
+name = "geode-diagnostics"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+bench = false
+
+# MIN-12 (Phase 4b Task 5 fix round 1): no geode-data dependency, normal
+# or dev — this module needs no `DataHandle` (the whole point of the
+# shell/data split geode-diagnostics itself sits on the shell side of).
+[dependencies]
+geode-core.workspace = true
+geode-shell.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+chrono = "0.4.42"
+toml = "1.1.4"
+tracing.workspace = true
+
+[dev-dependencies]
+geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }

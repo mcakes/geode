@@ -935,8 +935,9 @@ fn spawn_rebind(
     cx: &mut Context<ShellView>,
 ) {
     let Some(user_dir) = user_dir else {
-        eprintln!(
-            "[keybindings] warning: no writable user config dir; the new binding for {} was not saved",
+        tracing::warn!(
+            target: "geode::config",
+            "no writable user config dir; the new binding for {} was not saved",
             row.action
         );
         return;
@@ -955,16 +956,18 @@ fn spawn_rebind(
         .spawn(async move {
             match apply_rebind(&user_dir, &rebind) {
                 Ok(outcome) if outcome.displacement == Displacement::OldKeyNotFound => {
-                    eprintln!(
-                        "[keybindings] warning: the previous binding for {} was not found \
-                         where expected while saving the new one — it may still be \
-                         reachable from wherever it actually lives",
+                    tracing::warn!(
+                        target: "geode::config",
+                        "the previous binding for {} was not found where expected while \
+                         saving the new one — it may still be reachable from wherever it \
+                         actually lives",
                         rebind.action
                     );
                 }
                 Ok(_) => {}
-                Err(e) => eprintln!(
-                    "[keybindings] warning: failed to save the new binding for {}: {e}",
+                Err(e) => tracing::warn!(
+                    target: "geode::config",
+                    "failed to save the new binding for {}: {e}",
                     rebind.action
                 ),
             }
@@ -1190,22 +1193,24 @@ fn spawn_unbind(
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
     let Some(user_dir) = user_dir.clone() else {
-        eprintln!(
-            "[keybindings] warning: no writable user config dir; the binding change for {action} was not saved"
+        tracing::warn!(target: "geode::config",
+            "no writable user config dir; the binding change for {action} was not saved"
         );
         return Some("no writable user config directory — nothing was saved".to_string());
     };
     cx.background_executor()
         .spawn(async move {
             match apply_unbind(&user_dir, &unbind) {
-                Ok(outcome) if unbind.is_user_layer && !outcome.removed => eprintln!(
-                    "[keybindings] warning: the binding for {action} was not found where \
-                     expected, so nothing was removed — it may still be reachable from \
-                     wherever it actually lives"
-                ),
+                Ok(outcome) if unbind.is_user_layer && !outcome.removed => {
+                    tracing::warn!(target: "geode::config",
+                        "the binding for {action} was not found where \
+                         expected, so nothing was removed — it may still be reachable from \
+                         wherever it actually lives"
+                    )
+                }
                 Ok(_) => {}
-                Err(e) => eprintln!(
-                    "[keybindings] warning: failed to change the binding for {action}: {e}"
+                Err(e) => tracing::warn!(target: "geode::config",
+                    "failed to change the binding for {action}: {e}"
                 ),
             }
         })

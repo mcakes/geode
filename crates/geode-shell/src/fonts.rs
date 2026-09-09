@@ -97,9 +97,9 @@ pub fn register(cx: &mut App) {
         Cow::Borrowed(JETBRAINS_MONO_BOLD),
     ];
     if let Err(err) = cx.text_system().add_fonts(fonts) {
-        eprintln!(
-            "[fonts] warning: failed to register bundled fonts ({err}); \
-             using the platform default font instead"
+        tracing::warn!(
+            target: "geode::theme",
+            "failed to register bundled fonts ({err}); using the platform default font instead"
         );
         return;
     }

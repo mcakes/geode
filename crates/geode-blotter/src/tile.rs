@@ -148,7 +148,20 @@ impl BlotterTile {
         let view_name = restored
             .and_then(|t| t.get("view").and_then(|v| v.as_str()).map(str::to_string))
             .filter(|n| views.borrow().iter().any(|v| &v.name == n))
-            .or_else(|| views.borrow().first().map(|v| v.name.clone()))
+            .or_else(|| {
+                // Phase 4b M6: the view flagged `default` (a top-level
+                // `default = "<name>"` key in the views doc) wins over
+                // "just take the first one" — `ViewSpec::from_doc` only
+                // sorts by name when no view carries the flag, so this
+                // is deterministic either way, but an explicit default
+                // must win when the author bothered to name one.
+                let views = views.borrow();
+                views
+                    .iter()
+                    .find(|v| v.is_default)
+                    .or_else(|| views.first())
+                    .map(|v| v.name.clone())
+            })
             .unwrap_or_default();
         let pin = match restored {
             Some(t) if t.get("pinned_slot").and_then(|v| v.as_integer()).is_some() => {
@@ -171,8 +184,8 @@ impl BlotterTile {
         // `filter.expr`/`filter.text` (Phase 4a §3.7): a restored
         // expression that no longer parses (e.g. hand-edited, or a
         // column since removed) drops the whole filter rather than
-        // half-applying it — logged here since a fresh tile has nowhere
-        // inline to report it (4b migrates this to real logging).
+        // half-applying it — logged (`geode::shell`, warn) since a fresh
+        // tile has nowhere inline to report it.
         let tile_scope = restored
             .and_then(|t| t.get("filter"))
             .and_then(|v| v.as_table())
@@ -182,8 +195,9 @@ impl BlotterTile {
                     match parse_expr(expr_str) {
                         Ok(expr) => scope.expression = Some(expr),
                         Err(e) => {
-                            eprintln!(
-                                "[blotter] restored filter.expr '{expr_str}' failed to parse at column {}: {} — filter dropped",
+                            tracing::warn!(
+                                target: "geode::shell",
+                                "restored filter.expr '{expr_str}' failed to parse at column {}: {} — filter dropped",
                                 e.caret + 1,
                                 e.message
                             );
@@ -1268,6 +1282,19 @@ mod tests {
         ViewSpec::from_doc(&doc).0
     }
 
+    /// [`views`], plus a top-level `default = "<name>"` header (Phase 4b
+    /// Task 1 fix round 1, MIN-4) — for pinning `BlotterTile::new`'s own
+    /// half of M6 (`.find(|v| v.is_default)`), which had no test of its
+    /// own: the two M6 tests in `geode-core::view` both pin `ViewSpec::
+    /// from_doc`'s sort/flag, not the half a fresh tile actually feels.
+    fn views_with_explicit_default(default: &str) -> Vec<ViewSpec> {
+        let text = format!(
+            "default = \"{default}\"\n[tree]\ndataset = \"d\"\ngrouping = [\"lhu\", \"underlying_ref\"]\n[[tree.columns]]\nname = \"delta01\"\n[[tree.columns]]\nname = \"daily_trading_pnl\"\n[wide]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[wide.columns]]\nname = \"delta01\"\n"
+        );
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", &text).unwrap()]);
+        ViewSpec::from_doc(&doc).0
+    }
+
     /// The `d` dataset `views()`'s "tree"/"wide" views point at —
     /// `validate_tile_scope`'s target for the `:filter` tests below.
     /// `model_code` is a carried dimension (`grain = "instrument"`) so a
@@ -1505,6 +1532,76 @@ mod tests {
             },
             vcx,
         )
+    }
+
+    /// Same as [`open_with`], but the views doc is the caller's own
+    /// rather than the fixed [`views`] fixture — for
+    /// [`views_with_explicit_default`] (Phase 4b Task 1 fix round 1,
+    /// MIN-4).
+    fn open_with_views(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+        views: Vec<ViewSpec>,
+    ) -> (Harness, gpui::VisualTestContext) {
+        cx.update(gpui_component::init);
+        cx.update(crate::init);
+        let (data, requests) = DataHandle::for_tests();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
+                    cx.new(|cx| {
+                        let tile = cx.new(|cx| {
+                            BlotterTile::new(
+                                TileId(7),
+                                frame.clone(),
+                                data.clone(),
+                                Rc::new(RefCell::new(views)),
+                                Rc::new(RefCell::new(schema())),
+                                Rc::new(RefCell::new(DerivedDimensions::default())),
+                                Rc::new(Cell::new(FindStyle::Vim)),
+                                Rc::new(Cell::new(DEFAULT_STALE_AFTER)),
+                                restored,
+                                window,
+                                cx,
+                            )
+                        });
+                        Host { tile, frame }
+                    })
+                })
+            })
+            .unwrap();
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (tile, frame) = window
+            .root(&mut vcx)
+            .unwrap()
+            .read_with(&vcx, |h, _| (h.tile.clone(), h.frame.clone()));
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        (
+            Harness {
+                tile,
+                frame,
+                requests,
+            },
+            vcx,
+        )
+    }
+
+    /// Phase 4b Task 1 fix round 1, MIN-4: a fresh tile (nothing
+    /// restored) must open on the view flagged `default`, not the one
+    /// that happens to sort first by name — "wide" is flagged here,
+    /// while "tree" < "wide" alphabetically, so a regression that drops
+    /// `BlotterTile::new`'s `.find(|v| v.is_default)` would silently
+    /// open on "tree" instead.
+    #[gpui::test]
+    fn a_fresh_tile_opens_on_the_explicit_default_view_not_the_alphabetical_first(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (h, vcx) = open_with_views(cx, None, views_with_explicit_default("wide"));
+        let state = h.tile.read_with(&vcx, |t, _| t.serialize());
+        assert_eq!(state["view"].as_str(), Some("wide"));
     }
 
     /// Two tiles sharing one frame, one `DataHandle`/`Receiver<Request>`

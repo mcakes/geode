@@ -62,6 +62,10 @@ fn services_with_pickable() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 
@@ -392,6 +396,39 @@ fn escape_cancels_without_touching_the_scope(cx: &mut gpui::TestAppContext) {
         books,
         vec!["BK000".to_string()],
         "the original scope is untouched"
+    );
+}
+
+/// Phase 4b M5: `PickerState::tag` used to reset to the same starting
+/// value on every `open`, so a stale `DistinctOutcome` from a first open
+/// on `book` could pass the tag check of a second, unrelated open on the
+/// same column (both opens' one `request_values` call bumped a fresh
+/// `PickerState`'s tag from 0 to 1). `ShellView::next_picker_tag` is now
+/// the session-wide source of every tag, so a second open's request
+/// always carries a strictly larger tag than the first's.
+#[gpui::test]
+fn a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, services_with_pickable());
+    let shell = shell_of(&window, &mut vcx);
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    let first_tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
+
+    vcx.simulate_keystrokes("escape");
+    assert!(
+        shell.read_with(&vcx, |s, _| s.picker.is_none()),
+        "escape must close the picker so the second open is a fresh one"
+    );
+
+    dispatch_action(&shell, "frame::pick_book", &mut vcx);
+    let second_tag = shell.read_with(&vcx, |s, _| s.picker.as_ref().unwrap().tag);
+
+    assert!(
+        second_tag > first_tag,
+        "a fresh open must never repeat a tag an earlier open already used: \
+         first {first_tag}, second {second_tag}"
     );
 }
 

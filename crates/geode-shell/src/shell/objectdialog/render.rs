@@ -775,7 +775,7 @@ fn spawn_removals(
                 if let Err(e) = config_write::edit(&user_dir, Layer::User, doc, |document| {
                     document.remove(&name);
                 }) {
-                    eprintln!("[config] warning: {e}");
+                    tracing::warn!(target: "geode::config", "{e}");
                 }
             }
         })

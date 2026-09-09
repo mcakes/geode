@@ -8,11 +8,14 @@ publish.workspace = true
 bench = false
 
 [features]
-# Fixture builders for downstream crates' tests (`Snapshot::for_tests`).
-# Exists so that Arrow stays an implementation detail of `snapshot.rs`:
+# Fixture builders for downstream crates' tests. `Snapshot::for_tests`
+# exists so that Arrow stays an implementation detail of `snapshot.rs`:
 # without it, every crate that wants a `Snapshot` fixture would have to
 # name Arrow types, which is exactly what that module promises nobody
-# outside it does.
+# outside it does. `config::test_support::config_from` (Phase 4b Task 2)
+# is the same idea for `Config`: a fixture built from one builtin doc,
+# with no desk/user directory on disk, for downstream crates' tests that
+# need a real `Config` rather than a bare `MergedDoc`.
 test-support = []
 
 [dependencies]
@@ -48,6 +51,10 @@ regex = "1.11.1"
 # rather than `toml`, matching every other read-modify-write config writer
 # in this codebase (see `geode-shell`'s own `toml_edit` dependency comment).
 toml_edit = "0.25.13"
+# `geode_core::log`: the ring's `Record`/`Level` and the `RingLayer`
+# subscriber layer that feeds it.
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -27,6 +27,7 @@ pub fn saved_scopes_from_doc(
         layer: None,
         file: None,
         message: m,
+        path: None,
     };
     for (name, value) in &doc.value {
         if name == "config_version" {

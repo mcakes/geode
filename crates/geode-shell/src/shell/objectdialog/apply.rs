@@ -562,7 +562,7 @@ fn to_edit_table(value: &toml::Value) -> toml_edit::Table {
 /// actually on disk — disk stays the arbiter, which is the property that
 /// makes the revert safe to be approximate.
 fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<ShellView>) {
-    eprintln!("[config] warning: {message}");
+    tracing::warn!(target: "geode::config", "{message}");
     let Some(pending) = shell.pending_config_write.take() else {
         return;
     };

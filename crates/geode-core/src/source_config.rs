@@ -101,6 +101,7 @@ fn diag(severity: Severity, name: &str, m: impl std::fmt::Display) -> Diagnostic
         layer: None,
         file: None,
         message: format!("source '{name}': {m}"),
+        path: None,
     }
 }
 

@@ -21,7 +21,7 @@
 //! without interrupting a load in flight (spec §5.4).
 
 use crate::health::Health;
-use crate::ingest::load::{LoadRequest, load_file};
+use crate::ingest::load::{LoadError, LoadOutcome, LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
 use crate::source::{CandidateState, Priority};
@@ -29,6 +29,7 @@ use crate::store::{Catalog, Store};
 use chrono::{DateTime, Utc};
 use geode_core::schema::SchemaSpec;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -36,6 +37,11 @@ use std::thread::JoinHandle;
 #[derive(Debug, Clone)]
 pub enum IngestEvent {
     Published {
+        /// The `[sources.<name>]` this item came from (Phase 4b final
+        /// review, MAJ-1) — distinct from `dataset`: `SourceSpec` names
+        /// and datasets are two separate fields, and the service must key
+        /// `DataEvent::Health` by this, never by `dataset`.
+        source: String,
         dataset: String,
         batch: String,
         gen_id: i64,
@@ -45,6 +51,8 @@ pub enum IngestEvent {
         health: Health,
     },
     Failed {
+        /// See `Published::source`'s doc — same reasoning, same field.
+        source: String,
         dataset: String,
         batch: String,
         reason: String,
@@ -53,9 +61,12 @@ pub enum IngestEvent {
     PlanComplete,
 }
 
-/// Where events go. `false` means nobody is listening, which stops the
-/// runner. Called from the runner's own thread with no lock held, so a
-/// sink must not block indefinitely — a channel send is fine.
+/// Where events go. `false` means "this event was not delivered" —
+/// the caller's bounded channel was full, or its receiver is gone. It is
+/// never a shutdown signal: the runner keeps working through one and the
+/// event is simply dropped (Phase 4b follow-up, Task 1; the runner's only
+/// stop is `IngestHandle::shutdown`). Called from the runner's own thread,
+/// so a sink must not block indefinitely — a channel send is fine.
 pub type IngestSink = Arc<dyn Fn(IngestEvent) -> bool + Send + Sync>;
 
 #[derive(Default)]
@@ -80,13 +91,30 @@ pub struct IngestHandle {
 
 pub struct IngestRunner;
 
+/// The work a file load does. A function pointer rather than a direct
+/// call to [`load_file`] so a test can inject one that panics — the
+/// same shape as `geode_data::query::pool::RunFn`, and for the same
+/// reason: there is no CSV that makes `load_file` itself panic, and
+/// panic-safety (Phase 4b Task 6: the file and the panic payload land
+/// in the reported `Failed.reason`) is the property worth testing here.
+type LoadFn = fn(&Store, &LoadRequest) -> Result<LoadOutcome, LoadError>;
+
 impl IngestRunner {
     pub fn spawn(store: Store, schema: SchemaSpec, sink: IngestSink) -> IngestHandle {
+        Self::spawn_with_load(store, schema, sink, load_file)
+    }
+
+    fn spawn_with_load(
+        store: Store,
+        schema: SchemaSpec,
+        sink: IngestSink,
+        load: LoadFn,
+    ) -> IngestHandle {
         let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
         let worker_queue = Arc::clone(&queue);
         let thread = std::thread::Builder::new()
             .name("geode-ingest".into())
-            .spawn(move || run(store, schema, worker_queue, sink))
+            .spawn(move || run(store, schema, worker_queue, sink, load))
             .expect("spawning the ingest thread");
         IngestHandle {
             queue,
@@ -223,11 +251,25 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
     q.in_flight = None;
 }
 
-fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, sink: IngestSink) {
+fn run(
+    store: Store,
+    schema: SchemaSpec,
+    queue: Arc<(Mutex<Queue>, Condvar)>,
+    sink: IngestSink,
+    load: LoadFn,
+) {
     // PlanComplete is announced once per drain, on the transition from
     // working to idle — not on every wakeup. An idle runner would otherwise
     // push an event every poll interval, forever, into an unbounded channel.
     let mut announced_idle = false;
+    // One line per runner, not one per refused event (final review,
+    // MIN-3): before Task 1 a gone receiver ended this thread after a
+    // single refusal, so it could never repeat. Now the thread lives
+    // on, and an unlatched warning would fill the 4,096-entry log ring
+    // — the one in-process log a diagnostics tile reads — with copies
+    // of itself. The caller's `dropped` counter stays the
+    // authoritative count.
+    let refusal_logged = AtomicBool::new(false);
 
     loop {
         let item = {
@@ -250,7 +292,17 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 if !announced_idle {
                     announced_idle = true;
                     if !sink(IngestEvent::PlanComplete) {
-                        return;
+                        // Logged with the lock released, the same rule
+                        // `query::pool`'s delivery site follows (fix
+                        // round 1, MIN-5): formatting a warning under
+                        // the queue mutex blocks `submit`. Re-acquired
+                        // and re-checked from the top, so a shutdown or
+                        // an item that landed meanwhile is seen at once
+                        // rather than after the 50 ms wait.
+                        drop(q);
+                        log_refused_event(&refusal_logged, "the queue-drained announcement");
+                        q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        continue;
                     }
                 }
                 let (guard, _) = cvar
@@ -276,8 +328,19 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
         // two are matched as distinct arms so a future diagnostic can
         // tell "the read broke" from "nothing was found" apart, even
         // though both currently do the same thing.
+        //
+        // Fix round 1, MIN-10: unlike the load boundary twenty lines
+        // down, a panic caught here produces no `IngestEvent` — it is
+        // swallowed into "not stale" by `.unwrap_or(false)` below. It is
+        // not silent: the boundary runs under `geode_core::panic::
+        // contained`, so the process-wide hook logs it at `error` as a
+        // contained panic (message and location) without a crash file.
+        // What it lacks is the load arm's *named* event with the file
+        // path; recorded as a known asymmetry rather than fixed here.
         let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
+            geode_core::panic::contained(|| {
+                Catalog::new(store.writer()).lookup_by_path(&item.candidate.csv_path)
+            })
         }))
         .map(|result| match result {
             Ok(Some(prev)) => is_unchanged(&prev, item.candidate.size, item.source_time),
@@ -294,13 +357,20 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
         // one is this item's failure, named, and the runner carries on.
         let Some(dataset) = schema.dataset(&item.dataset) else {
             let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '{}' is not declared", item.dataset),
             });
             clear_in_flight(&queue);
             if !failed {
-                return;
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
             }
             continue;
         };
@@ -309,24 +379,27 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
         // the runner keeps working. Only a render-thread panic takes the app
         // down.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let CandidateState::Ready(sentinel) = &item.candidate.state else {
-                return Err("candidate was not ready".to_string());
-            };
-            load_file(
-                &store,
-                &LoadRequest {
-                    dataset,
-                    dataset_name: &item.dataset,
-                    csv_path: &item.candidate.csv_path,
-                    sentinel,
-                    batch: &item.batch,
-                },
-            )
-            .map_err(|e| e.to_string())
+            geode_core::panic::contained(|| {
+                let CandidateState::Ready(sentinel) = &item.candidate.state else {
+                    return Err("candidate was not ready".to_string());
+                };
+                load(
+                    &store,
+                    &LoadRequest {
+                        dataset,
+                        dataset_name: &item.dataset,
+                        csv_path: &item.candidate.csv_path,
+                        sentinel,
+                        batch: &item.batch,
+                    },
+                )
+                .map_err(|e| e.to_string())
+            })
         }));
 
         let event = match outcome {
             Ok(Ok(loaded)) => IngestEvent::Published {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 gen_id: loaded.gen_id,
@@ -341,24 +414,62 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
                 health: loaded.health,
             },
             Ok(Err(reason)) => IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason,
             },
-            Err(_) => IngestEvent::Failed {
-                dataset: item.dataset.clone(),
-                batch: item.batch.clone(),
-                reason: "ingest task panicked".into(),
-            },
+            Err(payload) => {
+                // The panic's payload (Phase 4b Task 6, spec §4.7's
+                // as-built deviation: a panicking load is `Failed`, not
+                // `Degraded` — the plan's ruling): `&str`/`String` cover
+                // every `panic!`/`unwrap`/`expect` in practice; anything
+                // else (a custom payload type) falls back to a named
+                // placeholder rather than losing the event.
+                let message = panic_payload_message(payload.as_ref());
+                let path = item.candidate.csv_path.display();
+                log_ingest_panic(&item.candidate.csv_path, &message);
+                IngestEvent::Failed {
+                    source: item.source.clone(),
+                    dataset: item.dataset.clone(),
+                    batch: item.batch.clone(),
+                    reason: format!("ingest task panicked at {path}: {message}"),
+                }
+            }
         };
         let delivered = sink(event);
         // Cleared only now: while the load ran, `in_flight` kept a
         // duplicate submitted mid-load harmless.
         clear_in_flight(&queue);
         if !delivered {
-            return; // receiver gone: nothing left to report to
+            log_refused_event(
+                &refusal_logged,
+                &format!("the load outcome for {}/{}", item.dataset, item.batch),
+            );
         }
     }
+}
+
+/// A refused event was not delivered — the caller's bounded channel was
+/// momentarily full, or its receiver is gone. Either way the runner keeps
+/// going (Phase 4b follow-up, Task 1: exit-on-false was never the shutdown
+/// path — `IngestHandle::shutdown` + `Drop` is, and one cold-start burst
+/// filling a 256-slot channel used to end ingest for the session). Logged
+/// once per RUNNER, never retried: the health transitions that matter are
+/// re-offered by `HealthTracker` on the next report, and `latched` keeps a
+/// permanently gone receiver from filling the log ring with copies of this
+/// line (final review, MIN-3). A free function for the same reason
+/// `log_ingest_panic` is one: it fires on the runner's own thread, so a
+/// test can only reach it directly.
+fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target: "geode::ingest",
+        "event channel refused {what}: dropped, the runner keeps working \
+         (further refusals are counted, not logged)",
+    );
 }
 
 /// Backfill items yield between files so current work is not starved. The
@@ -366,6 +477,43 @@ fn run(store: Store, schema: SchemaSpec, queue: Arc<(Mutex<Queue>, Condvar)>, si
 /// intent is testable and named.
 pub fn is_preemptible(item: &WorkItem) -> bool {
     item.priority == Priority::Backfill
+}
+
+/// A `catch_unwind` payload as text, for the `Failed.reason` a panicking
+/// load produces (Phase 4b Task 6). `panic!`/`unwrap`/`expect` payloads
+/// are always `&'static str` or `String`; anything else (a custom
+/// `panic_any` payload) falls back to a named placeholder rather than
+/// losing the event.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic>".to_string()
+    }
+}
+
+/// Logs a panicking load at `geode::ingest` `error`, with the file and
+/// payload (Phase 4b Task 6 fix round 1, MAJ-2). Pulled out as a free
+/// function — the crate's established pattern for a log line a test
+/// needs to drive directly, `service.rs`'s `log_health_event`/
+/// `log_ingest_failure` — for the same reason those exist: this event
+/// fires on the spawned `geode-ingest` thread, and
+/// `tracing::subscriber::with_default`'s scope is thread-local, so a
+/// test running on the *test* thread could never observe it if it
+/// stayed inline in `run`.
+///
+/// Fix round 1, MIN-9: a panicking load is logged at `error` twice —
+/// this line (which has the file) and `service.rs`'s own
+/// `log_ingest_failure` a moment later on the same thread (which has
+/// the dataset/batch, reading `Failed.reason` — the string this event's
+/// `message` also feeds). Both are correct per their own task's brief;
+/// recorded here so two `geode::ingest` errors for one failure reads as
+/// a decision, not a surprise, to whoever next looks at the ring or the
+/// diagnostics tile for this source.
+fn log_ingest_panic(path: &std::path::Path, message: &str) {
+    tracing::error!(target: "geode::ingest", file = %path.display(), "ingest task panicked: {message}");
 }
 
 #[cfg(test)]
@@ -424,6 +572,147 @@ mod tests {
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
         let plan = crate::ingest::build_plan(&[(spec, found)]);
         (db_dir, src_dir, store, ds, plan)
+    }
+
+    /// A sink that forwards into a channel but REFUSES the first event
+    /// matching `refuse` — returning `false` without sending it. `false`
+    /// means "this event was not delivered", never "stop producing"
+    /// (Phase 4b follow-up, Task 1): every test below asserts the runner
+    /// kept working through one. The returned counter is how many
+    /// refusals actually happened, so a test can wait for the refusal
+    /// rather than racing it.
+    fn refusing_sink(
+        refuse: fn(&IngestEvent) -> bool,
+    ) -> (
+        IngestSink,
+        Receiver<IngestEvent>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (tx, rx) = channel();
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&refusals);
+        let sink: IngestSink = Arc::new(move |e: IngestEvent| {
+            // One `compare_exchange` rather than load-then-add: the
+            // refusal is claimed atomically, so "the first match only"
+            // holds however many threads call this.
+            if refuse(&e)
+                && counter
+                    .compare_exchange(
+                        0,
+                        1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                return false;
+            }
+            tx.send(e).is_ok()
+        });
+        (sink, rx, refusals)
+    }
+
+    /// Block until `counter` reaches `n`, or fail. The refusal happens on
+    /// the runner's own thread; a test that submitted more work without
+    /// waiting would not know whether the refusal came first.
+    fn wait_for_count(counter: &std::sync::atomic::AtomicUsize, n: usize, what: &str) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            if counter.load(std::sync::atomic::Ordering::SeqCst) >= n {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {n} {what}");
+    }
+
+    #[test]
+    fn a_refused_load_outcome_does_not_stop_the_runner() {
+        // A momentarily full event channel is not a shutdown signal: the
+        // runner's own `shutdown` is (Phase 4b follow-up, Task 1).
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
+        let first = plan.items[0].clone();
+        let second = plan.items[1].clone();
+
+        let (sink, rx, refusals) = refusing_sink(|e| {
+            matches!(
+                e,
+                IngestEvent::Published { .. } | IngestEvent::Failed { .. }
+            )
+        });
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        handle.submit(WorkPlan { items: vec![first] });
+        wait_for_count(&refusals, 1, "refused terminal events");
+
+        handle.submit(WorkPlan {
+            items: vec![second.clone()],
+        });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Published { batch, .. } if *batch == second.batch
+            )),
+            "the item after a refused event must still load and report: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_plan_complete_does_not_stop_the_runner() {
+        let (_db, _src, store, ds, plan) = harness();
+        let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::PlanComplete));
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        // The runner idles immediately with an empty queue, announces
+        // once, and that announcement is refused.
+        wait_for_count(&refusals, 1, "refused PlanComplete events");
+
+        handle.submit(plan);
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, IngestEvent::Published { .. })),
+            "work submitted after a refused idle announcement must still load: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_undeclared_dataset_failure_does_not_stop_the_runner() {
+        let (_db, _src, store, ds, plan) = harness();
+        assert!(plan.items.len() >= 2, "need at least two files");
+        let mut undeclared = plan.items[0].clone();
+        undeclared.dataset = "not_declared_anywhere".into();
+        // A DIFFERENT file: sharing `plan.items[0]`'s `(csv_path, size,
+        // source_time)` races `clear_in_flight`, which runs after the
+        // sink call this test waits on, so the resubmission could be
+        // dropped as an in-flight duplicate (fix round 1, MIN-1).
+        let good = plan.items[1].clone();
+
+        let (sink, rx, refusals) = refusing_sink(|e| matches!(e, IngestEvent::Failed { .. }));
+        let handle = IngestRunner::spawn(store, schema_of(ds), sink);
+        handle.submit(WorkPlan {
+            items: vec![undeclared],
+        });
+        wait_for_count(&refusals, 1, "refused Failed events");
+
+        handle.submit(WorkPlan {
+            items: vec![good.clone()],
+        });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                IngestEvent::Published { batch, .. } if *batch == good.batch
+            )),
+            "an undeclared dataset's refused failure must not end the runner: {events:?}"
+        );
     }
 
     /// Terse RFC 3339 literal, matching the convention used by
@@ -739,6 +1028,106 @@ mod tests {
             published, good,
             "one bad file must not stop the run (spec §5.7)"
         );
+    }
+
+    /// A runner delivering into a channel, built on an injected `load` —
+    /// mirrors `query/pool.rs`'s `channel_pool_with`, for a test that
+    /// needs to control what a load does (panic) rather than run a real
+    /// one.
+    fn spawn_channel_with_load(
+        store: Store,
+        schema: geode_core::schema::SchemaSpec,
+        load: LoadFn,
+    ) -> (IngestHandle, Receiver<IngestEvent>) {
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        (IngestRunner::spawn_with_load(store, schema, sink, load), rx)
+    }
+
+    fn boom(_store: &Store, _req: &LoadRequest) -> Result<LoadOutcome, LoadError> {
+        panic!("injected panic payload");
+    }
+
+    #[test]
+    fn a_panicking_load_names_the_file_and_the_panic_payload() {
+        let (_db, _src, store, ds, plan) = harness();
+        let item = plan.items[0].clone();
+        let path = item.candidate.csv_path.clone();
+
+        let (handle, rx) = spawn_channel_with_load(store, schema_of(ds), boom);
+        handle.submit(WorkPlan { items: vec![item] });
+        let events = drain(&rx, 1);
+        handle.shutdown();
+
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                IngestEvent::Failed { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no Failed event: {events:?}"));
+        assert!(
+            reason.contains(&path.display().to_string()),
+            "reason must name the file: {reason}"
+        );
+        assert!(
+            reason.contains("injected panic payload"),
+            "reason must carry the panic payload: {reason}"
+        );
+    }
+
+    /// `service.rs`'s own `logged(...)` pattern (Phase 4b Task 2 fix
+    /// round 1, MAJ-1), reproduced here rather than shared: `log_ingest_
+    /// panic` fires on the spawned `geode-ingest` thread, so — unlike
+    /// `a_panicking_load_names_the_file_and_the_panic_payload` above,
+    /// which only sees the `Failed.reason` string that crosses the
+    /// channel — this drives the free function directly, on the test
+    /// thread, against a scoped ring subscriber (fix round 1, MAJ-2:
+    /// exactly why it was pulled out of `run` as a free function).
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_runner_not_once_per_event() {
+        // A gone receiver refuses every event for the rest of the
+        // session; unlatched, this line alone would evict the 4,096-entry
+        // ring a diagnostician came to read (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_event(&latch, "the first thing");
+            log_refused_event(&latch, "the second thing");
+            log_refused_event(&latch, "the third thing");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(
+            records[0].message.contains("the first thing"),
+            "{records:?}"
+        );
+    }
+
+    #[test]
+    fn log_ingest_panic_logs_the_file_and_payload_at_error() {
+        let records = logged(|| {
+            log_ingest_panic(std::path::Path::new("/tmp/risk_snapshot.csv"), "boom");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::ERROR);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(
+            records[0].message.contains("/tmp/risk_snapshot.csv"),
+            "{records:?}"
+        );
+        assert!(records[0].message.contains("boom"), "{records:?}");
     }
 
     #[test]

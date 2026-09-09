@@ -48,7 +48,7 @@ pub(super) fn test_services() -> ShellServices {
     // saved_scopes` returns empty and the loop is a no-op, but the
     // startup-ordering path itself still runs on every test built from
     // this fixture.
-    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config));
+    register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
     let mod_alias = default_mod();
     let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
     let (keymap, diags) = build_keymap(&[doc], mod_alias, &registry);
@@ -67,6 +67,10 @@ pub(super) fn test_services() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 
@@ -331,6 +335,10 @@ pub(super) fn test_services_with_gg_binding() -> ShellServices {
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        log: None,
+        action_tail: std::sync::Arc::new(std::sync::Mutex::new(
+            crate::diagnostics::ActionTail::new(),
+        )),
     }
 }
 /// `apply_reload` is `ShellView`'s real config-hot-reload apply path
@@ -355,9 +363,11 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
 mod asof;
 mod chrome_and_dialogs;
 mod commandline;
+mod diagnostics;
 mod dock;
 mod drag;
 mod flip;
+mod input;
 mod keybindings_dialog;
 mod objectdialog;
 mod occupants;

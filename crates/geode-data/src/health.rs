@@ -1,94 +1,36 @@
-//! Degradation vocabulary (spec §5.7). Data problems are never modal and
-//! never fatal: a failed load leaves live untouched and degrades this
-//! file's health. Ord is severity order so a rollup can take the worst.
+//! Re-export of [`geode_core::health::Health`] (Phase 4b Task 4): the
+//! type moved to `geode-core` so `geode-shell`'s `Diagnostics` entity can
+//! name it without `geode-shell` depending on `geode-data` (CLAUDE.md:
+//! shell and data never depend on each other). Kept under this path so
+//! every existing `geode_data::health::Health` / `crate::health::Health`
+//! reference in this crate and its callers keeps compiling unchanged.
+pub use geode_core::health::Health;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Health {
-    Ok,
-    /// A CSV whose sentinel has not landed yet. Expected, not broken.
-    Pending,
-    /// Pending past the source's configured timeout.
-    PendingTooLong,
-    /// Loaded, but something was wrong — a required column was missing.
-    Degraded {
-        reason: String,
-    },
-    /// The load failed. Last good generation stays live.
-    Failed {
-        reason: String,
-    },
-}
-
-impl Health {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Health::Ok => "ok",
-            Health::Pending => "pending",
-            Health::PendingTooLong => "pending_too_long",
-            Health::Degraded { .. } => "degraded",
-            Health::Failed { .. } => "failed",
-        }
-    }
-
-    pub fn to_parts(&self) -> (String, Option<String>) {
-        let reason = match self {
-            Health::Degraded { reason } | Health::Failed { reason } => Some(reason.clone()),
-            _ => None,
-        };
-        (self.label().to_string(), reason)
-    }
-
-    pub fn from_parts(label: &str, reason: Option<&str>) -> Health {
-        match label {
-            "pending" => Health::Pending,
-            "pending_too_long" => Health::PendingTooLong,
-            "degraded" => Health::Degraded {
-                reason: reason.unwrap_or_default().to_string(),
-            },
-            "failed" => Health::Failed {
-                reason: reason.unwrap_or_default().to_string(),
-            },
-            _ => Health::Ok,
-        }
-    }
-
-    pub fn is_ok(&self) -> bool {
-        matches!(self, Health::Ok)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn health_orders_by_severity_so_rollups_take_the_worst() {
-        let mut states = [
-            Health::Ok,
-            Health::Failed {
-                reason: "torn read".into(),
-            },
-            Health::Pending,
-            Health::Degraded {
-                reason: "column missing".into(),
-            },
-        ];
-        states.sort();
-        assert_eq!(states.first().unwrap().label(), "ok");
-        assert_eq!(states.last().unwrap().label(), "failed");
-    }
-
-    #[test]
-    fn round_trips_through_its_stored_label() {
-        for h in [
-            Health::Ok,
-            Health::Pending,
-            Health::PendingTooLong,
-            Health::Degraded { reason: "r".into() },
-            Health::Failed { reason: "r".into() },
-        ] {
-            let (label, reason) = h.to_parts();
-            assert_eq!(Health::from_parts(&label, reason.as_deref()), h);
-        }
+/// The severity ordering `HealthTracker` compares by, and the only one
+/// (round 4, NEW-5).
+///
+/// [`Health`]'s own derived `Ord` must never be used for this. Its
+/// variant order IS severity order, but once two values share a variant
+/// it falls through to comparing the `reason` STRING — so between a
+/// discovery `Degraded { reason: "expected value at line 1" }` and a
+/// load `Degraded { reason: "currency varies within instrument key" }`
+/// the winner was whichever reason sorted later, and the loser was
+/// dropped without ever reaching the surface. That is the same
+/// "a real problem is never shown" failure MAJ-3 and NEW-4 were raised
+/// for, arriving through the tie-break instead.
+///
+/// Task 3 (health follow-ups) moved this here from `service.rs`, where
+/// `HealthTracker`'s worst-of-two-lanes rollup was its only user, once
+/// `geode-data::ingest::scheduler`'s own `worst_health` needed the same
+/// rank for its worst-of-candidates rollup — the same "same variant,
+/// different reason" hazard, this time between two discovery candidates
+/// rather than two health lanes.
+pub(crate) fn severity_rank(h: &Health) -> u8 {
+    match h {
+        Health::Failed { .. } => 4,
+        Health::Degraded { .. } => 3,
+        Health::PendingTooLong => 2,
+        Health::Pending => 1,
+        Health::Ok => 0,
     }
 }

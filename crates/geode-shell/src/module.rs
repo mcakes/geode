@@ -10,6 +10,7 @@
 //! to the tile whose id is the outcome's key.
 
 use crate::actions::{ActionId, ActionRegistry};
+use crate::diagnostics::Diagnostics;
 use crate::frame::Frame;
 use crate::keymap::KeyContext;
 use crate::tiling::TileId;
@@ -40,6 +41,14 @@ pub trait TileContent {
     fn command(&self, line: &str, window: &mut Window, cx: &mut App) -> Result<(), String>;
     /// Candidates for the word under `cursor` on a `:` line. The shell
     /// ranks and shows them; the occupant only knows its vocabulary.
+    /// Each candidate is the bare WORD for that position (`ingest`,
+    /// never `level ingest`): the shell splices the accepted one into
+    /// the line in place of the word under the cursor
+    /// (`commandline::accept`), so a whole-line candidate doubles the
+    /// line (`level level ingest` — seen on a display 2026-09-08). Return
+    /// the position's whole vocabulary, unfiltered; the shell's ranking
+    /// narrows it, and Enter refuses a partial word that ranks more than
+    /// one candidate rather than guessing.
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String>;
     fn find(&self, event: FindEvent, window: &mut Window, cx: &mut App);
     /// A query result addressed to this tile (§5.1).
@@ -85,6 +94,7 @@ pub trait ModuleFactory {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: Entity<Frame>,
+        diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant;
@@ -145,6 +155,17 @@ pub mod placeholder {
     use gpui::{Context, Render, div};
     use gpui_component::ActiveTheme as _;
 
+    /// The kind string a placeholder occupant's `TileOccupant::kind`
+    /// carries (Phase 4b Task 1 fix round 1, MIN-7) — named here, next
+    /// to the factory that is its one source of truth, so every other
+    /// site that must recognize a placeholder occupant (`PlaceholderFactory
+    /// ::kind`, `PlaceholderFactory::create`'s `TileOccupant`, and
+    /// `shell::occupants`'s two `visible_tile_keys`/`current_tiles`
+    /// filters) names this constant instead of repeating the bare string
+    /// literal `"placeholder"` — a rename of one becomes a compile error
+    /// everywhere else instead of a silent behaviour change.
+    pub const PLACEHOLDER_KIND: &str = "placeholder";
+
     pub struct PlaceholderFactory;
 
     struct PlaceholderView {
@@ -189,7 +210,7 @@ pub mod placeholder {
 
     impl ModuleFactory for PlaceholderFactory {
         fn kind(&self) -> &'static str {
-            "placeholder"
+            PLACEHOLDER_KIND
         }
         fn register_actions(&self, _: &mut ActionRegistry) {}
         fn create(
@@ -197,12 +218,13 @@ pub mod placeholder {
             tile: TileId,
             _: Option<&toml::Table>,
             _: Entity<Frame>,
+            _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {
             let view = cx.new(|_| PlaceholderView { tile });
             TileOccupant {
-                kind: "placeholder",
+                kind: PLACEHOLDER_KIND,
                 view: view.into(),
                 content: Box::new(PlaceholderContent),
             }
@@ -337,6 +359,7 @@ pub mod recording {
             tile: TileId,
             restored: Option<&toml::Table>,
             _: Entity<Frame>,
+            _: Entity<Diagnostics>,
             _: &mut Window,
             cx: &mut App,
         ) -> TileOccupant {

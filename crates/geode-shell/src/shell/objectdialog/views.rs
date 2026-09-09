@@ -373,6 +373,13 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
                     "view '{}': dataset '{dataset}' is not in the schema",
                     draft.name
                 ),
+                // `None`, like every other build site in the workspace:
+                // 4b added the field and filled it in from no reader
+                // ("Not filled in by any reader in 4b" — its own doc),
+                // and nothing yet reads it back. Attaching a field-row
+                // path here via `with_path` is the feature that field
+                // was added for, not something a merge should invent.
+                path: None,
             });
         }
     }

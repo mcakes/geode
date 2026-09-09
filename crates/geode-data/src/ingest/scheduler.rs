@@ -7,20 +7,29 @@
 //! the same code path as the thirtieth poll, and discovery I/O happens
 //! here where nothing waits on it.
 
-use crate::health::Health;
+use crate::health::{Health, severity_rank};
 use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
 use crate::source::{CandidateState, SourceSpec, discover};
 use crate::store::Catalog;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SchedulerEvent {
     /// One poll finished; `ready` is how many files were handed to the
-    /// runner. Tests wait on this; the service ignores it.
-    Polled { source: String, ready: usize },
+    /// runner. Tests wait on this; the service maps it to
+    /// `DataEvent::Polled` (Phase 4b §4.4's last/next-poll diagnostic).
+    /// `next_in` is this source's `poll_interval` at the moment of this
+    /// poll — the service adds it to "now" to get the next poll's
+    /// estimated time.
+    Polled {
+        source: String,
+        ready: usize,
+        next_in: Duration,
+    },
     /// The worst thing discovery found. Never modal, never fatal.
     Health {
         source: String,
@@ -29,6 +38,11 @@ pub enum SchedulerEvent {
     },
 }
 
+/// Where discovery's events go. `false` means "this event was not
+/// delivered" — the caller's bounded channel was full, or its receiver is
+/// gone — and is never a shutdown signal: the scheduler re-arms and polls
+/// on regardless (Phase 4b follow-up, Task 1; its only stop is the `stop`
+/// condvar `Scheduler::shutdown` sets). A sink must not block.
 pub type SchedulerSink = Arc<dyn Fn(SchedulerEvent) -> bool + Send + Sync>;
 
 pub struct Scheduler {
@@ -92,6 +106,37 @@ fn wait_until(stop: &(Mutex<bool>, Condvar), until: Instant) -> bool {
     }
 }
 
+/// Which of one poll's two events the sink refused. Both are always
+/// attempted (fix round 1, MIN-4), so the warning can name what was
+/// actually dropped instead of saying "a discovery event" for either.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Refused {
+    health: bool,
+    polled: bool,
+}
+
+impl Refused {
+    /// A poll that never got as far as its `Polled` — the discovery
+    /// error and panic arms, which report health and nothing else.
+    fn health(refused: bool) -> Refused {
+        Refused {
+            health: refused,
+            polled: false,
+        }
+    }
+
+    /// What to name in the log, or `None` when everything landed. A pure
+    /// function so the message is testable without a scheduler thread.
+    fn what(self) -> Option<&'static str> {
+        match (self.health, self.polled) {
+            (true, true) => Some("the health report and the poll result"),
+            (true, false) => Some("the health report"),
+            (false, true) => Some("the poll result"),
+            (false, false) => None,
+        }
+    }
+}
+
 fn run(
     sources: Vec<SourceSpec>,
     conn: duckdb::Connection,
@@ -102,6 +147,12 @@ fn run(
     if sources.is_empty() {
         return;
     }
+    // One line per scheduler, not one per poll (final review, MIN-3):
+    // before Task 1 a refusal ended this thread, so the warning could not
+    // repeat. Now the thread polls on every `poll_interval` for the rest
+    // of the session, and an unlatched line would fill the 4,096-entry
+    // log ring. `dropped` remains the authoritative count.
+    let refusal_logged = AtomicBool::new(false);
     // Everything is due now: the first sweep is the cold start.
     let mut due: Vec<(Instant, usize)> = (0..sources.len()).map(|i| (Instant::now(), i)).collect();
 
@@ -125,49 +176,75 @@ fn run(
         // being polled with nothing on the sink to say so — exactly the
         // silence spec §5.7 forbids.
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            || -> Result<bool, crate::store::StoreError> {
-                let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
-                let health = worst_health(&candidates);
-                let ok = match health {
-                    Some((worst, detail)) => sink(SchedulerEvent::Health {
-                        source: spec.name.clone(),
-                        worst,
-                        detail,
-                    }),
-                    None => true,
-                };
-                let plan = build_plan(&[(spec.clone(), candidates)]);
-                let ready = plan.items.len();
-                if ready > 0 {
-                    ingest.submit(plan);
-                }
-                Ok(ok
-                    && sink(SchedulerEvent::Polled {
+            || -> Result<Refused, crate::store::StoreError> {
+                geode_core::panic::contained(|| {
+                    let candidates = discover(spec, &Catalog::new(&conn), SystemTime::now())?;
+                    let health = worst_health(&candidates);
+                    // NEW-1 (final review round 2): the scheduler ALWAYS
+                    // emits its poll result now — `Ok` on a clean poll,
+                    // `worst` otherwise — with no dedup of its own. The
+                    // transition guard moved to `DataService`'s shared
+                    // `HealthTracker`, which both this scheduler sink and
+                    // the ingest sink report through: a scheduler-local
+                    // tracker (the old `last_reported`) could not see a
+                    // publish's own health notes, so a degraded publish
+                    // stayed latched even after the scheduler's own next
+                    // clean poll — the scheduler thought it had already
+                    // said `Ok`.
+                    let health_delivered = match health {
+                        Some((worst, detail)) => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst,
+                            detail,
+                        }),
+                        None => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst: Health::Ok,
+                            detail: String::new(),
+                        }),
+                    };
+                    let plan = build_plan(&[(spec.clone(), candidates)]);
+                    let ready = plan.items.len();
+                    if ready > 0 {
+                        ingest.submit(plan);
+                    }
+                    // Attempted unconditionally, never `health_delivered
+                    // && …` (fix round 1, MIN-4): a poll's two events are
+                    // independent, and short-circuiting meant one full
+                    // channel lost both while the caller's `dropped`
+                    // counter — and the warning below — knew about one.
+                    let polled_delivered = sink(SchedulerEvent::Polled {
                         source: spec.name.clone(),
                         ready,
-                    }))
+                        next_in: spec.poll_interval,
+                    });
+                    Ok(Refused {
+                        health: !health_delivered,
+                        polled: !polled_delivered,
+                    })
+                })
             },
         ));
 
-        let delivered = match outcome {
-            Ok(Ok(delivered)) => delivered,
-            Ok(Err(e)) => sink(SchedulerEvent::Health {
+        let refused = match outcome {
+            Ok(Ok(refused)) => refused,
+            Ok(Err(e)) => Refused::health(!sink(SchedulerEvent::Health {
                 source: spec.name.clone(),
                 worst: Health::Failed {
                     reason: e.to_string(),
                 },
                 detail: format!("discovery failed: {e}"),
-            }),
-            Err(_) => sink(SchedulerEvent::Health {
+            })),
+            Err(_) => Refused::health(!sink(SchedulerEvent::Health {
                 source: spec.name.clone(),
                 worst: Health::Failed {
                     reason: "discovery panicked".into(),
                 },
                 detail: "discovery panicked".into(),
-            }),
+            })),
         };
-        if !delivered {
-            return;
+        if let Some(what) = refused.what() {
+            log_refused_discovery(&refusal_logged, what, &spec.name);
         }
         // Re-arm from *now*, not from `when`: a slow share must not make
         // the next poll immediately due and spin.
@@ -175,9 +252,43 @@ fn run(
     }
 }
 
-/// The worst candidate state and a detail line naming the files in it.
+/// A refused event is one dropped diagnostic, not the end of discovery
+/// for every source (Phase 4b follow-up, Task 1). Nothing is retried: the
+/// health transition the tracker cares about is re-offered on the next
+/// report. Logged once per scheduler — `latched` (final review, MIN-3) —
+/// and a free function so a test can reach it without a scheduler thread,
+/// the same reason `runner::log_refused_event` is one.
+fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::warn!(
+        target: "geode::ingest",
+        "event channel refused {what} for source '{source}': dropped, polling \
+         continues (further refusals are counted, not logged)",
+    );
+}
+
+/// The worst candidate state and a detail line naming EVERY file at that
+/// worst severity, ordered by [`severity_rank`] — never `Health`'s
+/// derived `Ord`. Two `Orphaned` candidates (both lower to
+/// `Degraded`) with different reasons are the same variant, so `Ord`
+/// falls through to comparing the `reason` STRING: the alphabet would
+/// decide which candidate's `*w == h` / `*w > h` comparison kept it, and
+/// the other file's name was dropped from the detail entirely — the
+/// same failure `severity_rank`'s own doc explains for `service.rs`'s
+/// `HealthTracker` rollup (NEW-5), here between two discovery
+/// candidates instead of two health lanes.
+///
+/// Equal rank keeps every candidate at that rank. The returned `Health`
+/// carries the FIRST such candidate's reason, in candidate order. When
+/// the kept candidates' reasons differ, the detail names each file with
+/// its own reason (`degraded: a.csv (expected value at line 1), b.csv
+/// (no header)`); when they agree — including `PendingTooLong`, which
+/// has none — the detail keeps today's plain shape (`pending_too_long:
+/// a.csv, b.csv`).
 fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, String)> {
-    let mut worst: Option<(Health, Vec<String>)> = None;
+    let mut worst: Vec<(Health, String)> = Vec::new();
     for c in candidates {
         let h = match &c.state {
             CandidateState::PendingTooLong => Health::PendingTooLong,
@@ -193,16 +304,38 @@ fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, Stri
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        match &mut worst {
-            Some((w, names)) if *w == h => names.push(name),
-            Some((w, _)) if *w > h => {}
-            _ => worst = Some((h, vec![name])),
+        let incumbent_rank = worst.first().map(|(w, _)| severity_rank(w));
+        match incumbent_rank {
+            Some(r) if r == severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > severity_rank(&h) => {}
+            _ => worst = vec![(h, name)],
         }
     }
-    worst.map(|(h, names)| {
-        let detail = format!("{}: {}", h.label(), names.join(", "));
-        (h, detail)
-    })
+    let first = worst.first()?.0.clone();
+    let first_reason = reason(&first);
+    let reasons_differ = worst.iter().any(|(h, _)| reason(h) != first_reason);
+    let names = worst.iter().map(|(h, name)| {
+        if reasons_differ && let Some(r) = reason(h) {
+            return format!("{name} ({r})");
+        }
+        name.clone()
+    });
+    let detail = format!(
+        "{}: {}",
+        first.label(),
+        names.collect::<Vec<_>>().join(", ")
+    );
+    Some((first, detail))
+}
+
+/// `h`'s reason, without `to_parts()`'s always-allocated label —
+/// `worst_health` calls this once per candidate at the worst rank, on
+/// every scheduler poll.
+fn reason(h: &Health) -> Option<&str> {
+    match h {
+        Health::Degraded { reason } | Health::Failed { reason } => Some(reason.as_str()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -254,6 +387,270 @@ mod tests {
         (Arc::new(move |e| tx.send(e).is_ok()), rx)
     }
 
+    /// `events_sink`, but REFUSING the first event matching `refuse` —
+    /// returning `false` without sending it. `false` means "not
+    /// delivered", never "stop polling" (Phase 4b follow-up, Task 1).
+    /// The counter lets a test wait for the refusal instead of racing it.
+    fn refusing_events_sink(
+        refuse: fn(&SchedulerEvent) -> bool,
+    ) -> (
+        SchedulerSink,
+        Receiver<SchedulerEvent>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let (tx, rx) = channel();
+        let refusals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&refusals);
+        let sink: SchedulerSink = Arc::new(move |e: SchedulerEvent| {
+            // Claimed atomically (fix round 1, nit): load-then-add
+            // could refuse twice if two threads ever shared this sink.
+            if refuse(&e)
+                && counter
+                    .compare_exchange(
+                        0,
+                        1,
+                        std::sync::atomic::Ordering::SeqCst,
+                        std::sync::atomic::Ordering::SeqCst,
+                    )
+                    .is_ok()
+            {
+                return false;
+            }
+            tx.send(e).is_ok()
+        });
+        (sink, rx, refusals)
+    }
+
+    /// A candidate at `name`'s path in the given state; every other
+    /// field is filler `worst_health` never reads.
+    fn candidate(name: &str, state: CandidateState) -> crate::source::Candidate {
+        crate::source::Candidate {
+            csv_path: std::path::PathBuf::from(name),
+            sentinel_path: std::path::PathBuf::from(format!("{name}.done")),
+            batch: "b".into(),
+            size: 0,
+            mtime: SystemTime::now(),
+            state,
+        }
+    }
+
+    #[test]
+    fn two_orphaned_candidates_with_different_reasons_are_both_named() {
+        // Same severity (both `Orphaned` -> `Degraded`), different
+        // reasons: `Health`'s derived `Ord` would fall through to
+        // comparing the reason STRING and, with "b" sorting after "a",
+        // silently drop "a.csv" from the detail entirely (not even
+        // merged in) under the old `*w == h` / `*w > h` comparison.
+        //
+        // This is the only pair of candidates that CAN demonstrate
+        // `severity_rank` beating the reason-string tie-break: two
+        // different variants (e.g. `Degraded` vs `PendingTooLong`)
+        // already compare correctly under the derived `Ord`, since it
+        // only falls through to the reason string once both sides are
+        // the same variant. This test alone carries "rank, not reason
+        // text" — see the next test's comment for why a
+        // different-variant fixture cannot.
+        let candidates = vec![
+            candidate(
+                "b.csv",
+                CandidateState::Orphaned {
+                    reason: "no header".into(),
+                },
+            ),
+            candidate(
+                "a.csv",
+                CandidateState::Orphaned {
+                    reason: "expected value at line 1".into(),
+                },
+            ),
+        ];
+        let (health, detail) = worst_health(&candidates).expect("both candidates are unhealthy");
+        assert_eq!(
+            health,
+            Health::Degraded {
+                reason: "no header".into(),
+            },
+            "the health carries the FIRST candidate's reason, in candidate order"
+        );
+        assert_eq!(
+            detail,
+            "degraded: b.csv (no header), a.csv (expected value at line 1)"
+        );
+    }
+
+    #[test]
+    fn a_higher_rank_candidate_replaces_the_names_accumulated_at_a_lower_rank() {
+        // Review round 1's Major: a `Degraded`-vs-`PendingTooLong`
+        // fixture can never demonstrate "rank, not reason text" — those
+        // are different variants, and `Health`'s derived `Ord` already
+        // orders different variants correctly (it only falls through to
+        // the reason string once both sides are the SAME variant, which
+        // the test above covers). Hand-tracing the OLD `*w == h` /
+        // `*w > h` code against this exact fixture lands on the same
+        // answer as the fixed code either way, so no string choice here
+        // could have told the two implementations apart.
+        //
+        // What this fixture DOES pin, honestly: two ties accumulate at
+        // the lower rank (`PendingTooLong`, `a.csv` then `b.csv`), and a
+        // later, strictly higher-rank candidate (`Orphaned` -> Degraded,
+        // `c.csv`) must discard both accumulated names rather than
+        // append beside them — `worst` only ever holds candidates at
+        // the CURRENT worst rank.
+        let candidates = vec![
+            candidate("a.csv", CandidateState::PendingTooLong),
+            candidate("b.csv", CandidateState::PendingTooLong),
+            candidate(
+                "c.csv",
+                CandidateState::Orphaned {
+                    reason: "no header".into(),
+                },
+            ),
+        ];
+        let (health, detail) =
+            worst_health(&candidates).expect("all three candidates are unhealthy");
+        assert_eq!(
+            health,
+            Health::Degraded {
+                reason: "no header".into(),
+            },
+        );
+        assert_eq!(
+            detail, "degraded: c.csv",
+            "the two lower-rank names must be replaced, not kept alongside the winner"
+        );
+    }
+
+    #[test]
+    fn a_refused_event_does_not_stop_the_scheduler() {
+        // One full outbound channel used to end discovery for EVERY
+        // source for the rest of the session. The scheduler's only stop
+        // is its `stop` condvar (Phase 4b follow-up, Task 1).
+        let poll = Duration::from_millis(20);
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(poll, Duration::from_secs(3600));
+        let (sink, sched_rx, refusals) =
+            refusing_events_sink(|e| matches!(e, SchedulerEvent::Polled { .. }));
+        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && refusals.load(std::sync::atomic::Ordering::SeqCst) == 0
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            refusals.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the first Polled event must have been refused"
+        );
+
+        // A later poll must still arrive: the refusal cost one event, not
+        // the whole thread.
+        let mut later = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            match sched_rx.recv_timeout(Duration::from_secs(1)) {
+                Ok(e @ SchedulerEvent::Polled { .. }) => {
+                    later = Some(e);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {}
+            }
+        }
+        sched.shutdown();
+        assert!(
+            later.is_some(),
+            "the source must be polled again after a refused event"
+        );
+    }
+
+    /// Records logged while `f` runs, on this thread only — the same
+    /// scoped-subscriber pattern `runner.rs`'s own test module uses.
+    fn logged(f: impl FnOnce()) -> Vec<geode_core::log::Record> {
+        use tracing_subscriber::layer::SubscriberExt;
+        let ring = Arc::new(geode_core::log::Ring::new(8));
+        let sub =
+            tracing_subscriber::registry().with(geode_core::log::RingLayer::new(ring.clone()));
+        tracing::subscriber::with_default(sub, f);
+        let mut out = Vec::new();
+        ring.drain_since(0, &mut out);
+        out
+    }
+
+    #[test]
+    fn a_refusal_is_logged_once_per_scheduler_not_once_per_poll() {
+        // The default poll interval is 30 s and the thread no longer
+        // exits on a refusal, so an unlatched line repeats for the rest
+        // of the session (final review, MIN-3).
+        let latch = AtomicBool::new(false);
+        let records = logged(|| {
+            log_refused_discovery(&latch, "the health report", "risk");
+            log_refused_discovery(&latch, "the poll result", "risk");
+        });
+        assert_eq!(records.len(), 1, "{records:?}");
+        assert_eq!(records[0].level, tracing::Level::WARN);
+        assert_eq!(records[0].target, "geode::ingest");
+        assert!(records[0].message.contains("risk"), "{records:?}");
+    }
+
+    #[test]
+    fn the_warning_names_which_of_a_polls_events_was_refused() {
+        assert_eq!(Refused::default().what(), None);
+        assert_eq!(
+            Refused {
+                health: true,
+                polled: false
+            }
+            .what(),
+            Some("the health report")
+        );
+        assert_eq!(
+            Refused {
+                health: false,
+                polled: true
+            }
+            .what(),
+            Some("the poll result")
+        );
+        assert_eq!(
+            Refused {
+                health: true,
+                polled: true
+            }
+            .what(),
+            Some("the health report and the poll result")
+        );
+    }
+
+    #[test]
+    fn a_refused_health_does_not_swallow_that_polls_result() {
+        // The two events of one poll are independent (fix round 1,
+        // MIN-4): a refused `Health` used to short-circuit the `Polled`
+        // that follows it, so one full-channel moment lost two events
+        // while `dropped` counted one. The first event to actually
+        // arrive must therefore be THIS poll's `Polled`, not the next
+        // poll's `Health`.
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(20), Duration::from_secs(3600));
+        let (sink, sched_rx, refusals) =
+            refusing_events_sink(|e| matches!(e, SchedulerEvent::Health { .. }));
+        let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
+
+        let first = sched_rx.recv_timeout(Duration::from_secs(30));
+        sched.shutdown();
+        let first = first.expect("a poll whose Health was refused must still report its result");
+        assert!(
+            matches!(first, SchedulerEvent::Polled { .. }),
+            "expected this poll's own Polled, not the next poll's Health: {first:?}"
+        );
+        assert_eq!(
+            refusals.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "exactly one Health was refused"
+        );
+    }
+
     #[test]
     fn a_file_that_appears_after_start_is_discovered_and_published() {
         // The whole point of the scheduler (Phase 3 §2.8): the probe
@@ -263,8 +660,19 @@ mod tests {
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
 
-        // First poll: nothing there.
-        let first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // First poll: nothing there. A clean source's first poll is now
+        // also a Health::Ok transition (MAJ-2, final review) — skip past
+        // it rather than assuming Polled arrives first.
+        let mut first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        if matches!(
+            first,
+            SchedulerEvent::Health {
+                worst: Health::Ok,
+                ..
+            }
+        ) {
+            first = sched_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
         assert!(
             matches!(first, SchedulerEvent::Polled { ready: 0, .. }),
             "{first:?}"
@@ -298,17 +706,19 @@ mod tests {
 
     #[test]
     fn an_unchanged_directory_submits_nothing_on_later_polls() {
+        let poll = Duration::from_millis(20);
         let (_db, _dir, ingest, ingest_rx, conn, spec, _ds) =
-            harness(Duration::from_millis(20), Duration::from_secs(3600));
+            harness(poll, Duration::from_secs(3600));
         let (sink, sched_rx) = events_sink();
         let sched = Scheduler::spawn(vec![spec], conn, Arc::clone(&ingest), sink);
         let mut polls = 0;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while polls < 5 && std::time::Instant::now() < deadline {
-            if let Ok(SchedulerEvent::Polled { ready, .. }) =
+            if let Ok(SchedulerEvent::Polled { ready, next_in, .. }) =
                 sched_rx.recv_timeout(Duration::from_secs(10))
             {
                 assert_eq!(ready, 0);
+                assert_eq!(next_in, poll, "next_in is this source's poll_interval");
                 polls += 1;
             }
         }
@@ -344,6 +754,98 @@ mod tests {
         let (worst, detail) = seen.expect("a health event");
         assert_eq!(worst, Health::PendingTooLong);
         assert!(detail.contains("BK000"), "{detail}");
+        sched.shutdown();
+    }
+
+    /// MAJ-2 (final review): a source's health used to be latched for the
+    /// session — nothing ever emitted `Health::Ok`, so a source that
+    /// recovered from `PendingTooLong` kept reading as degraded forever.
+    #[test]
+    fn a_degraded_source_that_recovers_emits_an_ok_health_event() {
+        let (_db, dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(Duration::from_millis(50), Duration::ZERO);
+        std::fs::write(
+            dir.path().join("risk_2026-09-03_BK000.csv"),
+            "Book\nBK000\n",
+        )
+        .unwrap();
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut degraded = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::PendingTooLong,
+                ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                degraded = true;
+                break;
+            }
+        }
+        assert!(degraded, "setup: the source must degrade first");
+
+        // The sentinel lands: the file becomes Ready, so the next poll's
+        // `worst_health` returns None.
+        std::fs::write(
+            dir.path().join("risk_2026-09-03_BK000.csv.done"),
+            r#"{"as_of":"2026-09-03T07:00:00Z","columns":["Book"],"books":["BK000"]}"#,
+        )
+        .unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let mut recovered = false;
+        while std::time::Instant::now() < deadline {
+            if let Ok(SchedulerEvent::Health {
+                worst: Health::Ok, ..
+            }) = sched_rx.recv_timeout(Duration::from_secs(1))
+            {
+                recovered = true;
+                break;
+            }
+        }
+        assert!(recovered, "a recovered source must report Health::Ok");
+        sched.shutdown();
+    }
+
+    /// MAJ-2's original dedup guard lived here, at the scheduler; final
+    /// review round 2 (NEW-1) moved it to `DataService`'s shared
+    /// `HealthTracker`, because a scheduler-local tracker had no way to
+    /// see a PUBLISH's own health notes — a degraded publish stayed
+    /// latched even after the scheduler's next clean poll, since the
+    /// scheduler thought it had already said `Ok`. The scheduler now
+    /// emits its poll result unconditionally; the "exactly one Ok" case
+    /// this test used to pin now lives at the service level
+    /// (`service.rs`'s
+    /// `a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok`).
+    /// Pinned here instead: a steadily healthy source reports `Ok` on
+    /// EVERY poll, not just the first.
+    #[test]
+    fn a_steadily_healthy_source_reports_ok_on_every_poll() {
+        let poll = Duration::from_millis(20);
+        let (_db, _dir, ingest, _ingest_rx, conn, spec, _ds) =
+            harness(poll, Duration::from_secs(3600));
+        let (sink, sched_rx) = events_sink();
+        let sched = Scheduler::spawn(vec![spec], conn, ingest, sink);
+        let mut polls = 0;
+        let mut ok_count = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while polls < 8 && std::time::Instant::now() < deadline {
+            match sched_rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(SchedulerEvent::Polled { .. }) => polls += 1,
+                Ok(SchedulerEvent::Health {
+                    worst: Health::Ok, ..
+                }) => ok_count += 1,
+                _ => {}
+            }
+        }
+        assert_eq!(polls, 8, "eight polls within 30s");
+        assert_eq!(
+            ok_count, 8,
+            "the scheduler emits Ok on every clean poll now — dedup lives \
+             in DataService's shared HealthTracker"
+        );
         sched.shutdown();
     }
 

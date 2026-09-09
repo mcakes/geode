@@ -166,6 +166,13 @@ pub struct ViewSpec {
     pub grouping: Vec<String>,
     pub sort: Vec<SortKey>,
     pub presentation: BTreeMap<String, ColumnPresentation>,
+    /// Set by a top-level `default = "<name>"` key in the views doc
+    /// (Phase 4b M6) — at most one view carries `true`. A tile that
+    /// doesn't restore a `view` from its session record picks this one;
+    /// with no `default` key at all, `from_doc` instead sorts every view
+    /// by name so "the first one" is at least deterministic across a
+    /// `toml` `preserve_order` file's own author-chosen order.
+    pub is_default: bool,
 }
 
 impl ViewSpec {
@@ -209,6 +216,7 @@ impl ViewSpec {
             layer: None,
             file: None,
             message: format!("view '{}': {m}", self.name),
+            path: None,
         };
 
         let Some(ds) = schema.dataset(&self.dataset) else {
@@ -290,9 +298,42 @@ impl ViewSpec {
     pub fn from_doc(doc: &MergedDoc) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
         let mut diags = Vec::new();
+        // Phase 4b M6: a top-level `default = "<name>"` key names which
+        // view a tile with nothing restored should open on — captured
+        // ahead of the main loop below since (unlike every view itself)
+        // its value is a bare string, not a table.
+        //
+        // Phase 4b Task 1 fix round 1, MIN-3: the main loop below must
+        // only skip a `default` entry that is either the string header
+        // or a malformed non-table value already warned about here — a
+        // view literally named `default` (a natural name for the view a
+        // desk wants opened first) is a TABLE, not a string, so it must
+        // still reach the loop and parse as an ordinary `ViewSpec`. A
+        // non-string, non-table `default` value (a typo like
+        // `default = 3`) is neither a valid header nor a valid view — it
+        // warns here and is skipped below rather than tripping the main
+        // loop's own "not a table" diagnostic under the confusing name
+        // "view 'default'".
+        let default_value = doc.value.get("default");
+        let default_name = default_value.and_then(|v| v.as_str()).map(str::to_string);
+        if let Some(v) = default_value
+            && v.as_str().is_none()
+            && v.as_table().is_none()
+        {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: "top-level 'default' must be a string naming a view".to_string(),
+                path: None,
+            });
+        }
 
         for (name, value) in &doc.value {
             if name == "config_version" {
+                continue;
+            }
+            if name == "default" && value.as_table().is_none() {
                 continue;
             }
             let bad = |m: String| Diagnostic {
@@ -300,6 +341,7 @@ impl ViewSpec {
                 layer: None,
                 file: None,
                 message: format!("view '{name}': {m}"),
+                path: None,
             };
             let Some(table) = value.as_table() else {
                 diags.push(bad("not a table".into()));
@@ -479,6 +521,27 @@ impl ViewSpec {
             out.push(view);
         }
 
+        // Phase 4b M6: with no `default` key, sort by name so "the first
+        // view" (`BlotterTile::new`'s fallback when nothing is restored)
+        // is deterministic regardless of file order — `toml`'s
+        // `preserve_order` feature means that would otherwise be
+        // whatever order the author happened to write the views in. A
+        // `default` key makes that ordering moot (the fallback finds the
+        // flagged view directly), so file order is left alone instead.
+        match &default_name {
+            Some(default_name) => match out.iter_mut().find(|v| &v.name == default_name) {
+                Some(v) => v.is_default = true,
+                None => diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!("default view '{default_name}' does not exist"),
+                    path: None,
+                }),
+            },
+            None => out.sort_by(|a, b| a.name.cmp(&b.name)),
+        }
+
         (out, diags)
     }
 }
@@ -526,6 +589,7 @@ impl ViewPresentationSpec {
                 layer: None,
                 file: None,
                 message: format!("view presentation '{view_name}': {m}"),
+                path: None,
             };
             let Some(table) = value.as_table() else {
                 diags.push(bad("not a table".into()));
@@ -602,6 +666,7 @@ impl ViewPresentationSpec {
                 layer: None,
                 file: None,
                 message: format!("view presentation '{view_name}': {m}"),
+                path: None,
             };
             let Some(view) = views.iter_mut().find(|v| &v.name == view_name) else {
                 diags.push(warn("no view of that name — ignored".into()));
@@ -772,6 +837,89 @@ grain = "instrument"
         let (views, diags) = ViewSpec::from_doc(&doc(&format!("config_version = 1\n{SAMPLE}")));
         assert!(diags.is_empty(), "{diags:?}");
         assert!(views.iter().any(|v| v.name == "desk_risk"));
+    }
+
+    #[test]
+    fn views_with_no_default_key_come_out_sorted_by_name() {
+        // Phase 4b M6: file order is `b` then `a` — with `toml`'s
+        // `preserve_order` feature on, that would otherwise be the order
+        // `from_doc` returns them in, making "the first view" (a fresh
+        // tile's default) depend on where the author happened to write
+        // each view rather than on anything deliberate.
+        let text = r#"
+[b]
+dataset = "risk_snapshot"
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, vec!["a", "b"]);
+        assert!(views.iter().all(|v| !v.is_default));
+    }
+
+    #[test]
+    fn a_top_level_default_key_flags_that_view_and_leaves_file_order_alone() {
+        let text = r#"
+default = "b"
+
+[b]
+dataset = "risk_snapshot"
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let b = views.iter().find(|v| v.name == "b").expect("view b");
+        assert!(b.is_default);
+        let a = views.iter().find(|v| v.name == "a").expect("view a");
+        assert!(!a.is_default);
+    }
+
+    #[test]
+    fn a_view_literally_named_default_is_not_silently_dropped() {
+        // Phase 4b Task 1 fix round 1, MIN-3: the top-level `default`
+        // key skip used to fire unconditionally on any doc entry named
+        // "default", table or not — a desk whose `[default]` view is a
+        // perfectly natural name for the view it wants opened first lost
+        // it outright, with no diagnostic and `default_name` staying
+        // `None` (a table is not a `str`).
+        let text = r#"
+[default]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            views.iter().any(|v| v.name == "default"),
+            "a view named 'default' must still become a ViewSpec: {views:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_string_default_value_warns_instead_of_being_silently_ignored() {
+        // Phase 4b Task 1 fix round 1, MIN-3: `default = 3` (a typo, or
+        // any non-string value) used to be silently skipped by the same
+        // unconditional `name == "default"` check — no warning, and the
+        // remaining views were sorted as if no `default` key existed at
+        // all.
+        let text = r#"
+default = 3
+
+[a]
+dataset = "risk_snapshot"
+"#;
+        let (views, diags) = ViewSpec::from_doc(&doc(text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Warning && d.message.contains("default")),
+            "a non-string `default` must warn: {diags:?}"
+        );
+        assert!(views.iter().all(|v| !v.is_default));
     }
 
     #[test]

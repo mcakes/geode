@@ -755,8 +755,10 @@ run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
-  '                         and coalesce(fg.archived_only, false) = false' \
-  '                         and true'
+  '                       where fg.dataset = ?
+                         and coalesce(fg.archived_only, false) = false' \
+  '                       where fg.dataset = ?
+                         and true'
 
 run_mutation "ingest: the publish event names the partitions written" \
   crates/geode-data/src/ingest/runner.rs \
@@ -919,11 +921,13 @@ run_mutation "ingest: the bookless partition is published" \
 
 run_mutation "pool: a panicking query does not wedge its view" \
   crates/geode-data/src/query/pool.rs \
-  '            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&conn, &req))) {
-                Ok(r) => r.map_err(|e| e.to_string()),
-                Err(payload) => Err(panic_message(&*payload)),
-            };' \
-  '            run(&conn, &req).map_err(|e| e.to_string());'
+  '        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| run(&conn, &req))
+        })) {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(payload) => Err(panic_message(&*payload)),
+        };' \
+  '        let outcome = run(&conn, &req).map_err(|e| e.to_string());'
 
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
@@ -1077,13 +1081,20 @@ run_mutation "service: replace_views actually replaces" \
 run_mutation "runner: an undeclared dataset is a named failure, not a skip" \
   crates/geode-data/src/ingest/runner.rs \
   '            let failed = sink(IngestEvent::Failed {
+                source: item.source.clone(),
                 dataset: item.dataset.clone(),
                 batch: item.batch.clone(),
                 reason: format!("dataset '"'"'{}'"'"' is not declared", item.dataset),
             });
             clear_in_flight(&queue);
             if !failed {
-                return;
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
             }
             continue;' \
   '            clear_in_flight(&queue);
@@ -1131,10 +1142,10 @@ run_mutation "scheduler: the poll re-arms" \
 
 run_mutation "scheduler: ready files reach the runner" \
   crates/geode-data/src/ingest/scheduler.rs \
-  '                if ready > 0 {
-                    ingest.submit(plan);
-                }' \
-  '                let _ = plan;' \
+  '                    if ready > 0 {
+                        ingest.submit(plan);
+                    }' \
+  '                    let _ = plan;' \
   geode-data \
   a_file_that_appears_after_start_is_discovered_and_published
 
@@ -1145,18 +1156,21 @@ run_mutation "scheduler: pending-too-long surfaces as health" \
   geode-data \
   a_csv_pending_past_its_timeout_is_a_health_event
 
+# Re-anchored, Phase 4b Task 2 fix round 1: the Published arm grew an
+# `info!` call and a `rows` binding around the same `sink(...)` call this
+# entry has always been about; the anchor now targets just that inner
+# call so it's independent of the tracing addition (which has its own
+# coverage — geode-data's own `service::tests` module).
 run_mutation "service: a publish becomes a Published event" \
   crates/geode-data/src/service.rs \
-  '                } => sink(DataEvent::Published {
-                    dataset,
-                    batch,
-                    gen_id,
-                    books,
-                }),' \
-  '                } => {
-                    let _ = (dataset, batch, gen_id, books);
-                    true
-                }' \
+  '                    let delivered = sink(DataEvent::Published {
+                        dataset,
+                        batch: batch.clone(),
+                        gen_id,
+                        books,
+                    });' \
+  '                    let delivered = true;
+                    let _ = (dataset, gen_id, books);' \
   geode-data \
   a_configured_source_is_discovered_loaded_and_announced
 
@@ -1804,10 +1818,18 @@ run_mutation "commandline: word_at clamps a non-char-boundary cursor down before
   geode-shell \
   a_cursor_on_a_non_char_boundary_clamps_down_instead_of_panicking
 
+# Re-anchored (Phase 4b Task 4 fix round 2, ruling 4 / fix round 1's
+# own re-anchor attempt, which never made it into the committed
+# script): the code moved from a direct `self.restart_required = None;`
+# assignment to an `if restart.is_empty() { None } else { Some(..) }`
+# expression assigned once via `restart_message.clone()`. Mutated to
+# only assign when `Some`, reintroducing "never clears".
 run_mutation "frame: restart_required clears once sources/datasets match the baseline again (M8)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                self.restart_required = None;' \
-  '                let _ = &self.restart_required;' \
+  '            self.restart_required = restart_message.clone();' \
+  '            if restart_message.is_some() {
+                self.restart_required = restart_message.clone();
+            }' \
   geode-shell \
   reverting_a_sources_edit_back_to_the_baseline_clears_restart_required
 
@@ -1824,20 +1846,7 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                     }
                 });
             }
-            if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    if f.replace_saved_scopes(saved) {
-                        cx.notify();
-                    }
-                });
-            }
-            if views_changed {
-                self.frame.update(cx, |f, cx| {
-                    f.note_config_reloaded();
-                    cx.notify();
-                });
-            }' \
+' \
   '            if groupings_changed {
                 let slots = rebuild_slots(&self.services.config);
                 self.frame.update(cx, |f, cx| {
@@ -1846,33 +1855,24 @@ run_mutation "reload: ConfigReloaded is queued before ANY frame.update, includin
                     }
                 });
             }
-            if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    if f.replace_saved_scopes(saved) {
-                        cx.notify();
-                    }
-                });
-            }
             if views_changed {
                 cx.emit(ShellEvent::ConfigReloaded);
-                self.frame.update(cx, |f, cx| {
-                    f.note_config_reloaded();
-                    cx.notify();
-                });
-            }' \
+            }
+' \
   geode-shell \
   emits_config_reloaded_before_the_frame_notifies
 
 run_mutation "frame: bar_model is rebuilt when versions change" \
   crates/geode-shell/src/frame.rs \
-  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions == versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
-  '        if let Some((cached_versions, cached)) = self.bar_cache.borrow().as_ref()
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
             && *cached_versions != versions
+            && *cached_today == today
         {
             return Rc::clone(cached);
         }' \
@@ -2278,8 +2278,8 @@ run_mutation "tile: completions offer dataset dimensions, not just displayed col
 run_mutation "bridge: dropped_events counted on a refused try_send" \
   crates/geode-app/src/bridge.rs \
   '            dropped.fetch_add(1, Ordering::Relaxed);
-            false' \
-  '            false' \
+            if err.is_closed()' \
+  '            if err.is_closed()' \
   geode-app \
   a_refused_event_is_counted_as_dropped_rather_than_lost_silently
 
@@ -2314,21 +2314,36 @@ run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted d
 # it's what the covering test below already sends after closing the
 # window, and neither arm is one a later Phase 4a task is expected to
 # touch the way `Distinct`/`Published` were.
+#
+# Phase 4b Task 4 fix round 1: re-anchored again — `ShellView::
+# set_data_status` (what the replacement text called) no longer exists,
+# deleted by Task 4 in favour of the `Diagnostics` entity. The
+# replacement now routes the `Health` arm through `shell_direct`'s own
+# `diagnostics().update(..)` (a real, still-live call: `note_health`),
+# keeping the exact same shape — bypass the shared `window.update`, do
+# real work through a window-independent clone, `continue` before the
+# window check ever runs.
 run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
   crates/geode-app/src/bridge.rs \
   '    cx.spawn(async move |cx: &mut AsyncApp| {
+        let diagnostics = diagnostics_for_drain;
+        let catalog_tag = catalog_tag_for_drain;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);' \
   '    let shell_direct = shell.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
+        let diagnostics = diagnostics_for_drain;
+        let catalog_tag = catalog_tag_for_drain;
         let mut last_dropped = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
             if let DataEvent::Health { source, worst, detail } = &event {
-                eprintln!("[data] health {source}: {} — {detail}", worst.label());
                 shell_direct.update(cx, |s, cx| {
-                    s.set_data_status(Some(format!("{source}: {}", worst.label())), cx)
+                    s.diagnostics().update(cx, |d, cx| {
+                        d.note_health(source, worst.clone(), detail.clone(), std::time::SystemTime::now());
+                        cx.notify();
+                    });
                 });
                 last_dropped = now_dropped;
                 continue;
@@ -2696,11 +2711,10 @@ run_mutation "frame: a new set clears redo" \
 
 run_mutation "frame: a text session pushes once" \
   crates/geode-shell/src/frame.rs \
-  '            Some(None) => self.scope_session = Some(None),' \
-  '            Some(None) => {
-                let o = self.scope.clone();
-                self.push_undo(o);
-                self.scope_session = Some(None)
+  '            Some(_) => {}' \
+  '            Some(_) => {
+                let outgoing = self.scope.clone();
+                self.push_undo(outgoing);
             }' \
   geode-shell a_text_session_coalesces_into_one_undo_entry
 
@@ -3567,6 +3581,1421 @@ run_mutation "reload: the builtin layer is reused, not rebuilt from the keymap a
     })' \
   geode-shell \
   a_reload_keeps_every_builtin_doc_not_just_the_keymap
+
+# ---- Phase 4b Task 1: the deferred 4a-review minors (M2, M5, M7, M8,
+# M10, M11, M12, M13) ---------------------------------------------------
+
+run_mutation "M2: a text session that ends where it began pops its own undo entry" \
+  crates/geode-shell/src/frame.rs \
+  '    pub fn end_scope_session(&mut self) {
+        if let Some(session) = self.scope_session.take()
+            && session.pushed
+            && self.scope_undo.last() == Some(&session.base)
+            && self.scope == session.base
+        {
+            self.scope_undo.pop();
+            self.scope_redo = session.redo_snapshot;
+        }
+    }' \
+  '    pub fn end_scope_session(&mut self) {
+        self.scope_session = None;
+    }' \
+  geode-shell a_text_session_that_ends_where_it_began_leaves_no_undo_entry
+
+run_mutation "M5: the picker's tag is session-wide, not per-open" \
+  crates/geode-shell/src/shell/picker.rs \
+  '    view.next_picker_tag += 1;
+    let tag = view.next_picker_tag;' \
+  '    let tag = view.next_picker_tag;' \
+  geode-shell a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first
+
+run_mutation "M7: the flip barrier is swept on the reload-poll tick" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
+                    return; // window/entity gone; stop polling
+                };
+                frame.update(cx, |f, cx| {
+                    if f.sweep(Instant::now()) {
+                        cx.notify();
+                    }
+                });' \
+  '' \
+  geode-shell the_reload_poll_tick_sweeps_an_open_barrier_past_its_deadline
+
+run_mutation "M8: a placeholder occupant is excluded from the barrier's key set" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        let has_real_occupant = |id: &TileId| {
+            self.occupants
+                .get(id)
+                .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
+        };' \
+  '        let has_real_occupant = |id: &TileId| self.occupants.contains_key(id);' \
+  geode-shell a_placeholder_occupant_is_excluded_from_the_barriers_key_set
+
+run_mutation "M10: Expr Display escapes an embedded quote in a string literal" \
+  crates/geode-core/src/scope/expr.rs \
+  "                    if c == '\\'' {" \
+  "                    if false {" \
+  geode-core a_quote_inside_a_string_literal_escapes_as_a_doubled_quote_and_round_trips
+
+run_mutation "M11: save_scope bumps saved_scopes, not config" \
+  crates/geode-shell/src/frame.rs \
+  '        self.versions.saved_scopes += 1;' \
+  '        self.versions.config += 1;' \
+  geode-shell save_scope_bumps_saved_scopes_not_config
+
+run_mutation "M12: the bar-model cache key includes today's date" \
+  crates/geode-shell/src/frame.rs \
+  '        if let Some((cached_versions, cached_today, cached)) = self.bar_cache.borrow().as_ref()
+            && *cached_versions == versions
+            && *cached_today == today
+        {' \
+  '        if let Some((cached_versions, _cached_today, cached)) = self.bar_cache.borrow().as_ref()
+            && *cached_versions == versions
+        {' \
+  geode-shell the_bar_model_cache_rebuilds_when_today_changes_with_versions_unchanged
+
+run_mutation "M13: FrameRecord omits an empty dimensions table" \
+  crates/geode-shell/src/session.rs \
+  '        if !dims.is_empty() {
+            t.insert("dimensions".into(), toml::Value::Table(dims));
+        }' \
+  '        t.insert("dimensions".into(), toml::Value::Table(dims));' \
+  geode-shell a_frame_record_with_no_dimension_selections_writes_no_dimensions_key
+
+# ---- Phase 4b Task 1 review fix round 1 (MIN-12): M6 and M9 had test
+# coverage but no harness entry of their own; M15 is a signature-
+# preserving re-export and genuinely needs none. -----------------------
+
+run_mutation "M6: an explicit default view wins over the alphabetical first" \
+  crates/geode-core/src/view.rs \
+  '                Some(v) => v.is_default = true,' \
+  '                Some(_v) => {}' \
+  geode-blotter a_fresh_tile_opens_on_the_explicit_default_view_not_the_alphabetical_first
+
+run_mutation "M9: the as-of presets cache is keyed on the frame's data version" \
+  crates/geode-shell/src/shell/asof_view.rs \
+  '    let v = frame.versions().data;
+    if let Some((cached_v, cached)) = state.presets_cache.borrow().as_ref()
+        && *cached_v == v
+    {
+        return Rc::clone(cached);
+    }' \
+  '    let v = frame.versions().data;
+    if let Some((_cached_v, cached)) = state.presets_cache.borrow().as_ref() {
+        return Rc::clone(cached);
+    }' \
+  geode-shell cached_presets_rebuilds_only_when_the_frames_data_version_changes
+
+# ---- Phase 4b Task 2: the tracing foundation (the ring, [log]) --------
+
+run_mutation "the ring's push wraps to the next slot, not slot 0" \
+  crates/geode-core/src/log/mod.rs \
+  '        g.head = (head + 1) % cap;' \
+  '        g.head = head;' \
+  geode-core wrapping_overwrites_the_oldest_and_keeps_order
+
+run_mutation "drain_since excludes the record at exactly since, not only older ones" \
+  crates/geode-core/src/log/mod.rs \
+  '                Some(r) if r.seq > since => out.push(r.clone()),' \
+  '                Some(r) if r.seq >= since => out.push(r.clone()),' \
+  geode-core drain_since_returns_only_newer_records_oldest_first
+
+run_mutation "seq is assigned by the ring's push, not carried from the caller" \
+  crates/geode-core/src/log/mod.rs \
+  '        g.seq += 1;
+        r.seq = g.seq;
+        let cap = g.records.len();' \
+  '        g.seq += 1;
+        let cap = g.records.len();' \
+  geode-core two_writers_never_lose_a_sequence_number
+
+run_mutation "[log] rejects a key that names no known target" \
+  crates/geode-core/src/log/mod.rs \
+  '            if !TARGETS
+                .iter()
+                .any(|t| t.strip_prefix("geode::") == Some(key.as_str()))
+            {
+                diags.push(warn(format!(
+                    "[log] {key}: not a known target ({})",
+                    TARGETS
+                        .iter()
+                        .map(|t| &t[7..])
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+                continue;
+            }
+            levels.targets.retain(|(k, _)| k != key);' \
+  '            levels.targets.retain(|(k, _)| k != key);' \
+  geode-core an_unknown_target_key_is_a_warning
+
+# ---- Phase 4b Task 2 fix round 1 ---------------------------------------
+
+run_mutation "log_health_event: Health::Failed logs at warn, not error" \
+  crates/geode-data/src/service.rs \
+  '        Health::Failed { .. } => {
+            tracing::error!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }' \
+  '        Health::Failed { .. } => {
+            tracing::warn!(target: "geode::ingest", "{source}: {} — {detail}", worst.label());
+        }' \
+  geode-data a_failed_health_logs_at_error_through_the_service_sink
+
+run_mutation "log_ingest_failure: an IngestEvent::Failed logs at warn, not error" \
+  crates/geode-data/src/service.rs \
+  'fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
+    tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
+}' \
+  'fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
+    tracing::warn!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
+}' \
+  geode-data a_load_failure_logs_dataset_batch_and_reason_at_error
+
+run_mutation "MessageVisitor::record_str drops a non-message field instead of appending it" \
+  crates/geode-core/src/log/mod.rs \
+  '    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            self.0.push_str(value);
+        } else {
+            if !self.0.is_empty() {
+                self.0.push('"'"' '"'"');
+            }
+            let _ = write!(self.0, "{}={value}", field.name());
+        }
+    }' \
+  '    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.push_str(value);
+        }
+    }' \
+  geode-core a_non_message_str_field_is_not_dropped
+
+run_mutation "trim_log_files deletes the newest files beyond the cap, not the oldest" \
+  crates/geode-app/src/crash.rs \
+  '    for old in &files[..files.len() - keep] {' \
+  '    for old in &files[keep..] {' \
+  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+
+run_mutation "[log] present but not a table is silently accepted, not a warning" \
+  crates/geode-core/src/log/mod.rs \
+  '        let Some(table) = value.as_table() else {
+            diags.push(warn(
+                "[log]: expected a table, e.g. [log]\\ndefault = \"info\"".to_string(),
+            ));
+            return (levels, diags);
+        };' \
+  '        let Some(table) = value.as_table() else {
+            return (levels, diags);
+        };' \
+  geode-core log_present_but_not_a_table_is_a_warning
+
+run_mutation "to_targets: every crate follows [log] default, not just geode" \
+  crates/geode-core/src/log/mod.rs \
+  '        let mut t = Targets::new()
+            .with_default(Level::WARN)
+            .with_target("geode", self.default);' \
+  '        let mut t = Targets::new().with_default(self.default);' \
+  geode-core to_targets_caps_non_geode_targets_at_warn_regardless_of_default
+
+run_mutation "drain_since's backward scan never stops early, always visiting every slot" \
+  crates/geode-core/src/log/mod.rs \
+  '                Some(r) if r.seq > since => out.push(r.clone()),
+                // Either an empty slot (the ring hasn'"'"'t wrapped yet, and
+                // we'"'"'ve walked past its oldest write) or a record at or
+                // before `since` — descending order means nothing
+                // further back can be newer than `since` either.
+                _ => break,' \
+  '                Some(r) if r.seq > since => out.push(r.clone()),
+                _ => continue,' \
+  geode-core drain_since_stops_scanning_once_it_reaches_records_at_or_before_since
+
+run_mutation "oldest_seq ignores the wrap and always reads slot 0" \
+  crates/geode-core/src/log/mod.rs \
+  '    pub fn oldest_seq(&self) -> Option<u64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match &g.records[g.head] {
+            Some(r) => Some(r.seq),
+            None => g.records[0].as_ref().map(|r| r.seq),
+        }
+    }' \
+  '    pub fn oldest_seq(&self) -> Option<u64> {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        g.records[0].as_ref().map(|r| r.seq)
+    }' \
+  geode-core oldest_seq_is_none_when_empty_then_tracks_the_surviving_floor_through_a_wrap
+
+run_mutation "build_catalog: live is the first generation per partition, not the last" \
+  crates/geode-data/src/query/catalog.rs \
+  '        if let Some(newest) = p.generations.last_mut() {
+            newest.live = true;
+        }' \
+  '        if let Some(newest) = p.generations.first_mut() {
+            newest.live = true;
+        }' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
+
+run_mutation "build_catalog: resolved_gen is ignored under AsOf::At, always None" \
+  crates/geode-data/src/query/catalog.rs \
+  '            p.resolved_gen = by_partition
+                .get(&(p.batch.clone(), p.book.clone()))
+                .copied();' \
+  '            p.resolved_gen = None;' \
+  geode-data under_an_as_of_the_resolved_generation_is_named_per_partition
+
+# MIN-1/MIN-2 (review round 1): retargeted at `archive_rows` rather than
+# `live_rows` — the `live_rows` direction of this mutation was already
+# caught twice over (this test's own oracle *and*
+# `the_catalog_lists_every_partitions_generations_with_the_live_one_marked`'s
+# `ds.live_rows == 5`), so neither test was proven isolated. Mutating
+# `archive_rows` instead has exactly one defence: the `archive_rows`
+# assertion this fix round added here.
+run_mutation "build_catalog: archive_rows sums the live tables too" \
+  crates/geode-data/src/query/catalog.rs \
+  '        archive_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Archive))
+            .copied()
+            .unwrap_or(0);
+    }' \
+  '        archive_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Live))
+            .copied()
+            .unwrap_or(0);
+        archive_rows += sizes
+            .get(&table_name(&ds.name, grain, TableKind::Archive))
+            .copied()
+            .unwrap_or(0);
+    }' \
+  geode-data the_row_counts_agree_with_duckdb_by_execution
+
+# Review round 1 MAJ-1: the fixture's `file_id`s (11, 12, 13) are
+# deliberately not the same as the `gen_id`s (1, 2, 3) they name, so a
+# join keyed on the wrong column no longer lines up by accident.
+run_mutation "build_catalog: loaded_at/file_rows join on file_id, not gen_id" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \' \
+  '    let sql = "select fg.file_id, fg.loaded_at, fg.row_count \' \
+  geode-data the_catalog_lists_every_partitions_generations_with_the_live_one_marked
+
+# Review round 1 MAJ-2: `file_generations_for` must stay bounded to the
+# generations `generations` still names, not every row `file_generations`
+# has ever accumulated (that table is never pruned). Removing the
+# `exists` bound reproduces the unbounded read the fixture's orphan row
+# (gen_id 99, no matching `generations` row) exists to catch.
+run_mutation "build_catalog: file_generations_for reads every row ever recorded, not just the surviving ones" \
+  crates/geode-data/src/query/catalog.rs \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \
+               from file_generations fg \
+               where fg.dataset = ? \
+                 and exists (select 1 from generations g \
+                             where g.dataset = fg.dataset and g.gen_id = fg.gen_id)";' \
+  '    let sql = "select fg.gen_id, fg.loaded_at, fg.row_count \
+               from file_generations fg \
+               where fg.dataset = ?";' \
+  geode-data file_generations_for_excludes_a_row_whose_generation_no_longer_exists
+
+# Review round 1 MAJ-3, isolating the `batch` half of the `(batch, book)`
+# partition key: `fixture_one_batch_many_books` gives EOD/BK000,
+# EOD/BK001 and EOD/NULL the same batch, so comparing `batch` alone
+# collapses all three into one partition.
+run_mutation "build_catalog: partitions group by batch alone" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch);' \
+  geode-data partitions_group_by_batch_and_book_together_not_either_alone
+
+# Review round 1 MAJ-3, isolating the `book` half: EOD/NULL and
+# FOLLOWUP/NULL sort adjacently (NULL last within a batch, "EOD" <
+# "FOLLOWUP") and share book `None`, so comparing `book` alone collapses
+# those two into one partition across the batch boundary.
+run_mutation "build_catalog: partitions group by book alone" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.book == book);' \
+  geode-data partitions_group_by_batch_and_book_together_not_either_alone
+
+# Review round 1 MAJ-3: the bookless partition (rows with `book is
+# null`) is a real partition, spec §4.4/§4.4-adjacent code (as_of.rs,
+# retention.rs, publish.rs) all carry the same warning about it.
+run_mutation "build_catalog: the bookless partition is dropped" \
+  crates/geode-data/src/query/catalog.rs \
+  '    for (batch, book, gen_id, source_time) in rows {
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  '    for (batch, book, gen_id, source_time) in rows {
+        if book.is_none() {
+            continue;
+        }
+        let same_partition = partitions
+            .last()
+            .is_some_and(|p| p.batch == batch && p.book == book);' \
+  geode-data the_bookless_partition_is_kept_as_its_own_partition_with_its_generation_live
+
+# Review round 1 MAJ-4(a): renamed to what this actually defends — the
+# `SchedulerEvent::Polled` emit site's `next_in`, not the mapped
+# `DataEvent::Polled.next` (which the entry below now covers on its
+# own, restoring the brief's own Step 8 entry rather than only
+# substituting for it).
+run_mutation "scheduler: Polled carries a zero next_in" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                        next_in: spec.poll_interval,' \
+  '                        next_in: Duration::ZERO,' \
+  geode-data an_unchanged_directory_submits_nothing_on_later_polls
+
+# Review round 1 MAJ-4(b): the brief's Step 8 entry ("Polled.next = at")
+# restored directly against the extracted `polled_event` helper.
+run_mutation "service: Polled.next = at, next_in is ignored" \
+  crates/geode-data/src/service.rs \
+  '        next: at.checked_add(next_in).unwrap_or(at),' \
+  '        next: at,' \
+  geode-data polled_event_next_is_at_plus_next_in
+
+# --- Task 4: the Diagnostics entity, its feed, and the status bar -----
+
+# Phase 4b Task 4 fix round 2 (NEW-3): re-anchored — MAJ-2 (fix round
+# 1) replaced the `!is_new && ...` guard this used to anchor on with
+# `if let Some(current) = &state.health && ...`. Distinct from the
+# MAJ-2 entry below (which targets the first-real-note edge case via a
+# default-to-Ok comparison): this one disables the whole guard, so a
+# *repeat* of the same health bumps — the original behaviour this entry
+# has always covered.
+run_mutation "diagnostics: note_health bumps unconditionally, not just on a real transition" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+        {
+            return;
+        }' \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+            && false
+        {
+            return;
+        }' \
+  geode-shell a_repeated_identical_health_does_not_bump_the_version
+
+run_mutation "diagnostics: SOURCE_HISTORY_CAP loosened from 16" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const SOURCE_HISTORY_CAP: usize = 16;' \
+  'pub const SOURCE_HISTORY_CAP: usize = 1600;' \
+  geode-shell history_is_capped_at_sixteen_transitions
+
+run_mutation "diagnostics: summary's LABELS silently drops degraded" \
+  crates/geode-shell/src/diagnostics.rs \
+  'const LABELS: [&str; 5] = ["ok", "pending", "pending_too_long", "degraded", "failed"];' \
+  'const LABELS: [&str; 4] = ["ok", "pending", "pending_too_long", "failed"];' \
+  geode-shell the_summary_counts_sources_by_health_and_config_errors
+
+run_mutation "diagnostics: note_published requests a catalog regardless of watchers" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers > 0 {
+            self.pending_catalog_request = true;
+        }' \
+  '        if true {
+            self.pending_catalog_request = true;
+        }' \
+  geode-shell a_publish_requests_a_catalog_only_while_watched
+
+run_mutation "diagnostics: refresh_frame_hist copies the histogram while unwatched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.watchers == 0 {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-shell the_frame_histogram_is_copied_only_while_watched
+
+run_mutation "bridge: a stale Catalog outcome's tag check is disabled" \
+  crates/geode-app/src/bridge.rs \
+  '                    DataEvent::Catalog(outcome) => {
+                        if outcome.tag != catalog_tag.get() {
+                            return;
+                        }' \
+  '                    DataEvent::Catalog(outcome) => {
+                        if false {
+                            return;
+                        }' \
+  geode-app a_stale_catalog_outcome_is_dropped_and_the_latest_is_applied
+
+run_mutation "hot_reload: an [log] change on reload is never applied" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if changed("app") {' \
+  '            if false && changed("app") {' \
+  geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
+
+# --- Task 4 fix round 1: CRIT-1, MAJ-1..6, MIN-2..5,8..10 -------------
+
+run_mutation "diagnostics: CRIT-1 — an unreported source counts as pending in the summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '            let Some(health) = &s.health else {
+                continue; // no report yet — not counted (CRIT-1)
+            };' \
+  '            let health = s.health.clone().unwrap_or(Health::Pending);' \
+  geode-shell a_described_but_unreported_source_is_not_counted_in_the_summary
+
+run_mutation "diagnostics: MAJ-2 — note_health's first-real-note guard defaults to Ok" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if let Some(current) = &state.health
+            && *current == worst
+            && state.detail == detail
+        {
+            return;
+        }' \
+  '        if state.health.clone().unwrap_or(Health::Ok) == worst && state.detail == detail {
+            return;
+        }' \
+  geode-shell the_first_real_health_note_transitions_even_after_describe_source_and_note_polled
+
+run_mutation "diagnostics: MAJ-3 — refresh_frame_hist copies an unchanged histogram while watched" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.frame_hist.count() == hist.count()
+            && self.frame_hist.max_micros() == hist.max_micros()
+        {
+            return false;' \
+  '        if false {
+            return false;' \
+  geode-shell refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged
+
+run_mutation "diagnostics: MAJ-4 — restart_required re-embedded in the summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self.dropped_events > 0 {
+            parts.push(format!("{} dropped", self.dropped_events));
+        }
+
+        parts.join(" · ")
+    }' \
+  '        if self.dropped_events > 0 {
+            parts.push(format!("{} dropped", self.dropped_events));
+        }
+
+        if let Some(message) = &self.restart_required {
+            parts.push(format!("restart required: {message}"));
+        }
+
+        parts.join(" · ")
+    }' \
+  geode-shell set_restart_required_does_not_appear_in_the_summary
+
+run_mutation "diagnostics: MAJ-5 — note_config appends instead of replacing" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        if self.config == diags {
+            return;
+        }
+        self.config = diags.clone();
+        self.config_history.push_front((at, diags));' \
+  '    pub fn note_config(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        if diags.is_empty() {
+            return;
+        }
+        self.config.extend(diags.clone());
+        self.config_history.push_front((at, diags));' \
+  geode-shell note_config_is_a_no_op_for_an_identical_batch
+
+run_mutation "diagnostics: MAJ-1 — summary() rebuilds the Rc<str> on a cache hit" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        {
+            let cache = self.summary_cache.borrow();
+            if cache.0 == self.version {
+                return cache.1.clone();
+            }
+        }' \
+  '        {
+            let cache = self.summary_cache.borrow();
+            if false {
+                return cache.1.clone();
+            }
+        }' \
+  geode-shell summary_reuses_the_same_allocation_when_the_version_is_unchanged
+
+run_mutation "diagnostics: MIN-2 — describe_source bumps for an identical summary" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        let state = self.sources.entry(source.to_string()).or_default();
+        if state.spec.as_ref() == Some(&summary) {
+            return;
+        }
+        state.spec = Some(summary);' \
+  '        let state = self.sources.entry(source.to_string()).or_default();
+        if false {
+            return;
+        }
+        state.spec = Some(summary);' \
+  geode-shell describe_source_is_a_no_op_for_an_identical_summary
+
+run_mutation "diagnostics: MIN-3 — request_level re-queues a persist when unchanged" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if self
+            .levels
+            .targets
+            .iter()
+            .any(|(t, l)| t == target && *l == level)
+        {
+            return;
+        }
+        self.levels = self.levels.with(target, level);' \
+  '        if false {
+            return;
+        }
+        self.levels = self.levels.with(target, level);' \
+  geode-shell request_level_is_a_no_op_when_the_target_already_has_that_level
+
+run_mutation "diagnostics: MIN-4 — unwatch never clears a pending catalog request" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn unwatch(&mut self) {
+        self.watchers = self.watchers.saturating_sub(1);
+        if self.watchers == 0 {
+            self.pending_catalog_request = false;
+        }
+    }' \
+  '    pub fn unwatch(&mut self) {
+        self.watchers = self.watchers.saturating_sub(1);
+    }' \
+  geode-shell unwatch_to_zero_clears_a_pending_catalog_request
+
+run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a newer snapshot" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        for state in self.datasets.values_mut() {
+            state.catalog = None;
+        }
+        for ds in &snapshot.datasets {' \
+  '        for ds in &snapshot.datasets {' \
+  geode-shell set_catalog_drops_a_dataset_missing_from_a_newer_snapshot
+
+run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                if new_levels != self.diagnostics.read(cx).levels {
+                    if let Some(log) = &self.services.log
+                        && let Err(e) = log.control.set(&new_levels)
+                    {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  '                if let Some(log) = &self.services.log
+                    && new_levels != self.diagnostics.read(cx).levels
+                {
+                    if let Err(e) = log.control.set(&new_levels) {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  geode-shell a_log_table_change_updates_the_entity_even_without_log_services
+
+run_mutation "log: MIN-10 — LogLevels.targets not canonicalised by from_doc" \
+  crates/geode-core/src/log/mod.rs \
+  '        levels.targets.sort();
+        (levels, diags)
+    }' \
+  '        let _ = &levels.targets;
+        (levels, diags)
+    }' \
+  geode-core targets_in_a_different_file_order_compare_equal
+
+# MAJ-6: both stated deviations get a harness entry.
+run_mutation "hot_reload: MAJ-6 — the reload path persists through request_level, not set_levels" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }' \
+  '                    self.diagnostics.update(cx, |d, cx| {
+                        d.request_level("ingest", geode_core::log::Level::DEBUG);
+                        cx.notify();
+                    });
+                }' \
+  geode-shell a_log_table_change_on_reload_applies_it_through_level_control_once
+
+run_mutation "diagnostics: MAJ-6 — watch() no longer requests the first catalog" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.pending_catalog_request = true;
+        true
+    }' \
+  '        false
+    }' \
+  geode-shell watching_itself_also_requests_the_first_catalog
+
+run_mutation "diagnostics: MIN-8 — CONFIG_HISTORY_CAP loosened from 16" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const CONFIG_HISTORY_CAP: usize = 16;' \
+  'pub const CONFIG_HISTORY_CAP: usize = 1600;' \
+  geode-shell config_history_is_capped_at_sixteen_batches
+
+# --- Task 4 fix round 2: NEW-1 (config/data diagnostics split) -------
+
+run_mutation "diagnostics: NEW-1 — note_config also clears data_diagnostics" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        self.config = diags.clone();
+        self.config_history.push_front((at, diags));' \
+  '        self.config = diags.clone();
+        self.data_diagnostics.clear();
+        self.config_history.push_front((at, diags));' \
+  geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
+
+run_mutation "diagnostics: NEW-1 — note_data_diagnostics also clears config" \
+  crates/geode-shell/src/diagnostics.rs \
+  '    pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        let mut changed = false;' \
+  '    pub fn note_data_diagnostics(&mut self, diags: Vec<Diagnostic>, at: SystemTime) {
+        self.config.clear();
+        let mut changed = false;' \
+  geode-shell a_data_diagnostic_does_not_clobber_a_standing_config_error
+
+run_mutation "diagnostics: NEW-1 — note_data_diagnostics re-appends an identical entry" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        for d in diags {
+            if self
+                .data_diagnostics
+                .iter()
+                .any(|(_, existing)| existing == &d)
+            {
+                continue;
+            }
+            self.data_diagnostics.push_back((at, d));
+            changed = true;
+        }' \
+  '        for d in diags {
+            self.data_diagnostics.push_back((at, d));
+            changed = true;
+        }' \
+  geode-shell note_data_diagnostics_does_not_reappend_an_identical_entry
+
+run_mutation "diagnostics: NEW-1 — DATA_DIAGNOSTICS_CAP loosened from 256" \
+  crates/geode-shell/src/diagnostics.rs \
+  'pub const DATA_DIAGNOSTICS_CAP: usize = 256;' \
+  'pub const DATA_DIAGNOSTICS_CAP: usize = 25600;' \
+  geode-shell data_diagnostics_is_capped_at_two_hundred_fifty_six
+
+run_mutation "diagnostics: NEW-1 — summary omits the data error count" \
+  crates/geode-shell/src/diagnostics.rs \
+  '        if data_errors > 0 {
+            parts.push(format!("data {data_errors} error{}", plural(data_errors)));
+        }' \
+  '' \
+  geode-shell a_config_reload_does_not_clobber_a_standing_data_diagnostic
+
+# --- Task 5: the geode-diagnostics module ---------------------------
+
+run_mutation "diagnostics module: sources sorted best-first instead of worst-first" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    reported.sort_by(|a, b| b.1.health.cmp(&a.1.health).then_with(|| a.0.cmp(b.0)));' \
+  '    reported.sort_by(|a, b| a.1.health.cmp(&b.1.health).then_with(|| a.0.cmp(b.0)));' \
+  geode-diagnostics sources_are_sorted_worst_first_with_their_detail
+
+run_mutation "diagnostics module: the resolved-generation marker points at the wrong generation" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                    && part.resolved_gen == Some(generation.gen_id);' \
+  '                    && part.resolved_gen == Some(generation.gen_id + 1);' \
+  geode-diagnostics data_rows_mark_the_resolved_generation_under_an_as_of
+
+run_mutation "diagnostics module: the log filter matches every row regardless of target or level" \
+  crates/geode-diagnostics/src/sections.rs \
+  '        .filter(|r| filter.is_empty() || r.text.contains(filter))
+        .collect()' \
+  '        .filter(|_r| true)
+        .collect()' \
+  geode-diagnostics log_rows_filter_by_target_or_level_text
+
+run_mutation "diagnostics module: move_cursor never clears follow" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        self.cursor = target as usize;
+        self.follow = false;' \
+  '        self.cursor = target as usize;' \
+  geode-diagnostics the_log_section_follows_the_tail_until_the_cursor_moves
+
+run_mutation "diagnostics module: the diagnostics observer rebuilds on every notify, not just a real version change" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            this.last_diag_versions = now;
+            if relevant {
+                this.rebuild(cx);
+            }
+        })
+        .detach();
+        // MIN-7 (final review)' \
+  '            this.last_diag_versions = now;
+            this.rebuild(cx);
+        })
+        .detach();
+        // MIN-7 (final review)' \
+  geode-diagnostics an_unchanged_entity_does_not_rebuild_rows
+
+run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        let ws = self.services.workspaces.active();
+        let found: Option<(TileId, Option<DockSide>)> = ws
+            .tree()
+            .tiles()
+            .into_iter()
+            .find(|id| self.occupant_kind(*id) == Some(kind))
+            .map(|id| (id, None))
+            .or_else(|| {
+                ws.docks().iter().find_map(|(side, dock)| {
+                    dock.tree()
+                        .tiles()
+                        .into_iter()
+                        .find(|id| self.occupant_kind(*id) == Some(kind))
+                        .map(|id| (id, Some(side)))
+                })
+            });' \
+  '        let found: Option<(TileId, Option<DockSide>)> = None;' \
+  geode-shell open_module_twice_yields_one_tile_of_that_kind_focused
+
+run_mutation "diagnostics module: the log section never reports records lost to a ring wrap" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                self.lost_records = self
+                    .ring
+                    .oldest_seq()
+                    .map(|oldest| oldest.saturating_sub(self.since + 1))
+                    .unwrap_or(0);' \
+  '                self.lost_records = 0;' \
+  geode-diagnostics the_log_section_reports_lost_records_when_the_ring_wrapped_past_since
+
+# --- Task 5 fix round 1 ----------------------------------------------
+
+run_mutation "diagnostics module: MAJ-1 — sync_scroll never scrolls the list" \
+  crates/geode-diagnostics/src/tile.rs \
+  '    fn sync_scroll(&self) {
+        self.scroll
+            .scroll_to_item(self.cursor, ScrollStrategy::Nearest);
+    }' \
+  '    fn sync_scroll(&self) {}' \
+  geode-diagnostics pressing_bottom_scrolls_the_list_to_the_last_row
+
+run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant without unwatching it" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                o.content.set_visible(false, cx);
+            }
+        }
+        self.occupants.retain(|id, _| all.contains(id));' \
+  '        self.occupants.retain(|id, _| all.contains(id));' \
+  geode-shell closing_a_watching_tile_unwatches_the_diagnostics_entity
+
+run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_changed gate" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();' \
+  '            if views_changed {
+                self.frame.update(cx, |f, cx| {
+                    f.note_config_reloaded();' \
+  geode-shell a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version
+
+run_mutation "diagnostics module: MAJ-5 — a real log drain allocates a fresh buffer instead of reusing drain_buf" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                self.ring.drain_since(self.since, &mut self.drain_buf);' \
+  '                let mut fresh_drain_buf = Vec::new();
+                self.ring.drain_since(self.since, &mut fresh_drain_buf);
+                self.drain_buf = fresh_drain_buf;' \
+  geode-diagnostics a_no_op_log_drain_does_not_grow_the_drain_buffer
+
+run_mutation "diagnostics module: the frame observer rebuilds Sources/Log/Perf on an as_of-or-config change too (successor of the retired MAJ-6 frame_versions_relevant_eq entry — that function was deleted by MAJ-4)" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                Section::Sources | Section::Log | Section::Perf => false,' \
+  '                Section::Sources | Section::Log | Section::Perf => as_of_changed || config_changed,' \
+  geode-diagnostics a_config_reload_while_showing_sources_does_not_rebuild
+
+run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            if as_of_changed && this.visible {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog();
+                    cx.notify();
+                });
+            }' \
+  '            if false {
+                this.diagnostics.update(cx, |d, cx| {
+                    d.request_catalog();
+                    cx.notify();
+                });
+            }' \
+  geode-diagnostics an_as_of_change_while_visible_requests_a_fresh_catalog
+
+run_mutation "diagnostics module: MAJ-8 — the config explainer stops recursing into arrays" \
+  crates/geode-diagnostics/src/sections.rs \
+  '        toml::Value::Array(items) => {
+            for (i, v) in items.iter().enumerate() {
+                walk_value(v, &format!("{path}.{i}"), out);
+            }
+        }
+        other => out.push((path.to_string(), other.to_string())),' \
+  '        other => out.push((path.to_string(), other.to_string())),' \
+  geode-diagnostics config_rows_recurses_into_arrays_with_indexed_paths
+
+run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count multiplier" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            "page_down" => self.move_cursor(5 * n, cx),
+            "page_up" => self.move_cursor(-5 * n, cx),' \
+  '            "page_down" => self.move_cursor(5, cx),
+            "page_up" => self.move_cursor(-5, cx),' \
+  geode-diagnostics a_count_prefix_multiplies_page_down
+
+run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            self.diagnostics.update(cx, |d, cx| {
+                d.unwatch();
+                cx.notify();
+            });
+        }
+    }' \
+  '            self.diagnostics.update(cx, |d, _cx| {
+                d.unwatch();
+            });
+        }
+    }' \
+  geode-diagnostics set_visible_false_unwatches_and_notifies
+
+run_mutation "shell: MIN-7 — open_module loses its same-pending-kind guard" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+            return;
+        }
+        self.services' \
+  '        self.services' \
+  geode-shell two_open_module_calls_for_the_same_kind_before_any_render_split_only_once
+
+run_mutation "diagnostics module: MIN-11 — the header never shows the filtered pill" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        if !self.filter.is_empty() {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)' \
+  '        if false {
+            header = header.child(
+                div()
+                    .text_color(theme.warning_foreground)' \
+  geode-diagnostics a_filtered_tile_shows_the_filtered_pill
+
+# --- Task 5 fix round 2 ----------------------------------------------
+
+run_mutation "diagnostics module: MAJ-7 — an as-of change while visible never requests a fresh catalog (bridge drain, end to end)" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            if as_of_changed && this.visible {' \
+  '            if false {' \
+  geode-app an_as_of_change_on_a_visible_diagnostics_tile_requests_a_second_catalog_with_the_new_as_of
+
+# ---- Phase 4b Task 6: the panic boundaries (the ingest error event, ----
+# ---- the crash file, the action tail) -----------------------------------
+
+run_mutation "ingest runner: the panic payload is dropped from the reported Failed.reason" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    reason: format!("ingest task panicked at {path}: {message}"),' \
+  '                    reason: format!("ingest task panicked at {path}"),' \
+  geode-data a_panicking_load_names_the_file_and_the_panic_payload
+
+run_mutation "crash file: the log ring's records are dropped from write_crash_file's output" \
+  crates/geode-app/src/crash.rs \
+  '    for r in records {
+        out.push_str(&format_record(r));' \
+  '    for r in records.iter().take(0) {
+        out.push_str(&format_record(r));' \
+  geode-app write_crash_file_contains_the_message_location_records_and_actions_in_order
+
+run_mutation "shell: dispatch never records the dispatched action into the tail" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.services
+            .action_tail
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record(&action.0);' \
+  '        let _ = &action.0;' \
+  geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
+
+run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
+  crates/geode-app/src/crash.rs \
+  '    for old in &files[..files.len() - keep] {' \
+  '    for old in &files[..files.len() - keep - 1] {' \
+  geode-app trim_deletes_the_oldest_files_beyond_the_cap
+
+# ---- Task 6 fix round 1: panic containment (MAJ-1), the runner's -------
+# ---- panic log extracted and tested (MAJ-2) -----------------------------
+
+run_mutation "geode_core::panic: contained never marks the thread as inside a boundary" \
+  crates/geode-core/src/panic.rs \
+  '    DEPTH.with(|d| d.set(d.get() + 1));' \
+  '    DEPTH.with(|d| d.set(d.get()));' \
+  geode-core contained_reports_true_only_for_its_own_extent
+
+run_mutation "geode_core::panic: the guard's drop never clears the marker" \
+  crates/geode-core/src/panic.rs \
+  '            DEPTH.with(|d| d.set(d.get().saturating_sub(1)));' \
+  '            let _ = DEPTH.with(|d| d.get());' \
+  geode-core contained_reports_true_only_for_its_own_extent
+
+run_mutation "ingest runner: log_ingest_panic never logs (its error! call is dropped)" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    tracing::error!(target: "geode::ingest", file = %path.display(), "ingest task panicked: {message}");' \
+  '    let _ = (path, message);' \
+  geode-data log_ingest_panic_logs_the_file_and_payload_at_error
+
+run_mutation "crash file: write_crash_file truncates a same-instant collision instead of suffixing it" \
+  crates/geode-app/src/crash.rs \
+  '.create_new(true)' \
+  '.create(true).truncate(true)' \
+  geode-app a_second_write_at_the_same_instant_gets_a_suffixed_name_not_a_truncation
+
+run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
+  crates/geode-app/src/crash.rs \
+  '    prune_files(dir, "crash-", ".log", CRASH_FILES_KEPT);
+    Ok(path)' \
+  '    Ok(path)' \
+  geode-app write_crash_file_prunes_to_the_newest_ten
+
+# ---- Final fix wave (whole-branch review, 2026-09-08): MAJ-1..MAJ-4 ----
+
+run_mutation "service: an ingest failure is keyed by the source name, not the dataset" \
+  crates/geode-data/src/service.rs \
+  '                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: source.clone(),
+                                worst,
+                                detail,
+                            }),' \
+  '                            Some((worst, detail)) => sink(DataEvent::Health {
+                                source: dataset.clone(),
+                                worst,
+                                detail,
+                            }),' \
+  geode-data a_load_failure_reports_health_under_the_source_name_not_the_dataset_name
+
+run_mutation "service: a degraded publish also reaches the entity as Health" \
+  crates/geode-data/src/service.rs \
+  '                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },' \
+  '                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                true
+                            }
+                            None => true,
+                        },' \
+  geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
+
+run_mutation "scheduler: a clean poll always sends Health::Ok now (dedup moved to DataService's shared HealthTracker)" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                        None => sink(SchedulerEvent::Health {
+                            source: spec.name.clone(),
+                            worst: Health::Ok,
+                            detail: String::new(),
+                        }),' \
+  '                        None => true,' \
+  geode-data a_steadily_healthy_source_reports_ok_on_every_poll
+
+# ---- final review round 2: NEW-1 (one HealthTracker, shared by both sinks) ----
+
+run_mutation "service: HealthTracker.report returns Some unconditionally, never deduping" \
+  crates/geode-data/src/service.rs \
+  '        if combined == self.last_reported {
+            return emit(None);
+        }' \
+  '        if false {
+            return emit(None);
+        }' \
+  geode-data a_clean_scheduler_poll_and_a_clean_publish_together_send_exactly_one_ok
+
+run_mutation "service: the ingest sink skips reporting a clean (Ok) publish to the shared tracker" \
+  crates/geode-data/src/service.rs \
+  '                    let reason = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+                        _ => String::new(),
+                    };' \
+  '                    let reason = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => reason.clone(),
+                        _ => String::new(),
+                    };
+                    if health == Health::Ok {
+                        return delivered;
+                    }' \
+  geode-data a_clean_republish_of_the_same_batch_clears_its_degraded_health
+
+# ---- final review round 3: NEW-4 (two health lanes, combined as the worse) ----
+
+run_mutation "service: HealthTracker.report combines by taking the discovery lane instead of the worse of the two" \
+  crates/geode-data/src/service.rs \
+  '        worse_of(self.discovery.as_ref(), load).map(|v| match &v.health {' \
+  '        self.discovery.as_ref().or(load).map(|v| match &v.health {' \
+  geode-data a_degraded_load_survives_a_clean_discovery_poll
+
+run_mutation "service: the ingest sink never writes the load lane, so a publish never affects the tracker" \
+  crates/geode-data/src/service.rs \
+  '                    let health_delivered = health_tracker.report_load_and_emit(
+                        &source,
+                        &batch,
+                        health,
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },
+                    );' \
+  '                    let health_delivered = {
+                        let _ = (&source, &batch, &health, &reason, &sink);
+                        true
+                    };' \
+  geode-data a_degraded_publish_reaches_the_entity_as_degraded_health
+
+# ---- final review round 4: NEW-5 (severity rank, the deciding lane's detail)
+#      and NEW-6 (the load lane keyed per batch) ----
+
+run_mutation "service: lanes are compared by Health's derived Ord (reason TEXT) instead of severity rank" \
+  crates/geode-data/src/service.rs \
+  'fn displaces(candidate: &LaneValue, incumbent: &LaneValue) -> bool {
+    (severity_rank(&candidate.health), candidate.changed)
+        > (severity_rank(&incumbent.health), incumbent.changed)
+}' \
+  'fn displaces(candidate: &LaneValue, incumbent: &LaneValue) -> bool {
+    (candidate.health.clone(), candidate.changed) > (incumbent.health.clone(), incumbent.changed)
+}' \
+  geode-data a_second_degradation_at_the_same_rank_is_reported
+
+run_mutation "service: an identical re-report restamps its slot, so the calling lane wins every tie" \
+  crates/geode-data/src/service.rs \
+  'fn unchanged_stamp(slot: Option<&LaneValue>, health: &Health, detail: &str) -> Option<u64> {
+    slot.filter(|v| v.health == *health && v.detail == detail)
+        .map(|v| v.changed)
+}' \
+  'fn unchanged_stamp(slot: Option<&LaneValue>, health: &Health, detail: &str) -> Option<u64> {
+    let _ = (slot, health, detail);
+    None
+}' \
+  geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
+
+# The anchor below occurs twice (one door each); run_mutation replaces the
+# first, which is the discovery door — enough to break the invariant the
+# named test pins. The mutation writes the updated `Lanes` back afterwards,
+# so it breaks ONLY the lock-holding, not the bookkeeping (a mutation that
+# also dropped the commit would be caught by half the module for reasons
+# that have nothing to do with its name).
+run_mutation "service: the discovery door emits after dropping the tracker lock, so two reporters can reorder" \
+  crates/geode-data/src/service.rs \
+  '        lanes.offer(emit)' \
+  '        let mut detached = lanes.clone();
+        drop(sources);
+        let out = detached.offer(emit);
+        self.sources
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(source.to_string(), detached);
+        out' \
+  geode-data emit_runs_with_the_tracker_lock_held
+
+# ---- final review round 5: finding 2 (commit only what was delivered) ----
+
+run_mutation "service: a health transition is recorded as reported even when its event was refused" \
+  crates/geode-data/src/service.rs \
+  '        let delivered = emit(combined.clone());
+        if delivered {
+            self.last_reported = combined;
+        }
+        delivered' \
+  '        let delivered = emit(combined.clone());
+        self.last_reported = combined;
+        delivered' \
+  geode-data a_refused_health_event_is_offered_again_not_recorded_as_reported
+
+run_mutation "service: the load lane is keyed by source only, so any batch's clean publish clears every other" \
+  crates/geode-data/src/service.rs \
+  '        let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
+  '        let batch = "";
+        let kept = unchanged_stamp(lanes.load.get(batch), &health, &detail);' \
+  geode-data a_clean_publish_of_one_batch_leaves_another_batchs_degraded_standing
+
+run_mutation "diagnostics tile: the diagnostics observer compares the current section's version, not just any version" \
+  crates/geode-diagnostics/src/tile.rs \
+  '                diag_version_for_section(this.section, now)
+                    != diag_version_for_section(this.section, this.last_diag_versions)' \
+  '                true' \
+  geode-diagnostics refresh_frame_hist_does_not_rebuild_the_config_section
+
+run_mutation "sections: the perf section shows database/memory bytes and threads once a catalog arrives" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                "database {} (checkpointed) · memory {} · threads {}",' \
+  '                "db {} (checkpointed) · mem {} · thr {}",' \
+  geode-diagnostics perf_rows_show_database_bytes_memory_bytes_and_threads_once_a_catalog_arrives
+
+run_mutation "diagnostics tile: set_section replaces the cached header text" \
+  crates/geode-diagnostics/src/tile.rs \
+  '        self.header_text = header_text_for(section);' \
+  '        let _ = header_text_for(section);' \
+  geode-diagnostics the_header_text_is_cached_across_paints_and_replaced_on_section_change
+
+run_mutation "diagnostics tile: since is seeded from the ring's current latest_seq, not 0" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            since: initial_since,' \
+  '            since: 0,' \
+  geode-diagnostics a_freshly_opened_tile_does_not_claim_records_it_never_had
+
+run_mutation "sections: the resolved-generation marker requires the snapshot's own as_of to match the frame's" \
+  crates/geode-diagnostics/src/sections.rs \
+  '                let marked = !as_of.is_live()
+                    && snapshot_matches_as_of
+                    && part.resolved_gen == Some(generation.gen_id);' \
+  '                let marked = !as_of.is_live()
+                    && part.resolved_gen == Some(generation.gen_id);' \
+  geode-diagnostics data_rows_suppresses_the_marker_when_the_snapshot_as_of_does_not_match_the_frames
+
+run_mutation "occupants: pending_kind_for_new_tile is spent on the lowest TileId, deterministically" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        creation_order.sort();' \
+  '        creation_order.sort_by(|a, b| b.cmp(a));' \
+  geode-shell a_pending_kind_lands_on_the_lower_tile_id_when_two_tiles_go_occupantless_in_one_pass
+
+run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+    out.push(row(
+        format!(
+            "priority: {} · readiness: {}",
+            spec.priority, spec.readiness
+        ),
+        1,
+        Tone::Muted,
+    ));' \
+  '    out.push(row(
+        format!("path: {paths} · priority: {} · readiness: {}", spec.priority, spec.readiness),
+        1,
+        Tone::Muted,
+    ));' \
+  geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
+
+run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
+  crates/geode-diagnostics/src/commands.rs \
+  '        ["level"] => known_targets().map(str::to_string).collect(),' \
+  '        ["level"] => known_targets().map(|t| format!("level {t}")).collect(),' \
+  geode-diagnostics a_candidate_is_the_word_under_the_cursor_not_the_line
+
+run_mutation "commands: diagnostics completions split words on the shell's delimiters, not just a space" \
+  crates/geode-diagnostics/src/commands.rs \
+  '        .split(|c: char| c.is_whitespace() || c == '"'"','"'"')' \
+  '        .split('"'"' '"'"')' \
+  geode-diagnostics completions_split_words_the_way_the_shell_does
+
+# ---- a refused event never stops a producer (Phase 4b follow-up, Task 1)
+
+run_mutation "runner: a refused idle announcement drops the event, it does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        drop(q);
+                        log_refused_event(&refusal_logged, "the queue-drained announcement");
+                        q = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        continue;' \
+  '                        return;' \
+  geode-data a_refused_plan_complete_does_not_stop_the_runner
+
+run_mutation "runner: a refused undeclared-dataset failure does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            if !failed {
+                log_refused_event(
+                    &refusal_logged,
+                    &format!(
+                        "the undeclared-dataset failure for {}/{}",
+                        item.dataset, item.batch
+                    ),
+                );
+            }' \
+  '            if !failed {
+                return;
+            }' \
+  geode-data a_refused_undeclared_dataset_failure_does_not_stop_the_runner
+
+run_mutation "runner: a refused load outcome does not stop the runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        if !delivered {
+            log_refused_event(
+                &refusal_logged,
+                &format!("the load outcome for {}/{}", item.dataset, item.batch),
+            );
+        }' \
+  '        if !delivered {
+            return;
+        }' \
+  geode-data a_refused_load_outcome_does_not_stop_the_runner
+
+run_mutation "scheduler: a refused event does not stop polling every source" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            log_refused_discovery(&refusal_logged, what, &spec.name);' \
+  '            return;' \
+  geode-data a_refused_event_does_not_stop_the_scheduler
+
+run_mutation "pool: a refused result does not stop the worker" \
+  crates/geode-data/src/query/pool.rs \
+  '            log_refused_result(&refusal_logged, &req.view.0);' \
+  '            return;' \
+  geode-data a_refused_result_does_not_stop_the_worker
+
+run_mutation "scheduler: a poll sends its result even when its health report was refused" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '                    let polled_delivered = sink(SchedulerEvent::Polled {' \
+  '                    let polled_delivered = health_delivered
+                        && sink(SchedulerEvent::Polled {' \
+  geode-data a_refused_health_does_not_swallow_that_polls_result
+
+run_mutation "bridge: a gone receiver is logged once per sink, not once per event" \
+  crates/geode-app/src/bridge.rs \
+  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
+  '            if err.is_closed() && true {' \
+  geode-app a_closed_channel_is_counted_and_logged_once
+
+run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never a full one" \
+  crates/geode-app/src/bridge.rs \
+  '            if err.is_closed() && !warned_closed.swap(true, Ordering::Relaxed) {' \
+  '            if !warned_closed.swap(true, Ordering::Relaxed) {' \
+  geode-app a_full_channel_is_counted_but_not_reported_as_a_gone_receiver
+
+run_mutation "service: open seeds the health load lane from the catalog" \
+  crates/geode-data/src/service.rs \
+  '        for dataset in datasets {
+            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+  '        for dataset in datasets.into_iter().take(0) {
+            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+  geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
+
+run_mutation "service: the seed is filed under the key a publish writes" \
+  crates/geode-data/src/service.rs \
+  '                    health_tracker.report_load_and_emit(
+                        &spec.name,
+                        batch,' \
+  '                    health_tracker.report_load_and_emit(
+                        &spec.name,
+                        &format!("{dataset}/{batch}"),' \
+  geode-data a_seeded_batch_is_cleared_by_that_batchs_own_corrected_republish
+
+run_mutation "catalog: live_health reports only generations that are not ok" \
+  crates/geode-data/src/store/catalog.rs \
+  "                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')" \
+  '                         and health is not null' \
+  geode-data live_health_reports_only_the_batches_whose_live_generation_is_unhealthy
+
+run_mutation "catalog: live_health admits only labels from_parts round-trips" \
+  crates/geode-data/src/store/catalog.rs \
+  "                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')" \
+  "                         and health <> 'ok'" \
+  geode-data live_health_ignores_a_health_label_it_does_not_recognise
+
+run_mutation "catalog: live_health breaks a tied source time on the newer generation" \
+  crates/geode-data/src/store/catalog.rs \
+  '                                      order by g.source_time desc, g.gen_id desc' \
+  '                                      order by g.source_time desc, g.gen_id asc' \
+  geode-data live_health_breaks_a_tied_source_time_on_the_newer_generation
+
+run_mutation "catalog: live_health never picks an archived-only generation" \
+  crates/geode-data/src/store/catalog.rs \
+  '                            and coalesce(fg.archived_only, false) = false
+                           where g.dataset = ?' \
+  '                            and 1 = 1
+                           where g.dataset = ?' \
+  geode-data live_health_never_reads_an_archived_only_generation_as_live
+
+run_mutation "catalog: live_health rolls a batch up to its worst book" \
+  crates/geode-data/src/store/catalog.rs \
+  "                                           end desc,
+                                           source_time desc, gen_id desc" \
+  "                                           end asc,
+                                           source_time desc, gen_id desc" \
+  geode-data live_health_takes_the_worst_across_the_books_of_one_batch
+
+# ---- health follow-ups (Task 3): worst_health names both Orphaned files
+
+run_mutation "scheduler: worst_health compares by rank, not Health's derived Ord" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '        let incumbent_rank = worst.first().map(|(w, _)| severity_rank(w));
+        match incumbent_rank {
+            Some(r) if r == severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > severity_rank(&h) => {}
+            _ => worst = vec![(h, name)],
+        }' \
+  '        let incumbent_rank = worst.first().map(|(w, _)| w.clone());
+        match incumbent_rank {
+            Some(r) if r == h => worst.push((h, name)),
+            Some(r) if r > h => {}
+            _ => worst = vec![(h, name)],
+        }' \
+  geode-data two_orphaned_candidates_with_different_reasons_are_both_named
+
+run_mutation "scheduler: a higher-rank candidate REPLACES the names kept at a lower rank" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '            _ => worst = vec![(h, name)],' \
+  '            _ => worst.push((h, name)),' \
+  geode-data a_higher_rank_candidate_replaces_the_names_accumulated_at_a_lower_rank
+
+run_mutation "runner: the refusal warning is latched once per runner" \
+  crates/geode-data/src/ingest/runner.rs \
+  'fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_event(latched: &AtomicBool, what: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_runner_not_once_per_event
+
+run_mutation "scheduler: the refusal warning is latched once per scheduler" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  'fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_discovery(latched: &AtomicBool, what: &str, source: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_scheduler_not_once_per_poll
+
+run_mutation "pool: the refusal warning is latched once per worker" \
+  crates/geode-data/src/query/pool.rs \
+  'fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  'fn log_refused_result(latched: &AtomicBool, view: &str) {
+    if false && latched.swap(true, Ordering::Relaxed) {
+        return;
+    }' \
+  geode-data a_refusal_is_logged_once_per_worker_not_once_per_result
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -411,6 +411,130 @@ impl<'a> Catalog<'a> {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
+    /// The persisted health of the generations a `AsOf::Live` query
+    /// reads right now, one entry per batch whose live generation is not
+    /// `ok`.
+    ///
+    /// Phase 4b's health tracker keeps its load lane in process only, so
+    /// a restart used to forget a still-live degraded generation
+    /// entirely: the first poll finds the CSV `Unchanged`, nothing
+    /// republishes, and the source reads `ok` while the blotter sums its
+    /// degraded rows. This is the read-back that seeds it
+    /// (`DataService::open`) — `file_generations.health` has been
+    /// written on every publish since 2a and was never read back.
+    ///
+    /// **No time bound, deliberately (fix round 1, MIN-3).** This must
+    /// agree with what the query path actually serves, and the live path
+    /// carries no generation predicate at all: `Era::live()` leaves
+    /// `generations: None` and `Era::relation` reads the live table
+    /// whole. So a generation whose `source_time` is *ahead* of the host
+    /// clock — an upstream stamping a business close in advance, or plain
+    /// clock skew; publish applies no such bound either — is live, is
+    /// summed by the blotter, and must be what this reports. Bounding
+    /// this by `Utc::now()` would have reported the *previous*
+    /// generation's health instead: a false clean, the one direction this
+    /// seam must never fail in. What is live is therefore the newest
+    /// non-archived generation per `(batch, book)` with no bound at all,
+    /// which is exactly what `live_source_time` and `book_freshness`
+    /// already read. Historical health is a different question, for a
+    /// caller that has one; nothing asks it today.
+    ///
+    /// Resolution is otherwise `query::as_of::resolve_generations`', off
+    /// the same summary table: newest `source_time` per `(batch, book)`,
+    /// ties broken by `gen_id` descending. The tie is not exotic — a
+    /// *corrected republish* keeps the sentinel's `as_of` and so ties the
+    /// generation it replaces (`store::publish`'s backfill guard is
+    /// strictly-older for exactly that reason), which is the ordinary way
+    /// a degradation is fixed. Taking the lower `gen_id` there would seed
+    /// the superseded degraded generation of a batch that was corrected
+    /// while the app was down, with a stale reason, on every restart.
+    ///
+    /// Three further differences from `resolve_generations`, all
+    /// deliberate:
+    ///
+    /// - `coalesce(fg.archived_only, false) = false` sits in the JOIN,
+    ///   not in an outer filter, so a generation that never went live
+    ///   (§4.5) can neither be picked as the live one nor hide the
+    ///   generation that actually is — the same guard `book_freshness`
+    ///   and `live_source_time` apply, for the same reason.
+    /// - The result is one row per BATCH, because the health tracker's
+    ///   load lane is keyed by batch (Phase 4b, NEW-6). A batch whose
+    ///   books resolve to different generations with different health is
+    ///   reported once, at its worst, by the label order `failed` >
+    ///   `degraded` > `pending_too_long` > `pending` — the SQL spelling
+    ///   of `service::severity_rank`, which is the one ordering this
+    ///   codebase rolls health up by (never `Health`'s derived `Ord`,
+    ///   which falls through to comparing reason strings).
+    /// - The filter names the four unhealthy labels rather than excluding
+    ///   `'ok'` (fix round 1, MIN-4). `Health::from_parts` maps anything
+    ///   it does not recognise to `Health::Ok`, so a label written by a
+    ///   future build, or a hand-edited row, used to arrive here as a
+    ///   spurious `Ok` — seeded before any producer had spoken, taking
+    ///   `last_reported` with it and swallowing the first genuine
+    ///   discovery `Ok`. Naming the vocabulary keeps this function's
+    ///   filter and `from_parts`' match arms the same set: a label this
+    ///   admits is a label that round-trips.
+    ///
+    /// A generation with no `file_generations` row — a summary rebuilt
+    /// from the data tables of a database whose catalog was lost — is
+    /// dropped by the join: no health was recorded, so none is claimed.
+    pub fn live_health(&self, dataset: &str) -> Result<Vec<(String, Health)>, StoreError> {
+        let sql = "select batch, health, health_reason from (
+                       select batch, health, health_reason,
+                              row_number() over (
+                                  partition by batch
+                                  order by case health
+                                               when 'failed' then 4
+                                               when 'degraded' then 3
+                                               when 'pending_too_long' then 2
+                                               when 'pending' then 1
+                                               else 0
+                                           end desc,
+                                           source_time desc, gen_id desc
+                              ) as batch_rn
+                       from (
+                           select g.batch as batch, g.gen_id as gen_id,
+                                  g.source_time as source_time,
+                                  fg.health as health,
+                                  fg.health_reason as health_reason,
+                                  row_number() over (
+                                      partition by g.batch, g.book
+                                      order by g.source_time desc, g.gen_id desc
+                                  ) as rn
+                           from generations g
+                           join file_generations fg
+                             on fg.gen_id = g.gen_id
+                            and fg.dataset = g.dataset
+                            and coalesce(fg.archived_only, false) = false
+                           where g.dataset = ?
+                       ) where rn = 1
+                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')
+                   ) where batch_rn = 1 order by batch";
+        let err = |source| StoreError::Sql {
+            statement: sql.to_string(),
+            source,
+        };
+        let mut stmt = self.conn.prepare(sql).map_err(err)?;
+        let rows = stmt
+            .query_map(duckdb::params![dataset], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map_err(err)?;
+        // Propagated, never swallowed, for `resolve_generations`' own
+        // reason: a row dropped here reports a degraded source as clean,
+        // which is the exact failure this function exists to prevent.
+        let mut out = Vec::new();
+        for row in rows {
+            let (batch, label, reason) = row.map_err(err)?;
+            out.push((batch, Health::from_parts(&label, reason.as_deref())));
+        }
+        Ok(out)
+    }
+
     /// A dataset's headline as-of: the oldest book in scope. An empty scope
     /// means every book.
     pub fn dataset_as_of(
@@ -1121,5 +1245,319 @@ mod tests {
         cat.record(&r).unwrap();
         let fresh = cat.book_freshness("risk_snapshot").unwrap();
         assert_eq!(fresh.len(), 2);
+    }
+
+    /// Record one generation into BOTH the catalog and the `generations`
+    /// summary, the way a real publish does — `live_health` reads the
+    /// join of the two, so a fixture that writes only one of them cannot
+    /// reach it.
+    fn published(
+        store: &crate::store::Store,
+        batch: &str,
+        book: Option<&str>,
+        gen_id: i64,
+        source_time: DateTime<Utc>,
+        health: Health,
+        archived_only: bool,
+    ) {
+        let mut r = record(batch, &[], source_time);
+        r.books = vec![book.map(|b| b.to_string())];
+        r.gen_id = gen_id;
+        r.file_id = gen_id;
+        r.health = health;
+        r.archived_only = archived_only;
+        Catalog::new(store.writer()).record(&r).unwrap();
+        store
+            .writer()
+            .execute(
+                "insert into generations values ('risk_snapshot', ?, ?, ?, ?)",
+                duckdb::params![batch, book, gen_id, source_time],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn live_health_reports_only_the_batches_whose_live_generation_is_unhealthy() {
+        // Phase 4b follow-up (spec §4.4 "Known gaps, deferred" item 2):
+        // the ingest health lane is in-process, so after a restart the
+        // only record of a still-live degraded generation is the one
+        // `file_generations.health` kept. This is the read-back.
+        let (_d, store) = store();
+        // BK000: degraded and still live — the whole point.
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Degraded {
+                reason: "currency varies within instrument key".into(),
+            },
+            false,
+        );
+        // BK001: clean. Never reported — seeding it would say a source
+        // is degraded because some other batch once was.
+        published(
+            &store,
+            "BK001",
+            Some("BK001"),
+            2,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Ok,
+            false,
+        );
+        // BK002: degraded, then CORRECTED by a later clean republish. The
+        // live generation is the clean one, so nothing is outstanding —
+        // a fixture that looked at history rather than at what is live
+        // would wrongly report this one forever.
+        published(
+            &store,
+            "BK002",
+            Some("BK002"),
+            3,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Degraded {
+                reason: "stale".into(),
+            },
+            false,
+        );
+        published(
+            &store,
+            "BK002",
+            Some("BK002"),
+            4,
+            ts("2026-08-30T08:00:00Z"),
+            Health::Ok,
+            false,
+        );
+
+        let live = Catalog::new(store.writer())
+            .live_health("risk_snapshot")
+            .unwrap();
+        assert_eq!(
+            live,
+            vec![(
+                "BK000".to_string(),
+                Health::Degraded {
+                    reason: "currency varies within instrument key".into(),
+                }
+            )],
+            "only the batch whose LIVE generation is unhealthy"
+        );
+    }
+
+    #[test]
+    fn live_health_reports_a_generation_whose_source_time_is_in_the_future() {
+        // Fix round 1, MIN-3. Publish applies no upper bound on source
+        // time, and `Era::live()` carries no generation predicate at all
+        // — a sentinel stamped ahead of the host clock (a business close
+        // dated in advance, or clock skew) publishes into the live table
+        // and IS what a live query sums. An `at <= now` bound here would
+        // have answered with the previous, clean generation instead:
+        // false-clean, the one direction this seam must never fail in.
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Ok,
+            false,
+        );
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            2,
+            Utc::now() + chrono::Duration::days(3650),
+            Health::Degraded {
+                reason: "stamped ahead of the clock".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap(),
+            vec![(
+                "BK000".to_string(),
+                Health::Degraded {
+                    reason: "stamped ahead of the clock".into()
+                }
+            )],
+            "what is live is what the live path serves, not what a clock bound admits"
+        );
+    }
+
+    #[test]
+    fn live_health_breaks_a_tied_source_time_on_the_newer_generation() {
+        // Fix round 1, MIN-1. The backfill guard is strictly-older
+        // (`store::publish`) precisely so that a file re-dropped with the
+        // same sentinel `as_of` REPLACES rather than becoming history —
+        // which is the ordinary way an operator corrects a degraded file.
+        // Both generations therefore carry one source time and only
+        // `gen_id` separates them. Taking the lower one seeds the
+        // superseded degraded generation, with a stale reason, on every
+        // restart until something republishes in-session.
+        let (_d, store) = store();
+        let tied = ts("2026-08-30T07:00:00Z");
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            tied,
+            Health::Degraded {
+                reason: "the operator has already fixed this".into(),
+            },
+            false,
+        );
+        published(&store, "BK000", Some("BK000"), 2, tied, Health::Ok, false);
+        assert!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap()
+                .is_empty(),
+            "the corrected republish is live; its superseded generation is not"
+        );
+    }
+
+    #[test]
+    fn live_health_ignores_a_health_label_it_does_not_recognise() {
+        // Fix round 1, MIN-4. `Health::from_parts` maps anything it does
+        // not know to `Health::Ok`, so a label written by a future build
+        // (or a hand-edited row) used to be seeded as a spurious `Ok`
+        // before any producer had spoken — taking `last_reported` with it
+        // and swallowing the first genuine discovery `Ok`. The filter
+        // names the vocabulary rather than excluding `'ok'`, so this
+        // function's filter and `from_parts`' arms stay the same set.
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Ok,
+            false,
+        );
+        store
+            .writer()
+            .execute(
+                "update file_generations set health = 'quarantined' where gen_id = 1",
+                [],
+            )
+            .unwrap();
+        assert!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap()
+                .is_empty(),
+            "a label this build cannot round-trip is not a health report"
+        );
+    }
+
+    #[test]
+    fn live_health_never_reads_an_archived_only_generation_as_live() {
+        // A generation filed straight to the archive was never live
+        // (§4.5), so its health is not what the source is currently
+        // serving. The source times here are arranged so that source
+        // order alone would pick the archived one — the
+        // `archived_only` guard, not the ordering, is what excludes it,
+        // and only a fixture built this way can tell the two apart.
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T08:00:00Z"),
+            Health::Ok,
+            false,
+        );
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            2,
+            ts("2026-08-30T09:00:00Z"),
+            Health::Degraded {
+                reason: "never went live".into(),
+            },
+            true,
+        );
+        assert!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap()
+                .is_empty(),
+            "an archived-only generation is never the live one"
+        );
+    }
+
+    #[test]
+    fn live_health_takes_the_worst_across_the_books_of_one_batch() {
+        // One batch, two books, two generations: `resolve_generations`
+        // resolves per (batch, book), so a batch can hold a clean book
+        // and a failed one at once. It is reported ONCE, at its worst —
+        // the tracker keys its load lane by batch, and the seed must not
+        // hand it two rows whose order decides which survives.
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000_A"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Degraded {
+                reason: "one column".into(),
+            },
+            false,
+        );
+        published(
+            &store,
+            "BK000",
+            Some("BK000_B"),
+            2,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Failed {
+                reason: "torn read".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap(),
+            vec![(
+                "BK000".to_string(),
+                Health::Failed {
+                    reason: "torn read".into()
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn live_health_does_not_read_another_datasets_generations() {
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
+            Health::Degraded {
+                reason: "wrong dataset".into(),
+            },
+            false,
+        );
+        assert!(
+            Catalog::new(store.writer())
+                .live_health("other_dataset")
+                .unwrap()
+                .is_empty()
+        );
     }
 }

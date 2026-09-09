@@ -1079,6 +1079,164 @@ either. The larger win from a real, high-generation-count archive (the
 is no longer reachable through this crate's own benches: the compile
 that used to scale with 3000 generations is now a fixed-cost lookup.
 
+## Phase 4b: diagnostics
+
+Phase 4b (`docs/superpowers/specs/2026-09-06-geode-phase-4-frame-features-design.md`
+§4) adds an always-on log ring and a `geode-diagnostics` tile over it,
+both explicitly subject to the charter's per-frame-churn rule. This
+section records the allocation and rebuild contracts that keep them off
+the render thread's budget, and the one display reading that would
+prove it — not yet taken; template rows below. (A source's *reported*
+health is a correctness question, not a performance one, so it is
+covered in the spec's §4.4 as-built note, not here — final review round
+3, NEW-4: it is the worse of two independently-tracked lanes, discovery
+and load, precisely so a routine, content-blind clean poll can never
+silently clear a real, unfixed problem a publish set.)
+
+**The ring reader's allocation contract.** `geode_core::log::Ring::
+drain_since` is the one thing a following diagnostics tile calls every
+time it might have new log lines, so its cost model is pinned by tests,
+not just documented:
+
+- `a_hit_allocates_nothing_in_the_reader` (`crates/geode-core/src/log/mod.rs`)
+  drains once, records the returned `Vec`'s capacity, pushes more
+  records, drains again for the same count, and asserts the capacity
+  did not grow — the reader owns its buffer and reuses it, so a tile
+  following the tail allocates only for records genuinely newer than
+  its `since`, never for the act of reading.
+- `drain_since` itself walks backward from the newest slot and stops
+  the instant it reaches a record at-or-before `since` (or an unwritten
+  pre-wrap slot), rather than scanning all 4,096 slots on every call —
+  a `#[cfg(test)]` `Ring::drain_visits` counter proves the bound
+  directly rather than inferring it from timing.
+- The one real allocation on a hit is each matching record's `message:
+  String` clone, made while the ring's mutex is held — the mutex is
+  never held for *formatting* (that happens on the emitting thread,
+  before `push`), only for the copy.
+
+**The no-rebuild-on-bare-notify discipline.** Every diagnostics section
+rebuilds only when an observed version actually changed, not on every
+`cx.notify()` a nearby entity happens to fire — a ring push carries no
+notify of its own, so a real caller relies on some other `Diagnostics`/
+`Frame` version bump (the reload-poll tick, a health note, a config
+reload) landing nearby to pick up new log lines, and that same version
+comparison must not rebuild on a notify that changed nothing.
+`an_unchanged_entity_does_not_rebuild_rows` (`crates/geode-diagnostics/
+src/tile.rs`) pins this the hard way: it calls `cx.notify()` on both
+`diagnostics` and `frame` with no real mutation behind either call and
+asserts `rebuild_count` does not move. The frame-driven half of that
+comparison narrows to exactly the two `FrameVersions` fields any
+section reads (`as_of`, `config`) — a scope-only or grouping-only frame
+change is not a reason for this tile to rebuild.
+
+**Per-population versions (final-review fix, MAJ-4).** The whole-branch
+review found that this discipline held for the *entity's own* version
+but not fully: `Diagnostics` had one combined `version()` counter, so
+ANY mutation — including the perf-only reload-tick copy of the frame
+histogram, which fires roughly every 500ms while any diagnostics tile
+is visible — bumped it, and the tile's one `cx.observe` compared that
+single counter regardless of which of the five sections was showing.
+For four sections that comparison was cheap to redo; for `config` it
+was not — `sections::config_rows` walks every loaded doc's leaves
+(several allocations per leaf: the walked path, the value's `to_
+string`, `explain`'s own probe, the row's `format!`), and was being
+redone twice a second whenever a `config` tile sat open beside anything
+painting frames, whether or not the config actually changed.
+
+The fix: `Diagnostics` gained `versions: DiagVersions { sources, data,
+config, log_levels, perf }` (`crates/geode-shell/src/diagnostics.rs`),
+one counter per section, each bumped only by the mutators that
+section's row builder reads — `note_config`/a changed `note_data_
+diagnostics` bump `config` (despite `data_diagnostics`' name, it is
+`config_rows` that renders it); `describe_source`/`note_health`/
+`note_polled` bump `sources`; `note_published`/`set_catalog` bump
+`data`; `request_level`/`set_levels` bump `log_levels`; `refresh_frame_
+hist`/`note_dropped` bump `perf`. `Diagnostics::version()` is untouched
+and keeps bumping on every mutation, unrelated to this — it still backs
+`summary()`'s cache. `DiagnosticsTile`'s two `cx.observe` closures
+(`crates/geode-diagnostics/src/tile.rs`) now compare only the
+version(s) the *current* section reads — `diag_version_for_section`
+for the diagnostics-entity half, plus the ring's own `latest_seq` for
+the log section specifically (not a `Diagnostics` version at all); the
+frame-driven half compares `as_of` only while showing `Data` and
+`config` only while showing `Config`. A perf-only tick while showing
+`config` now touches neither counter the config comparison reads, so
+`rebuild()` — and `config_rows`'s walk — does not run.
+
+Pinned by `refresh_frame_hist_does_not_rebuild_the_config_section`
+(a perf-only bump leaves the config section's `rebuild_count`
+untouched) and `note_config_rebuilds_the_config_section` (a real config
+change still does) in `crates/geode-diagnostics/src/tile.rs`.
+
+**The config section's own cost, measured (display-free proxy).** No
+display was available to take the reading the "Display recipe" section
+below describes, so — as MAJ-4's ruling asks — `config_rows` was timed
+directly against the largest config this repo ships: the `--demo`
+layer's five docs (`app`, `datasets`, `dimensions`, `groupings`,
+`views`) plus the compiled-in builtin keymap (the single biggest doc in
+a real session — one leaf per binding key, after the earlier MAJ-8 fix
+recurses into `[[bindings]]`'s array). Recipe:
+
+```sh
+cargo test -p geode-diagnostics --lib \
+  sections::tests::config_rows_on_the_demo_config_stays_under_budget \
+  -- --nocapture
+```
+
+| build | rows produced | `config_rows` elapsed |
+| --- | --- | --- |
+| debug (`cargo test`, unoptimized) | 591 | ~0.7-1.3ms (five runs, warm cache) |
+
+Well inside the render thread's 8ms pure-UI budget even unoptimized and
+even paid on every rebuild — the periodic-tick waste MAJ-4 fixed was
+real (twice a second regardless of relevance), but the walk itself was
+never close to the budget on a config this size. The test asserts a
+generous 10ms sanity bound, not this measured number, so it does not
+flake on a slower CI runner; a maintainer whose desk config grows much
+larger than the demo config's five docs plus the builtin keymap should
+re-run the recipe above rather than trust this row indefinitely.
+
+**The histogram copy cadence.** `ShellView::perf: FrameHistogram` stays
+the value the overlay and the render path read every frame;
+`Diagnostics.frame_hist` is a *copy*, refreshed on the shell's existing
+~500 ms reload-poll tick and only while `Diagnostics.watchers() > 0` —
+an open-but-invisible or closed diagnostics tile costs nothing here.
+`refresh_frame_hist` also compares before copying, so even a watched
+tile's copy is a no-op once the histogram stops changing between ticks.
+Pinned by `the_frame_histogram_is_copied_only_while_watched` and
+`refresh_frame_hist_is_a_no_op_when_the_histogram_is_unchanged`
+(`crates/geode-shell/src/diagnostics.rs`).
+
+**Display recipe — not yet run, template rows below.** The claim to
+verify: opening a diagnostics tile with the log section following (so
+it is draining the ring on every relevant tick) must not move the
+frame-time histogram's p95 against a baseline with no diagnostics tile
+open. Recipe, matching the Phase 3/4a sections' convention above:
+
+```sh
+cargo run --release -p geode-app -- --demo 1000000
+```
+
+1. With no diagnostics tile open, reset the overlay's counters
+   (`perf::reset`, palette-only) and hold `j` in a blotter tile for a
+   few seconds the way the Phase 3 wide-view reading above did; read
+   **p50**/**p95**/**max** before releasing.
+2. Open a diagnostics tile (`mod+shift+d`), switch to the `log`
+   section (`]`/`[` or `:section log`) so it is following the tail,
+   trigger some log activity (an ingest tick, a `:level` change),
+   `perf::reset` again, and repeat the same `j` hold in the blotter
+   tile.
+3. Compare the two p95 readings — the claim holds if they agree within
+   noise (same order of magnitude as the Phase 3 wide-view p95 above,
+   not a new tail introduced by the diagnostics tile's background
+   copying).
+
+| reading | where read | value |
+| --- | --- | --- |
+| baseline `j`-hold, no diagnostics tile, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
+| same hold, diagnostics tile open + log section following, p50/p95/max | overlay, counters reset before the hold | *(template — not yet measured)* |
+| verdict: does the diagnostics tile move p95? | comparison of the two rows above | *(template — not yet measured)* |
+
 ## Phase 4c: what a config-dialog keystroke costs, and what its flush costs
 
 Config dialogs have no save key (spec §3.2/§7.1). A keystroke changes the

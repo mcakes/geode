@@ -10,6 +10,7 @@ use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
+use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::Frame;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{FindEvent, ModuleFactory, TileContent, TileOccupant};
@@ -139,6 +140,7 @@ impl ModuleFactory for BlotterFactory {
         tile: TileId,
         restored: Option<&toml::Table>,
         frame: Entity<Frame>,
+        _diagnostics: Entity<Diagnostics>,
         window: &mut Window,
         cx: &mut App,
     ) -> TileOccupant {
@@ -169,6 +171,7 @@ impl ModuleFactory for BlotterFactory {
 mod tests {
     use super::*;
     use geode_core::groupings::GroupingSlots;
+    use geode_core::log::LogLevels;
     use geode_core::scopes::SavedScopes;
 
     /// One tile per open window, its own `VisualTestContext`.
@@ -181,7 +184,8 @@ mod tests {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let frame =
                         cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
-                    let occupant = factory.create(TileId(1), None, frame, window, cx);
+                    let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
+                    let occupant = factory.create(TileId(1), None, frame, diagnostics, window, cx);
                     occupant.view.downcast::<BlotterTile>().unwrap()
                 })
             })

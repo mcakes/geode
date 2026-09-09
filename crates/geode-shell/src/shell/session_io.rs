@@ -70,7 +70,7 @@ impl ShellView {
                 Some((path, text))
             }
             Err(e) => {
-                eprintln!("[session] warning: failed to serialize session: {e}");
+                tracing::warn!(target: "geode::session", "failed to serialize session: {e}");
                 None
             }
         }
@@ -100,7 +100,7 @@ impl ShellView {
             &self.current_tiles(cx),
             Some(&record),
         ) {
-            eprintln!("[session] warning: failed to save session: {e}");
+            tracing::warn!(target: "geode::session", "failed to save session: {e}");
         }
     }
 }

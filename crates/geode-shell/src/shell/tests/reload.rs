@@ -151,6 +151,52 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     });
 }
 
+/// Phase 4b Task 5 fix round 1, MAJ-3: `versions.config` must bump on
+/// every *applied* reload, not only one that changes `views`/
+/// `dimensions` — `note_config_reloaded`'s call used to sit behind the
+/// same `views_changed` gate as `ShellEvent::ConfigReloaded` (which is
+/// correctly scoped to what the data thread needs), so anything gating
+/// on "config was just reloaded" — chiefly the diagnostics module's
+/// config-section explainer — went stale on the reload `:level`'s own
+/// persist write causes (an `[log]`-only `app.toml` change).
+/// `config_with_mod` only touches `app.toml`'s `[keymap]` table:
+/// `views`/`dimensions` are both absent, so `views_changed` is false for
+/// this reload, and before the fix `versions.config` would not have
+/// moved at all.
+#[gpui::test]
+fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_version(
+    cx: &mut gpui::TestAppContext,
+) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view().clone().downcast::<ShellView>().unwrap()
+    });
+
+    let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    let new_config = config_with_mod("cmd");
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    let v1 = shell.read_with(&cx, |s, cx| s.frame.read(cx).versions());
+    assert!(
+        v1.config > v0.config,
+        "views/dimensions untouched, but the config version must still bump \
+         (v0={v0:?}, v1={v1:?})"
+    );
+}
+
 /// An error-severity diagnostic in the new config (here: an
 /// unsupported `config_version`) means the entire previous `Config`
 /// (and everything built from it — mod alias, keymap) is kept
@@ -1074,5 +1120,75 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
          the frame's own change notification, even when it's the \
          groupings_changed branch — which runs first in source order — \
          that actually notifies"
+    );
+}
+
+/// Phase 4b Task 1 fix round 1, MIN-8: M15's `pub use` re-export gave
+/// `main.rs` a second startup caller of `rebuild_saved_scopes` alongside
+/// `ShellView::new`'s own — printing diagnostics from both
+/// unconditionally would mean one malformed `scopes.toml` entry prints
+/// twice at every launch. `report_diagnostics: false` must not print;
+/// `true` must — pinned via `hot_reload::SAVED_SCOPES_REPORT_CALLS`
+/// (a test-only counter incremented once per printing call) rather than
+/// by capturing `stderr`, which `eprintln!` gives no in-process hook for.
+#[test]
+fn rebuild_saved_scopes_prints_only_when_asked() {
+    use crate::shell::hot_reload::{SAVED_SCOPES_REPORT_CALLS, rebuild_saved_scopes};
+
+    // "bad" is a string, not a table — `saved_scopes_from_doc` always
+    // produces at least one diagnostic for it, so this exercises the
+    // branch that actually has something to print.
+    let config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("scopes", "bad = \"not a table\"\n").unwrap()],
+        ..ConfigSources::default()
+    });
+    SAVED_SCOPES_REPORT_CALLS.with(|c| c.set(0));
+
+    rebuild_saved_scopes(&config, false);
+    assert_eq!(
+        SAVED_SCOPES_REPORT_CALLS.with(|c| c.get()),
+        0,
+        "report_diagnostics: false must not print — this is main.rs's own call"
+    );
+
+    rebuild_saved_scopes(&config, true);
+    assert_eq!(
+        SAVED_SCOPES_REPORT_CALLS.with(|c| c.get()),
+        1,
+        "report_diagnostics: true must print exactly once — this is \
+         ShellView::new's (and apply_reload's) own call"
+    );
+}
+
+/// Phase 4b Task 1 fix round 1, MIN-9: `ShellView::today` is read fresh
+/// from the clock once per ~500ms reload-poll tick (alongside the flip
+/// sweep and the dirty-session flush), not on every paint. A stale value
+/// set directly here stands in for "yesterday" — the test executor's
+/// virtual clock (what `advance_clock` moves) never touches the real
+/// `chrono::Local::now()` this reads, the same limitation `shell::
+/// tests::flip`'s own reload-poll-tick test documents — so this proves
+/// the tick corrects a wrong value rather than proving a date rollover
+/// specifically.
+#[gpui::test]
+fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+
+    let real_today = chrono::Local::now().date_naive();
+    let stale = real_today - chrono::Duration::days(1);
+    shell.update(&mut vcx, |s, _cx| s.today = stale);
+    assert_eq!(shell.read_with(&vcx, |s, _| s.today), stale);
+
+    vcx.run_until_parked();
+    vcx.executor().advance_clock(
+        crate::shell::hot_reload::RELOAD_POLL_INTERVAL + std::time::Duration::from_millis(1),
+    );
+    vcx.run_until_parked();
+
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.today),
+        real_today,
+        "one reload-poll tick must refresh `today` from the clock"
     );
 }

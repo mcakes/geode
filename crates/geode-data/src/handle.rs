@@ -8,7 +8,7 @@
 use crate::service::{DataEvent, DataService, DataServiceConfig, EventSink, QueryParams};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::query::{DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
+use geode_core::query::{CatalogParams, DistinctOutcome, DistinctParams, QueryKey, QueryOutcome};
 use geode_core::view::ViewSpec;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
@@ -25,6 +25,10 @@ pub enum Request {
     Query(QueryParams),
     /// The picker's distinct-values query (spec §3.4).
     Distinct(DistinctParams),
+    /// The diagnostics tile's "what does the database hold" request
+    /// (Phase 4b §4.5). Answered synchronously on the service thread,
+    /// not through the query pool — see `DataService::catalog`.
+    Catalog(CatalogParams),
     Cancel {
         key: QueryKey,
     },
@@ -122,6 +126,13 @@ impl DataHandle {
         self.send(Request::Distinct(params))
     }
 
+    /// Queue the diagnostics tile's catalog request (spec §4.5). `false`
+    /// means it was not queued; the result, when it comes, arrives on
+    /// the sink as `DataEvent::Catalog`, keyed and tagged as asked.
+    pub fn catalog(&self, params: CatalogParams) -> bool {
+        self.send(Request::Catalog(params))
+    }
+
     /// The safe hot-reload path for views (foundation §8). Diagnostics
     /// come back on the sink.
     pub fn replace_views(&self, views: Vec<ViewSpec>, dimensions: DerivedDimensions) -> bool {
@@ -198,6 +209,7 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                 layer: None,
                 file: None,
                 message: format!("data service failed to open: {e}"),
+                path: None,
             }]));
             return;
         }
@@ -231,6 +243,9 @@ fn serve(config: DataServiceConfig, sink: EventSink, rx: Receiver<Request>) {
                         values: Err(e.to_string()),
                     }));
                 }
+            }
+            Request::Catalog(params) => {
+                sink(DataEvent::Catalog(service.catalog(&params)));
             }
             Request::Cancel { key } => service.cancel(key),
             Request::ReplaceViews { views, dimensions } => {
@@ -299,6 +314,23 @@ mod tests {
             Request::Distinct(p) => {
                 assert_eq!(p.key, QueryKey(7));
                 assert_eq!(p.column, "book");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_test_handle_hands_a_catalog_request_to_the_test() {
+        let (h, rx) = DataHandle::for_tests();
+        assert!(h.catalog(CatalogParams {
+            key: QueryKey(9),
+            tag: 3,
+            as_of: AsOf::Live,
+        }));
+        match rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            Request::Catalog(p) => {
+                assert_eq!(p.key, QueryKey(9));
+                assert_eq!(p.tag, 3);
             }
             other => panic!("{other:?}"),
         }
@@ -390,6 +422,64 @@ mod tests {
             1,
             "the refused post-shutdown request is counted"
         );
+    }
+
+    #[test]
+    fn a_catalog_request_reaches_the_sink_as_a_catalog_event() {
+        // The full path: `DataHandle::catalog` -> `Request::Catalog` ->
+        // `serve`'s request loop -> `DataService::catalog` -> the sink,
+        // as `DataEvent::Catalog`, tag echoed.
+        let (db, _src, store, ds, emitted) = crate::ingest::load::tests_support::fixture();
+        for file in emitted.files.iter().filter(|f| f.sentinel_path.is_some()) {
+            let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+            let sentinel = crate::source::parse_sentinel(&text).unwrap();
+            let batch = crate::ingest::load::tests_support::batch_of(&file.csv_path);
+            let _ = crate::ingest::load_file(
+                &store,
+                &crate::ingest::LoadRequest {
+                    dataset: &ds,
+                    dataset_name: "risk_snapshot",
+                    csv_path: &file.csv_path,
+                    sentinel: &sentinel,
+                    batch: &batch,
+                },
+            );
+        }
+        drop(store);
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(ds);
+
+        let (tx, rx) = channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let h = DataService::spawn(
+            DataServiceConfig {
+                db_path: db.path().join("geode.duckdb"),
+                schema,
+                views: vec![crate::ingest::load::tests_support::tree_view()],
+                dimensions: geode_core::dimensions::DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+            },
+            sink,
+        );
+        assert!(h.catalog(CatalogParams {
+            key: QueryKey(21),
+            tag: 21,
+            as_of: AsOf::Live,
+        }));
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)).unwrap() {
+                DataEvent::Catalog(o) => {
+                    assert_eq!(o.key, QueryKey(21));
+                    assert_eq!(o.tag, 21);
+                    let snap = o.snapshot.expect("catalog request failed");
+                    assert_eq!(snap.datasets.len(), 1);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+        h.shutdown();
     }
 
     #[test]

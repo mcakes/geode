@@ -22,7 +22,7 @@
 //! workaround, which predated those tokens' use here.
 
 use gpui::prelude::*;
-use gpui::{App, IntoElement, div, px};
+use gpui::{App, IntoElement, MouseButton, Window, div, px};
 use gpui_component::ActiveTheme as _;
 use gpui_component::status_bar::StatusBar;
 
@@ -43,11 +43,19 @@ pub const HEIGHT: f32 = 26.0;
 /// dialog that started it), then the restart indicator when
 /// `restart_message` is `Some` (Phase 3 §4.5: a `sources`/`datasets`
 /// reload the frame cannot pick up live, so this asks for a restart in the
-/// same `warning` token the readout's AS OF badge uses), then the data
-/// status indicator when `data_status_message` is `Some` (Phase 3 §5.1:
-/// a source's degraded health, or events the app bridge's bounded
-/// channel had to refuse — same `warning` token, same reasoning), then
-/// the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
+/// same `warning` token the readout's AS OF badge uses), then the
+/// diagnostics summary when `diagnostics_summary` is `Some` (Phase 4b
+/// §4.4: `Diagnostics::summary()` — source health, config errors and
+/// dropped events, in one terse line — same `warning` token, same
+/// reasoning); a click on that segment calls `on_diagnostics_click`
+/// (Phase 4b Task 5 — `render.rs`'s call site opens the tile via
+/// `ShellView::open_module("diagnostics", ..)` directly, the same end
+/// door `mod+shift+d`'s `diagnostics::open` action also opens by kind
+/// through, but not by dispatching that action itself — MIN-9, final
+/// review: the click is therefore not recorded in the crash file's
+/// action tail, though `open_module` does mark the session dirty on
+/// its own).
+/// Then the as-of indicator when `as_of` is `Some` (Phase 4a §3.6: the frame
 /// is scoped to a past instant — an unmissable `AS OF {t} · :live to
 /// return` segment in the same warning tokens the toolbar's own AS OF
 /// badge uses, since spec §4.5 says nothing on screen may look live when
@@ -70,7 +78,8 @@ pub fn status_bar(
     reload_message: Option<&str>,
     write_error_message: Option<&str>,
     restart_message: Option<&str>,
-    data_status_message: Option<&str>,
+    diagnostics_summary: Option<&str>,
+    on_diagnostics_click: impl Fn(&mut Window, &mut App) + 'static,
     as_of: Option<&str>,
     theme_name: &str,
     cx: &App,
@@ -121,12 +130,15 @@ pub fn status_bar(
                 .child(message.to_string()),
         );
     }
-    if let Some(message) = data_status_message {
+    if let Some(message) = diagnostics_summary {
         bar = bar.left(
             div()
                 .text_color(theme.warning)
-                .debug_selector(|| "data-status".to_string())
-                .child(message.to_string()),
+                .debug_selector(|| "diagnostics-summary".to_string())
+                .child(message.to_string())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    on_diagnostics_click(window, cx);
+                }),
         );
     }
     if let Some(t) = as_of {

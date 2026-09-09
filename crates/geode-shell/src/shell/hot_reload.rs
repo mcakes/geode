@@ -5,7 +5,7 @@
 //! `shell/mod.rs` (Phase 3c Task 0) as the one seam that reacts to a
 //! config change after startup.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use gpui::Context;
 
@@ -17,6 +17,7 @@ use crate::vimfind::FindStyle;
 use geode_core::config::Config;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
+use geode_core::log::LogLevels;
 use geode_core::schema::SchemaSpec;
 
 use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
@@ -27,6 +28,12 @@ use super::{ShellEvent, ShellView, docs_equal, pickable_columns};
 /// ().spawn`); only the cheap decision + entity mutation happens on the UI
 /// thread, via the async entity handle (spec PHILOSOPHY.md: "nothing may
 /// stall the render thread").
+///
+/// **Coupled to `perf::IDLE_CUTOFF` (also 500ms) — see that constant's own
+/// doc comment for why.** This is also the tick `Diagnostics::
+/// refresh_frame_hist` rides while a diagnostics tile is visible; keep the
+/// two at least this close, or add a floor at the `refresh_frame_hist`
+/// call site instead of relying on the coincidence.
 pub(super) const RELOAD_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Rebuild `GroupingSlots` from whatever `[groupings]` (plus the
@@ -53,9 +60,20 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
         .map(|d| GroupingSlots::from_doc(d, &schema, &dims))
         .unwrap_or_default();
     for d in &diags {
-        eprintln!("[groupings] {d}");
+        tracing::warn!(target: "geode::config", "{d}");
     }
     slots
+}
+
+// Test-only counter (Phase 4b Task 1 fix round 1, MIN-8): incremented
+// once per `rebuild_saved_scopes` call that actually prints its
+// diagnostics (`report_diagnostics: true`), so a test can pin "the two
+// startup callers together print at most once" without capturing
+// `stderr` — see `shell/tests/reload.rs`'s
+// `rebuild_saved_scopes_prints_only_when_asked`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SAVED_SCOPES_REPORT_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// Rebuild [`SavedScopes`](geode_core::scopes::SavedScopes) from whatever
@@ -64,7 +82,30 @@ pub(super) fn rebuild_slots(config: &Config) -> GroupingSlots {
 /// shared the same way between `ShellView::new` (seeds the frame's
 /// initial saved scopes) and `apply_reload` (replaces them when `scopes`/
 /// `datasets`/`dimensions` changes, spec §4.5-style live pickup).
-pub(super) fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
+/// `pub`, not `pub(super)` (Phase 4b M15): `shell::mod` re-exports this
+/// as `shell::saved_scopes` (`pub use`) so `main.rs`, across the crate
+/// boundary, can call it without a second copy of its load logic — a
+/// `pub use` cannot re-export an item less visible than the path it is
+/// re-exported through, and `saved_scopes` is reached from outside this
+/// crate. `hot_reload` the *module* stays private either way (`mod
+/// hot_reload;`, no `pub`), so this doesn't otherwise widen what's
+/// reachable — only the one re-exported name is.
+///
+/// `report_diagnostics` (Phase 4b Task 1 fix round 1, MIN-8): M15's
+/// re-export gave `main.rs` a second startup caller of this function
+/// (`register_scope_actions(&mut registry, &saved_scopes(&config))`)
+/// alongside `ShellView::new`'s own — before M15, `main.rs`'s copy
+/// printed nothing at all (the bug M15 fixed), but printing from both
+/// unconditionally means a single malformed `scopes.toml` entry prints
+/// twice at every launch, reading as two distinct problems. `ShellView::
+/// new` passes `true` (the frame's own load is the one that reports);
+/// `main.rs` passes `false`; `apply_reload`'s live-reload call also
+/// passes `true` — a config change actually happening is exactly when a
+/// fresh diagnostic should surface.
+pub fn rebuild_saved_scopes(
+    config: &Config,
+    report_diagnostics: bool,
+) -> geode_core::scopes::SavedScopes {
     let (schema, _) = config
         .doc("datasets")
         .map(SchemaSpec::from_doc)
@@ -77,8 +118,12 @@ pub(super) fn rebuild_saved_scopes(config: &Config) -> geode_core::scopes::Saved
         .doc("scopes")
         .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims))
         .unwrap_or_default();
-    for d in &diags {
-        eprintln!("[scopes] {d}");
+    if report_diagnostics {
+        #[cfg(test)]
+        SAVED_SCOPES_REPORT_CALLS.with(|c| c.set(c.get() + 1));
+        for d in &diags {
+            tracing::warn!(target: "geode::config", "{d}");
+        }
     }
     saved
 }
@@ -138,20 +183,32 @@ impl ShellView {
         new_config.diagnostics.extend(keymap_diags);
 
         let outcome = reload::decide(&new_config);
+        // Phase 4b §4.4: every diagnostic this load produced (config
+        // parse/merge problems, the mod-alias/keymap-build diagnostics
+        // just extended in above) reaches the entity's "config" section
+        // regardless of whether `decide` applies or rejects the reload —
+        // a rejected reload's own fatal diagnostic is exactly the kind of
+        // thing a trader watching the diagnostics tile needs to see.
+        self.diagnostics.update(cx, |d, cx| {
+            let before = d.version();
+            d.note_config(new_config.diagnostics.clone(), SystemTime::now());
+            if d.version() != before {
+                cx.notify();
+            }
+        });
         if let reload::ReloadOutcome::Applied { warnings } = &outcome {
             // Fix wave, Fix 4: `decide` folds warning-severity diagnostics
             // (config + keymap-build) into `Applied { warnings }` rather
             // than discarding them, but nothing previously read that field
             // — a warning-only reload (e.g. an unknown-but-non-fatal
             // keymap key) applied silently with no trace anywhere. Surface
-            // each on stderr, one line per warning, the same
-            // `[source] warning: message` convention `main.rs`'s startup
-            // diagnostics already use (these are plain `String`s by the
-            // time they reach here — `decide` already extracted
-            // `Diagnostic::message` — so there's no `Diagnostic` Display
-            // impl to reuse here).
+            // each at `geode::config` warn, one event per warning — the
+            // same target `main.rs`'s startup diagnostics log at (Phase
+            // 4b Task 2; these are plain `String`s by the time they reach
+            // here — `decide` already extracted `Diagnostic::message` —
+            // so there's no `Diagnostic` Display impl to reuse here).
             for warning in warnings {
-                eprintln!("[reload] warning: {warning}");
+                tracing::warn!(target: "geode::config", "{warning}");
             }
 
             let theme_changed =
@@ -215,6 +272,42 @@ impl ShellView {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
+
+            // Phase 4b §4.3: an `[log]` change applies through the same
+            // `LevelControl` door `:level` (a later task) uses, and
+            // updates the entity so the diagnostics tile's own log
+            // section reflects it — never re-persisted here (this
+            // *picked up* a change already on disk; re-writing it back
+            // would be pointless, and `Diagnostics::set_levels` is
+            // deliberately the no-persist twin of `request_level`).
+            if changed("app") {
+                let (new_levels, log_diags) = LogLevels::from_doc(&new_config);
+                for d in &log_diags {
+                    tracing::warn!(target: "geode::config", "{d}");
+                }
+                // Phase 4b Task 4 fix round 1, MIN-9: `set_levels` runs
+                // whenever the levels actually changed, regardless of
+                // whether `self.services.log` is wired up — only
+                // `LevelControl::set` (the real subscriber) needs a real
+                // `LogServices` to call. Before this fix both were
+                // guarded by the same `if let Some(log) = ..`, so every
+                // test setup that opts out of logging (`log: None`,
+                // every fixture that doesn't build one explicitly) let
+                // `Diagnostics.levels` silently drift from what's on
+                // disk on every reload.
+                if new_levels != self.diagnostics.read(cx).levels {
+                    if let Some(log) = &self.services.log
+                        && let Err(e) = log.control.set(&new_levels)
+                    {
+                        tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+                    }
+                    self.diagnostics.update(cx, |d, cx| {
+                        if d.set_levels(new_levels) {
+                            cx.notify();
+                        }
+                    });
+                }
+            }
 
             self.services.config = new_config;
             self.services.mod_alias = mod_alias;
@@ -297,28 +390,64 @@ impl ShellView {
                 });
             }
             if scopes_changed {
-                let saved = rebuild_saved_scopes(&self.services.config);
+                // `true` (Phase 4b Task 1 fix round 1, MIN-8): a live
+                // reload actually changing `scopes.toml` is exactly when
+                // a fresh diagnostic should surface, unlike `main.rs`'s
+                // one-shot startup call for action registration.
+                let saved = rebuild_saved_scopes(&self.services.config, true);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_saved_scopes(saved) {
                         cx.notify();
                     }
                 });
             }
-            if views_changed {
+            // Phase 4b Task 5 fix round 1, MAJ-3: unconditional now,
+            // unlike the `ConfigReloaded` emission just above — that event
+            // is scoped to what the DATA thread needs (`views`/
+            // `dimensions`), but `versions.config` is a general "some
+            // config was reloaded" signal other observers key off (the
+            // diagnostics module's config-section explainer, `main.rs`'s
+            // own config-refresh subscription) and must bump on every
+            // applied reload, including an `[log]`- or `[theme]`-only
+            // edit that leaves `views`/`dimensions` untouched — otherwise
+            // exactly the reload `:level`'s own persist write causes
+            // never refreshes the one tile whose job is to show it.
+            // `BlotterTile::follows_changed` also reads this counter (a
+            // requery on config != data change), so this does mean a
+            // visible blotter tile now requeries on every applied reload,
+            // not only a `views`/`dimensions` one — accepted: reloads are
+            // rare, deliberate file edits (the ~500ms poll only acts when
+            // something actually changed), not a per-frame or per-
+            // keystroke cost.
+            {
                 self.frame.update(cx, |f, cx| {
                     f.note_config_reloaded();
                     cx.notify();
                 });
             }
-            if !restart.is_empty() {
-                let message = format!("{} changed — restart to apply", restart.join(" and "));
-                self.restart_required = Some(message.clone());
-                cx.emit(ShellEvent::RestartRequired(message));
+            let restart_message = if !restart.is_empty() {
+                Some(format!(
+                    "{} changed — restart to apply",
+                    restart.join(" and ")
+                ))
             } else {
                 // M8: both docs are back at the baseline the running data
                 // engine was built from — the on-disk config no longer
                 // disagrees with what's running, so the message is stale.
-                self.restart_required = None;
+                None
+            };
+            self.restart_required = restart_message.clone();
+            // Phase 4b §4.4: the entity's own copy, so the diagnostics
+            // tile can show it without reaching back into `ShellView`.
+            self.diagnostics.update(cx, |d, cx| {
+                let before = d.version();
+                d.set_restart_required(restart_message.clone());
+                if d.version() != before {
+                    cx.notify();
+                }
+            });
+            if let Some(message) = restart_message {
+                cx.emit(ShellEvent::RestartRequired(message));
             }
         }
 

@@ -45,21 +45,25 @@ use gpui_component::input::{InputEvent, InputState};
 
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
+use crate::diagnostics::{ActionTail, Diagnostics};
 use crate::fontsize::FontSize;
-use crate::frame::{FLIP_DEADLINE, Frame, FrameVersions};
+use crate::frame::{Frame, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
+use crate::log_persist;
 use crate::module::{ModuleRoster, TileOccupant};
 use crate::palette::PaletteState;
 use crate::perf::FrameHistogram;
 use crate::reload;
 use crate::session;
 use crate::theme::ThemeService;
-use crate::tiling::{TileId, Workspaces};
+use crate::tiling::{DockSide, Orientation, TileId, Workspaces};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, ConfigSources, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_core::query::{DistinctOutcome, QueryKey};
 use geode_core::schema::{ColumnRole, SchemaSpec};
+use std::sync::{Arc, Mutex};
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
@@ -106,6 +110,31 @@ pub struct ShellServices {
     /// fresh session (no file, or one with no `[frame]` table yet) and in
     /// every test setup that doesn't opt in.
     pub restored_frame: Option<crate::session::FrameRecord>,
+    /// The `tracing` foundation (Phase 4b Task 2): the ring the
+    /// diagnostics tile reads, the control `:level` writes through, and
+    /// the levels `[log]` resolved to at startup. `None` in every test
+    /// setup that doesn't opt in — logging is then simply not wired up,
+    /// never a panic (mirrors `session_path`'s own "missing = skipped").
+    pub log: Option<LogServices>,
+    /// The last 32 dispatched actions' hashes (Phase 4b Task 6): recorded
+    /// by `ShellView::dispatch` before it matches the action, read by the
+    /// crash hook (`geode_app::crash::install_panic_hook`) through the
+    /// `Arc<Mutex<_>>` handed to it at startup — a shared handle, not a
+    /// snapshot, so the hook always sees the latest keypresses right up
+    /// to the panic. A `Mutex`, not `RefCell`: this must be `Send + Sync`
+    /// to be captured by the 'static panic hook closure alongside
+    /// `ActionRegistry::hash_names`'s own `Arc<RwLock<_>>`.
+    pub action_tail: Arc<Mutex<ActionTail>>,
+}
+
+/// The pieces of the installed `tracing` subscriber the shell needs at
+/// runtime: a handle to read the ring (the diagnostics tile), a handle to
+/// change the level filter (`:level`), and the levels currently in
+/// effect.
+pub struct LogServices {
+    pub ring: Arc<Ring>,
+    pub control: Arc<dyn LevelControl>,
+    pub levels: LogLevels,
 }
 
 impl ShellServices {
@@ -179,6 +208,12 @@ impl EventEmitter<ShellEvent> for ShellView {}
 /// instead and is routed to [`ShellView::deliver_distinct`], a separate
 /// method with its own stale-tag/stale-column guard.
 pub const PICKER_KEY: QueryKey = QueryKey(u64::MAX - 1);
+
+/// The coalescing key the diagnostics tile's `Request::Catalog` submits
+/// under (Phase 4b §4.5) — same reservation reasoning as [`PICKER_KEY`]
+/// just above, one lower so the two can never collide with each other or
+/// with a real tile's `TileId`-derived key.
+pub const DIAGNOSTICS_KEY: QueryKey = QueryKey(u64::MAX - 2);
 
 /// One column a dimension picker can open (spec §3.3): every categorical
 /// column of every dataset, plus every derived dimension. `role` is
@@ -256,27 +291,19 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
 /// way: `[scopes]` validated against the `datasets`/`dimensions` docs a
 /// scope's own columns must resolve against.
 ///
-/// This reproduces `hot_reload::rebuild_saved_scopes`'s load (that
+/// Phase 4b M15: this used to be its own copy of `hot_reload::
+/// rebuild_saved_scopes`'s load logic (kept separate because that
 /// function is `pub(super)` — internal reload housekeeping, out of
-/// `main.rs`'s reach across the crate boundary) rather than exposing it
-/// directly, the same "compute it again, once here before the frame
-/// exists for action registration, once inside `ShellView::new` for the
-/// frame itself" shape [`pickable_columns`] already has two independent
-/// callers of.
-pub fn saved_scopes(config: &Config) -> geode_core::scopes::SavedScopes {
-    let (schema, _) = config
-        .doc("datasets")
-        .map(SchemaSpec::from_doc)
-        .unwrap_or_default();
-    let (dims, _) = config
-        .doc("dimensions")
-        .map(DerivedDimensions::from_doc)
-        .unwrap_or_default();
-    config
-        .doc("scopes")
-        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, &schema, &dims).0)
-        .unwrap_or_default()
-}
+/// `main.rs`'s reach across the crate boundary) — a real duplication,
+/// not just a naming difference: the copy here silently dropped
+/// `saved_scopes_from_doc`'s diagnostics (`.0` on the tuple) where
+/// `rebuild_saved_scopes` prints them. A `pub use` re-export needs no
+/// copy: `hot_reload` the *module* stays private, but re-exporting one
+/// of its `pub(super)` items under a public name here is exactly as
+/// legal as `pickable_columns` living in this module in the first
+/// place — nothing about `pub(super)` prevents `shell::mod` itself,
+/// which is `hot_reload`'s parent, from naming and re-exporting it.
+pub use hot_reload::rebuild_saved_scopes as saved_scopes;
 
 /// The window's root view. Intercepts all keyboard input via `on_key_down`
 /// rather than gpui's own action-dispatch system, because key resolution
@@ -576,6 +603,22 @@ pub struct ShellView {
     perf_overlay: bool,
     /// The shared frame (§4), created here so every occupant can hold it.
     frame: Entity<Frame>,
+    /// The shell-owned diagnostics gatherer (Phase 4b §4.4), created
+    /// alongside the frame so every occupant can hold it too. Fed by
+    /// the app bridge and by config load/reload (`hot_reload::
+    /// apply_reload`); drained by the `cx.observe` set up in `new` for
+    /// `:level` persistence, the overlay toggle, and the catalog
+    /// request.
+    diagnostics: Entity<Diagnostics>,
+    /// Set by [`Self::open_module`] right after it splits a fresh tile for
+    /// a kind with no existing occupant in the focused workspace (Phase 4b
+    /// Task 5): `ensure_occupants` (`shell/occupants.rs`) consumes this —
+    /// the ONE new tile it finds with no restored record gets this kind's
+    /// factory instead of the roster's default — and clears it, whether or
+    /// not a matching factory existed (falling back to the default kind
+    /// with a `warn!` when it didn't, same "never a blank, never a panic"
+    /// contract `placeholder` upholds for an unknown session kind).
+    pending_kind_for_new_tile: Option<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -629,14 +672,6 @@ pub struct ShellView {
     /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
     /// the `datasets` doc.
     datasets_baseline: Vec<LayerDoc>,
-    /// The latest data-layer diagnostic the app bridge wants shown (Phase
-    /// 3 §5.1) — a source's health degrading, or events refused because
-    /// the bridge's bounded channel filled up. `None` means nothing to
-    /// report. The shell cannot query for itself (CLAUDE.md: it does not
-    /// depend on `geode-data`), so `geode-app` is the only writer, via
-    /// [`set_data_status`](Self::set_data_status); this field is plain
-    /// display state, same as `restart_required` two fields up.
-    data_status: Option<String>,
     /// Every column a dimension picker can open (Phase 4a §3.3),
     /// [`pickable_columns`] over the current config — computed once at
     /// construction and rebuilt by `hot_reload::apply_reload` whenever
@@ -656,6 +691,16 @@ pub struct ShellView {
     /// cleared by [`close_modal`](Self::close_modal), same as the other
     /// two dialogs.
     picker: Option<picker::PickerState>,
+    /// The tag [`picker::open`]/[`picker::request_values`] hands out next
+    /// (Phase 4b M5) — monotonic across the whole session, never reset
+    /// per open. `PickerState::new` used to always start a fresh picker
+    /// at `tag: 0`, so two separate opens on the same column produced
+    /// the *same* sequence of tags (0, then 1 once the first request
+    /// went out); a `DistinctOutcome` that arrived late from the first
+    /// open could then be mistaken for the second open's own answer.
+    /// Reusing one counter across opens instead of restarting it makes
+    /// every tag this session ever hands out unique.
+    next_picker_tag: u64,
     /// Scroll state for the picker's `Values`-stage `uniform_list` (fix
     /// round 1, Finding 1) — the `keybindings_scroll`/`settings_scroll`/
     /// `palette_scroll` split, one gpui type over: `uniform_list` is
@@ -711,6 +756,16 @@ pub struct ShellView {
     /// commonest way to reach the failure path with no dialog left on
     /// screen to carry a notice.
     pub(crate) config_write_error: Option<String>,
+    /// Today's local date (Phase 4b Task 1 fix round 1, MIN-9) —
+    /// refreshed once per reload-poll tick (~500ms, alongside the flip
+    /// sweep and the dirty-session flush) rather than read fresh on
+    /// every paint. Before this, `render`'s own `chrono::Local::now()`
+    /// call (feeding `Frame::bar_model`'s `(versions, today)` cache key,
+    /// M12) ran on every single render — including every one of the
+    /// ~100% of frames that hit the cache — new per-frame clock-read
+    /// work on the render path for a value that only meaningfully
+    /// changes once a day.
+    pub(super) today: chrono::NaiveDate,
 }
 
 /// Whether two layered doc slices for the same config file
@@ -925,6 +980,85 @@ impl ShellView {
                     .timer(hot_reload::RELOAD_POLL_INTERVAL)
                     .await;
 
+                // Sweep the flip barrier's deadline (Phase 4b M7),
+                // unconditionally on every tick just like the session
+                // flush right below — one always-running timer rather
+                // than a fresh detached one per scope/grouping/as-of
+                // mutation (`on_frame_changed` used to spawn one on every
+                // such change; a burst of keystrokes spawned a burst of
+                // timers, all racing to sweep the same barrier). `sweep`
+                // itself is a cheap no-op once nothing is open or the
+                // deadline hasn't passed, so this costs nothing on a
+                // quiet tick. The tradeoff (spec §3.10's as-built note,
+                // corrected in Task 1 fix round 1 MIN-5): a barrier now
+                // releases on the poll loop's next iteration after
+                // `FLIP_DEADLINE`, not exactly at it — bounded by that
+                // whole iteration (this timer, then the session flush
+                // below, then the `reload::scan` further down), not by
+                // the timer interval alone, since nothing sweeps again
+                // until the loop comes back around to this line.
+                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
+                    return; // window/entity gone; stop polling
+                };
+                frame.update(cx, |f, cx| {
+                    if f.sweep(Instant::now()) {
+                        cx.notify();
+                    }
+                });
+
+                // Copy the frame-time histogram into `Diagnostics`
+                // (Phase 4b open question 2's ruling), same tick — a
+                // no-op, allocation-free, unless a diagnostics tile is
+                // actually watching. `refresh_frame_hist` itself also
+                // compares before copying (Task 4 fix round 1, MAJ-3),
+                // but the `~176`-byte `view.perf.clone()` (`FrameHistogram`
+                // is `[u32; 36]` plus four scalars) that used to happen
+                // unconditionally right here, every ~500ms tick,
+                // regardless of `watchers()`, is gated on it too now
+                // (Task 4 fix round 1, MIN-1 — the comment used to claim
+                // this whole thing was already "allocation-free unless
+                // watching" while the clone ran every tick regardless;
+                // now it's actually true, not just documented that way).
+                let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {
+                    let watched = view.diagnostics.read(cx).watchers() > 0;
+                    (view.diagnostics.clone(), watched)
+                }) else {
+                    return; // window/entity gone; stop polling
+                };
+                if watched {
+                    let Ok(perf) = this.update(cx, |view, _cx| view.perf.clone()) else {
+                        return; // window/entity gone; stop polling
+                    };
+                    diagnostics.update(cx, |d, cx| {
+                        if d.refresh_frame_hist(&perf) {
+                            cx.notify();
+                        }
+                    });
+                }
+
+                // Refresh `today` (Phase 4b Task 1 fix round 1, MIN-9),
+                // same tick, same "cheap no-op unless it actually
+                // changed" shape as the sweep just above — this is the
+                // one clock read the whole ~500ms tick needs; `render`
+                // (and therefore `Frame::bar_model`'s cache key) reads
+                // `self.today` rather than calling `chrono::Local::now()`
+                // itself, so a held key no longer pays a clock read on
+                // every repaint for a value that only changes once a
+                // day. Only notifies when the date actually moved on —
+                // any other trigger repaints "for free" with the fresh
+                // value already in place.
+                let Ok(changed) = this.update(cx, |view, _cx| {
+                    let today = chrono::Local::now().date_naive();
+                    let changed = view.today != today;
+                    view.today = today;
+                    changed
+                }) else {
+                    return; // window/entity gone; stop polling
+                };
+                if changed {
+                    let _ = this.update(cx, |_view, cx| cx.notify());
+                }
+
                 // Flush a dirty session (Task 3 fix round 1), coalesced
                 // onto this same ~500ms tick rather than writing per
                 // dispatch. `take_dirty_session_write` does the cheap part
@@ -945,7 +1079,7 @@ impl ShellView {
                         .spawn(async move { session::write_atomic(&path, &text) })
                         .await
                         .unwrap_or_else(|e| {
-                            eprintln!("[session] warning: failed to save session: {e}")
+                            tracing::warn!(target: "geode::session", "failed to save session: {e}")
                         });
                 }
 
@@ -1026,7 +1160,12 @@ impl ShellView {
         // rebuilds.
         let frame = {
             let slots = hot_reload::rebuild_slots(&services.config);
-            let saved = hot_reload::rebuild_saved_scopes(&services.config);
+            // `true` (Phase 4b Task 1 fix round 1, MIN-8): the frame's
+            // own initial load is the one startup caller that reports —
+            // `main.rs`'s `saved_scopes(&config)` call (action
+            // registration, before this even runs) passes `false`, so a
+            // malformed `scopes.toml` entry doesn't print twice.
+            let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
             cx.new(|_| Frame::new(slots, saved, user_dir.clone()))
         };
         // A slot or scope saved by a module (`:group save N`, `:scope
@@ -1049,6 +1188,39 @@ impl ShellView {
         // branch) self-arrive without ever requerying.
         cx.observe_in(&frame, window, |view, frame, window, cx| {
             view.on_frame_changed(frame, window, cx)
+        })
+        .detach();
+
+        // The shell-owned diagnostics gatherer (Phase 4b §4.4), created
+        // alongside the frame — see the field's own doc comment. Seeded
+        // from `services.log`'s levels when logging is wired up (`None`
+        // in every test setup that doesn't opt in, mirroring `log`
+        // itself), `LogLevels::default()` otherwise.
+        let diagnostics = {
+            let levels = services
+                .log
+                .as_ref()
+                .map(|l| l.levels.clone())
+                .unwrap_or_default();
+            cx.new(|_| Diagnostics::new(levels))
+        };
+        // The config this window started with already carries whatever
+        // `Config::load` diagnosed — `main.rs`'s own startup
+        // `print_diagnostic` loop logs the same list to `geode::config`;
+        // recorded here too so the diagnostics tile's "config" section
+        // has it from the very first frame, not only from the first live
+        // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
+        diagnostics.update(cx, |d, _cx| {
+            d.note_config(
+                services.config.diagnostics.clone(),
+                std::time::SystemTime::now(),
+            );
+        });
+        // Same drain-only shape as the frame's own observer above, minus
+        // the `Window` — none of `on_diagnostics_changed`'s three drains
+        // need one.
+        cx.observe(&diagnostics, |view, diagnostics, cx| {
+            view.on_diagnostics_changed(diagnostics, cx);
         })
         .detach();
 
@@ -1114,6 +1286,8 @@ impl ShellView {
             last_render_started: None,
             perf_overlay: false,
             frame,
+            diagnostics,
+            pending_kind_for_new_tile: None,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
@@ -1123,9 +1297,9 @@ impl ShellView {
             restart_required: None,
             sources_baseline,
             datasets_baseline,
-            data_status: None,
             pickable,
             picker: None,
+            next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             object_dialog: None,
@@ -1133,6 +1307,7 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
+            today: chrono::Local::now().date_naive(),
         }
     }
 
@@ -1205,16 +1380,13 @@ impl ShellView {
             self.visible_tile_keys(&mut keys);
             frame.update(cx, |f, _| f.open_flip(keys.iter().copied(), Instant::now()));
             self.scratch_visible_keys = keys;
-            let deadline_frame = frame.clone();
-            cx.spawn(async move |_this, cx| {
-                cx.background_executor().timer(FLIP_DEADLINE).await;
-                deadline_frame.update(cx, |f, cx| {
-                    if f.sweep(Instant::now()) {
-                        cx.notify();
-                    }
-                });
-            })
-            .detach();
+            // Phase 4b M7: no detached per-mutation timer here any more —
+            // a burst of keystrokes used to spawn one `FLIP_DEADLINE`
+            // timer each, all racing to sweep the same barrier. The
+            // reload-poll loop (`ShellView::new`, ~500ms) sweeps every
+            // tick instead, so the deadline is "released on the next
+            // tick after `FLIP_DEADLINE`" rather than exactly on it —
+            // see that loop's own comment and spec §3.10's as-built note.
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
             && let Some(dir) = self.user_dir.clone()
@@ -1223,7 +1395,7 @@ impl ShellView {
                 .spawn(async move {
                     if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping)
                     {
-                        eprintln!("[groupings] warning: {e}");
+                        tracing::warn!(target: "geode::config", "{e}");
                     }
                 })
                 .detach();
@@ -1238,7 +1410,7 @@ impl ShellView {
                 .spawn(async move {
                     if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope)
                     {
-                        eprintln!("[scopes] warning: {e}");
+                        tracing::warn!(target: "geode::config", "{e}");
                     }
                 })
                 .detach();
@@ -1264,6 +1436,42 @@ impl ShellView {
                     i.set_value(frame_text, window, cx);
                 });
             }
+        }
+        cx.notify();
+    }
+
+    /// Fired by the `cx.observe(&diagnostics, ..)` set up in `new`
+    /// whenever the entity notifies: drains the two pending requests a
+    /// module can queue but never reach `ShellView` to act on directly
+    /// (spec ruling — modules never reach `ShellView`) — `request_level`'s
+    /// runtime apply + persist, and `request_overlay_toggle`. The catalog
+    /// request drain lives in the app bridge (`geode-app` is the only
+    /// crate allowed to touch `geode-data`), not here.
+    fn on_diagnostics_changed(&mut self, diagnostics: Entity<Diagnostics>, cx: &mut Context<Self>) {
+        let (pending_level, pending_overlay) = diagnostics.update(cx, |d, _cx| {
+            (d.take_pending_level(), d.take_pending_overlay_toggle())
+        });
+        if let Some((target, level)) = pending_level {
+            let levels = diagnostics.read(cx).levels.clone();
+            if let Some(log) = &self.services.log
+                && let Err(e) = log.control.set(&levels)
+            {
+                tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
+            }
+            if let Some(dir) = self.user_dir.clone() {
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) =
+                            log_persist::persist_log_level_to_user_config(&dir, &target, level)
+                        {
+                            tracing::warn!(target: "geode::config", "failed to persist [log]: {e}");
+                        }
+                    })
+                    .detach();
+            }
+        }
+        if pending_overlay {
+            self.perf_overlay = !self.perf_overlay;
         }
         cx.notify();
     }
@@ -1300,6 +1508,80 @@ impl ShellView {
     /// The shared frame entity every occupant holds (§4).
     pub fn frame(&self) -> &Entity<Frame> {
         &self.frame
+    }
+
+    /// The shell-owned diagnostics entity every occupant can hold too
+    /// (Phase 4b §4.4).
+    pub fn diagnostics(&self) -> &Entity<Diagnostics> {
+        &self.diagnostics
+    }
+
+    /// Open a module tile of `kind` in the focused workspace (Phase 4b
+    /// Task 5, spec ruling: "`diagnostics::open` opens by kind through the
+    /// shell, not through the module"): focus an existing occupant of that
+    /// kind wherever it lives (the main tree or a dock) if one exists,
+    /// else split the focused tile (the same path `ctrl+v`/`workspace::
+    /// split_right` takes — `Tree::split` always focuses the new tile) and
+    /// set [`Self::pending_kind_for_new_tile`], which `ensure_occupants`
+    /// (`shell/occupants.rs`) consumes on its very next call — the same
+    /// render pass, since `ensure_occupants` runs at the top of every
+    /// `render` and this always `cx.notify()`s.
+    pub fn open_module(&mut self, kind: &str, _window: &mut Window, cx: &mut Context<Self>) {
+        let ws = self.services.workspaces.active();
+        let found: Option<(TileId, Option<DockSide>)> = ws
+            .tree()
+            .tiles()
+            .into_iter()
+            .find(|id| self.occupant_kind(*id) == Some(kind))
+            .map(|id| (id, None))
+            .or_else(|| {
+                ws.docks().iter().find_map(|(side, dock)| {
+                    dock.tree()
+                        .tiles()
+                        .into_iter()
+                        .find(|id| self.occupant_kind(*id) == Some(kind))
+                        .map(|id| (id, Some(side)))
+                })
+            });
+        if let Some((tile, side)) = found {
+            let ws = self.services.workspaces.active_mut();
+            match side {
+                Some(side) => {
+                    ws.focus_dock_tile(side, tile);
+                }
+                None => {
+                    ws.focus_main_tile(tile);
+                }
+            }
+            self.session_dirty = true;
+            cx.notify();
+            return;
+        }
+        // MIN-7 (Phase 4b Task 5 fix round 1): two `open_module` calls for
+        // the same kind within one render (a double `mod+shift+d` press,
+        // key-repeat) would otherwise both miss the "existing occupant"
+        // search above — the first call's split tile has no occupant yet
+        // (`ensure_occupants` only creates one at the top of the *next*
+        // render), so the second call splits again and overwrites
+        // `pending_kind_for_new_tile`, leaving one tile hosting `kind` and
+        // a stray second one hosting the default kind. A pending request
+        // for the SAME kind is a no-op — the tile that request will
+        // create is, for all `open_module`'s purposes, already "the one
+        // open occupant of this kind" the moment it's requested, whether
+        // or not `ensure_occupants` has caught up yet. A pending request
+        // for a *different* kind still overwrites, same as before (last
+        // request wins, unambiguous — nothing between two `open_module`
+        // calls for different kinds within one render should silently
+        // drop either).
+        if self.pending_kind_for_new_tile.as_deref() == Some(kind) {
+            return;
+        }
+        self.services
+            .workspaces
+            .split_active(Orientation::Horizontal);
+        self.pending_kind_for_new_tile = Some(kind.to_string());
+        self.session_dirty = true;
+        cx.notify();
     }
 
     /// The open dimension picker's state, if any (Phase 4a §3.3/§3.4) —

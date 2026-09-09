@@ -333,6 +333,12 @@ pub fn open(
         Some(c) if view.pickable.iter().any(|p| p.column == c) => Stage::Values { column: c },
         Some(_) | None => Stage::Columns,
     };
+    // `tag: 0` here is only ever a placeholder: a `Columns`-stage open
+    // makes no request yet (nothing to compare it against), and a
+    // `Values`-stage open below calls `request_values` in the same
+    // synchronous call, which overwrites it with a real tag (Phase 4b
+    // M5: drawn from `ShellView::next_picker_tag`, the session-wide
+    // counter) before any outcome could possibly arrive.
     view.picker = Some(PickerState {
         stage,
         selected: 0,
@@ -368,10 +374,19 @@ pub fn open(
 /// itself currently narrows to", which is what makes a value's count
 /// meaningful rather than self-referential.
 fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+    // Phase 4b M5: drawn from the shell's own monotonic counter (never
+    // reset per open), not a `+= 1` on the picker's own tag — a fresh
+    // `PickerState` always starts at the same value, so two separate
+    // opens on the same column used to hand out the identical sequence
+    // of tags, and a stale outcome from the first open could pass the
+    // second open's tag check. See `ShellView::next_picker_tag`'s own
+    // doc comment.
+    view.next_picker_tag += 1;
+    let tag = view.next_picker_tag;
     let Some(p) = view.picker.as_mut() else {
         return;
     };
-    p.tag += 1;
+    p.tag = tag;
     p.values = None;
     // Pre-tick the current selection.
     let (scope, as_of) = {

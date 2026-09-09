@@ -38,12 +38,25 @@ pub enum Severity {
 }
 
 /// A problem found while loading or interpreting config. Never fatal.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` (Phase 4b Task 4 fix round 1, MAJ-5): `Diagnostics::
+/// note_config` compares a freshly loaded batch against the one already
+/// held to decide whether a reload actually changed anything — `Severity`,
+/// `Layer`, `PathBuf`, `String` and `Option<String>` (`path`) all already
+/// support it, so this is a plain derive, not a new comparison to design.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Diagnostic {
     pub severity: Severity,
     pub layer: Option<Layer>,
     pub file: Option<PathBuf>,
     pub message: String,
+    /// The reader's own key path into the doc, e.g. `"app.theme.name"`
+    /// (Phase 4b Task 4). `None` by default — every existing constructor
+    /// (`Diagnostic::error`/`warning`, every literal build site across
+    /// the workspace) leaves it unset; 4c's config dialogs attach it to
+    /// a field row via [`Self::with_path`]. Not filled in by any reader
+    /// in 4b.
+    pub path: Option<String>,
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -71,6 +84,7 @@ impl Diagnostic {
             layer: Some(layer),
             file: Some(file),
             message: message.into(),
+            path: None,
         }
     }
 
@@ -80,7 +94,17 @@ impl Diagnostic {
             layer: Some(layer),
             file: Some(file),
             message: message.into(),
+            path: None,
         }
+    }
+
+    /// Attach the reader's own key path into the doc (Phase 4b Task 4;
+    /// consumed by 4c's config dialogs — see the `path` field's own doc
+    /// comment). A builder, not a constructor parameter: every existing
+    /// call site of `error`/`warning` stays unchanged.
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 
@@ -103,6 +127,7 @@ impl LayerDoc {
             layer: Some(Layer::Builtin),
             file: None,
             message: format!("builtin doc '{name}': {e}"),
+            path: None,
         })?;
         Ok(LayerDoc {
             layer: Layer::Builtin,
@@ -125,7 +150,16 @@ pub struct ConfigSources {
 }
 
 /// The loaded, merged configuration plus everything needed to explain it.
-#[derive(Debug, Default)]
+///
+/// `Clone` (Phase 4b Task 5): `geode_diagnostics::DiagnosticsFactory`
+/// holds its own `Rc<RefCell<Config>>` for the config section's
+/// effective-config explainer, refreshed on every `ShellEvent::
+/// ConfigReloaded` from `ShellView::config()`'s `&Config` — the same
+/// clone-on-reload shape `BlotterFactory::set_views`/`set_schema` already
+/// use for their own `Vec`/`SchemaSpec` copies. Every field here is
+/// already `Clone` (`MergedDoc`, `LayerDoc`, `Diagnostic`), so this is a
+/// plain derive, not a new copy to design.
+#[derive(Debug, Clone, Default)]
 pub struct Config {
     docs: BTreeMap<String, MergedDoc>,
     layered: BTreeMap<String, Vec<LayerDoc>>,
@@ -216,6 +250,19 @@ impl Config {
         self.docs.get(name)
     }
 
+    /// Every doc name this `Config` holds a merged doc for, in
+    /// alphabetical order (`docs` is a `BTreeMap`) — for a reader that
+    /// wants to enumerate "everything", not name one doc in particular
+    /// (Phase 4b Task 5 fix round 1, MIN-3: the diagnostics module's
+    /// effective-config explainer used to walk a hand-maintained constant
+    /// list of doc names instead, which could silently fall behind a doc
+    /// this or a future reader added). This is about *display*, not the
+    /// "a reader names what it wants" rationale `doc`/`get` follow for
+    /// *typed* access — an enumerator doesn't weaken that.
+    pub fn doc_names(&self) -> impl Iterator<Item = &str> {
+        self.docs.keys().map(String::as_str)
+    }
+
     /// The unmerged per-layer docs for `name`, in Builtin → Desk → User order.
     /// Consumers that layer at interpretation time (the keymap engine) use
     /// this instead of the merged doc.
@@ -248,6 +295,27 @@ impl Config {
                 None => return None,
             }
         }
+    }
+}
+
+/// Fixture builders for downstream crates' tests that need a real
+/// `Config` — not just a `MergedDoc` (`merge_docs`/`LayerDoc::builtin`,
+/// the pattern `geode-data`'s benches use) — but with no desk/user
+/// directory on disk.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::{Config, ConfigSources, LayerDoc};
+
+    /// A `Config` built from one builtin doc named `name`, parsed from
+    /// `text`. Builtin docs skip the `config_version` check (see
+    /// [`LayerDoc::builtin`]), so `text` need not carry one.
+    pub fn config_from(name: &str, text: &str) -> Config {
+        let doc = LayerDoc::builtin(name, text).expect("well-formed test TOML");
+        Config::load(&ConfigSources {
+            builtin: vec![doc],
+            desk: None,
+            user: None,
+        })
     }
 }
 
@@ -368,12 +436,44 @@ mod tests {
         );
     }
 
+    /// Phase 4b Task 5 fix round 1, MIN-3: `doc_names` lists every doc
+    /// `Config` actually holds, alphabetically — so an effective-config
+    /// explainer walking it needs no hand-maintained list to keep in
+    /// sync with what's actually loaded.
+    #[test]
+    fn doc_names_lists_every_loaded_doc_alphabetically() {
+        let sources = ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[risk]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin("app", "config_version = 1\n").unwrap(),
+                LayerDoc::builtin("keymap", "").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        };
+        let config = Config::load(&sources);
+        let names: Vec<&str> = config.doc_names().collect();
+        assert_eq!(names, vec!["app", "keymap", "views"]);
+    }
+
     // --- Diagnostic Display -------------------------------------------
 
     #[test]
     fn display_with_layer_and_file() {
         let diag = Diagnostic::error(Layer::User, PathBuf::from("/path/keymap.toml"), "bad toml");
         assert_eq!(diag.to_string(), "[user] /path/keymap.toml: bad toml");
+    }
+
+    /// Phase 4b Task 4: `path` defaults to `None` on every constructor
+    /// (`error`/`warning`) and `with_path` is the one door that sets it —
+    /// 4c's config dialogs attach a reader's key path to a field row
+    /// through this builder.
+    #[test]
+    fn with_path_sets_the_field_and_defaults_to_none() {
+        let diag = Diagnostic::error(Layer::User, PathBuf::from("app.toml"), "bad");
+        assert_eq!(diag.path, None);
+        let diag = diag.with_path("app.theme.name");
+        assert_eq!(diag.path.as_deref(), Some("app.theme.name"));
     }
 
     #[test]
@@ -383,6 +483,7 @@ mod tests {
             layer: Some(Layer::Builtin),
             file: None,
             message: "builtin doc invalid".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "[builtin] <no file>: builtin doc invalid");
     }
@@ -394,6 +495,7 @@ mod tests {
             layer: None,
             file: Some(PathBuf::from("app.toml")),
             message: "unrecognized key".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "app.toml: unrecognized key");
     }
@@ -405,6 +507,7 @@ mod tests {
             layer: None,
             file: None,
             message: "generic warning".to_string(),
+            path: None,
         };
         assert_eq!(diag.to_string(), "<no file>: generic warning");
     }
