@@ -442,11 +442,16 @@ impl Workspace {
     /// Toggle one dock's visibility. Hidden→visible always works, even on
     /// an empty dock, and takes focus (spec 2026-09-08 add-tile §8: it
     /// shows, renders its "move a tile here" hint, and now also focuses
-    /// it, empty or not, so "ctrl+[ then Add Blotter" fills the dock).
-    /// Visible→hidden keeps the dock's whole tree parked — splits, ratios,
-    /// and focus memory included (toggle back and it's all still there);
-    /// if the hidden dock held focus, focus falls back per
-    /// [`Workspace::fallback_region`].
+    /// it, empty or not, so "ctrl+[ then Add Blotter" fills the dock) —
+    /// exiting any main-tree fullscreen first (same precedent as
+    /// [`Workspace::move_to_dock`]'s `Main` arm), since fullscreen and a
+    /// focused dock is a combination `render` cannot paint (no docks
+    /// while a tile is fullscreen, no focus ring while the region isn't
+    /// `Main`) and [`Workspace::toggle_fullscreen`] refuses to undo while
+    /// a dock is focused. Visible→hidden keeps the dock's whole tree
+    /// parked — splits, ratios, and focus memory included (toggle back
+    /// and it's all still there); if the hidden dock held focus, focus
+    /// falls back per [`Workspace::fallback_region`].
     pub fn toggle_dock(&mut self, side: DockSide) {
         if self.docks.get(side).visible() {
             self.docks.get_mut(side).set_visible(false);
@@ -456,6 +461,7 @@ impl Workspace {
         } else {
             // Showing focuses (spec 2026-09-08 add-tile §8): the next add
             // lands in this dock's tree, empty or not.
+            self.tree.exit_fullscreen();
             self.enter_region(FocusRegion::Dock(side));
         }
     }
@@ -2010,6 +2016,27 @@ mod tests {
         assert_eq!(ws.active().focused_tile(), tree_focused);
     }
 
+    /// Fullscreen and a focused dock is a combination `render` cannot
+    /// paint (no docks while a tile is fullscreen; no focus ring outside
+    /// `Main`) and `toggle_fullscreen` cannot undo (it no-ops while a
+    /// dock is focused) — so showing a dock must exit any main-tree
+    /// fullscreen first, same precedent as `move_to_dock`'s `Main` arm.
+    #[test]
+    fn toggling_a_dock_visible_exits_main_tree_fullscreen() {
+        let mut ws = two_tiles();
+        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        assert!(ws.active().tree().fullscreen().is_some());
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert!(
+            ws.active().tree().fullscreen().is_none(),
+            "showing a dock must exit main-tree fullscreen"
+        );
+        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert!(ws.active().tree().fullscreen().is_none());
+    }
+
     #[test]
     fn a_hidden_dock_keeps_its_whole_tree() {
         let mut ws = two_tiles();
@@ -2432,16 +2459,24 @@ mod tests {
         assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
     }
 
-    /// Directional focus never crosses into a HIDDEN dock — spec
-    /// 2026-09-08 add-tile §8 only changes what *showing* a dock does
-    /// (`toggle_dock` now focuses it, empty or not); a dock that was
-    /// never shown is still not a directional-focus target
-    /// (`Dock::focusable` — visible AND occupied — governs that).
+    /// Directional focus never crosses into a HIDDEN dock, and — spec
+    /// 2026-09-08 add-tile §8 changes only what *toggling* a dock does,
+    /// never `focus_direction` — still never into a visible-but-EMPTY
+    /// one either: `Dock::focusable` (visible AND occupied) keeps
+    /// governing a directional-focus target.
     #[test]
-    fn focus_does_not_enter_a_hidden_dock() {
+    fn focus_does_not_enter_a_hidden_or_empty_dock() {
         let mut ws = two_tiles();
         apply_workspace_action(&mut ws, &act("workspace::focus_left"));
         // Left dock hidden+empty: staying put.
+        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
+        // Visible but empty: `dock::toggle_left` focuses it directly
+        // (that's a different path, covered elsewhere) — back out to
+        // Main, then `focus_left` must still not enter it.
+        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        assert_eq!(ws.active().region(), FocusRegion::Main);
         apply_workspace_action(&mut ws, &act("workspace::focus_left"));
         assert_eq!(ws.active().region(), FocusRegion::Main);
     }
@@ -3035,11 +3070,13 @@ mod tests {
                 seen.push(tile);
             }
         }
-        // The region invariant: a focused dock is focusable.
+        // The region invariant (spec 2026-09-08 add-tile §8): a focused
+        // dock is visible — not necessarily occupied, since an empty
+        // visible dock may hold focus so an add can fill it.
         if let FocusRegion::Dock(side) = workspace.region() {
             assert!(
-                workspace.docks().get(side).focusable(),
-                "region points at a non-focusable {side:?} dock"
+                workspace.docks().get(side).visible(),
+                "region points at a hidden {side:?} dock"
             );
         }
     }
