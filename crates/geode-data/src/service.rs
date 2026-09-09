@@ -3268,23 +3268,46 @@ source_name = "NPV"
 
         // Collect everything for several poll intervals: the clean
         // publish itself must still arrive (the load succeeds), but no
-        // Health::Ok for this source may ever follow it, since the
-        // stray file keeps discovery's own lane at PendingTooLong.
+        // Health::Ok for this source may ever follow it, since the stray
+        // file keeps discovery's own lane at PendingTooLong.
+        //
+        // Two phases rather than one 800 ms window (fix round 1): the
+        // setup half is a real discovery poll, CSV read and publish, and
+        // 800 ms of wall clock is not enough for it under a loaded
+        // machine — it flaked in a full-suite run, passing every time in
+        // isolation. Waiting for the publish on the suite's usual
+        // generous bound and only then watching for a spurious `Ok`
+        // makes the assertion timing-independent and strictly stronger:
+        // the whole publish is now inside the observation window instead
+        // of racing its end.
         let mut saw_published = false;
         let mut saw_ok = false;
-        let deadline = Instant::now() + Duration::from_millis(800);
-        while Instant::now() < deadline {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(DataEvent::Published { .. }) => saw_published = true,
-                Ok(DataEvent::Health {
-                    source,
-                    worst: Health::Ok,
-                    ..
-                }) if source == "eod_risk" => saw_ok = true,
-                _ => {}
-            }
+        let watch = |e, saw_published: &mut bool, saw_ok: &mut bool| match e {
+            Ok(DataEvent::Published { .. }) => *saw_published = true,
+            Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) if source == "eod_risk" => *saw_ok = true,
+            _ => {}
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline && !saw_published {
+            watch(
+                rx.recv_timeout(Duration::from_millis(100)),
+                &mut saw_published,
+                &mut saw_ok,
+            );
         }
         assert!(saw_published, "setup: the clean file must still load");
+        let deadline = Instant::now() + Duration::from_millis(800);
+        while Instant::now() < deadline {
+            watch(
+                rx.recv_timeout(Duration::from_millis(100)),
+                &mut saw_published,
+                &mut saw_ok,
+            );
+        }
         assert!(
             !saw_ok,
             "an unrelated clean publish must not clear a stray file's \
