@@ -4387,6 +4387,24 @@ run_mutation "catalog: live_health rolls a batch up to its worst book" \
                                            source_time desc, gen_id desc" \
   geode-data live_health_takes_the_worst_across_the_books_of_one_batch
 
+# ---- health follow-ups (Task 3): worst_health names both Orphaned files
+
+run_mutation "scheduler: worst_health compares by rank, not Health's derived Ord" \
+  crates/geode-data/src/ingest/scheduler.rs \
+  '        let incumbent_rank = worst.first().map(|(w, _)| crate::health::severity_rank(w));
+        match incumbent_rank {
+            Some(r) if r == crate::health::severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > crate::health::severity_rank(&h) => {}
+            _ => worst = vec![(h, name)],
+        }' \
+  '        let incumbent_rank = worst.first().map(|(w, _)| w.clone());
+        match incumbent_rank {
+            Some(r) if r == h => worst.push((h, name)),
+            Some(r) if r > h => {}
+            _ => worst = vec![(h, name)],
+        }' \
+  geode-data two_orphaned_candidates_with_different_reasons_are_both_named
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
