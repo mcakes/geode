@@ -7,7 +7,7 @@
 //! the same code path as the thirtieth poll, and discovery I/O happens
 //! here where nothing waits on it.
 
-use crate::health::Health;
+use crate::health::{Health, severity_rank};
 use crate::ingest::IngestHandle;
 use crate::ingest::plan::build_plan;
 use crate::source::{CandidateState, SourceSpec, discover};
@@ -254,8 +254,8 @@ fn run(
 }
 
 /// The worst candidate state and a detail line naming EVERY file at that
-/// worst severity, ordered by [`crate::health::severity_rank`] — never
-/// `Health`'s derived `Ord`. Two `Orphaned` candidates (both lower to
+/// worst severity, ordered by [`severity_rank`] — never `Health`'s
+/// derived `Ord`. Two `Orphaned` candidates (both lower to
 /// `Degraded`) with different reasons are the same variant, so `Ord`
 /// falls through to comparing the `reason` STRING: the alphabet would
 /// decide which candidate's `*w == h` / `*w > h` comparison kept it, and
@@ -288,18 +288,18 @@ fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, Stri
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let incumbent_rank = worst.first().map(|(w, _)| crate::health::severity_rank(w));
+        let incumbent_rank = worst.first().map(|(w, _)| severity_rank(w));
         match incumbent_rank {
-            Some(r) if r == crate::health::severity_rank(&h) => worst.push((h, name)),
-            Some(r) if r > crate::health::severity_rank(&h) => {}
+            Some(r) if r == severity_rank(&h) => worst.push((h, name)),
+            Some(r) if r > severity_rank(&h) => {}
             _ => worst = vec![(h, name)],
         }
     }
     let first = worst.first()?.0.clone();
-    let first_reason = first.to_parts().1;
-    let reasons_differ = worst.iter().any(|(h, _)| h.to_parts().1 != first_reason);
+    let first_reason = reason(&first);
+    let reasons_differ = worst.iter().any(|(h, _)| reason(h) != first_reason);
     let names = worst.iter().map(|(h, name)| {
-        if reasons_differ && let Some(r) = h.to_parts().1 {
+        if reasons_differ && let Some(r) = reason(h) {
             return format!("{name} ({r})");
         }
         name.clone()
@@ -310,6 +310,16 @@ fn worst_health(candidates: &[crate::source::Candidate]) -> Option<(Health, Stri
         names.collect::<Vec<_>>().join(", ")
     );
     Some((first, detail))
+}
+
+/// `h`'s reason, without `to_parts()`'s always-allocated label —
+/// `worst_health` calls this once per candidate at the worst rank, on
+/// every scheduler poll.
+fn reason(h: &Health) -> Option<&str> {
+    match h {
+        Health::Degraded { reason } | Health::Failed { reason } => Some(reason.as_str()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -415,6 +425,15 @@ mod tests {
         // comparing the reason STRING and, with "b" sorting after "a",
         // silently drop "a.csv" from the detail entirely (not even
         // merged in) under the old `*w == h` / `*w > h` comparison.
+        //
+        // This is the only pair of candidates that CAN demonstrate
+        // `severity_rank` beating the reason-string tie-break: two
+        // different variants (e.g. `Degraded` vs `PendingTooLong`)
+        // already compare correctly under the derived `Ord`, since it
+        // only falls through to the reason string once both sides are
+        // the same variant. This test alone carries "rank, not reason
+        // text" — see the next test's comment for why a
+        // different-variant fixture cannot.
         let candidates = vec![
             candidate(
                 "b.csv",
@@ -444,26 +463,45 @@ mod tests {
     }
 
     #[test]
-    fn an_orphaned_candidate_outranks_a_pending_too_long_one_by_rank_not_reason_text() {
-        // Picked so alphabetic order would have chosen the OTHER file if
-        // this still fell back to `Health`'s derived `Ord`: "a" sorts
-        // before "pending_too_long" has no reason to compare against
-        // anyway, so this pins that a higher-rank `Degraded` always wins
-        // over `PendingTooLong`, named alone.
+    fn a_higher_rank_candidate_replaces_the_names_accumulated_at_a_lower_rank() {
+        // Review round 1's Major: a `Degraded`-vs-`PendingTooLong`
+        // fixture can never demonstrate "rank, not reason text" — those
+        // are different variants, and `Health`'s derived `Ord` already
+        // orders different variants correctly (it only falls through to
+        // the reason string once both sides are the SAME variant, which
+        // the test above covers). Hand-tracing the OLD `*w == h` /
+        // `*w > h` code against this exact fixture lands on the same
+        // answer as the fixed code either way, so no string choice here
+        // could have told the two implementations apart.
+        //
+        // What this fixture DOES pin, honestly: two ties accumulate at
+        // the lower rank (`PendingTooLong`, `a.csv` then `b.csv`), and a
+        // later, strictly higher-rank candidate (`Orphaned` -> Degraded,
+        // `c.csv`) must discard both accumulated names rather than
+        // append beside them — `worst` only ever holds candidates at
+        // the CURRENT worst rank.
         let candidates = vec![
+            candidate("a.csv", CandidateState::PendingTooLong),
+            candidate("b.csv", CandidateState::PendingTooLong),
             candidate(
-                "orphan.csv",
-                CandidateState::Orphaned { reason: "a".into() },
+                "c.csv",
+                CandidateState::Orphaned {
+                    reason: "no header".into(),
+                },
             ),
-            candidate("stuck.csv", CandidateState::PendingTooLong),
         ];
-        let (health, detail) = worst_health(&candidates).expect("both candidates are unhealthy");
+        let (health, detail) =
+            worst_health(&candidates).expect("all three candidates are unhealthy");
         assert_eq!(
             health,
-            Health::Degraded { reason: "a".into() },
-            "Degraded outranks PendingTooLong regardless of processing order"
+            Health::Degraded {
+                reason: "no header".into(),
+            },
         );
-        assert_eq!(detail, "degraded: orphan.csv");
+        assert_eq!(
+            detail, "degraded: c.csv",
+            "the two lower-rank names must be replaced, not kept alongside the winner"
+        );
     }
 
     #[test]
