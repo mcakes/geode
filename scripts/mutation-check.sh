@@ -1648,12 +1648,41 @@ run_mutation "hosting: a closed tile drops its occupant" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# Re-anchored when Phase 4b's diagnostics work merged in (its Task 5
+# MAJ-2 fix added a SECOND `o.content.set_visible(false, cx);` earlier in
+# the same file, for the vanished-tile-before-drop announcement). The
+# harness does one `str.replace(..., 1)`, so the bare line stopped naming
+# this behaviour and started mutating 4b's instead — the entry reported
+# `caught*`, caught by a test other than its own. Both anchors now carry
+# their enclosing loop, which is what tells the two sites apart.
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                o.content.set_visible(false, cx);' \
-  '                let _ = o;' \
+  '        for id in self.visible_tiles.difference(&active) {
+            if let Some(o) = self.occupants.get(id) {
+                o.content.set_visible(false, cx);' \
+  '        for id in self.visible_tiles.difference(&active) {
+            if let Some(o) = self.occupants.get(id) {
+                let _ = o;' \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
+
+# The behaviour the entry above used to mutate by accident, now named in
+# its own right (Phase 4b Task 5 fix round 1, MAJ-2): a tile that vanished
+# between renders is told it is invisible BEFORE its occupant is dropped,
+# so an occupant that opened something in `set_visible(true)` gets the
+# matching close rather than leaking it for the life of the process. The
+# visibility diff further down cannot cover this — a closed tile is not in
+# `active`, so that diff never sees it.
+run_mutation "hosting: a vanished tile is told before its occupant is dropped" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                o.content.set_visible(false, cx);' \
+  '        for (id, o) in self.occupants.iter() {
+            if !all.contains(id) {
+                let _ = o;' \
+  geode-shell \
+  closing_a_watching_tile_unwatches_the_diagnostics_entity
 
 run_mutation "hosting: a fallback factory never sees a mismatched record's state" \
   crates/geode-shell/src/shell/occupants.rs \
