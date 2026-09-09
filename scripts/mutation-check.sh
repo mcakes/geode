@@ -4335,6 +4335,20 @@ run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never 
   '            if !warned_closed.swap(true, Ordering::Relaxed) {' \
   geode-app a_full_channel_is_counted_but_not_reported_as_a_gone_receiver
 
+run_mutation "service: open seeds the health load lane from the catalog" \
+  crates/geode-data/src/service.rs \
+  '        for spec in &config.sources {
+            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {' \
+  '        for spec in config.sources.iter().take(0) {
+            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {' \
+  geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
+
+run_mutation "catalog: live_health reports only generations that are not ok" \
+  crates/geode-data/src/store/catalog.rs \
+  "                   ) where rn = 1 and health is not null and health <> 'ok'" \
+  '                   ) where rn = 1 and health is not null' \
+  geode-data live_health_reports_only_the_batches_whose_live_generation_is_unhealthy
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
