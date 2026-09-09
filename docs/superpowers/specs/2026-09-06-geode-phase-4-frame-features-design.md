@@ -1029,10 +1029,10 @@ Both were fixed on the follow-up branch, 2026-09-08.**
 2. ~~The load lane is in-process only, so a restart false-cleans a
    still-live degraded generation.~~ **Fixed (follow-up branch, Task 2,
    2026-09-08.)** `DataService::open` now seeds the load lane from the
-   health `file_generations` persisted for the generations LIVE at that
-   moment, through `Catalog::live_health` — the generations
-   `query::as_of::resolve_generations` would resolve at `now` (newest
-   `source_time` per `(batch, book)`, ties by `gen_id`, with the
+   health `file_generations` persisted for the generations that are
+   LIVE, through `Catalog::live_health` — `resolve_generations`'
+   resolution off the same summary table (newest `source_time` per
+   `(batch, book)`, ties by `gen_id` descending, with the
    `archived_only` guard in the join so a generation that never went
    live is neither picked nor allowed to hide the one that is), joined
    to the catalog, one entry per batch whose live generation is not
@@ -1046,6 +1046,25 @@ Both were fixed on the follow-up branch, 2026-09-08.**
    seed that follows reads as a spurious transition rather than the
    state. A corrected republish that landed while the app was down is
    simply not seeded — its batch's live generation is the clean one.
+
+   Three details the fix-round-1 review pinned down. **No time bound**
+   (MIN-3): the seed must agree with what the query path serves, and
+   `AsOf::Live` carries no generation predicate at all — `Era::live()`
+   leaves `generations: None` and `Era::relation` reads the live table
+   whole — so a generation stamped ahead of the host clock (publish
+   applies no upper bound either) is live, is summed, and must be
+   reported. `Utc::now()` as an upper bound would have answered with the
+   previous generation's health: a false clean. **The `gen_id`
+   tie-break is load-bearing** (MIN-1): the backfill guard is
+   strictly-older precisely so a file re-dropped with the same sentinel
+   `as_of` REPLACES rather than becoming history, which is the ordinary
+   shape of a correction, so the two generations tie on `source_time`
+   and only `gen_id` separates them. **The filter names the four
+   unhealthy labels** rather than excluding `'ok'` (MIN-4), because
+   `Health::from_parts` maps anything it does not recognise to
+   `Health::Ok`: a label from a future build used to be seeded as a
+   spurious `Ok` before any producer had spoken, taking `last_reported`
+   with it and swallowing the first genuine discovery `Ok`.
 
    The ruling that makes this expressible: health is persisted per
    DATASET (the only grain the catalog records) and the tracker is keyed

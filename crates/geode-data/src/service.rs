@@ -661,32 +661,55 @@ impl DataService {
         // A `StoreError` here is propagated, not swallowed: the failure
         // mode of a swallowed one is a service that opens quietly and
         // reports clean.
-        for spec in &config.sources {
-            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {
-                let (_, reason) = health.to_parts();
-                let detail = format!("{batch}: {}", reason.unwrap_or_default());
-                let source = spec.name.clone();
-                let sink = Arc::clone(&sink);
-                // The ingest sink's `Published` arm's emit closure,
-                // verbatim: the same door, the same log line, the same
-                // verbatim forwarding of the DECIDING slot's pair.
-                health_tracker.report_load_and_emit(
-                    &spec.name,
-                    &batch,
-                    health,
-                    detail,
-                    |reported| match reported {
-                        Some((worst, detail)) => {
-                            log_health_event(&source, &worst, &detail);
-                            sink(DataEvent::Health {
-                                source: source.clone(),
-                                worst,
-                                detail,
-                            })
-                        }
-                        None => true,
-                    },
-                );
+        //
+        // Each dataset is read ONCE and its result fanned out to every
+        // source configured for it, rather than re-running the query per
+        // source: the answer depends only on the dataset, and two sources
+        // on one dataset would otherwise run the identical two-window
+        // join twice at open.
+        //
+        // One `DataEvent::Health` per unhealthy batch reaches the sink
+        // here, not one per source: with several degraded batches the
+        // entity's final value is the worst of them (the tracker
+        // combines before it emits), but the startup log carries a line
+        // for each transition along the way.
+        let datasets: std::collections::BTreeSet<&str> =
+            config.sources.iter().map(|s| s.dataset.as_str()).collect();
+        for dataset in datasets {
+            let unhealthy = Catalog::new(&conn).live_health(dataset)?;
+            for spec in config.sources.iter().filter(|s| s.dataset == dataset) {
+                for (batch, health) in &unhealthy {
+                    let (_, reason) = health.to_parts();
+                    let detail = format!("{batch}: {}", reason.unwrap_or_default());
+                    let source = spec.name.clone();
+                    let sink = Arc::clone(&sink);
+                    // The ingest sink's `Published` arm's emit closure,
+                    // verbatim: the same door, the same log line, the same
+                    // verbatim forwarding of the DECIDING slot's pair.
+                    //
+                    // Its `bool` is discarded for the same reason the
+                    // sinks' own callers stopped acting on one (Task 1):
+                    // a refused send means only "not delivered", the
+                    // tracker did not commit the transition, and the next
+                    // report of this source offers it again.
+                    health_tracker.report_load_and_emit(
+                        &spec.name,
+                        batch,
+                        health.clone(),
+                        detail,
+                        |reported| match reported {
+                            Some((worst, detail)) => {
+                                log_health_event(&source, &worst, &detail);
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
+                            None => true,
+                        },
+                    );
+                }
             }
         }
 
@@ -2090,12 +2113,23 @@ source_name = "NPV"
     }
 
     /// One file's worth of rows for `carried_schema`, with its sentinel.
+    ///
+    /// The CSV is written aside and renamed, then the sentinel is
+    /// (re)written — the order an operator's drop has to use, because
+    /// `discovery::classify` reads a sentinel OLDER than its CSV as "the
+    /// file is being rewritten" and holds the file `Pending`. Calling
+    /// this a second time with different rows is therefore a corrected
+    /// republish: same sentinel `as_of`, so publish's strictly-older
+    /// backfill guard replaces the live generation rather than filing
+    /// history.
     fn write_carried_csv(src: &std::path::Path, rows: &str) {
+        let tmp = src.join("risk_2026-08-24_BK0.csv.partial");
         std::fs::write(
-            src.join("risk_2026-08-24_BK0.csv"),
+            &tmp,
             format!("Book,LHU,PositionRef,Counterparty,InstrumentRef,Currency,NPV\n{rows}"),
         )
         .unwrap();
+        std::fs::rename(&tmp, src.join("risk_2026-08-24_BK0.csv")).unwrap();
         std::fs::write(
             src.join("risk_2026-08-24_BK0.csv.done"),
             r#"{"as_of":"2026-08-24T07:00:00Z","columns":["Book","LHU","PositionRef","Counterparty","InstrumentRef","Currency","NPV"],"books":["BK0"]}"#,
@@ -2238,6 +2272,82 @@ source_name = "NPV"
             !saw_ok,
             "the seeded load lane must outlive a clean discovery poll, \
              the same as a freshly published one"
+        );
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_seeded_batch_is_cleared_by_that_batchs_own_corrected_republish() {
+        // Fix round 1, MIN-2. The seed's key must be exactly the key a
+        // publish writes (`WorkItem::batch`), or the seeded `Degraded` is
+        // unclearable: the operator fixes the file, the republish clears
+        // its own key, and the seeded one sits beside it reporting a
+        // problem that no longer exists — for the rest of the session,
+        // and again on the next restart. That is MAJ-2's stuck-forever
+        // failure mode arriving through the seed.
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("geode.duckdb");
+        write_carried_csv(
+            src.path(),
+            "BK0,L0,P1,C,I1,USD,100\nBK0,L0,P1,C,I1,EUR,100\n",
+        );
+
+        {
+            let (svc, rx) = DataService::open_channel(carried_config(
+                db_path.clone(),
+                src.path(),
+                Duration::from_secs(3600),
+            ))
+            .unwrap();
+            assert!(
+                matches!(
+                    await_unhealthy(&rx, Duration::from_secs(30)),
+                    Some(Health::Degraded { .. })
+                ),
+                "setup: the file must degrade"
+            );
+            svc.shutdown();
+            drop(svc);
+        }
+
+        let (svc, rx) = DataService::open_channel(carried_config(
+            db_path,
+            src.path(),
+            Duration::from_millis(30),
+        ))
+        .unwrap();
+        assert!(
+            matches!(
+                await_unhealthy(&rx, Duration::from_secs(10)),
+                Some(Health::Degraded { .. })
+            ),
+            "setup: the restart must seed the degraded batch"
+        );
+
+        // The correction: one currency per instrument key, dropped the
+        // way an operator drops one (CSV then sentinel, same `as_of`), so
+        // publish's strictly-older backfill guard replaces the live
+        // generation rather than filing this as history.
+        write_carried_csv(src.path(), "BK0,L0,P1,C,I1,USD,100\n");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut cleared = false;
+        while Instant::now() < deadline && !cleared {
+            if let Ok(DataEvent::Health {
+                source,
+                worst: Health::Ok,
+                ..
+            }) = rx.recv_timeout(Duration::from_millis(200))
+            {
+                assert_eq!(source, "eod_risk");
+                cleared = true;
+            }
+        }
+        assert!(
+            cleared,
+            "a corrected republish of the seeded batch must clear it: the \
+             seed's key is the key a publish writes"
         );
         svc.shutdown();
     }

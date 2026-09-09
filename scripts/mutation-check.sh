@@ -4337,17 +4337,55 @@ run_mutation "bridge: only a CLOSED channel is logged as a gone receiver, never 
 
 run_mutation "service: open seeds the health load lane from the catalog" \
   crates/geode-data/src/service.rs \
-  '        for spec in &config.sources {
-            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {' \
-  '        for spec in config.sources.iter().take(0) {
-            for (batch, health) in Catalog::new(&conn).live_health(&spec.dataset, Utc::now())? {' \
+  '        for dataset in datasets {
+            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+  '        for dataset in datasets.iter().take(0) {
+            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
   geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
+
+run_mutation "service: the seed is filed under the key a publish writes" \
+  crates/geode-data/src/service.rs \
+  '                    health_tracker.report_load_and_emit(
+                        &spec.name,
+                        batch,' \
+  '                    health_tracker.report_load_and_emit(
+                        &spec.name,
+                        &format!("{dataset}/{batch}"),' \
+  geode-data a_seeded_batch_is_cleared_by_that_batchs_own_corrected_republish
 
 run_mutation "catalog: live_health reports only generations that are not ok" \
   crates/geode-data/src/store/catalog.rs \
-  "                   ) where rn = 1 and health is not null and health <> 'ok'" \
-  '                   ) where rn = 1 and health is not null' \
+  "                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')" \
+  '                         and health is not null' \
   geode-data live_health_reports_only_the_batches_whose_live_generation_is_unhealthy
+
+run_mutation "catalog: live_health admits only labels from_parts round-trips" \
+  crates/geode-data/src/store/catalog.rs \
+  "                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')" \
+  "                         and health <> 'ok'" \
+  geode-data live_health_ignores_a_health_label_it_does_not_recognise
+
+run_mutation "catalog: live_health breaks a tied source time on the newer generation" \
+  crates/geode-data/src/store/catalog.rs \
+  '                                      order by g.source_time desc, g.gen_id desc' \
+  '                                      order by g.source_time desc, g.gen_id asc' \
+  geode-data live_health_breaks_a_tied_source_time_on_the_newer_generation
+
+run_mutation "catalog: live_health never picks an archived-only generation" \
+  crates/geode-data/src/store/catalog.rs \
+  '                            and coalesce(fg.archived_only, false) = false
+                           where g.dataset = ?' \
+  '                            and 1 = 1
+                           where g.dataset = ?' \
+  geode-data live_health_never_reads_an_archived_only_generation_as_live
+
+run_mutation "catalog: live_health rolls a batch up to its worst book" \
+  crates/geode-data/src/store/catalog.rs \
+  "                                           end desc,
+                                           source_time desc, gen_id desc" \
+  "                                           end asc,
+                                           source_time desc, gen_id desc" \
+  geode-data live_health_takes_the_worst_across_the_books_of_one_batch
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

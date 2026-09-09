@@ -411,8 +411,9 @@ impl<'a> Catalog<'a> {
         Ok(rows.filter_map(|r| r.ok()).collect())
     }
 
-    /// The persisted health of the generations LIVE at `at`, one entry
-    /// per batch whose live generation is not `ok`.
+    /// The persisted health of the generations a `AsOf::Live` query
+    /// reads right now, one entry per batch whose live generation is not
+    /// `ok`.
     ///
     /// Phase 4b's health tracker keeps its load lane in process only, so
     /// a restart used to forget a still-live degraded generation
@@ -422,10 +423,33 @@ impl<'a> Catalog<'a> {
     /// (`DataService::open`) — `file_generations.health` has been
     /// written on every publish since 2a and was never read back.
     ///
-    /// "Live at `at`" is exactly what `query::as_of::resolve_generations`
-    /// means by it, and is resolved here the same way from the same
-    /// summary table: newest `source_time` per `(batch, book)`, ties
-    /// broken by `gen_id`. Two differences from that function, both
+    /// **No time bound, deliberately (fix round 1, MIN-3).** This must
+    /// agree with what the query path actually serves, and the live path
+    /// carries no generation predicate at all: `Era::live()` leaves
+    /// `generations: None` and `Era::relation` reads the live table
+    /// whole. So a generation whose `source_time` is *ahead* of the host
+    /// clock — an upstream stamping a business close in advance, or plain
+    /// clock skew; publish applies no such bound either — is live, is
+    /// summed by the blotter, and must be what this reports. Bounding
+    /// this by `Utc::now()` would have reported the *previous*
+    /// generation's health instead: a false clean, the one direction this
+    /// seam must never fail in. What is live is therefore the newest
+    /// non-archived generation per `(batch, book)` with no bound at all,
+    /// which is exactly what `live_source_time` and `book_freshness`
+    /// already read. Historical health is a different question, for a
+    /// caller that has one; nothing asks it today.
+    ///
+    /// Resolution is otherwise `query::as_of::resolve_generations`', off
+    /// the same summary table: newest `source_time` per `(batch, book)`,
+    /// ties broken by `gen_id` descending. The tie is not exotic — a
+    /// *corrected republish* keeps the sentinel's `as_of` and so ties the
+    /// generation it replaces (`store::publish`'s backfill guard is
+    /// strictly-older for exactly that reason), which is the ordinary way
+    /// a degradation is fixed. Taking the lower `gen_id` there would seed
+    /// the superseded degraded generation of a batch that was corrected
+    /// while the app was down, with a stale reason, on every restart.
+    ///
+    /// Three further differences from `resolve_generations`, all
     /// deliberate:
     ///
     /// - `coalesce(fg.archived_only, false) = false` sits in the JOIN,
@@ -441,15 +465,20 @@ impl<'a> Catalog<'a> {
     ///   of `service::severity_rank`, which is the one ordering this
     ///   codebase rolls health up by (never `Health`'s derived `Ord`,
     ///   which falls through to comparing reason strings).
+    /// - The filter names the four unhealthy labels rather than excluding
+    ///   `'ok'` (fix round 1, MIN-4). `Health::from_parts` maps anything
+    ///   it does not recognise to `Health::Ok`, so a label written by a
+    ///   future build, or a hand-edited row, used to arrive here as a
+    ///   spurious `Ok` — seeded before any producer had spoken, taking
+    ///   `last_reported` with it and swallowing the first genuine
+    ///   discovery `Ok`. Naming the vocabulary keeps this function's
+    ///   filter and `from_parts`' match arms the same set: a label this
+    ///   admits is a label that round-trips.
     ///
     /// A generation with no `file_generations` row — a summary rebuilt
     /// from the data tables of a database whose catalog was lost — is
     /// dropped by the join: no health was recorded, so none is claimed.
-    pub fn live_health(
-        &self,
-        dataset: &str,
-        at: DateTime<Utc>,
-    ) -> Result<Vec<(String, Health)>, StoreError> {
+    pub fn live_health(&self, dataset: &str) -> Result<Vec<(String, Health)>, StoreError> {
         let sql = "select batch, health, health_reason from (
                        select batch, health, health_reason,
                               row_number() over (
@@ -477,8 +506,9 @@ impl<'a> Catalog<'a> {
                              on fg.gen_id = g.gen_id
                             and fg.dataset = g.dataset
                             and coalesce(fg.archived_only, false) = false
-                           where g.dataset = ? and g.source_time <= ?
-                       ) where rn = 1 and health is not null and health <> 'ok'
+                           where g.dataset = ?
+                       ) where rn = 1
+                         and health in ('failed', 'degraded', 'pending_too_long', 'pending')
                    ) where batch_rn = 1 order by batch";
         let err = |source| StoreError::Sql {
             statement: sql.to_string(),
@@ -486,7 +516,7 @@ impl<'a> Catalog<'a> {
         };
         let mut stmt = self.conn.prepare(sql).map_err(err)?;
         let rows = stmt
-            .query_map(duckdb::params![dataset, at], |r| {
+            .query_map(duckdb::params![dataset], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -1302,7 +1332,7 @@ mod tests {
         );
 
         let live = Catalog::new(store.writer())
-            .live_health("risk_snapshot", ts("2026-08-30T12:00:00Z"))
+            .live_health("risk_snapshot")
             .unwrap();
         assert_eq!(
             live,
@@ -1317,48 +1347,114 @@ mod tests {
     }
 
     #[test]
-    fn live_health_reads_the_generation_live_at_the_asked_instant() {
-        // The corrected republish above, read from BEFORE the correction
-        // landed: at 07:30 the degraded generation IS the live one. Same
-        // fixture, different instant — which is what makes the `<=` bound
-        // load-bearing rather than decoration.
+    fn live_health_reports_a_generation_whose_source_time_is_in_the_future() {
+        // Fix round 1, MIN-3. Publish applies no upper bound on source
+        // time, and `Era::live()` carries no generation predicate at all
+        // — a sentinel stamped ahead of the host clock (a business close
+        // dated in advance, or clock skew) publishes into the live table
+        // and IS what a live query sums. An `at <= now` bound here would
+        // have answered with the previous, clean generation instead:
+        // false-clean, the one direction this seam must never fail in.
         let (_d, store) = store();
         published(
             &store,
-            "BK002",
-            Some("BK002"),
-            3,
+            "BK000",
+            Some("BK000"),
+            1,
             ts("2026-08-30T07:00:00Z"),
-            Health::Degraded {
-                reason: "stale".into(),
-            },
+            Health::Ok,
             false,
         );
         published(
             &store,
-            "BK002",
-            Some("BK002"),
-            4,
-            ts("2026-08-30T08:00:00Z"),
+            "BK000",
+            Some("BK000"),
+            2,
+            Utc::now() + chrono::Duration::days(3650),
+            Health::Degraded {
+                reason: "stamped ahead of the clock".into(),
+            },
+            false,
+        );
+        assert_eq!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap(),
+            vec![(
+                "BK000".to_string(),
+                Health::Degraded {
+                    reason: "stamped ahead of the clock".into()
+                }
+            )],
+            "what is live is what the live path serves, not what a clock bound admits"
+        );
+    }
+
+    #[test]
+    fn live_health_breaks_a_tied_source_time_on_the_newer_generation() {
+        // Fix round 1, MIN-1. The backfill guard is strictly-older
+        // (`store::publish`) precisely so that a file re-dropped with the
+        // same sentinel `as_of` REPLACES rather than becoming history —
+        // which is the ordinary way an operator corrects a degraded file.
+        // Both generations therefore carry one source time and only
+        // `gen_id` separates them. Taking the lower one seeds the
+        // superseded degraded generation, with a stale reason, on every
+        // restart until something republishes in-session.
+        let (_d, store) = store();
+        let tied = ts("2026-08-30T07:00:00Z");
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            tied,
+            Health::Degraded {
+                reason: "the operator has already fixed this".into(),
+            },
+            false,
+        );
+        published(&store, "BK000", Some("BK000"), 2, tied, Health::Ok, false);
+        assert!(
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
+                .unwrap()
+                .is_empty(),
+            "the corrected republish is live; its superseded generation is not"
+        );
+    }
+
+    #[test]
+    fn live_health_ignores_a_health_label_it_does_not_recognise() {
+        // Fix round 1, MIN-4. `Health::from_parts` maps anything it does
+        // not know to `Health::Ok`, so a label written by a future build
+        // (or a hand-edited row) used to be seeded as a spurious `Ok`
+        // before any producer had spoken — taking `last_reported` with it
+        // and swallowing the first genuine discovery `Ok`. The filter
+        // names the vocabulary rather than excluding `'ok'`, so this
+        // function's filter and `from_parts`' arms stay the same set.
+        let (_d, store) = store();
+        published(
+            &store,
+            "BK000",
+            Some("BK000"),
+            1,
+            ts("2026-08-30T07:00:00Z"),
             Health::Ok,
             false,
         );
-        let cat = Catalog::new(store.writer());
-        assert_eq!(
-            cat.live_health("risk_snapshot", ts("2026-08-30T07:30:00Z"))
-                .unwrap(),
-            vec![(
-                "BK002".to_string(),
-                Health::Degraded {
-                    reason: "stale".into()
-                }
-            )]
-        );
+        store
+            .writer()
+            .execute(
+                "update file_generations set health = 'quarantined' where gen_id = 1",
+                [],
+            )
+            .unwrap();
         assert!(
-            cat.live_health("risk_snapshot", ts("2026-08-30T08:30:00Z"))
+            Catalog::new(store.writer())
+                .live_health("risk_snapshot")
                 .unwrap()
                 .is_empty(),
-            "after the correction, nothing is outstanding"
+            "a label this build cannot round-trip is not a health report"
         );
     }
 
@@ -1393,7 +1489,7 @@ mod tests {
         );
         assert!(
             Catalog::new(store.writer())
-                .live_health("risk_snapshot", ts("2026-08-30T12:00:00Z"))
+                .live_health("risk_snapshot")
                 .unwrap()
                 .is_empty(),
             "an archived-only generation is never the live one"
@@ -1432,7 +1528,7 @@ mod tests {
         );
         assert_eq!(
             Catalog::new(store.writer())
-                .live_health("risk_snapshot", ts("2026-08-30T12:00:00Z"))
+                .live_health("risk_snapshot")
                 .unwrap(),
             vec![(
                 "BK000".to_string(),
@@ -1459,7 +1555,7 @@ mod tests {
         );
         assert!(
             Catalog::new(store.writer())
-                .live_health("other_dataset", ts("2026-08-30T12:00:00Z"))
+                .live_health("other_dataset")
                 .unwrap()
                 .is_empty()
         );
