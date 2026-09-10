@@ -8,12 +8,19 @@
 //! on this one scaffold, so a trader edits *objects with fields* rather
 //! than text, and so the layer a change lands in is a property of the
 //! scaffold rather than a thing each dialog remembers to get right.
-//! Both stages are built, over one adapter, [`Domain::Views`] — the
-//! hardest shape first, deliberately (spec §14), so the vocabulary is
-//! settled before three thin adapters depend on it. Views is the only
+//! Both stages were first built over one adapter, [`Domain::Views`] — the
+//! hardest shape first, deliberately (spec §14), so the vocabulary was
+//! settled before the thinner adapters depended on it. Views is the only
 //! domain whose fields split across two destinations, and
 //! [`Destination`] is what makes that split mechanical rather than a
 //! special case inside one adapter.
+//!
+//! [`Domain::Groupings`] is the first of those thinner adapters, and it
+//! needed one more thing from the scaffold that Views alone never
+//! exercised: its object's own value is a bare array (`3 = ["book",
+//! "lhu"]`), not a table, so [`Domain::to_table`] renders a
+//! `toml_edit::Item` rather than a `toml_edit::Table` — see
+//! `groupings.rs`'s module doc for the full story.
 //!
 //! ## Layout
 //!
@@ -27,6 +34,8 @@
 //! - [`views`] — the `Domain::Views` adapter: the doc it reads, the
 //!   one-line summary a view row shows, the fields a view has and which
 //!   file each one is written to, and nothing else;
+//! - [`groupings`] — the `Domain::Groupings` adapter: the nine grouping
+//!   slots, one dimension chain each;
 //! - [`render`] — the gpui shell: `open`, the [`dialog::ModalKeyHandler`]
 //!   both stages come through, and the painted list, fields and action
 //!   bar.
@@ -58,6 +67,7 @@
 //! from the reverted config, so the two cannot drift apart.
 
 pub mod apply;
+mod groupings;
 pub mod render;
 mod views;
 
@@ -68,11 +78,13 @@ use geode_core::config::{Config, Diagnostic, Layer};
 use crate::dialogmode::DialogMode;
 
 /// Which config domain a dialog is browsing. One variant per adapter
-/// module under this directory; `Views` is the only one built so far
-/// (spec §8 has the other four, each arriving with its own adapter).
+/// module under this directory (spec §8 has three more — Sources,
+/// Scopes, and the read-only Schema — each still to arrive with its own
+/// adapter).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
     Views,
+    Groupings,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -144,6 +156,7 @@ impl Domain {
     pub fn doc(self) -> &'static str {
         match self {
             Domain::Views => views::DOC,
+            Domain::Groupings => groupings::DOC,
         }
     }
 
@@ -151,6 +164,7 @@ impl Domain {
     pub fn title(self) -> &'static str {
         match self {
             Domain::Views => "Views",
+            Domain::Groupings => "Groupings",
         }
     }
 
@@ -160,6 +174,24 @@ impl Domain {
     fn summary_fn(self) -> fn(&toml::Value) -> String {
         match self {
             Domain::Views => views::summary,
+            Domain::Groupings => groupings::summary,
+        }
+    }
+
+    /// The presentation doc this domain's objects can be personalised
+    /// through without forking (spec §4.1), if it has one at all.
+    ///
+    /// `None` for a domain none of whose fields carry
+    /// [`Destination::Presentation`] — Groupings, whose `dimensions` is
+    /// entirely [`Destination::Doc`] (`groupings.rs`'s module doc has the
+    /// reasoning) — so [`derive_rows`]'s "personalised without
+    /// overriding" check, and `render::run_confirmed`'s removal list,
+    /// both have either a real doc name to look for or nothing to look
+    /// for, rather than a name that could never correspond to a file.
+    fn presentation_doc(self) -> Option<&'static str> {
+        match self {
+            Domain::Views => Some(views::PRESENTATION_DOC),
+            Domain::Groupings => None,
         }
     }
 
@@ -172,15 +204,16 @@ impl Domain {
     /// must share the one tested walk. A per-domain `match` here would
     /// merely *discourage* an adapter from doing its own walk and
     /// diverging; an unconditional call makes that unrepresentable — the
-    /// only two things a domain decides are its doc name and its summary
-    /// line, and both arrive through the two small matches above. Part 2
-    /// adds three more adapters onto this exact seam, which is why the
-    /// hole is closed while there is still only one.
+    /// only things a domain decides are its doc name, its summary line
+    /// and (optionally) its presentation doc, and all three arrive
+    /// through the small matches above. Part 2 adds two more adapters
+    /// onto this exact seam, which is why the hole is closed while there
+    /// are still only two.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
         derive_rows(
             config,
             self.doc(),
-            Destination::Presentation.doc(self),
+            self.presentation_doc(),
             self.summary_fn(),
         )
     }
@@ -204,13 +237,16 @@ impl Domain {
 ///   restore anything (`render::arm_revert` gates on exactly this).
 ///
 /// "The user layer containing it" spans `presentation_doc` as well as
-/// `doc`, and that is not a refinement: §4.1's whole design is that
-/// hiding a column writes `view_presentation.toml` and forks nothing, so
-/// the commonest user override there is leaves `doc`'s user layer empty.
-/// Reading the markers off `doc` alone answered `r` with "no user
-/// override to revert" while the file `r` would have removed sat on
-/// disk. The `some earlier layer` half is still read off `doc` only —
-/// that is the half that guarantees reverting leaves an object behind.
+/// `doc`, when the domain has one, and that is not a refinement: §4.1's
+/// whole design is that hiding a column writes `view_presentation.toml`
+/// and forks nothing, so the commonest user override there leaves
+/// `doc`'s user layer empty. Reading the markers off `doc` alone
+/// answered `r` with "no user override to revert" while the file `r`
+/// would have removed sat on disk. The `some earlier layer` half is
+/// still read off `doc` only — that is the half that guarantees
+/// reverting leaves an object behind. A domain with no presentation doc
+/// at all (`presentation_doc: None`) simply has nothing this half can
+/// add.
 ///
 /// Sorted by name rather than kept in file order: rows come from up to
 /// three documents, so "file order" would mean one file's order followed
@@ -223,19 +259,26 @@ impl Domain {
 fn derive_rows(
     config: &Config,
     doc: &str,
-    presentation_doc: &str,
+    presentation_doc: Option<&str>,
     summary: fn(&toml::Value) -> String,
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
-    let personalised: BTreeSet<&str> = config
-        .layered_docs(presentation_doc)
-        .iter()
-        .filter(|layered| layered.layer == Layer::User)
-        .flat_map(|layered| layered.table.keys())
-        .filter(|name| *name != "config_version")
-        .map(String::as_str)
-        .collect();
+    // Empty outright for a domain with no presentation doc at all
+    // (`presentation_doc: None`) — there is nothing to be personalised
+    // through.
+    let personalised: BTreeSet<&str> = presentation_doc
+        .map(|presentation_doc| {
+            config
+                .layered_docs(presentation_doc)
+                .iter()
+                .filter(|layered| layered.layer == Layer::User)
+                .flat_map(|layered| layered.table.keys())
+                .filter(|name| *name != "config_version")
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default();
     // Accumulated by name — one name can appear in up to three documents
     // and each appearance updates the same row — in a `BTreeMap`, whose
     // key order IS the by-name order described above, so the rows come
@@ -315,6 +358,13 @@ impl Destination {
         match (self, domain) {
             (Destination::Doc, domain) => domain.doc(),
             (Destination::Presentation, Domain::Views) => views::PRESENTATION_DOC,
+            // Every Groupings field is `Destination::Doc` (spec §8.2 —
+            // there is nothing presentational about a dimension chain),
+            // so this arm exists only to keep the match exhaustive as
+            // domains are added, not because anything can reach it.
+            (Destination::Presentation, Domain::Groupings) => {
+                unreachable!("Groupings has no Presentation-destined fields")
+            }
         }
     }
 }
@@ -750,6 +800,7 @@ impl Domain {
     pub fn fields(self, config: &Config, object: Option<&str>) -> Vec<Field> {
         match self {
             Domain::Views => views::fields(config, object),
+            Domain::Groupings => groupings::fields(config, object),
         }
     }
 
@@ -776,10 +827,17 @@ impl Domain {
         draft
     }
 
-    /// The draft rendered as the table that would be written to `dest`.
-    pub fn to_table(self, draft: &Draft, dest: Destination) -> toml_edit::Table {
+    /// The draft rendered as the item that would be written to `dest`.
+    ///
+    /// `toml_edit::Item`, not `toml_edit::Table`: every Views field
+    /// renders a table, but a grouping slot's own value is a bare array
+    /// (`groupings::to_table`'s doc comment has the full story), and a
+    /// return type that could only ever be a table would have had no way
+    /// to say so.
+    pub fn to_table(self, draft: &Draft, dest: Destination) -> toml_edit::Item {
         match self {
             Domain::Views => views::to_table(draft, dest),
+            Domain::Groupings => groupings::to_table(draft, dest),
         }
     }
 
@@ -789,35 +847,39 @@ impl Domain {
     pub fn validate(self, draft: &Draft, config: &Config) -> Vec<Diagnostic> {
         match self {
             Domain::Views => views::validate(draft, config),
+            Domain::Groupings => groupings::validate(draft, config),
         }
     }
 }
 
-/// Put `table` in `document` under `name`, replacing whatever was there.
+/// Put `item` in `document` under `name`, replacing whatever was there.
 ///
 /// The one spelling of what a flush does to a file, shared by the write
-/// path and by [`object_text`]. Whole-table replacement, never a
+/// path and by [`object_text`]. Whole-value replacement, never a
 /// key-by-key merge: every doc these dialogs edit is atomic at depth one
 /// (`config::merge::atomic_depth`), so a stale `hidden` left behind by a
 /// merge would be a key nothing in the UI could remove.
-pub(super) fn set_object(
-    document: &mut toml_edit::DocumentMut,
-    name: &str,
-    table: toml_edit::Table,
-) {
-    document[name] = toml_edit::Item::Table(table);
+///
+/// `toml_edit::Item`, not `toml_edit::Table`: every domain but Groupings
+/// stores an object as a table (`[tree]` header), but a grouping slot's
+/// value is a bare array (`3 = ["book", "lhu"]`), and `DocumentMut`'s own
+/// indexing assignment renders either shape correctly — a `Table` gets
+/// its header, a `Value` gets `name = value` inline — without this
+/// function needing to know which one it was handed.
+pub(super) fn set_object(document: &mut toml_edit::DocumentMut, name: &str, item: toml_edit::Item) {
+    document[name] = item;
 }
 
-/// One object's table as the TOML text a write would produce.
+/// One object's item as the TOML text a write would produce.
 ///
 /// Goes through a `DocumentMut` rather than `Table::to_string`, which is
 /// not the same thing and quietly loses work: a bare table renders only
 /// its own key-value pairs, so an array of tables (`[[tree.columns]]`)
 /// and a sub-table (`[tree.width]`) both need the document's header path
 /// to appear at all.
-pub fn object_text(name: &str, table: toml_edit::Table) -> String {
+pub fn object_text(name: &str, item: toml_edit::Item) -> String {
     let mut document = toml_edit::DocumentMut::new();
-    set_object(&mut document, name, table);
+    set_object(&mut document, name, item);
     document.to_string()
 }
 
@@ -1414,8 +1476,11 @@ mod tests {
     }
 
     /// `Number` refused at `max` and had no way down at all, so the first
-    /// adapter with a real `Number` — Groupings' `slot` — would inherit a
-    /// field that can be raised and never lowered.
+    /// adapter with a real `Number` field would inherit one that can be
+    /// raised and never lowered. (Groupings turned out not to be that
+    /// adapter after all — its `slot` is display-only, see
+    /// `groupings.rs`'s module doc — so this still guards a field no
+    /// domain has built yet.)
     #[test]
     fn a_number_steps_both_ways_and_stops_at_each_end() {
         // At min: stepping back is a no-op returning false; forward moves it.

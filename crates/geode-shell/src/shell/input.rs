@@ -148,6 +148,11 @@ impl ShellView {
             // `keybindings::open` above and for the same reason
             // (defaults.rs: no key binding).
             objectdialog::render::open(self, objectdialog::Domain::Views, window, cx);
+        } else if action.0 == "config::groupings" {
+            // Part 2a Task 4: the object dialog's browse stage over
+            // `Domain::Groupings` (`shell::objectdialog::groupings`).
+            // Palette-only, like `config::views` above.
+            objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

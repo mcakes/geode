@@ -428,6 +428,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // beside it as their adapters are built, so the palette groups the
     // whole family under one heading.
     action(reg, "config::views", "Edit views", "Configuration");
+    // Part 2a Task 4: the object dialog over `groupings` — the nine
+    // `ctrl+1`..`ctrl+9` slots. Palette-only for the same reason
+    // `config::views` is: the chord that matters day to day is the slot
+    // itself (`frame::slot_*`, below), not the occasional edit of what a
+    // slot groups by.
+    action(reg, "config::groupings", "Edit groupings", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no

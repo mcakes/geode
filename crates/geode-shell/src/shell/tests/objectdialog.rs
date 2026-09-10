@@ -1647,3 +1647,170 @@ fn a_failed_removal_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::Test
         "[tree\nhidden =",
     );
 }
+
+// --- Task 4: `config::groupings` ------------------------------------
+
+/// A `datasets` doc with two dimension columns and one key column, plus
+/// a `groupings` doc naming slot 3 as `dims` (in that order) — and,
+/// deliberately, a real `keymap` layer carrying `BUILTIN_KEYMAP`.
+///
+/// That last part is the one easy to get wrong here and nowhere else in
+/// this file: every other fixture in it only asserts on the *dialog*, so
+/// `services_with_views`'s own `ConfigSources` never bothers with a
+/// `keymap` doc — `ShellServices::keymap` (the compiled struct `ctrl+3`
+/// actually resolves through) was already built once, at
+/// `test_services()` time, and nothing before now needed it rebuilt.
+/// This fixture's own end-to-end test does trigger a rebuild — the
+/// dialog's write flush runs `apply_reload`, which recompiles the keymap
+/// from `new_config.layered_docs("keymap")` unconditionally
+/// (`hot_reload::apply_reload`) — so an omitted `keymap` doc would come
+/// back from that flush with `ctrl+1..9` gone entirely, and the test
+/// would be unable to tell "the edit never reached the frame" apart from
+/// "the keystroke had nowhere to go".
+fn services_with_slot_3(dims: &[&str]) -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    let quoted: Vec<String> = dims.iter().map(|d| format!("\"{d}\"")).collect();
+    let groupings =
+        LayerDoc::builtin("groupings", &format!("3 = [{}]\n", quoted.join(", "))).unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            groupings,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// **The point of Task 4.** `config::groupings` opens over slot 3 (the
+/// only configured slot, so browse opens with it already selected);
+/// reordering its `dimensions` applies through the whole pipeline —
+/// draft, pending batch, debounced flush, `apply_reload`,
+/// `hot_reload::rebuild_slots` — and a later `ctrl+3` regroups off the
+/// NEW order, never the one the slot opened with.
+///
+/// `Frame::active_grouping` is exactly what a following blotter tile
+/// reads to regroup itself on `ctrl+1..9` (spec §4.2,
+/// `geode_blotter::tile`'s own `last_grouping`), so asserting against it
+/// — rather than only against `groupings.toml`'s bytes — is what proves
+/// the edit reached the frame a following tile actually reads, not
+/// merely the file underneath it. A weaker test asserting on the file
+/// alone would still pass if some future refactor broke the flush's
+/// `apply_reload` call without touching `run_writes`.
+#[gpui::test]
+fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_slot_3(&["book", "lhu"]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
+
+    // Into slot 3's edit stage.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    // Past `Slot` and the `Dimensions` header row, onto `book` — the
+    // chain's first item — and swap it past `lhu`.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+
+    // Every Groupings field is `Destination::Doc` (spec §8.2 — there is
+    // no presentation split the way Views has one), so reordering a
+    // builtin-owned slot is a definitional change to an object the user
+    // layer does not own: it forks, and asks first, exactly like any
+    // other `Doc` edit to a desk/builtin object.
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "reordering a builtin slot has to ask before forking it into the \
+         user layer"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    // Let the debounced batch merge, apply, and write.
+    flush_config_write(&mut cx);
+
+    // Out of the dialog entirely: `ctrl+3` is a workspace binding, not
+    // one the object dialog's own key handler claims, so it must not
+    // still be open when the chord is pressed.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "the dialog has to be closed for ctrl+3 to reach frame::slot_3"
+    );
+
+    cx.simulate_keystrokes("ctrl-3");
+    cx.run_until_parked();
+
+    let active = shell.read_with(&cx, |s, cx| {
+        s.frame.read(cx).active_grouping().map(<[String]>::to_vec)
+    });
+    assert_eq!(
+        active,
+        Some(vec!["lhu".to_string(), "book".to_string()]),
+        "a following tile must regroup off the reordered chain, not the \
+         order the slot opened with"
+    );
+
+    // The file agrees too — not the assertion that matters, but the
+    // whole point of the pipeline is that both do.
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
+    assert!(
+        written
+            .find("lhu")
+            .is_some_and(|l| written.find("book").is_some_and(|b| l < b)),
+        "{written}"
+    );
+}
+
+/// The confirm-and-fork step above is not incidental: `d`/`r` on a
+/// Groupings slot must not panic looking for a presentation file that
+/// does not exist (`Domain::presentation_doc` is `None` for Groupings) —
+/// this is the regression the removal path's own generalisation guards.
+#[gpui::test]
+fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_slot_3(&["book", "lhu"]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    // The slot is now the user's own (the fork just above copied it in),
+    // so `d` is live and must delete cleanly rather than panicking on a
+    // presentation doc Groupings never has.
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap_or_default();
+    assert!(!written.contains('3'), "{written}");
+}

@@ -3455,7 +3455,7 @@ run_mutation "objectdialog: a failed write reports only through the dialog notic
 # object is ABSENT can see it.
 run_mutation "objectdialog: an empty object table is written instead of removed" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    if table.is_empty() {
+  '    if item_is_empty(&item) {
         return None;
     }' \
   '    if false {
@@ -5248,16 +5248,99 @@ run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
   '' \
   geode-shell shift_space_steps_a_value_backward
 
-# `Number` used to refuse at `max` with no way down at all — Groupings'
-# `slot` would otherwise inherit a field that can be raised and never
-# lowered. Making the backward arm always refuse (`return false`) is the
-# old defect, and only a test asserting the value actually moves down —
-# not just that the row is steppable — can see it.
+# `Number` used to refuse at `max` with no way down at all — the sketch
+# this guarded against was Groupings' `slot`, which Part 2a Task 4 ruled
+# out (display-only, never a `Number` — see `groupings.rs`'s own module
+# doc), so this now guards a field no domain has built yet. Making the
+# backward arm always refuse (`return false`) is the old defect, and only
+# a test asserting the value actually moves down — not just that the row
+# is steppable — can see it.
 run_mutation "objectdialog: Number refuses to step down" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
   '                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),' \
   '                        StepDirection::Backward => return false,' \
   geode-shell a_number_steps_both_ways_and_stops_at_each_end
+
+# ---- Phase 4c part 2a, Task 4: the Groupings adapter -------------------
+#
+# The object's own value is a bare array, not a table (`3 = ["book",
+# "lhu"]`) — the first domain the write pipeline had to generalise
+# `Table` to `Item` for. `presentation_doc` is the other generalisation:
+# Groupings has no presentation destination at all, so `Domain::objects`
+# and `render::run_confirmed`'s removal-doc list both had to stop
+# assuming every domain has one.
+
+run_mutation "groupings: the summary drops the malformed/empty branches" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '    if names.is_empty() {
+        "empty".to_string()
+    } else {
+        GroupingSlots::label_of(&names)
+    }' \
+  '    GroupingSlots::label_of(&names)' \
+  geode-shell the_summary_names_the_dimension_chain
+
+run_mutation "groupings: fields duplicates a chain column instead of deduping against the catalogue" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '        if current.contains(&column.column) {
+            continue;
+        }' \
+  '        if false {
+            continue;
+        }' \
+  geode-shell fields_offers_every_pickable_column_chain_first_then_the_rest
+
+run_mutation "groupings: to_table writes every list item, ticked or not" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '        if item.included {
+            array.push(item.name.as_str());
+        }' \
+  '        array.push(item.name.as_str());' \
+  geode-shell to_table_excludes_unticked_items
+
+run_mutation "groupings: validate discards the reader's own diagnostics" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '    let (_slots, diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
+    diags' \
+  '    let (_slots, _diags) = GroupingSlots::from_doc(&doc, &schema, &dims);
+    Vec::new()' \
+  geode-shell an_out_of_range_slot_key_still_warns_through_validate
+
+# `item_is_empty`'s array branch is what makes ticking off every
+# dimension remove the user's override rather than writing `3 = []` —
+# Groupings is the only domain whose object is ever a bare array, so
+# Views' own empty-table tests cannot see this branch at all.
+run_mutation "objectdialog: an emptied array is written instead of removed" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        toml_edit::Item::Value(v) => v.as_array().is_some_and(|a| a.is_empty()),' \
+  '        toml_edit::Item::Value(_) => false,' \
+  geode-shell an_empty_array_item_is_no_edit_at_all
+
+# `Domain::objects` used to ask `Destination::Presentation.doc(self)`
+# unconditionally, which panics for Groupings (no Presentation-destined
+# field to name a doc for). Hardcoding `None` here does not panic — it
+# silently drops the personalisation check for every domain, Views
+# included, so an existing Views test is what catches it, proving the
+# generalisation did not cost Views its own feature.
+run_mutation "objectdialog: objects() stops asking any domain for a presentation doc" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            self.presentation_doc(),' \
+  '            None,' \
+  geode-shell a_presentation_only_override_is_marked_overridden
+
+# The removal path's own twin: reverting to the old unconditional
+# two-file array panics on `Destination::Presentation.doc(Groupings)`
+# the moment a trader deletes or reverts a slot — unreachable from any
+# Views fixture, since Views is the one domain that DOES have a
+# presentation doc.
+run_mutation "objectdialog: d/r ask for a presentation doc even when the domain has none" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            let mut docs = vec![Destination::Doc.doc(domain)];
+            if let Some(presentation) = domain.presentation_doc() {
+                docs.push(presentation);
+            }' \
+  '            let docs = [Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
+  geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -912,10 +912,13 @@ fn run_confirmed(
         // `commit_removal`'s own doc for why a removal must never be
         // blocked by the very diagnostic it would resolve).
         Confirm::Delete | Confirm::Revert => {
-            let docs = [
-                Destination::Doc.doc(domain),
-                Destination::Presentation.doc(domain),
-            ];
+            // The domain's own doc always applies; its presentation doc
+            // only when it has one at all (`Domain::presentation_doc` —
+            // Groupings has none, so there is nothing else to remove).
+            let mut docs = vec![Destination::Doc.doc(domain)];
+            if let Some(presentation) = domain.presentation_doc() {
+                docs.push(presentation);
+            }
             match removal_edits(shell, &docs) {
                 Ok(keys) => {
                     // Preserves `docs`' own order rather than whatever

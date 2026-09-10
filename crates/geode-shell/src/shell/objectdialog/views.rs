@@ -157,11 +157,18 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// depth one (`config::merge::atomic_depth`), and a key-by-key write
 /// would leave a stale `hidden` entry behind the first time a trader
 /// unhid the last hidden column.
-pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Table {
-    match dest {
+///
+/// Wrapped in `toml_edit::Item::Table` for [`Domain::to_table`]'s sake —
+/// every Views field is a table, so this adapter never sees the bare
+/// array Groupings does (`groupings::to_table`).
+///
+/// [`Domain::to_table`]: super::Domain::to_table
+pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
+    let table = match dest {
         Destination::Doc => doc_table(draft),
         Destination::Presentation => presentation_table(draft),
-    }
+    };
+    toml_edit::Item::Table(table)
 }
 
 /// The view itself, for `views.toml`: the object exactly as the merged
@@ -393,7 +400,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
     // parser; `unwrap_or_default` rather than a panic because a draft is
     // live UI state and an empty table simply validates as "missing
     // dataset" instead of taking the window down.
-    super::object_text(&draft.name, doc_table(draft))
+    super::object_text(&draft.name, toml_edit::Item::Table(doc_table(draft)))
         .parse::<toml::Table>()
         .unwrap_or_default()
 }

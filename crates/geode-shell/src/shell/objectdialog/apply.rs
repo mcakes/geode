@@ -53,7 +53,7 @@
 //! not, which is why the numbers are split the way the work is.
 //!
 //! Memory and disk both derive from the same rendered
-//! `toml_edit::Table` — [`object_value`] parses exactly the text
+//! `toml_edit::Item` — [`object_value`] parses exactly the text
 //! [`super::object_text`] would write — so the write is a *copy* of the
 //! decision, never its source. Nothing about the write's completion
 //! updates memory. Its **failure** does: see [`revert_failed_write`].
@@ -160,23 +160,42 @@ pub(crate) struct PendingConfigWrite {
     revert: Vec<LayerDoc>,
 }
 
-/// The user-layer table `object` should carry in its document, or `None`
-/// when the rendered table is empty (see [`ObjectEdit`]).
+/// The user-layer value `object` should carry in its document, or `None`
+/// when the rendered item is empty (see [`ObjectEdit`]).
 ///
 /// Goes through [`super::object_text`] — the exact text the file write
 /// produces — and parses it back, rather than converting
-/// `toml_edit::Table` to `toml::Value` field by field. One rendering,
+/// `toml_edit::Item` to `toml::Value` field by field. One rendering,
 /// two destinations: memory cannot end up holding something the file
 /// would not have said. It is a parse of a few hundred bytes, and it is
 /// part of the keystroke rather than of the flush — measured inside that
 /// keystroke's 37 µs, against an 8 ms budget.
-pub fn object_value(object: &str, table: toml_edit::Table) -> ObjectEdit {
-    if table.is_empty() {
+pub fn object_value(object: &str, item: toml_edit::Item) -> ObjectEdit {
+    if item_is_empty(&item) {
         return None;
     }
-    let text = super::object_text(object, table);
+    let text = super::object_text(object, item);
     let mut parsed: toml::Table = text.parse().ok()?;
     parsed.remove(object)
+}
+
+/// Whether `item` carries nothing worth writing: an empty table (no
+/// keys, which `views::presentation_table` can render) or an empty array
+/// (every `dimensions` tick undone, which `groupings::to_table` can
+/// render). Either is "I have no personalisation of this object" and is
+/// written as an absence ([`ObjectEdit`]'s own doc), never as an empty
+/// container on disk.
+///
+/// Any other value — a populated table, a populated array, a bare
+/// string or number — is never empty: no domain built so far renders a
+/// Doc write as a bare scalar, so there is nothing else this could mean.
+fn item_is_empty(item: &toml_edit::Item) -> bool {
+    match item {
+        toml_edit::Item::Table(t) => t.is_empty(),
+        toml_edit::Item::ArrayOfTables(a) => a.is_empty(),
+        toml_edit::Item::Value(v) => v.as_array().is_some_and(|a| a.is_empty()),
+        toml_edit::Item::None => true,
+    }
 }
 
 /// `docs` with `object`'s entry in the **user layer's** copy of `doc` set
@@ -247,10 +266,10 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
         return out;
     };
     for dest in draft.writes_by_destination().keys() {
-        let table = state.domain.to_table(draft, *dest);
+        let item = state.domain.to_table(draft, *dest);
         out.insert(
             (dest.doc(state.domain), draft.name.clone()),
-            object_value(&draft.name, table),
+            object_value(&draft.name, item),
         );
     }
     out
@@ -654,7 +673,7 @@ fn run_writes(
             for (object, value) in objects {
                 match value {
                     Some(value) => {
-                        super::set_object(document, &object, to_edit_table(&value));
+                        super::set_object(document, &object, super::toml_value_to_item(&value));
                     }
                     None => {
                         document.remove(&object);
@@ -670,17 +689,6 @@ fn run_writes(
         Ok(())
     } else {
         Err(failures.join("; "))
-    }
-}
-
-/// One object's value as the table a document write inserts. A non-table
-/// value cannot occur — [`object_value`] produced it by parsing back a
-/// rendered `toml_edit::Table` — and an empty table would have been
-/// `None`, so the fallback is unreachable rather than lossy.
-fn to_edit_table(value: &toml::Value) -> toml_edit::Table {
-    match value.as_table() {
-        Some(table) => super::toml_table_to_edit(table),
-        None => toml_edit::Table::new(),
     }
 }
 
@@ -726,4 +734,49 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
         state.notice = Some(format!("could not save — change reverted ({message})"));
     }
     cx.notify();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An emptied array — [`item_is_empty`]'s own reason for widening
+    /// beyond `Table::is_empty` — is "I have no personalisation of this
+    /// object" ([`ObjectEdit`]'s own doc), written as an absence rather
+    /// than `3 = []` sitting on disk. Groupings is the first (and so far
+    /// only) domain whose object is ever a bare array rather than a
+    /// table, so this is the one path Views' own tests never exercise.
+    #[test]
+    fn an_empty_array_item_is_no_edit_at_all() {
+        let item = toml_edit::Item::Value(toml_edit::Array::new().into());
+        assert_eq!(object_value("3", item), None);
+    }
+
+    /// A populated array round-trips as a `toml::Value::Array` — exactly
+    /// the shape `GroupingSlots::from_doc` reads back — rather than the
+    /// `toml_edit::Table` fallback an unconditional `.as_table()` would
+    /// have produced (an empty table, silently erasing the slot).
+    #[test]
+    fn a_populated_array_item_round_trips_as_a_toml_array() {
+        let mut array = toml_edit::Array::new();
+        array.push("lhu");
+        array.push("book");
+        let item = toml_edit::Item::Value(array.into());
+        let value = object_value("3", item).expect("a populated array is a real edit");
+        assert_eq!(
+            value
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some(vec!["lhu", "book"])
+        );
+    }
+
+    /// An empty table (every other domain's own object shape) still
+    /// counts as no edit — the generalisation from `Table` to `Item`
+    /// must not have changed this.
+    #[test]
+    fn an_empty_table_item_is_still_no_edit_at_all() {
+        let item = toml_edit::Item::Table(toml_edit::Table::new());
+        assert_eq!(object_value("tree", item), None);
+    }
 }
