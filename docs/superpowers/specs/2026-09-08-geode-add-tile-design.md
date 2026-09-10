@@ -408,7 +408,8 @@ layer's first entries.
 
 ## 13. Implementation notes (2026-09-08)
 
-Four things the build settled that the design above did not say:
+Four things the build settled that the design above did not say (plus
+(e) and (f), later rulings):
 
 (a) `Workspace::toggle_dock`'s show branch exits main-tree fullscreen
 first. A fullscreen tile plus a focused dock is a state `render` cannot
@@ -451,3 +452,19 @@ rows always add (or fill) rather than ever focusing an existing tile —
 `register_add_actions`'s rows never did the existing-occupant search
 `open_module` does, so this only removes a second, now-redundant way to
 reach the same tile.
+
+(f) **Follow-up closed, 2026-09-09: the drag grab's focus trap.** A tile
+mouse-down that arms a drag (`try_arm_tile_drag`) returns before the
+caller's click-to-focus tail, which is where a plain click re-arms
+`pending_focus_restore` — so grabbing a focus-tracking occupant and then
+switching workspaces mid-drag (the keyboard stays live during a drag)
+unmounted that occupant while gpui's `Window::focus` still pointed at
+its id, leaving the window with no live focus and every key dead until
+a mouse click claimed focus somewhere. The grab now arms the same
+restore, and `render` carries a safety net directly under the flag's
+consumption: `window.focused(cx).is_none()` — nothing at all focused —
+hands focus back to the shell root. Exactly `is_none()`, never broader:
+a live focused `Input` (palette filter, dialog, scope bar, command
+line) must keep the caret. `shell/tests/drag.rs`'s workspace-switch
+cancel test no longer arms the flag by hand; the net has its own pair
+in `shell/tests/occupants.rs`.

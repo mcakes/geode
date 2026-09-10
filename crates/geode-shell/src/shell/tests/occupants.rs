@@ -532,6 +532,94 @@ fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
     );
 }
 
+/// The render-top safety net (focus-trap fix): a window with NOTHING
+/// focused sends keys nowhere, so the next render hands focus back to
+/// the shell root. `Window::blur` is gpui's own "remove focus from all
+/// elements within this window" — the same `focus == None` state an
+/// orphaned `FocusId` leaves behind when the view holding the focused
+/// handle is unmounted, which is what the net is really for; blur is
+/// just the deterministic way to reach that state from a test.
+#[gpui::test]
+fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    // Blur and the check on one side of the same update: leaving the
+    // block flushes gpui's effects, and a `refresh`ed window redraws
+    // there — which is the net firing, so a check in a later block would
+    // read the healed state and prove nothing about the fixture.
+    cx.update(|window, cx| {
+        window.blur(cx);
+        assert!(
+            window.focused(cx).is_none(),
+            "the fixture really did reach the no-focus state"
+        );
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let root = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+    assert!(
+        cx.update(|window, _| root.is_focused(window)),
+        "the render-top net gave the shell root focus back"
+    );
+    // … and the keyboard is alive again, through the real pipeline.
+    cx.simulate_keystrokes("alt-2");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        2,
+        "keys reach the shell again once the net reclaimed focus"
+    );
+}
+
+/// The net's other half, and why its condition is exactly `is_none()`:
+/// it must never steal focus from a LIVE focused element. The palette's
+/// filter `Input` holds focus while the palette is open and redraws land
+/// on every keystroke — any broader condition would yank the caret out
+/// of the field mid-type.
+#[gpui::test]
+fn the_focus_net_leaves_a_live_focused_input_alone(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let palette_focused = |shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            shell
+                .read(cx)
+                .palette_input
+                .read(cx)
+                .focus_handle(cx)
+                .is_focused(window)
+        })
+    };
+    assert!(
+        palette_focused(&shell, &mut cx),
+        "the palette's filter field takes focus when it opens"
+    );
+
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        palette_focused(&shell, &mut cx),
+        "a redraw with a live focused element leaves it focused"
+    );
+    let root = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+    assert!(
+        !cx.update(|window, _| root.is_focused(window)),
+        "the net did not pull focus back to the shell root"
+    );
+}
+
 // The status bar's diagnostics-summary indicator (Phase 3 §5.1's
 // data-status contract, replaced by Phase 4b's `Diagnostics` entity) is
 // covered in `shell/tests/diagnostics.rs` now — `set_data_status` no

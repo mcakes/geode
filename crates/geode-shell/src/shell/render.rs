@@ -94,6 +94,32 @@ impl Render for ShellView {
             self.focus_handle.focus(window, cx);
         }
 
+        // The safety net under that flag (focus-trap fix): a window with
+        // NOTHING focused sends keys nowhere at all, so every shell chord
+        // is dead until a mouse click claims focus somewhere. That state
+        // is reachable whenever the view holding the focused
+        // `FocusHandle` is unmounted while gpui's `Window::focus` still
+        // points at its id — the id outlives the handles, and
+        // `Window::focused` (which resolves the id back through the focus
+        // map, refusing a zero-refcount entry — verified against the
+        // pinned rev's `FocusHandle::for_id`) then reports `None`. Every
+        // path we know of that can do this also arms
+        // `pending_focus_restore` above; this catches the one we haven't
+        // thought of, one frame later, with no key lost that a click
+        // wouldn't have lost anyway.
+        //
+        // The condition is EXACTLY `is_none()`, deliberately: taking
+        // focus is only unambiguously right when nobody has it. Anything
+        // broader — "focus isn't the shell root", say — would yank the
+        // caret out of every live focused element this app has (the
+        // palette's filter, a dialog's `Input`, the scope bar's text
+        // field, a per-tile command line, a focus-tracking occupant that
+        // is still mounted), on every frame, mid-type. `the_focus_net_
+        // leaves_a_live_focused_input_alone` guards that half.
+        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }
+
         // Create occupants for any tile that lacks one, drop occupants
         // whose tile is gone, and tell occupants when they enter/leave the
         // screen (Phase 3 §3.2) — the one place every path that can change

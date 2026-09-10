@@ -281,6 +281,19 @@ impl ShellView {
             cursor: position,
             active: false,
         });
+        // A grab is a tile mouse-down like any other, so an occupant that
+        // tracks its own `FocusHandle` (`RecordingView`, and `DataTable`
+        // if it were ever focusable) takes window focus on it — but this
+        // branch returns before the caller's click-to-focus tail, which is
+        // where the plain click re-arms the restore. Arming it here closes
+        // the focus trap that gap opened: grab a focus-tracking tile, then
+        // switch workspaces mid-drag (the keyboard stays live during a
+        // drag), and the render-top cancel unmounts the occupant while
+        // gpui's focus still points at it — an orphaned `FocusId`, in
+        // which `handle_key_down` stops firing for EVERY key until a
+        // mouse click claims focus somewhere. Same restore, same reason
+        // as the plain-click path (§3.3).
+        self.pending_focus_restore = true;
         cx.stop_propagation();
         cx.notify();
         true

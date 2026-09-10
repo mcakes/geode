@@ -5168,6 +5168,46 @@ run_mutation "pool: the refusal warning is latched once per worker" \
     }' \
   geode-data a_refusal_is_logged_once_per_worker_not_once_per_result
 
+# ---- the drag grab's focus trap (2026-09-09) ---------------------------
+#
+# Two halves of the same defect: a tile mouse-down that arms a drag
+# returns before the caller's click-to-focus tail, so it has to re-arm
+# `pending_focus_restore` itself, and `render` carries a safety net for
+# the no-focus state generally. Both failure modes are silent — the app
+# paints perfectly and simply stops answering the keyboard.
+
+run_mutation "focus: the drag grab re-arms the focus restore" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        self.pending_focus_restore = true;
+        cx.stop_propagation();' \
+  '        cx.stop_propagation();' \
+  geode-shell switching_workspaces_mid_tile_drag_cancels_with_nothing_applied
+
+run_mutation "focus: a window with nothing focused gets the shell root back" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if false {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame
+
+# The other direction on the same line: the net's condition is exactly
+# `is_none()`, and the tempting broader form ("focus isn't the shell
+# root") pulls the caret out of every live focused `Input` on every
+# frame. Without a test that keeps one focused across a redraw, nothing
+# would notice.
+run_mutation "focus: the no-focus net never steals from a live focused element" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell the_focus_net_leaves_a_live_focused_input_alone
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
