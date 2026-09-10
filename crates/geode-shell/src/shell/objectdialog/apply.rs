@@ -139,9 +139,9 @@ pub type ObjectEdit = Option<toml::Value>;
 /// Edits recorded by keystrokes and not yet merged, applied or written —
 /// everything the next [`promote`] owes the rest of the app.
 ///
-/// Each entry is the whole rendered object as of the last keystroke that
-/// touched it, not a delta, so promoting the batch twice is idempotent
-/// and a superseded flush costs nothing.
+/// Each entry is the whole rendered object as of the last keystroke or
+/// confirmed removal that touched it, not a delta, so promoting the
+/// batch twice is idempotent and a superseded flush costs nothing.
 ///
 /// Keyed by `(doc, object)` rather than by doc alone: the debounce can
 /// span a trader leaving one object and editing another, and two objects
@@ -335,15 +335,22 @@ pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
 /// to prevent. The draft keeps the value, and the row still paints it,
 /// which is the honest picture of a shell with nowhere to write.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
-    // The actual gate: checked here, inside the one function every path
-    // that can queue a batch calls, rather than trusted to each caller.
-    // `render::commit_or_confirm` also checks this early (see
+    // The actual gate: checked here, inside the one function every EDIT
+    // reaches before it can queue a batch, rather than trusted to each
+    // caller. `render::commit_or_confirm` also checks this early (see
     // `blocking_diagnostic`'s own doc) so a `Confirm::Fork` question is
     // never asked over an edit that can never be saved — but that early
     // check is a UX nicety, not the safety property. This one is: it
     // covers `run_confirmed`'s `Confirm::Fork` arm, which calls this
     // function directly, and any future caller, without depending on
     // anything about how keys are dispatched while a confirm is armed.
+    //
+    // A removal never reaches this function — see [`commit_removal`],
+    // which joins the same batch through a deliberately ungated path.
+    // An error-severity diagnostic on the object `d`/`r` is about to
+    // remove describes exactly the state those verbs exist to escape;
+    // a gate built to keep an unsaveable *value* off the batch must not
+    // also refuse the one action that clears it.
     if let Some(notice) = blocking_diagnostic(shell) {
         return Some(notice);
     }
@@ -351,9 +358,6 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     if edits.is_empty() {
         return None;
     }
-    let Some(user_dir) = shell.user_dir.clone() else {
-        return Some("no writable user config directory — nothing was changed".to_string());
-    };
 
     // The draft's baseline moves here, not when the flush lands: the
     // baseline is "what this keystroke has already accounted for", so the
@@ -368,6 +372,76 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         draft.mark_saved();
     }
 
+    queue_batch(
+        shell,
+        edits,
+        WRITE_DEBOUNCE,
+        "no writable user config directory — nothing was changed",
+        cx,
+    )
+}
+
+/// Record a confirmed `d`/`r`'s removal and put it on the exact batch a
+/// field edit would join — the same [`PendingConfigWrite`], the same
+/// [`promote`] → [`apply_in_memory`] → [`run_writes`] → [`finish_flush`],
+/// so a delete or revert is no longer invisible until the 500 ms watcher
+/// notices the write `spawn_removals` used to make on its own. `render::
+/// removal_edits` builds `edits`; every value in it is `None` (see
+/// [`ObjectEdit`]) — a removal never carries a value for anything to
+/// reject.
+///
+/// **Deliberately does not call [`blocking_diagnostic`].** That gate
+/// exists so an edit `Domain::validate` rated `Severity::Error` can never
+/// join the batch, because `reload::decide` would refuse the merge a
+/// flush later while the file write had already fired. A removal cannot
+/// hit that: it does not write the value the reader would reject, it
+/// erases the object carrying it. Gating a delete or revert on the very
+/// diagnostic it would resolve would trap a trader in the one dialog
+/// built to fix that state, refusing the only action that helps — see
+/// this crate's Task 3 report for the fuller reasoning.
+///
+/// **No debounce, unlike [`commit_edit`].** [`WRITE_DEBOUNCE`] exists to
+/// coalesce a keystroke *stream* — a held `shift+j`, a typed filter char
+/// — into one write; a removal is a single already-confirmed act (armed
+/// by `d`/`r`, answered by a second keystroke), so there is nothing to
+/// coalesce and nothing gained by waiting on the clock. It still goes
+/// through [`schedule_flush`] rather than applying inline, so an edit
+/// already mid-debounce on another object is folded into the same flush
+/// instead of racing it.
+pub(super) fn commit_removal(
+    shell: &mut ShellView,
+    edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    queue_batch(
+        shell,
+        edits,
+        Duration::ZERO,
+        "no writable user config directory — nothing was removed",
+        cx,
+    )
+}
+
+/// The tail [`commit_edit`] and [`commit_removal`] share once each has
+/// decided what belongs in `edits`: find somewhere to write, capture the
+/// batch's revert baseline, and schedule the flush that applies and
+/// writes it. `no_dir_notice` differs only in wording between the two
+/// callers ("changed" vs. "removed"), so it is the one thing left to
+/// parameterise.
+fn queue_batch(
+    shell: &mut ShellView,
+    edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    delay: Duration,
+    no_dir_notice: &str,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    if edits.is_empty() {
+        return None;
+    }
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some(no_dir_notice.to_string());
+    };
+
     // Captured before the first edit of a batch, so a failed write
     // restores the state the batch started from.
     let revert = match shell.pending_config_write.as_ref() {
@@ -375,7 +449,7 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         None => shell.services.config.all_docs(),
     };
 
-    schedule_flush(shell, user_dir, edits, revert, cx);
+    schedule_flush(shell, user_dir, edits, revert, delay, cx);
     None
 }
 
@@ -416,14 +490,22 @@ fn apply_in_memory(
 }
 
 /// Fold `edits` into the pending batch and schedule the flush that will
-/// apply and write it.
+/// apply and write it, after `delay`.
 ///
-/// Every keystroke bumps the sequence and spawns a fresh timer; whichever
-/// task wakes holding the current sequence owns the whole accumulated
-/// batch, and every superseded task finds a newer sequence and returns.
-/// That is the coalescing: N keystrokes inside the debounce window
-/// produce N timers, **one** application, and one write per touched
-/// document.
+/// Every keystroke or removal bumps the sequence and spawns a fresh
+/// timer; whichever task wakes holding the current sequence owns the
+/// whole accumulated batch, and every superseded task finds a newer
+/// sequence and returns. That is the coalescing: N keystrokes inside the
+/// debounce window produce N timers, **one** application, and one write
+/// per touched document.
+///
+/// `delay` is [`WRITE_DEBOUNCE`] for [`commit_edit`]'s keystrokes and
+/// `Duration::ZERO` for [`commit_removal`]'s single confirmed act. A
+/// zero-duration `timer` resolves as soon as it is polled rather than
+/// waiting on the clock (`Executor::timer`'s own short-circuit), so a
+/// removal needs no clock advance in a test and no wait in the running
+/// app, while still folding into — and being folded into by — whatever
+/// the pending batch already holds, exactly like a longer delay would.
 ///
 /// The sequence guards both ends of the flush. [`promote`] checks it
 /// before doing the work, and [`finish_flush`] checks it before clearing
@@ -436,6 +518,7 @@ fn schedule_flush(
     user_dir: PathBuf,
     edits: BTreeMap<(&'static str, String), ObjectEdit>,
     revert: Vec<LayerDoc>,
+    delay: Duration,
     cx: &mut Context<ShellView>,
 ) {
     let seq = shell.config_write_seq.wrapping_add(1);
@@ -452,7 +535,7 @@ fn schedule_flush(
     pending.edits.extend(edits);
 
     cx.spawn(async move |this, cx| {
-        cx.background_executor().timer(WRITE_DEBOUNCE).await;
+        cx.background_executor().timer(delay).await;
         let Ok(Some((user_dir, edits))) = this.update(cx, |shell, cx| promote(shell, seq, cx))
         else {
             return;

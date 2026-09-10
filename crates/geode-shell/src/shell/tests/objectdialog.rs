@@ -1507,3 +1507,143 @@ fn revert_undoes_a_presentation_only_override(cx: &mut gpui::TestAppContext) {
         "and reverting presentation must not touch the view's own doc"
     );
 }
+
+/// A single view defined **only** by the user layer — no desk, no
+/// builtin — so its browse row's `layer` is `Layer::User` and `d` arms
+/// [`objectdialog::Confirm::Delete`] rather than pointing at `r`.
+fn services_with_a_user_only_view() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+    )
+    .unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "views".to_string(),
+        file: "<test:user>".into(),
+        table: "[mine]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
+                [[mine.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                [[mine.columns]]\nname = \"npv\"\n"
+            .parse()
+            .unwrap(),
+    };
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![datasets, user],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// **The requirement this task exists for.** `spawn_removals` wrote the
+/// file and returned with no in-memory merge, so `d` on a user-layer
+/// object left its row painting in the browse list until the 500 ms
+/// watcher noticed the write and reloaded — every other mutation in this
+/// dialog is instant, and a delete was the one exception.
+///
+/// The row must be gone **before the watcher would ever fire**: this
+/// test never advances the clock at all (contrast `flush_config_write`,
+/// which every file-asserting EDIT test above calls), so the only way it
+/// can pass is if confirming the delete applies to memory — and reaches
+/// disk — inside the same `run_until_parked()` that dispatches the `y`.
+/// A version that routes the removal onto the 250 ms edit debounce
+/// instead of an immediate flush would need a clock advance here and
+/// fail exactly this assertion, which is the point: a delete is a single
+/// already-confirmed act, not a keystroke stream to coalesce, so it has
+/// nothing to wait for.
+#[gpui::test]
+fn deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-mine").is_some(),
+        "the browse list has to show the object before any of this starts"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "d arms on an object the user layer itself defines"
+    );
+
+    // The whole test: confirm, and drive the executor with nothing but
+    // run_until_parked — no `advance_clock`, no simulated watcher tick.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-row-mine").is_none(),
+        "the row must be gone from the browse list before the 500 ms watcher \
+         poll could ever have run — nothing here advanced any clock"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("deleted")),
+        "and the notice says what happened, not what is pending, got {notice:?}"
+    );
+    assert!(
+        !notice.as_deref().unwrap_or_default().ends_with('…'),
+        "the outcome is no longer pending, so the notice must not hedge \
+         with an ellipsis, got {notice:?}"
+    );
+
+    // The file follows the in-memory removal.
+    let written = std::fs::read_to_string(dir.path().join("views.toml"))
+        .expect("the delete has to have reached disk too");
+    assert!(!written.contains("mine"), "{written}");
+}
+
+/// **Hazard from the task brief:** a removal now applies to memory before
+/// its write completes, exactly like an edit — so a removal whose write
+/// fails needs the same revert an edit's failed write already gets
+/// ([`apply::revert_failed_write`]), or the object is gone from memory
+/// and still sitting on disk with nothing having told the trader.
+///
+/// The fixture mirrors `a_failed_write_reverts_the_in_memory_change_and_
+/// says_so`: the file on disk is unparseable, but the config already in
+/// memory never read it back, so the in-memory removal succeeds and only
+/// the write can discover the problem.
+#[gpui::test]
+fn a_failed_removal_reverts_the_in_memory_change_and_says_so(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = desk_view_services(&[("view_presentation", "[tree]\nhidden = [\"book\"]\n")]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    std::fs::write(dir.path().join("view_presentation.toml"), "[tree\nhidden =").unwrap();
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert!(
+        presentation_of(&shell, &cx, "tree").is_some(),
+        "the failed write has to put the in-memory override back, or the \
+         trader is looking at a value that is not persisted anywhere"
+    );
+    let reported = shell.read_with(&cx, |s, _| s.config_write_error.clone());
+    assert!(
+        reported.as_deref().is_some_and(|m| m.contains("reverted")),
+        "and it has to say so rather than fail silently, got {reported:?}"
+    );
+    // The user's broken file is still their broken file.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap(),
+        "[tree\nhidden =",
+    );
+}

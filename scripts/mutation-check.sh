@@ -3385,9 +3385,9 @@ run_mutation "objectdialog: an edit assigns the config instead of going through 
 # Only a test counting the events can see it.
 run_mutation "objectdialog: the config fan-out fires per keystroke instead of riding the debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    schedule_flush(shell, user_dir, edits, revert, cx);' \
+  '    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
   '    apply_in_memory(shell, &user_dir, &edits, cx);
-    schedule_flush(shell, user_dir, edits, revert, cx);' \
+    schedule_flush(shell, user_dir, edits, revert, delay, cx);' \
   geode-shell \
   the_config_fan_out_is_debounced_and_goes_through_the_one_applier
 
@@ -3487,7 +3487,7 @@ run_mutation "objectdialog: a failed write is logged instead of reverting memory
 # disk while the keys were still coming can see it.
 run_mutation "objectdialog: the config write fires per keystroke instead of coalescing" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '        cx.background_executor().timer(WRITE_DEBOUNCE).await;' \
+  '        cx.background_executor().timer(delay).await;' \
   '' \
   geode-shell \
   edits_inside_the_debounce_window_coalesce_into_one_write
@@ -3560,6 +3560,39 @@ run_mutation "objectdialog: a warning blocks the batch as if it were an error" \
   '.find(|_d| true)?;' \
   geode-shell \
   an_edit_with_only_warnings_still_joins_the_batch
+
+# Task 3's own regression: `d`/`r` used to write the file straight off
+# the render thread with no in-memory merge at all (`spawn_removals`),
+# so a delete or revert sat invisible in the browse list until the 500 ms
+# watcher noticed the write and reloaded — the one mutation left in this
+# dialog after every field edit went instant. This mutation puts that
+# exact shape back: `commit_removal` writes through `run_writes` on the
+# background executor and returns, skipping `queue_batch` — so `services.
+# config` never changes and the browse row survives its own deletion.
+# Every notice- and file-only assertion stays green (the file still ends
+# up right, the confirm still fires); only a test reading the row back
+# out of the browse list, with nothing but `run_until_parked` driving it,
+# can see the row that never left.
+run_mutation "objectdialog: a removal bypasses the batch again" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    queue_batch(
+        shell,
+        edits,
+        Duration::ZERO,
+        "no writable user config directory — nothing was removed",
+        cx,
+    )' \
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was removed".to_string());
+    };
+    cx.background_executor()
+        .spawn(async move {
+            let _ = run_writes(&user_dir, edits);
+        })
+        .detach();
+    None' \
+  geode-shell \
+  deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
 # `Config::all_docs` is the other half of the loader split: it is what
 # hands `from_docs` the documents to merge, and dropping the layers below

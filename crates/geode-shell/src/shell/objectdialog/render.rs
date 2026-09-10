@@ -75,6 +75,7 @@
 //! bar's remaining verbs are exactly the destructive and structural
 //! ones.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use geode_core::config::Layer;
@@ -83,10 +84,10 @@ use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
+use super::apply;
 use super::{
     Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
 };
-use crate::config_write;
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
 use crate::listfilter;
@@ -763,14 +764,23 @@ fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
     derive_rows(shell).into_iter().find(|row| row.name == name)
 }
 
-/// Remove `name` from each of `docs` in the user layer, off the render
-/// thread. Only docs whose **user layer** actually contains the object are
-/// opened, so a delete never creates an empty file to say nothing.
-fn spawn_removals(
-    shell: &mut ShellView,
+/// `name`'s removal from each of `docs` whose **user layer** actually
+/// contains it, as the `None`-valued edits [`apply::commit_removal`]
+/// queues onto the same batch a field edit would — so a delete never
+/// creates an empty file to say nothing (no edit means no entry means no
+/// write) and never touches a doc it does not own.
+///
+/// This used to write the file itself, straight off the render thread,
+/// with no in-memory merge at all — invisible until the 500 ms watcher
+/// noticed. Building the edit map and handing it to `commit_removal`
+/// instead means a delete or revert rides the exact path an edit does:
+/// merged through `Config::from_docs`, applied through `apply_reload`,
+/// written by the same `run_writes`, reverted by the same
+/// `revert_failed_write` if the write fails.
+fn removal_edits(
+    shell: &ShellView,
     docs: &[&'static str],
-    cx: &mut Context<ShellView>,
-) -> Result<Vec<String>, String> {
+) -> Result<BTreeMap<(&'static str, String), apply::ObjectEdit>, String> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object }) => object.clone(),
         _ => return Err("nothing is open".to_string()),
@@ -790,22 +800,10 @@ fn spawn_removals(
     if touched.is_empty() {
         return Err(format!("nothing of yours defines {name}"));
     }
-    let Some(user_dir) = shell.user_dir.clone() else {
-        return Err("no writable user config directory — nothing was removed".to_string());
-    };
-    let files: Vec<String> = touched.iter().map(|doc| format!("{doc}.toml")).collect();
-    cx.background_executor()
-        .spawn(async move {
-            for doc in touched {
-                if let Err(e) = config_write::edit(&user_dir, Layer::User, doc, |document| {
-                    document.remove(&name);
-                }) {
-                    tracing::warn!(target: "geode::config", "{e}");
-                }
-            }
-        })
-        .detach();
-    Ok(files)
+    Ok(touched
+        .into_iter()
+        .map(|doc| ((doc, name.clone()), None))
+        .collect())
 }
 
 /// `d`: arm the delete confirm, or say why there is nothing to delete.
@@ -907,24 +905,48 @@ fn run_confirmed(
             }
             cx.notify();
         }
+        // `d`/`r` share `apply::commit_removal` with `Confirm::Fork`'s
+        // `commit_edit` above: same batch, same flush, same failure
+        // revert — deliberately without `blocking_diagnostic`'s gate (see
+        // `commit_removal`'s own doc for why a removal must never be
+        // blocked by the very diagnostic it would resolve).
         Confirm::Delete | Confirm::Revert => {
             let docs = [
                 Destination::Doc.doc(domain),
                 Destination::Presentation.doc(domain),
             ];
-            match spawn_removals(shell, &docs, cx) {
-                Ok(files) => {
-                    let verb = if confirm == Confirm::Delete {
-                        "deleting"
-                    } else {
-                        "reverting"
-                    };
+            match removal_edits(shell, &docs) {
+                Ok(edits) => {
+                    // Preserves `docs`' own order rather than the edit
+                    // map's `(doc, object)` sort, so a notice naming both
+                    // files reads "views and view_presentation" the way
+                    // it always has, not the map's alphabetical order.
                     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
                         Some(Stage::Edit { object }) => object.clone(),
                         _ => String::new(),
                     };
+                    let files: Vec<String> = docs
+                        .into_iter()
+                        .filter(|doc| edits.contains_key(&(*doc, name.clone())))
+                        .map(|doc| format!("{doc}.toml"))
+                        .collect();
+                    let verb = if confirm == Confirm::Delete {
+                        "deleted"
+                    } else {
+                        "reverted"
+                    };
+                    let outcome = apply::commit_removal(shell, edits, cx);
                     leave_edit(shell, window, cx);
-                    set_notice(shell, format!("{verb} {name} in {}…", files.join(" and ")));
+                    match outcome {
+                        // The removal joined the batch; the flush (no
+                        // debounce of its own) is already under way, so
+                        // the outcome is said plainly — not hedged with
+                        // an ellipsis the way a pending write once was.
+                        None => {
+                            set_notice(shell, format!("{verb} {name} in {}", files.join(" and ")))
+                        }
+                        Some(notice) => set_notice(shell, notice),
+                    }
                 }
                 Err(message) => set_notice(shell, message),
             }
