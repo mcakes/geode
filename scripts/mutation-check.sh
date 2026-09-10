@@ -5245,14 +5245,22 @@ run_mutation "focus: the departed-tile backstop spares the shell's own surfaces"
 # add them — a diagnostic that exists, is logged, and is invisible where
 # a trader would look for it.
 
+# The anchor deliberately ENDS on the keymap extend rather than on the
+# block's bare `diags` tail (fix round 2). Matching is exact-substring,
+# so a `from` ending in `\n            diags` matches the PREFIX of the
+# next line, `diags.extend(services.keymap_diagnostics…)` — the mutated
+# body then read `services.config.diagnostics.clone().extend(…); diags`
+# with `diags` unbound, and a compile error is reported as a plain
+# `caught` with the named test never run. The header's "an entry can lie"
+# case, and the reason an anchor must end somewhere no live line begins.
 run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
   crates/geode-shell/src/shell/mod.rs \
-  '            let cfg = &services.config;
-            let mut diags = cfg.diagnostics.clone();
+  '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            diags' \
-  '            services.config.diagnostics.clone()' \
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '            let mut diags = cfg.diagnostics.clone();
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
   geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
 
 # The fourth group is the one that cannot be recomputed — it rides on

@@ -1334,8 +1334,8 @@ fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::T
     );
 }
 
-/// The third startup group, and the one that cannot be recomputed: what
-/// `build_keymap` reported. `apply_reload` extends `keymap_diags`;
+/// The fourth and last startup group, and the one that cannot be
+/// recomputed: what `build_keymap` reported. `apply_reload` extends it;
 /// `ShellView::new` has no way to rebuild them (the registry as it stood
 /// at startup is gone), so they ride on `ShellServices::keymap_
 /// diagnostics` — filled by `main.rs`, and modelled here the same way.
