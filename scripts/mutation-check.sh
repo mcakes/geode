@@ -736,15 +736,37 @@ run_mutation "dimensions: a config_version header is not a spurious diagnostic" 
 
 # ---- findings from the phase-2b/prerequisites review round
 
+# The plain-measure half of the §6.3 blanking, the pair to the derived
+# entry below. A measure whose grain cannot be attributed at this depth is
+# emitted as `case when s.row_depth in (…) then null else agg."x" end`;
+# without it the cell shows the value belonging to an ANCESTOR row, which
+# is the double-count §6.3 exists to prevent, and it shows it as an
+# ordinary number with no marker a reader could notice. Added 2026-09-09:
+# until then the entry below was anchored on the bare
+# `let expr = if blank.is_empty() {`, whose first occurrence is this site,
+# so re-aiming it at the derived site left this one bare.
+run_mutation "measure: a non-attributable measure is blanked, not an ancestor's number" \
+  crates/geode-data/src/query/compile.rs \
+  '                .filter(|d| by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+
+            let expr = if blank.is_empty() {' \
+  '                .filter(|d| by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+
+            let expr = if true {' \
+  geode-data \
+  grouping_by_a_carried_dimension_sums_like_the_key_it_depends_on_and_blanks_coarser_measures
+
 # Re-anchored (2026-09-09): the bare `let expr = if blank.is_empty() {`
 # occurs twice in this file -- once for a plain measure, once for a
 # DERIVED column -- and `replace(..., 1)` was hitting the measure site,
 # which is not what this entry's name claims to guard. The `blank` build
 # above each differs (`by_depth` vs `attribution_by_depth`), so the anchor
-# now carries it and lands on the derived one. NOTE: the plain-measure
-# site has no entry of its own -- while this anchor pointed at it, the
-# derived blanking (the harder case, and the one §6.3's double-count
-# depends on) was undefended; now it is the measure blanking that is.
+# now carries it and lands on the derived one; the measure site is the
+# entry directly above.
 run_mutation "derived: the value is blanked, not just the marker" \
   crates/geode-data/src/query/compile.rs \
   '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
