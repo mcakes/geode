@@ -53,6 +53,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
+        keymap_diagnostics: Vec::new(),
     }
 }
 
@@ -296,6 +297,7 @@ fn services_with_saved_scope() -> ShellServices {
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
+        keymap_diagnostics: Vec::new(),
     }
 }
 

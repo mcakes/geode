@@ -116,7 +116,12 @@ pub(super) const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 /// sloppy mod+click can never rearrange the layout. Recorded decisions:
 /// - mod+down does NOT change focus at arm time — focus follows the moved
 ///   tile only on a successful drop, and an abandoned below-threshold
-///   mod+click leaves everything untouched, focus included.
+///   mod+click leaves everything untouched, focus included. That is about
+///   TILE focus (the workspace's own notion). WINDOW focus is separate:
+///   the grab re-arms `pending_focus_restore` exactly as a plain tile
+///   click does, so keyboard focus is back on the shell root by the next
+///   frame either way — see the comment at that assignment for the trap
+///   this closes.
 /// - The mod key does NOT need to stay held once the drag is armed
 ///   (standard WM behavior — releasing the modifier mid-drag continues
 ///   the drag; only the mouse button's release ends it). Modifier state
@@ -281,6 +286,19 @@ impl ShellView {
             cursor: position,
             active: false,
         });
+        // A grab is a tile mouse-down like any other, so an occupant that
+        // tracks its own `FocusHandle` (`RecordingView`, and `DataTable`
+        // if it were ever focusable) takes window focus on it — but this
+        // branch returns before the caller's click-to-focus tail, which is
+        // where the plain click re-arms the restore. Arming it here closes
+        // the focus trap that gap opened: grab a focus-tracking tile, then
+        // switch workspaces mid-drag (the keyboard stays live during a
+        // drag), and the render-top cancel unmounts the occupant while
+        // gpui's focus still points at it — an orphaned `FocusId`, in
+        // which `handle_key_down` stops firing for EVERY key until a
+        // mouse click claims focus somewhere. Same restore, same reason
+        // as the plain-click path (§3.3).
+        self.pending_focus_restore = true;
         cx.stop_propagation();
         cx.notify();
         true

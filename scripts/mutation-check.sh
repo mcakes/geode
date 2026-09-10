@@ -1760,11 +1760,13 @@ run_mutation "hosting: a closed tile drops its occupant" \
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
             }
         }' \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             let _ = id;
         }' \
   geode-shell \
@@ -5295,6 +5297,109 @@ run_mutation "pool: the refusal warning is latched once per worker" \
         return;
     }' \
   geode-data a_refusal_is_logged_once_per_worker_not_once_per_result
+
+# ---- the drag grab's focus trap (2026-09-09) ---------------------------
+#
+# Two halves of the same defect: a tile mouse-down that arms a drag
+# returns before the caller's click-to-focus tail, so it has to re-arm
+# `pending_focus_restore` itself, and `render` carries a safety net for
+# the no-focus state generally. Both failure modes are silent — the app
+# paints perfectly and simply stops answering the keyboard.
+
+run_mutation "focus: the drag grab re-arms the focus restore" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        self.pending_focus_restore = true;
+        cx.stop_propagation();' \
+  '        cx.stop_propagation();' \
+  geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
+
+run_mutation "focus: a window with nothing focused gets the shell root back" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if false {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame
+
+# The other direction on the same line: the net's condition is exactly
+# `is_none()`, and the tempting broader form ("focus isn't the shell
+# root") pulls the caret out of every live focused `Input` on every
+# frame. Without a test that keeps one focused across a redraw, nothing
+# would notice.
+run_mutation "focus: the no-focus net never steals from a live focused element" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell the_focus_net_leaves_a_live_focused_input_alone
+
+# The `is_none()` net above cannot see a workspace switch (occupants are
+# retained across workspaces, so focus stays `Some`); `ensure_occupants`
+# carries the backstop that can. Same two directions: it must reclaim,
+# and it must not reclaim from a live shell surface.
+run_mutation "focus: a departed tile's focus returns to the shell root" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            let _ = &focused;
+        }' \
+  geode-shell a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell
+
+run_mutation "focus: the departed-tile backstop spares the shell's own surfaces" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            && !self.holds_shell_focus(&focused, cx)' \
+  '            && !false' \
+  geode-shell a_tile_leaving_the_visible_set_leaves_the_palette_focused
+
+# ---- startup config diagnostics reach the entity (2026-09-09) ---------
+#
+# The mutation is the old code: seed the entity from
+# `config.diagnostics` alone. Neither the refused `keymap.mod` alias nor
+# the retired `[app] modules.default` key lives in that list, so the
+# diagnostics tile silently omitted both until a hot reload happened to
+# add them — a diagnostic that exists, is logged, and is invisible where
+# a trader would look for it.
+
+# The anchor deliberately ENDS on the keymap extend rather than on the
+# block's bare `diags` tail (fix round 2). Matching is exact-substring,
+# so a `from` ending in `\n            diags` matches the PREFIX of the
+# next line, `diags.extend(services.keymap_diagnostics…)` — the mutated
+# body then read `services.config.diagnostics.clone().extend(…); diags`
+# with `diags` unbound, and a compile error is reported as a plain
+# `caught` with the named test never run. The header's "an entry can lie"
+# case, and the reason an anchor must end somewhere no live line begins.
+run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let mut diags = cfg.diagnostics.clone();
+            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '            let mut diags = cfg.diagnostics.clone();
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
+
+# The fourth group is the one that cannot be recomputed — it rides on
+# `ShellServices::keymap_diagnostics` — so dropping the extend is silent
+# in a way the other three are not: nothing else would ever put a
+# `build_keymap` diagnostic in front of a trader at startup.
+run_mutation "diagnostics: the startup seeding carries build_keymap's own diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell startup_keymap_diagnostics_are_in_the_diagnostics_entity
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

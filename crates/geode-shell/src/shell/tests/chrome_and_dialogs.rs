@@ -1279,6 +1279,110 @@ fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppCont
     });
 }
 
+/// The *startup* half of the same diagnostic. `ShellView::new` used to
+/// seed the entity's config section with `services.config.diagnostics`
+/// alone — but `modules_default_diagnostic` and the refused-`keymap.mod`
+/// alias are computed OUTSIDE that list (by `main.rs`, which only logged
+/// them), so a trader who never edited config mid-session saw neither in
+/// the diagnostics tile. `new` now folds both in, in `apply_reload`'s
+/// order.
+#[gpui::test]
+fn a_modules_default_key_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("modules.default"))
+        .unwrap_or_else(|| panic!("expected a modules.default diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Warning,
+        "the key is dead config, not invalid config: {hit:?}"
+    );
+}
+
+/// The other half of the startup seeding: the refused `keymap.mod =
+/// "ctrl"` alias (Phase 4a Task 4b) is an *error*, and the diagnostics
+/// tile is where a trader would look to find out why their mod key is
+/// not what they wrote.
+#[gpui::test]
+fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.config = config_with_mod("ctrl");
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("keymap.mod"))
+        .unwrap_or_else(|| panic!("expected a keymap.mod diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Error,
+        "a refused alias is an error, not a warning: {hit:?}"
+    );
+}
+
+/// The fourth and last startup group, and the one that cannot be
+/// recomputed: what `build_keymap` reported. `apply_reload` extends it;
+/// `ShellView::new` has no way to rebuild them (the registry as it stood
+/// at startup is gone), so they ride on `ShellServices::keymap_
+/// diagnostics` — filled by `main.rs`, and modelled here the same way.
+/// Without it a binding naming an action nothing registered was logged at
+/// startup and then absent from the diagnostics tile until some later hot
+/// reload happened to put it there (review finding, Important 2).
+#[gpui::test]
+fn startup_keymap_diagnostics_are_in_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let user_doc = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: "[[bindings]]\n[bindings.keys]\n\"ctrl+q\" = \"nosuch::action\"\n"
+            .parse()
+            .unwrap(),
+    };
+    let (keymap, keymap_diags) = crate::keymap::build_keymap(
+        &[
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            user_doc,
+        ],
+        default_mod(),
+        &services.registry,
+    );
+    assert!(
+        keymap_diags
+            .iter()
+            .any(|d| d.message.contains("nosuch::action")),
+        "fixture check: build_keymap must have diagnosed the unknown action, got {keymap_diags:?}"
+    );
+    // Exactly what `main.rs` does with the pair.
+    services.keymap = keymap;
+    services.keymap_diagnostics = keymap_diags;
+
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    assert!(
+        config_diags
+            .iter()
+            .any(|d| d.message.contains("nosuch::action")),
+        "the keymap diagnostic must reach the entity at startup, got {config_diags:?}"
+    );
+}
+
 /// `settings_view::set_add_direction` (the add-direction row's setter,
 /// driven directly for the same reason `set_theme`'s and `set_find_
 /// style`'s tests drive the handler rather than the control) updates
