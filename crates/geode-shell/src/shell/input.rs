@@ -278,7 +278,7 @@ impl ShellView {
             });
         } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
             // A palette row from `register_add_actions` (spec 2026-09-08
-            // add-tile §3.2) — "Add <Kind>" follows the setting; the
+            // add-tile §3.2) — "<Kind>: Split" follows the setting; the
             // suffixed pair say where. Always adds (or fills); never
             // focuses an existing tile — that is `open_module`'s job.
             let kind = kind.to_string();
@@ -287,13 +287,6 @@ impl ShellView {
             self.duplicate_tile(Orientation::Horizontal, window, cx);
         } else if action.0 == "workspace::duplicate_vertical" {
             self.duplicate_tile(Orientation::Vertical, window, cx);
-        } else if action.0 == "diagnostics::open" {
-            // mod+shift+d (Phase 4b Task 5, spec §4.6) — opens by kind
-            // through the shell, not through the module (see
-            // `open_module`'s own doc comment); the status bar's
-            // diagnostics summary dispatches this same action on click
-            // (`render.rs`).
-            self.open_module("diagnostics", window, cx);
         } else {
             // Profiler-feature actions (`perf::dump`, `perf::gpui_overlay`)
             // — compiled (and registered) only with the `profiling`
