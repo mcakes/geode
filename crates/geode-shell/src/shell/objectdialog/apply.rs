@@ -68,21 +68,36 @@
 //!
 //! ## The watcher will see our own write
 //!
-//! It will, and the resulting reload is a **no-op by construction**,
-//! which is why nothing here suppresses it. `apply_reload` decides what a
+//! It will, and nothing here suppresses it. `apply_reload` decides what a
 //! reload changes by comparing the freshly loaded layered documents
-//! against the ones already in `services.config` (`docs_equal`). The file
-//! on disk is `config_write::edit`'s read-modify-write of the same object
-//! value memory already holds, and a fresh user-layer document memory
-//! creates carries the same `config_version` stamp `edit` puts at the top
-//! of a file it creates — so every `changed(..)` predicate answers false,
-//! no `ConfigReloaded` is emitted, no tile requeries, no palette closes,
-//! and the frame is never touched. The reload assigns an identical
-//! `Config` and repaints. Suppressing it would mean keeping a
-//! "self-write" ledger that has to be right about every path a write can
-//! take (including the ones that fail after the ledger entry is made) to
-//! avoid missing a real external edit; proving the reload inert costs
-//! nothing and cannot go stale.
+//! against the ones already in `services.config` (`docs_equal`), so what
+//! that reload costs depends on whether the file read back says exactly
+//! what memory already says.
+//!
+//! For a **value-setting** edit it does, by construction: the file on
+//! disk is `config_write::edit`'s read-modify-write of the same object
+//! value memory already holds, and a fresh user-layer document
+//! [`docs_with_object`] creates carries the same `config_version` stamp
+//! `edit` puts at the top of a file it creates — so every `changed(..)`
+//! predicate answers false, no `ConfigReloaded` is emitted, no tile
+//! requeries, no palette closes, and the frame is never touched. The
+//! reload assigns an identical `Config` and repaints.
+//!
+//! A **removal** against a doc the user layer has no file for is the one
+//! case where it does not, and it is stated rather than hidden:
+//! [`docs_with_object`] deliberately creates nothing in memory for a
+//! `None` value when there is no user doc to remove from, while
+//! `config_write::edit` read-or-**creates** and stamps it, so disk gains
+//! a `config_version`-only document memory does not have. `docs_equal`
+//! differs, and the watcher's next poll reports `changed(..)` for a write
+//! the app itself made. The cost is one spurious fan-out — the same
+//! merge over the same values, one extra time — never a wrong value.
+//!
+//! That is why the reload is left alone in both cases: suppressing it
+//! would mean keeping a "self-write" ledger that has to be right about
+//! every path a write can take (including the ones that fail after the
+//! ledger entry is made) to avoid missing a real external edit, and the
+//! reload cannot change a value either way.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -123,18 +138,42 @@ pub(crate) const WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 /// One config document's user-layer copy of one object, as an edit leaves
 /// it: `Some(value)` to set it, `None` to remove it entirely.
 ///
-/// `None` is not an optimisation. A presentation table that matches the
-/// view's own doc in every respect renders **empty** (`views::
-/// presentation_table` omits an `order` equal to the doc's, an empty
-/// `hidden`, and every width the doc already declares), and writing an
-/// empty table would leave `[tree]` alone in `view_presentation.toml` —
-/// a table that says nothing, which is exactly the artefact seen in a
+/// `None` is not an optimisation, and it does **not** mean "empty" —
+/// [`object_value`] decides which renderings become one, and only a
+/// [`Destination::Presentation`] one ever can. A presentation table that
+/// matches the view's own doc in every respect renders **empty**
+/// (`views::presentation_table` omits an `order` equal to the doc's, an
+/// empty `hidden`, and every width the doc already declares), and writing
+/// an empty table would leave `[tree]` alone in `view_presentation.toml`
+/// — a table that says nothing, which is exactly the artefact seen in a
 /// user's file before this design. Under the old staged-save model that
 /// needed a save whose draft excluded nothing; under this one it is one
 /// keystroke away, every time a trader unhides the last hidden column.
-/// So the empty rendering means "I have no personalisation of this
-/// object" and is written as an absence, in memory and on disk alike.
+/// So an empty *overlay* rendering means "I have no personalisation of
+/// this object" and is written as an absence, in memory and on disk
+/// alike.
 pub type ObjectEdit = Option<toml::Value>;
+
+/// What one rendered object does to its user-layer document — the return
+/// of [`object_value`], and the reason "empty" cannot mean the wrong
+/// thing at the wrong destination.
+///
+/// Three answers, not two, because removal and no-write are genuinely
+/// different acts in a layered config: removing the user's key means
+/// *inherit the layer beneath*, which is the opposite of what an emptied
+/// object asked for.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObjectWrite {
+    /// Set the user-layer key to this value.
+    Set(toml::Value),
+    /// Remove the user-layer key. Only an overlay destination
+    /// ([`Destination::Presentation`]) ever renders this, where absence
+    /// IS the state being recorded.
+    Remove,
+    /// Touch nothing: neither memory nor disk gains or loses a key, and
+    /// the object keeps whatever it already had.
+    Nothing,
+}
 
 /// Edits recorded by keystrokes and not yet merged, applied or written —
 /// everything the next [`promote`] owes the rest of the app.
@@ -160,8 +199,7 @@ pub(crate) struct PendingConfigWrite {
     revert: Vec<LayerDoc>,
 }
 
-/// The user-layer value `object` should carry in its document, or `None`
-/// when the rendered item is empty (see [`ObjectEdit`]).
+/// What `object`'s user-layer entry in `dest`'s document should become.
 ///
 /// Goes through [`super::object_text`] — the exact text the file write
 /// produces — and parses it back, rather than converting
@@ -170,21 +208,57 @@ pub(crate) struct PendingConfigWrite {
 /// would not have said. It is a parse of a few hundred bytes, and it is
 /// part of the keystroke rather than of the flush — measured inside that
 /// keystroke's 37 µs, against an 8 ms budget.
-pub fn object_value(object: &str, item: toml_edit::Item) -> ObjectEdit {
+///
+/// **`dest` is a parameter, not a convenience.** What an *empty*
+/// rendering means is not a property of the item — it is a property of
+/// the file it would be written to, and the two files these dialogs write
+/// mean opposite things by an absent key:
+///
+/// * `view_presentation.toml` is an **overlay** read over the object it
+///   names, so an absent key is "I have no personalisation of this
+///   object" (spec §16) — exactly what an empty rendering says, hence
+///   [`ObjectWrite::Remove`];
+/// * a domain's **own** doc is merged by layer, atomically at depth 1,
+///   so an absent user key means *inherit the layer beneath*. Removing it
+///   for an emptied object would silently restore the desk's copy of it —
+///   the trader asks for "this slot groups by nothing" and gets "revert
+///   to the desk's slot 3", with the edit stage still painting the empty
+///   chain they just cleared. So a Doc rendering never collapses to an
+///   absence, and the question cannot be reached from the wrong
+///   destination because no caller gets to answer it.
+///
+/// The other half of that rule lives in `Draft::step_selected`, which
+/// refuses the keystroke that would empty a `Destination::Doc` list at
+/// all: the states the config model cannot represent are not offered,
+/// so [`ObjectWrite::Nothing`] below is the inert answer to something
+/// that should never arrive rather than a behaviour anything relies on.
+pub fn object_value(object: &str, item: toml_edit::Item, dest: Destination) -> ObjectWrite {
     if item_is_empty(&item) {
-        return None;
+        return match dest {
+            Destination::Presentation => ObjectWrite::Remove,
+            Destination::Doc => ObjectWrite::Nothing,
+        };
     }
     let text = super::object_text(object, item);
-    let mut parsed: toml::Table = text.parse().ok()?;
-    parsed.remove(object)
+    let parsed: Option<toml::Value> = text
+        .parse::<toml::Table>()
+        .ok()
+        .and_then(|mut parsed| parsed.remove(object));
+    // A rendering that will not parse back is a bug in the renderer, not
+    // an instruction to delete the object: nothing, rather than the
+    // removal an `Option` return used to collapse this into.
+    match parsed {
+        Some(value) => ObjectWrite::Set(value),
+        None => ObjectWrite::Nothing,
+    }
 }
 
-/// Whether `item` carries nothing worth writing: an empty table (no
-/// keys, which `views::presentation_table` can render) or an empty array
-/// (every `dimensions` tick undone, which `groupings::to_table` can
-/// render). Either is "I have no personalisation of this object" and is
-/// written as an absence ([`ObjectEdit`]'s own doc), never as an empty
-/// container on disk.
+/// Whether `item` carries nothing at all: an empty table (no keys, which
+/// `views::presentation_table` can render) or an empty array (every
+/// `dimensions` tick undone, which `groupings::to_table` could render if
+/// `Draft::step_selected` let a trader get there). What that *means* is
+/// [`object_value`]'s question, not this one's — this says only that the
+/// container is empty.
 ///
 /// Any other value — a populated table, a populated array, a bare
 /// string or number — is never empty: no domain built so far renders a
@@ -267,10 +341,20 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
     };
     for dest in draft.writes_by_destination().keys() {
         let item = state.domain.to_table(draft, *dest);
-        out.insert(
-            (dest.doc(state.domain), draft.name.clone()),
-            object_value(&draft.name, item),
-        );
+        let key = (dest.doc(state.domain), draft.name.clone());
+        // The three answers are kept apart here rather than flattened
+        // into an `Option`: `Nothing` must not become the `None` the
+        // batch spells "remove this object's key", which for a
+        // `Destination::Doc` document is a revert (see [`object_value`]).
+        match object_value(&draft.name, item, *dest) {
+            ObjectWrite::Set(value) => {
+                out.insert(key, Some(value));
+            }
+            ObjectWrite::Remove => {
+                out.insert(key, None);
+            }
+            ObjectWrite::Nothing => {}
+        }
     }
     out
 }
@@ -351,8 +435,10 @@ pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
 /// the contract every persist path in this crate shares — so no flush is
 /// ever scheduled and the change is never applied: memory ahead of a
 /// disk that can never catch up is precisely the state hazard 1 exists
-/// to prevent. The draft keeps the value, and the row still paints it,
-/// which is the honest picture of a shell with nowhere to write.
+/// to prevent. The draft keeps the value and stays **dirty** — its
+/// baseline only moves once the batch is queued — and the row still
+/// paints it, which is the honest picture of a shell with nowhere to
+/// write.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
     // The actual gate: checked here, inside the one function every EDIT
     // reaches before it can queue a batch, rather than trusted to each
@@ -378,6 +464,16 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         return None;
     }
 
+    // **Before the baseline moves.** A shell with nowhere to write queues
+    // nothing, so nothing has been accounted for and the draft must stay
+    // dirty: a `mark_saved()` here would make the unqueued value the
+    // baseline, and a later declined `Confirm::Fork` would then
+    // `revert_to_baseline` onto a forked value that was never applied and
+    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was changed".to_string());
+    };
+
     // The draft's baseline moves here, not when the flush lands: the
     // baseline is "what this keystroke has already accounted for", so the
     // next keystroke's difference is that keystroke's alone. The batch
@@ -391,13 +487,8 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         draft.mark_saved();
     }
 
-    queue_batch(
-        shell,
-        edits,
-        WRITE_DEBOUNCE,
-        "no writable user config directory — nothing was changed",
-        cx,
-    )
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);
+    None
 }
 
 /// Record a confirmed `d`/`r`'s removal and put it on the exact batch a
@@ -444,35 +535,35 @@ pub(super) fn commit_removal(
 ) -> Option<String> {
     let edits: BTreeMap<(&'static str, String), ObjectEdit> =
         keys.into_iter().map(|key| (key, None)).collect();
-    queue_batch(
-        shell,
-        edits,
-        Duration::ZERO,
-        "no writable user config directory — nothing was removed",
-        cx,
-    )
-}
-
-/// The tail [`commit_edit`] and [`commit_removal`] share once each has
-/// decided what belongs in `edits`: find somewhere to write, capture the
-/// batch's revert baseline, and schedule the flush that applies and
-/// writes it. `no_dir_notice` differs only in wording between the two
-/// callers ("changed" vs. "removed"), so it is the one thing left to
-/// parameterise.
-fn queue_batch(
-    shell: &mut ShellView,
-    edits: BTreeMap<(&'static str, String), ObjectEdit>,
-    delay: Duration,
-    no_dir_notice: &str,
-    cx: &mut Context<ShellView>,
-) -> Option<String> {
     if edits.is_empty() {
         return None;
     }
     let Some(user_dir) = shell.user_dir.clone() else {
-        return Some(no_dir_notice.to_string());
+        return Some("no writable user config directory — nothing was removed".to_string());
     };
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    None
+}
 
+/// The tail [`commit_edit`] and [`commit_removal`] share once each has
+/// decided what belongs in `edits` **and** found somewhere to write it:
+/// capture the batch's revert baseline and schedule the flush that applies
+/// and writes it.
+///
+/// `user_dir` is a parameter rather than looked up here, and that is the
+/// whole point of the split: each caller has to resolve it *before* it
+/// commits to anything else (`commit_edit` moves the draft's baseline),
+/// and their two no-directory notices differ in wording anyway ("nothing
+/// was changed" vs. "nothing was removed"). Taking the directory as an
+/// argument means a caller cannot reach the queue without having answered
+/// that question first.
+fn queue_batch(
+    shell: &mut ShellView,
+    edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    user_dir: PathBuf,
+    delay: Duration,
+    cx: &mut Context<ShellView>,
+) {
     // Captured before the first edit of a batch, so a failed write
     // restores the state the batch started from.
     let revert = match shell.pending_config_write.as_ref() {
@@ -481,7 +572,6 @@ fn queue_batch(
     };
 
     schedule_flush(shell, user_dir, edits, revert, delay, cx);
-    None
 }
 
 /// Re-merge the documents with `edits` folded in, and hand the result to
@@ -740,43 +830,71 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
 mod tests {
     use super::*;
 
-    /// An emptied array — [`item_is_empty`]'s own reason for widening
-    /// beyond `Table::is_empty` — is "I have no personalisation of this
-    /// object" ([`ObjectEdit`]'s own doc), written as an absence rather
-    /// than `3 = []` sitting on disk. Groupings is the first (and so far
-    /// only) domain whose object is ever a bare array rather than a
-    /// table, so this is the one path Views' own tests never exercise.
+    /// **An empty rendering means opposite things at the two
+    /// destinations, and the Doc one is the dangerous half.** Removing a
+    /// user-layer key in a domain's own doc means *inherit the layer
+    /// beneath*, so collapsing an emptied object to an absence there
+    /// silently restores the desk's copy of it — the trader asks for
+    /// "this slot groups by nothing" and gets "revert to the desk's slot
+    /// 3" while the edit stage keeps painting the chain they cleared.
+    /// [`ObjectWrite::Nothing`] is the only safe answer: no write, no
+    /// removal, nothing of theirs destroyed.
+    ///
+    /// Unreachable by keystroke — `Draft::step_selected` refuses the last
+    /// untick — and pinned here anyway, because it is the semantics a
+    /// future `Destination::Doc` adapter inherits.
     #[test]
-    fn an_empty_array_item_is_no_edit_at_all() {
+    fn an_empty_doc_rendering_writes_nothing_rather_than_removing_the_key() {
         let item = toml_edit::Item::Value(toml_edit::Array::new().into());
-        assert_eq!(object_value("3", item), None);
+        assert_eq!(
+            object_value("3", item, Destination::Doc),
+            ObjectWrite::Nothing
+        );
+    }
+
+    /// The overlay half: `view_presentation.toml` is read *over* the
+    /// object it names, so an empty rendering is "I have no
+    /// personalisation of this object" ([`ObjectEdit`]'s own doc) and the
+    /// key goes away rather than `[tree]` sitting alone in the file.
+    #[test]
+    fn an_empty_presentation_rendering_is_an_absence() {
+        let item = toml_edit::Item::Table(toml_edit::Table::new());
+        assert_eq!(
+            object_value("tree", item, Destination::Presentation),
+            ObjectWrite::Remove
+        );
+        // An empty array reaches the same answer for the same reason —
+        // `item_is_empty` widened beyond `Table::is_empty` for Groupings'
+        // bare-array object shape, and the widening is about the
+        // container, not about which file it is going to.
+        let array = toml_edit::Item::Value(toml_edit::Array::new().into());
+        assert_eq!(
+            object_value("tree", array, Destination::Presentation),
+            ObjectWrite::Remove
+        );
     }
 
     /// A populated array round-trips as a `toml::Value::Array` — exactly
     /// the shape `GroupingSlots::from_doc` reads back — rather than the
     /// `toml_edit::Table` fallback an unconditional `.as_table()` would
     /// have produced (an empty table, silently erasing the slot).
+    /// Groupings is the first (and so far only) domain whose object is
+    /// ever a bare array rather than a table, so this is the one path
+    /// Views' own tests never exercise.
     #[test]
     fn a_populated_array_item_round_trips_as_a_toml_array() {
         let mut array = toml_edit::Array::new();
         array.push("lhu");
         array.push("book");
         let item = toml_edit::Item::Value(array.into());
-        let value = object_value("3", item).expect("a populated array is a real edit");
+        let ObjectWrite::Set(value) = object_value("3", item, Destination::Doc) else {
+            panic!("a populated array is a real write");
+        };
         assert_eq!(
             value
                 .as_array()
                 .map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
             Some(vec!["lhu", "book"])
         );
-    }
-
-    /// An empty table (every other domain's own object shape) still
-    /// counts as no edit — the generalisation from `Table` to `Item`
-    /// must not have changed this.
-    #[test]
-    fn an_empty_table_item_is_still_no_edit_at_all() {
-        let item = toml_edit::Item::Table(toml_edit::Table::new());
-        assert_eq!(object_value("tree", item), None);
     }
 }

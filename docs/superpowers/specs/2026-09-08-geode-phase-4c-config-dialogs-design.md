@@ -1110,22 +1110,24 @@ specific prerequisite no task in this plan built:
    command, the only other thing that ever set it, was deleted with that
    design. Needs the `Number` sub-row §3.3 describes under an included
    `OrderedList` item, made writable.
-3. **Reverse stepping.** §3.3 steps both `Choice` and `Number` with
-   `space` forward and `shift+space` back; `dialogmode::normal_command`
-   (`dialogmode.rs:83-119`) has no `shift+space` case at all — its shift
-   branch handles only `j`/`k`/`g` — so *every* steppable kind is
-   forward-only today: `Choice` wraps forward with no way back, and
-   `Number` steps forward only, clamping at `max` with no way back down.
-   This is one missing key in the interaction model, not a per-kind gap,
-   so the task is `shift+space` itself, with `Choice` and `Number` as its
+3. **Reverse stepping.** **Closed by Part 2a** — see §17's first bullet;
+   the rest of this item is the state it was closed from, kept because the
+   reasoning is what decided the shape of the task.
+   §3.3 steps both `Choice` and `Number` with `space` forward and
+   `shift+space` back; `dialogmode::normal_command` had no `shift+space`
+   case at all — its shift branch handled only `j`/`k`/`g` — so *every*
+   steppable kind was forward-only: `Choice` wrapped forward with no way
+   back, and `Number` stepped forward only, clamping at `max` with no way
+   back down.
+   That was one missing key in the interaction model, not a per-kind gap,
+   so the task was `shift+space` itself, with `Choice` and `Number` as its
    two consumers — implementing it for `Number` alone and leaving
-   `Choice` still forward-only would satisfy the letter of a
+   `Choice` still forward-only would have satisfied the letter of a
    `Number`-only task name while missing half the defect. Whichever
-   adapter builds the first real `Number` field — Groupings' `slot`
-   (§8.2) is the obvious candidate — would otherwise inherit a field
-   that can be raised and never lowered. Views exercises `Choice` but
-   never needs to step it backward, and has no `Number` field at all, so
-   nothing in Part 1 forced either half into view.
+   adapter builds the first real `Number` field would otherwise have
+   inherited a field that can be raised and never lowered. Views exercises
+   `Choice` but never needs to step it backward, and has no `Number` field
+   at all, so nothing in Part 1 forced either half into view.
 
 ### Deferred, and not blocked on anything
 
@@ -1201,6 +1203,36 @@ editing — are Part 2b.
   unreachable today for values without `", "` in them, but any elision
   added to the summary would have made `o` silently stop writing whole
   classes of scopes, with no test able to see it.
+- **An empty rendering means opposite things at the two destinations,
+  and the type says so** (whole-branch review, MAJ-1).
+  `apply::object_value` takes the `Destination` and returns
+  `ObjectWrite::{Set, Remove, Nothing}` rather than an
+  `Option<toml::Value>` whose `None` the batch spells "remove this
+  object's key". Removing a user-layer key in a domain's *own* doc means
+  **inherit the layer beneath**, so collapsing an emptied object to an
+  absence there restored the desk's copy of it — a trader who unticked a
+  slot's last dimension got the desk's chain back while the edit stage
+  kept painting an empty one and `ctrl+3` kept regrouping by it.
+  `Destination::Presentation` keeps the collapse, because
+  `view_presentation.toml` is an overlay and absence IS the state. The
+  other half of the rule is that the unrepresentable state is not offered
+  at all: `Draft::step_selected` **refuses** the untick that would empty a
+  `Destination::Doc` list (`GroupingSlots::set` refuses an empty chain;
+  `from_doc` warns "slot N is empty; ignored"), returning
+  `Step::Refused(reason)` which `render::refuse_step` shows with the verb
+  that does what the trader meant — `r` restores the desk's copy, `d`
+  deletes their own. `Step` replaced `bool` for exactly that reason: an
+  inert row and a refused step are different things to say.
+- **Two smaller review fixes in the same pass.** `commit_edit` resolves
+  `ShellView::user_dir` *before* `Draft::mark_saved`, so a shell with
+  nowhere to write leaves the draft dirty rather than making an unqueued
+  value the baseline (`queue_batch` now takes the directory as a
+  parameter, so no caller can reach the queue without having answered
+  that question). And `o` over a scope that already equals the frame's —
+  the ordinary state after `:scope load` — says "already matches the
+  frame's scope" instead of answering a confirmed verb with silence;
+  `commit_edit` returns `None` both for "queued" and for "nothing
+  changed", so the no-op is identified at the call site.
 - **Still open, and named so it is not rediscovered:** `drifted` is on
   every `ObjectRow` and still always `false` (§5.2's `overrides.toml` is
   unbuilt), and `ShellEvent::ReloadRejected` is still not built — §16's

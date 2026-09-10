@@ -87,6 +87,7 @@ use super::apply;
 use super::scopes;
 use super::{
     Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
+    Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
@@ -470,10 +471,22 @@ fn enter_edit_stage(
 /// 3. everything else goes through [`dialogmode::normal_command`], and a
 ///    key it does not claim is swallowed, exactly as in browse.
 ///
-/// Every branch that changes the draft ends in [`revalidate`]: validation
-/// is a parse of a few hundred bytes (spec §7.2), so it runs synchronously
-/// on every change with no debounce, and the diagnostics on screen are
-/// never one keystroke behind the value they describe.
+/// Every branch that changes a field's *value* ends in [`revalidate`]:
+/// validation is a parse of a few hundred bytes (spec §7.2), so it runs
+/// synchronously on every change with no debounce, and the diagnostics on
+/// screen are never one keystroke behind the value they describe.
+///
+/// [`NormalCommand::MoveItem`] is the one deliberate exception — it
+/// commits without revalidating — and it is safe because none of the three
+/// `Domain::validate` implementations is order-sensitive: each renders the
+/// object and hands it to its own loader (`ViewSpec::from_doc`,
+/// `GroupingSlots::from_doc`, `saved_scopes_from_doc`), none of which has a
+/// diagnostic a reorder can produce or resolve. That is a property of
+/// today's validators rather than of the dispatch table, so a future
+/// order-sensitive one has to add the call; the branch is also the only way
+/// a test can reach the commit gate with an injected diagnostic still
+/// standing (`an_edit_the_reader_rejects_does_not_join_the_batch` depends
+/// on exactly that).
 fn handle_edit_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -552,27 +565,25 @@ fn handle_edit_key(
                 shell.object_dialog_scroll.scroll_to_item(selected);
             }
         }
-        NormalCommand::Toggle => {
-            let changed = draft_mut(shell).is_some_and(|draft| draft.toggle_selected());
-            if changed {
+        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
+            Some(Step::Changed) => {
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
-            } else {
-                set_notice(shell, "nothing on this row changes with space".to_string());
             }
-        }
-        NormalCommand::ToggleBack => {
-            let changed = draft_mut(shell).is_some_and(|draft| draft.toggle_selected_back());
-            if changed {
+            Some(Step::Refused(reason)) => refuse_step(shell, reason),
+            _ => set_notice(shell, "nothing on this row changes with space".to_string()),
+        },
+        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
+            Some(Step::Changed) => {
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
-            } else {
-                set_notice(
-                    shell,
-                    "nothing on this row changes with shift+space".to_string(),
-                );
             }
-        }
+            Some(Step::Refused(reason)) => refuse_step(shell, reason),
+            _ => set_notice(
+                shell,
+                "nothing on this row changes with shift+space".to_string(),
+            ),
+        },
         NormalCommand::MoveItem(delta) => {
             let moved = draft_mut(shell).is_some_and(|draft| draft.move_item(delta));
             if moved {
@@ -632,6 +643,31 @@ fn handle_edit_key(
     }
     cx.notify();
     true
+}
+
+/// A step the draft declined ([`Step::Refused`]), said with the verb that
+/// does what the trader was reaching for.
+///
+/// The refusal this exists for is unticking a grouping slot's last
+/// dimension (`Draft::step_selected`'s own doc has the model reason). The
+/// trader wants that slot to stop grouping by the chain they just cleared,
+/// and the config model has exactly one way to say it: get rid of the
+/// slot's user-layer copy, which is `r` when the desk has one underneath
+/// and `d` when the slot is the user's own. Naming the wrong verb would be
+/// worse than naming none, so the hint is read off the same
+/// [`editing_row`] the action bar builds `d` and `r` from — a row that
+/// offers neither (a desk-owned slot the user has not forked) gets the
+/// reason alone rather than an invented verb.
+fn refuse_step(shell: &mut ShellView, reason: String) {
+    let hint = match editing_row(shell) {
+        // `overridden` implies the user layer has it too, so both verbs
+        // are live here; `r` is the one that restores what is underneath,
+        // which is what an emptied override is asking for.
+        Some(row) if row.overridden => " — r restores the desk's copy",
+        Some(row) if row.layer == Layer::User => " — d deletes it",
+        _ => "",
+    };
+    set_notice(shell, format!("{reason}{hint}"));
 }
 
 /// The draft under the cursor, mutably, if the edit stage is open.
@@ -1005,11 +1041,25 @@ fn run_confirmed(
                 return;
             }
             let scope = shell.frame.read(cx).scope().clone();
-            if let Some(draft) = draft_mut(shell) {
+            // `commit_edit` answers `None` both for "queued" and for
+            // "nothing changed", so the no-op case is identified here
+            // instead: a saved scope that already equals the frame's — the
+            // ordinary state straight after `:scope load` — would otherwise
+            // answer a deliberate second keystroke with no write, no config
+            // change and nothing on screen. A confirmed verb that does
+            // visibly nothing is the defect class this interaction model
+            // exists to remove.
+            let changed = draft_mut(shell).is_some_and(|draft| {
                 scopes::overwrite_with(draft, &scope);
-            }
+                draft.is_dirty()
+            });
             revalidate(shell);
-            if let Some(notice) = super::apply::commit_edit(shell, cx) {
+            if !changed {
+                set_notice(
+                    shell,
+                    "already matches the frame's scope — nothing to write".to_string(),
+                );
+            } else if let Some(notice) = super::apply::commit_edit(shell, cx) {
                 set_notice(shell, notice);
             }
             cx.notify();
@@ -1088,11 +1138,12 @@ struct Action {
 ///
 /// An earlier build put `Save changes` here whenever the draft was dirty,
 /// relabelled `Copy to user layer` when saving would fork. The fork
-/// warning survives; the save does not, because between keystrokes the
-/// draft is never dirty — [`Draft::is_dirty`](super::Draft::is_dirty)
-/// can only be true inside the keystroke that changed a field, or while
-/// a fork confirm is waiting on its answer, and the bar is never built
-/// in either moment with a save to offer.
+/// warning survives; the save does not, because a dirty draft never means
+/// "there is something a save key could do from here" —
+/// [`Draft::is_dirty`](super::Draft::is_dirty) enumerates the three ways it
+/// can be true, and in each one the value is either already recorded,
+/// waiting on a confirm that will record it, or refused by a diagnostic a
+/// save key could not get past either.
 fn actions(shell: &ShellView) -> Vec<Action> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();

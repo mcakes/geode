@@ -367,7 +367,7 @@ mod tests {
             };
             draft.selected = i;
             assert!(
-                !draft.toggle_selected(),
+                !draft.toggle_selected().changed(),
                 "field {i} must not change with space"
             );
         }

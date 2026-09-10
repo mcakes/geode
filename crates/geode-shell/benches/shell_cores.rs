@@ -336,7 +336,7 @@ fn bench_config_edit(c: &mut Criterion) {
             let mut out = Vec::new();
             for dest in [Destination::Doc, Destination::Presentation] {
                 let table = Domain::Views.to_table(&draft, dest);
-                out.push(apply::object_value(&draft.name, table));
+                out.push(apply::object_value(&draft.name, table, dest));
             }
             black_box((diagnostics, out))
         })

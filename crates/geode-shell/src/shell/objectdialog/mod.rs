@@ -346,8 +346,12 @@ fn derive_rows(
 /// It is an enum on the field rather than a rule inside the adapter so
 /// the split is mechanical: [`Draft::writes_by_destination`] groups by
 /// it, and the flush makes one `config_write::edit` call per group
-/// without knowing what either file is for. Nothing in the scaffold
-/// besides [`Destination::doc`] knows `view_presentation.toml` exists.
+/// without knowing what either file is for. Exactly two places in the
+/// scaffold know `view_presentation.toml` exists — [`Destination::doc`]
+/// and [`Domain::presentation_doc`], the same answer asked two ways
+/// ("which file does this destination write" and "does this domain have
+/// an overlay file at all") — and both route to the Views adapter's own
+/// `PRESENTATION_DOC` constant rather than spelling the name again.
 ///
 /// `Ord` because the groups are collected into a `BTreeMap`, so a flush
 /// writes its files in a fixed order rather than a hash-random one.
@@ -612,6 +616,34 @@ enum StepDirection {
     Backward,
 }
 
+/// What one `space`/`shift+space` did to the row under the cursor.
+///
+/// Three answers rather than a `bool`, because [`Step::Inert`] and
+/// [`Step::Refused`] are different things to say to a trader: the first
+/// is "this row has no value that key changes", the second is "it does,
+/// and that particular step would ask the config model for a state it
+/// cannot hold". A key that appears inert is the defect class this
+/// interaction model exists to remove, so both carry their own notice
+/// rather than sharing one.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Step {
+    /// The value moved; the caller revalidates and commits.
+    Changed,
+    /// Nothing on this row has a value this key changes.
+    Inert,
+    /// Declined, with the reason to show. See [`Draft::step_selected`]'s
+    /// `Destination::Doc` rule.
+    Refused(String),
+}
+
+impl Step {
+    /// Did the draft actually move? The one-bit question most callers —
+    /// and most tests — are asking.
+    pub fn changed(&self) -> bool {
+        matches!(self, Step::Changed)
+    }
+}
+
 impl Draft {
     /// The rows the edit stage paints, in order: every field, each
     /// ordered list's items directly under it.
@@ -637,10 +669,20 @@ impl Draft {
     /// the baseline rather than tracked with a flag, so putting a value
     /// back where it started changes nothing and writes nothing.
     ///
-    /// Between keystrokes this is always `false` — [`apply::commit_edit`]
-    /// moves the baseline as it records the change. It is `true` only
-    /// *within* the keystroke that changed a field, and while a
-    /// [`Confirm::Fork`] is waiting on its answer.
+    /// `true` in exactly three situations, and a reader relying on this
+    /// invariant should count on no others:
+    ///
+    /// 1. *within* the keystroke that changed a field, before
+    ///    [`apply::commit_edit`] records it and moves the baseline;
+    /// 2. while a [`Confirm::Fork`] is waiting on its answer — the change
+    ///    is on the draft and not yet recorded anywhere else;
+    /// 3. indefinitely, for a change `commit_edit` **refused**: an error
+    ///    diagnostic (`apply::blocking_diagnostic`) or a shell with no
+    ///    writable user directory both return before `mark_saved()`, so
+    ///    the value stays on the draft, painted and dirty, until a later
+    ///    commit succeeds and carries it along. That is deliberate — the
+    ///    keystroke is not lost — and it is why no verb here consults
+    ///    dirtiness to decide whether something needs saving.
     ///
     /// `source` is compared too, not just `fields` — see
     /// [`Draft::baseline_source`]'s own doc for why a fields-only
@@ -687,7 +729,7 @@ impl Draft {
     /// change, which the caller turns into a notice — a key that appears
     /// inert is the defect class this interaction model exists to
     /// remove.
-    pub fn toggle_selected(&mut self) -> bool {
+    pub fn toggle_selected(&mut self) -> Step {
         self.step_selected(StepDirection::Forward)
     }
 
@@ -696,18 +738,38 @@ impl Draft {
     /// [`Draft::step_selected`] rather than carrying two near-identical
     /// copies of the same match, which is the failure this codebase keeps
     /// hitting (a fix applied to one copy and not the other).
-    pub fn toggle_selected_back(&mut self) -> bool {
+    pub fn toggle_selected_back(&mut self) -> Step {
         self.step_selected(StepDirection::Backward)
     }
 
     /// Shared body of [`Draft::toggle_selected`] and
     /// [`Draft::toggle_selected_back`]: change the value under the
-    /// cursor one step in `direction`, recording it in the draft. `false`
-    /// when the row has no value to change, or when the step would be a
-    /// no-op (a `Number` already at the end `direction` points toward).
-    fn step_selected(&mut self, direction: StepDirection) -> bool {
+    /// cursor one step in `direction`, recording it in the draft.
+    /// [`Step::Inert`] when the row has no value to change, or when the
+    /// step would be a no-op (a `Number` already at the end `direction`
+    /// points toward).
+    ///
+    /// **One step is refused rather than inert: emptying a
+    /// [`Destination::Doc`] list.** Absence of a user-layer key in a
+    /// domain's own doc means *inherit the layer beneath*, so an object
+    /// rendered empty there cannot be written as "empty" and cannot be
+    /// written as an absence either (`apply::object_value` has the full
+    /// statement of that asymmetry). `GroupingSlots::set` refuses an
+    /// empty chain and `GroupingSlots::from_doc` warns "slot N is empty;
+    /// ignored", so the state is not representable in the model at all —
+    /// and a state the model cannot hold must not be reachable by
+    /// keystroke. Unticking a slot's last dimension is therefore declined
+    /// here, at the one place both `space` and `shift+space` pass
+    /// through, with `render::refuse_step` naming the verb (`d`/`r`) that
+    /// does what the trader meant.
+    ///
+    /// An overlay list (`Destination::Presentation` — Views' `columns`)
+    /// has no such rule: hiding every column of a view is a perfectly
+    /// representable personalisation, and an empty overlay rendering IS
+    /// an absence.
+    fn step_selected(&mut self, direction: StepDirection) -> Step {
         let Some(row) = self.selected_row() else {
-            return false;
+            return Step::Inert;
         };
         match row {
             EditRow::Field(i) => match &mut self.fields[i].kind {
@@ -715,7 +777,7 @@ impl Draft {
                 // same flip.
                 FieldKind::Bool(b) => {
                     *b = !*b;
-                    true
+                    Step::Changed
                 }
                 // Steps and wraps in both directions, which is what
                 // makes the option just behind the current one reachable
@@ -724,22 +786,22 @@ impl Draft {
                 // for `shift+space`.
                 FieldKind::Choice { options, selected } => {
                     if options.len() < 2 {
-                        return false;
+                        return Step::Inert;
                     }
                     *selected = match direction {
                         StepDirection::Forward => (*selected + 1) % options.len(),
                         StepDirection::Backward => (*selected + options.len() - 1) % options.len(),
                     };
-                    true
+                    Step::Changed
                 }
                 FieldKind::Number { value, min, max } => {
                     match direction {
-                        StepDirection::Forward if *value >= *max => return false,
-                        StepDirection::Backward if *value <= *min => return false,
+                        StepDirection::Forward if *value >= *max => return Step::Inert,
+                        StepDirection::Backward if *value <= *min => return Step::Inert,
                         StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
                         StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
                     }
-                    true
+                    Step::Changed
                 }
                 // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
                 // needs a per-option row, neither of which Views has.
@@ -747,18 +809,29 @@ impl Draft {
                 // its items, on the rows below, do.
                 FieldKind::Text(_)
                 | FieldKind::MultiChoice { .. }
-                | FieldKind::OrderedList { .. } => false,
+                | FieldKind::OrderedList { .. } => Step::Inert,
             },
             EditRow::Item { field, item } => {
+                // Read off the field before the list is borrowed mutably:
+                // the destination is what decides whether emptying this
+                // list is representable at all (see this function's doc).
+                let dest = self.fields[field].dest;
+                let label = self.fields[field].label.clone();
                 let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
-                    return false;
+                    return Step::Inert;
                 };
-                let Some(entry) = items.get_mut(item) else {
-                    return false;
+                let Some(included) = items.get(item).map(|entry| entry.included) else {
+                    return Step::Inert;
                 };
+                if included
+                    && dest == Destination::Doc
+                    && items.iter().filter(|i| i.included).count() == 1
+                {
+                    return Step::Refused(format!("{label} must keep at least one entry"));
+                }
                 // Inclusion is binary too, so both directions flip it.
-                entry.included = !entry.included;
-                true
+                items[item].included = !included;
+                Step::Changed
             }
         }
     }
@@ -1566,7 +1639,7 @@ mod tests {
             max: 2,
         });
         assert!(
-            !draft.toggle_selected_back(),
+            !draft.toggle_selected_back().changed(),
             "already at min, so backward changes nothing"
         );
         assert_eq!(
@@ -1577,7 +1650,7 @@ mod tests {
                 max: 2
             }
         );
-        assert!(draft.toggle_selected());
+        assert!(draft.toggle_selected().changed());
         assert_eq!(
             draft.fields[0].kind,
             FieldKind::Number {
@@ -1594,7 +1667,7 @@ mod tests {
             max: 2,
         });
         assert!(
-            !draft.toggle_selected(),
+            !draft.toggle_selected().changed(),
             "already at max, so forward changes nothing"
         );
         assert_eq!(
@@ -1605,7 +1678,7 @@ mod tests {
                 max: 2
             }
         );
-        assert!(draft.toggle_selected_back());
+        assert!(draft.toggle_selected_back().changed());
         assert_eq!(
             draft.fields[0].kind,
             FieldKind::Number {
@@ -1626,7 +1699,7 @@ mod tests {
             options: options.clone(),
             selected: 0,
         });
-        assert!(draft.toggle_selected_back());
+        assert!(draft.toggle_selected_back().changed());
         assert_eq!(
             draft.choice("value"),
             Some("c"),
@@ -1637,7 +1710,7 @@ mod tests {
             options,
             selected: 2,
         });
-        assert!(draft.toggle_selected());
+        assert!(draft.toggle_selected().changed());
         assert_eq!(
             draft.choice("value"),
             Some("a"),
@@ -1937,7 +2010,10 @@ mod tests {
             .iter()
             .position(|r| *r == EditRow::Field(1))
             .expect("the columns field's own header row");
-        assert!(!draft.toggle_selected(), "a list header has no value");
+        assert!(
+            !draft.toggle_selected().changed(),
+            "a list header has no value"
+        );
         assert!(!draft.is_dirty());
     }
 
@@ -2018,9 +2094,11 @@ mod tests {
         assert_eq!(draft.choice("dataset"), Some("retired"));
     }
 
-    /// Each destination knows exactly one file, and `Presentation` is the
-    /// only reason `view_presentation.toml` is named anywhere outside the
-    /// Views adapter.
+    /// Each destination knows exactly one file. `Presentation` is one of
+    /// the two scaffold doors onto `view_presentation.toml` — the other is
+    /// `Domain::presentation_doc`, asserted below — and both read the name
+    /// off the Views adapter's own constant, which is what keeps them from
+    /// naming different files.
     #[test]
     fn each_destination_names_its_own_file() {
         assert_eq!(Destination::Doc.doc(Domain::Views), "views");
@@ -2028,6 +2106,11 @@ mod tests {
             Destination::Presentation.doc(Domain::Views),
             "view_presentation"
         );
+        // The second door onto the same name, and the two domains that
+        // have no overlay file at all.
+        assert_eq!(Domain::Views.presentation_doc(), Some("view_presentation"));
+        assert_eq!(Domain::Groupings.presentation_doc(), None);
+        assert_eq!(Domain::Scopes.presentation_doc(), None);
     }
 
     /// Saving accepts the draft so `s` pressed twice does not write twice.

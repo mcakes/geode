@@ -469,10 +469,14 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
 
 /// **Hazard 2, decided by proof rather than by suppression.** The 500 ms
 /// watcher WILL see the file this dialog just wrote. That reload must not
-/// fight the edit — and it does not, because it produces documents
-/// identical to the ones memory already holds, so every `changed(..)`
-/// predicate in `apply_reload` answers false and nothing is rebuilt,
-/// re-emitted or closed.
+/// fight the edit — and for a **value-setting** edit, the one this test
+/// makes, it cannot even cost a fan-out: it produces documents identical
+/// to the ones memory already holds, so every `changed(..)` predicate in
+/// `apply_reload` answers false and nothing is rebuilt, re-emitted or
+/// closed. (The one case where the documents do differ is a *removal*
+/// against a doc with no user-layer file yet, which gains one on disk and
+/// none in memory — `apply`'s module header states it; the reload is still
+/// inert in value, it just is not free.)
 ///
 /// This asserts the identity the proof rests on: the layered documents
 /// before the self-triggered reload and after it are the same documents,
@@ -1167,7 +1171,10 @@ fn a_write_that_fails_after_the_dialog_closed_still_reports_itself(cx: &mut gpui
 /// table — every time, instantly. So an empty rendering is written as an
 /// **absence**: the object is removed from the user's document rather
 /// than written as a table with nothing in it, in memory and on disk
-/// alike.
+/// alike — an *overlay* rendering only, which is the whole of
+/// `apply::object_value`'s destination asymmetry: the same emptiness in a
+/// domain's own doc writes nothing at all, because an absence there means
+/// inherit rather than "nothing of mine to record".
 #[gpui::test]
 fn unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table(
     cx: &mut gpui::TestAppContext,
@@ -1816,6 +1823,105 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     assert!(!written.contains('3'), "{written}");
 }
 
+/// **The whole-branch review's Major.** Unticking a slot's last dimension
+/// asks for "this slot groups by nothing", and the config model has no
+/// such state: `GroupingSlots::set` refuses an empty chain and
+/// `GroupingSlots::from_doc` warns "slot N is empty; ignored". Worse, the
+/// write it used to produce was a *removal* of the user-layer key, and in
+/// a layered doc that means **inherit the layer beneath** — so the slot
+/// silently went back to the desk's chain while the edit stage kept
+/// painting an empty one and `ctrl+3` kept regrouping by the very chain
+/// the trader had just cleared.
+///
+/// So the keystroke is declined (`Draft::step_selected`), and the
+/// assertion is the *agreement* rather than the refusal: what the edit
+/// stage paints is what a following tile groups by. A test that only
+/// checked the notice, or only checked the file, could not see the
+/// divergence — `reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`
+/// is the shape that can, and this is its negative twin.
+#[gpui::test]
+fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_slot_3(&["book"]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
+
+    // Into slot 3's edit stage, past `Slot` and the `Dimensions` header,
+    // onto `book` — the chain's only ticked item.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.list_items("dimensions").unwrap()[0]
+            .included),
+        "the cursor has to be on the chain's own ticked item for this test \
+         to mean anything"
+    );
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+
+    // Read now, asserted at the end: the next keystroke clears it, and the
+    // assertion that matters here is the *effect*, not the message.
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "a declined step must not arm the fork confirm"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "and it must queue nothing at all"
+    );
+
+    // What the edit stage paints, which is the half that used to lie.
+    let painted: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("dimensions")
+            .unwrap()
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(painted, vec!["book".to_string()]);
+
+    flush_config_write(&mut cx);
+    assert!(
+        !dir.path().join("groupings.toml").exists(),
+        "nothing was queued, so nothing may be written — a `3 = []` would \
+         only load as \"slot 3 is empty; ignored\", and a removal would \
+         restore the layer underneath"
+    );
+
+    // Out of the dialog, so `ctrl+3` reaches `frame::slot_3`.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-3");
+    cx.run_until_parked();
+
+    let active = shell.read_with(&cx, |s, cx| {
+        s.frame.read(cx).active_grouping().map(<[String]>::to_vec)
+    });
+    assert_eq!(
+        active,
+        Some(painted),
+        "the chain a following tile regroups by must be the chain the edit \
+         stage is painting"
+    );
+
+    // And the declined keystroke said so: a key that appears inert is the
+    // defect class this interaction model exists to remove.
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("at least one entry")),
+        "the refusal has to explain itself, got {notice:?}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // `Domain::Scopes` (Part 2a Task 5): the thinnest adapter, and its one
 // new verb, `o`.
@@ -2054,5 +2160,139 @@ fn o_on_a_user_owned_scope_does_not_claim_a_fork(cx: &mut gpui::TestAppContext) 
         edit_draft(&shell, &cx, |draft| draft.confirm),
         Some(objectdialog::Confirm::Overwrite { forks: false }),
         "mine is already user-owned, so o must not claim a fork"
+    );
+}
+
+/// **A shell with nowhere to write must not move the draft's baseline.**
+///
+/// `commit_edit` resolves `ShellView::user_dir` *before* `mark_saved()`,
+/// and this is the ordering that proves it: with no writable user config
+/// directory nothing is queued, applied or written, so nothing has been
+/// accounted for and the draft has to stay dirty. A `mark_saved()` ahead
+/// of the check makes the unqueued value the baseline, and a later
+/// declined `Confirm::Fork` then `revert_to_baseline`s onto a value that
+/// was never applied and never persisted — the state `cancel_confirm`
+/// exists to prevent. Every other fixture in this file has a user
+/// directory, which is why this ordering regressed unseen.
+#[gpui::test]
+fn an_edit_with_nowhere_to_write_leaves_the_draft_dirty(cx: &mut gpui::TestAppContext) {
+    // `dialog_test_shell_with`, not `..._in_dir`: this one's `user_dir` is
+    // `None`.
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_a_desk_view(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("no writable user config directory")),
+        "a shell with nowhere to write has to say so, got {notice:?}"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "and it must queue nothing"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.is_dirty()),
+        "the baseline must not have moved: nothing was queued, so nothing \
+         has been accounted for"
+    );
+    // The keystroke is still visible, which is the other half of the
+    // contract — a refused write must not lose the trader's change.
+    assert!(
+        !edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
+            .included),
+        "the draft still paints the change the trader made"
+    );
+}
+
+/// A `scopes` doc holding `mine` exactly as `persist_scope_to_user_config`
+/// writes one — `dimensions` plus the empty `text` and `expression` keys
+/// `scope_to_table` always emits. That detail is the fixture's whole
+/// point: it is what makes a frame carrying the same selection render a
+/// *byte-identical* table, which is the state `:scope load mine` leaves
+/// the app in and the one [`services_with_a_saved_scope`] (whose `mine`
+/// omits both keys) cannot reach.
+fn services_with_a_scope_the_app_itself_wrote() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    let scopes = LayerDoc::builtin(
+        "scopes",
+        "[mine]\ntext = \"\"\nexpression = \"\"\n\
+         [mine.dimensions]\nbook = [\"BK001\"]\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// **A confirmed verb may not do visibly nothing.** `o` on a saved scope
+/// that already equals the frame's — the ordinary state straight after
+/// `:scope load mine`, not a corner — used to produce no write, no config
+/// change and no message: the confirm row simply vanished after a
+/// deliberate second keystroke. `commit_edit` answers `None` both for
+/// "queued" and for "nothing changed", so the no-op is identified at the
+/// call site instead.
+#[gpui::test]
+fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_a_scope_the_app_itself_wrote();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+
+    // Exactly what the saved scope already holds.
+    shell.update(&mut cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "book".to_string(),
+                    values: vec!["BK001".to_string()],
+                }],
+                ..Scope::default()
+            });
+        });
+    });
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("already matches the frame")),
+        "a confirmed o that writes nothing has to say why, got {notice:?}"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "and there really was nothing to write — the draft was clean"
+    );
+    flush_config_write(&mut cx);
+    assert!(
+        !dir.path().join("scopes.toml").exists(),
+        "nothing changed, so no file may appear"
     );
 }

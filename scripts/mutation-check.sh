@@ -3594,11 +3594,9 @@ run_mutation "objectdialog: a failed write reports only through the dialog notic
 run_mutation "objectdialog: an empty object table is written instead of removed" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '    if item_is_empty(&item) {
-        return None;
-    }' \
+        return match dest {' \
   '    if false {
-        return None;
-    }' \
+        return match dest {' \
   geode-shell \
   unhiding_the_last_column_removes_the_object_rather_than_writing_an_empty_table
 
@@ -3713,22 +3711,16 @@ run_mutation "objectdialog: a warning blocks the batch as if it were an error" \
 # can see the row that never left.
 run_mutation "objectdialog: a removal bypasses the batch again" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    queue_batch(
-        shell,
-        edits,
-        Duration::ZERO,
-        "no writable user config directory — nothing was removed",
-        cx,
-    )' \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
-        return Some("no writable user config directory — nothing was removed".to_string());
-    };
-    cx.background_executor()
+  '    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    None
+}' \
+  '    cx.background_executor()
         .spawn(async move {
             let _ = run_writes(&user_dir, edits);
         })
         .detach();
-    None' \
+    None
+}' \
   geode-shell \
   deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
@@ -5457,15 +5449,102 @@ run_mutation "groupings: validate discards the reader's own diagnostics" \
     Vec::new()' \
   geode-shell an_out_of_range_slot_key_still_warns_through_validate
 
-# `item_is_empty`'s array branch is what makes ticking off every
-# dimension remove the user's override rather than writing `3 = []` —
-# Groupings is the only domain whose object is ever a bare array, so
-# Views' own empty-table tests cannot see this branch at all.
+# `item_is_empty`'s array branch widened the empty test beyond
+# `Table::is_empty` for Groupings' bare-array object shape. Losing it
+# makes an empty array a real value again — written rather than recognised
+# as empty — and no Views fixture can see that, because Views' own object
+# is always a table.
 run_mutation "objectdialog: an emptied array is written instead of removed" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '        toml_edit::Item::Value(v) => v.as_array().is_some_and(|a| a.is_empty()),' \
   '        toml_edit::Item::Value(_) => false,' \
-  geode-shell an_empty_array_item_is_no_edit_at_all
+  geode-shell an_empty_presentation_rendering_is_an_absence
+
+# ---- whole-branch review fixes (2026-09-10) ----------------------------
+#
+# MAJ-1 and its three smaller siblings. The Major was a silent divergence
+# between what the Groupings edit stage painted and what the app grouped
+# by: "empty" collapsed to "remove the user's key", which in a domain's
+# own doc means INHERIT THE LAYER BENEATH — so unticking a slot's last
+# dimension restored the desk's chain while the stage kept painting an
+# empty one. The fix has two halves and each needs its own entry, because
+# the refusal makes the semantics unreachable by keystroke and the
+# semantics is what a future `Destination::Doc` adapter inherits.
+
+# Half one, the semantics: `Destination::Doc` must never turn an empty
+# rendering into an absence. Only a unit test can see this now that the
+# keystroke is refused — and it is the exact MAJ-1 defect, restored by
+# one word.
+run_mutation "objectdialog: an emptied Doc object removes the user's key instead of writing nothing" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '            Destination::Doc => ObjectWrite::Nothing,' \
+  '            Destination::Doc => ObjectWrite::Remove,' \
+  geode-shell an_empty_doc_rendering_writes_nothing_rather_than_removing_the_key
+
+# Half two, the refusal: a state the config model cannot hold
+# (`GroupingSlots::set` refuses an empty chain, `from_doc` warns "slot N
+# is empty; ignored") must not be reachable by keystroke. Removing the
+# guard lets the untick through, and only a test that compares the PAINTED
+# chain against `Frame::active_grouping()` after `ctrl+3` can see the
+# divergence that follows — a notice- or file-only assertion cannot.
+run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                if included
+                    && dest == Destination::Doc
+                    && items.iter().filter(|i| i.included).count() == 1
+                {' \
+  '                if false {' \
+  geode-shell unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agreeing
+
+# MIN-1: `commit_edit` resolves the user directory BEFORE it moves the
+# draft's baseline. Marking the draft saved on the way out of a shell with
+# nowhere to write makes an unqueued value the baseline, and a later
+# declined `Confirm::Fork` then reverts onto a value that was never
+# applied and never persisted. Needs `user_dir: None`, which only one
+# fixture in the suite has.
+run_mutation "objectdialog: a shell with nowhere to write still marks the draft saved" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was changed".to_string());
+    };' \
+  '    let user_dir = match shell.user_dir.clone() {
+        Some(dir) => dir,
+        None => {
+            if let Some(draft) = shell
+                .object_dialog
+                .as_mut()
+                .and_then(|state| state.draft.as_mut())
+            {
+                draft.mark_saved();
+            }
+            return Some("no writable user config directory — nothing was changed".to_string());
+        }
+    };' \
+  geode-shell an_edit_with_nowhere_to_write_leaves_the_draft_dirty
+
+# MIN-6: `commit_edit` answers `None` both for "queued" and for "nothing
+# changed", so a confirmed `o` over a scope that already equals the
+# frame's — the ordinary state after `:scope load` — produced no write and
+# no message at all. Every other `o` test stays green: they all overwrite
+# a scope that really differs.
+run_mutation "objectdialog: a confirmed o that changes nothing says nothing" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            revalidate(shell);
+            if !changed {' \
+  '            revalidate(shell);
+            if false {' \
+  geode-shell o_on_a_scope_that_already_matches_the_frame_says_so
+
+# The review's one missing entry, smaller than MAJ-1: `commit_removal`
+# flushes at `Duration::ZERO` rather than behind `WRITE_DEBOUNCE`, because
+# a confirmed `d`/`r` is a single act with nothing to coalesce. The
+# covering test advances no clock at all, so the debounce would leave the
+# deleted row in the browse list.
+run_mutation "objectdialog: a removal waits on the write debounce" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);' \
+  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);' \
+  geode-shell deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
 # `Domain::objects` used to ask `Destination::Presentation.doc(self)`
 # unconditionally, which panics for Groupings (no Presentation-destined
@@ -5523,14 +5602,12 @@ run_mutation "objectdialog: o overwrites immediately instead of asking first" \
 
 run_mutation "objectdialog: o writes the frame instead of the saved scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            if let Some(draft) = draft_mut(shell) {
+  '            let changed = draft_mut(shell).is_some_and(|draft| {
                 scopes::overwrite_with(draft, &scope);
-            }
-            revalidate(shell);
-            if let Some(notice) = super::apply::commit_edit(shell, cx) {
-                set_notice(shell, notice);
-            }' \
-  '            shell.frame.update(cx, |f, _| {
+                draft.is_dirty()
+            });' \
+  '            let changed = true;
+            shell.frame.update(cx, |f, _| {
                 f.set_scope(scope.clone());
             });' \
   geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
