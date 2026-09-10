@@ -5208,6 +5208,25 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
         }' \
   geode-shell the_focus_net_leaves_a_live_focused_input_alone
 
+# ---- startup config diagnostics reach the entity (2026-09-09) ---------
+#
+# The mutation is the old code: seed the entity from
+# `config.diagnostics` alone. Neither the refused `keymap.mod` alias nor
+# the retired `[app] modules.default` key lives in that list, so the
+# diagnostics tile silently omitted both until a hot reload happened to
+# add them — a diagnostic that exists, is logged, and is invisible where
+# a trader would look for it.
+
+run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let cfg = &services.config;
+            let mut diags = cfg.diagnostics.clone();
+            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags' \
+  '            services.config.diagnostics.clone()' \
+  geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

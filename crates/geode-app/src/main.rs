@@ -615,6 +615,12 @@ fn build_shell_services(
     // Modules register their actions before the keymap builds (§3.2).
     roster.register_actions(&mut registry);
 
+    // These two loops LOG; they do not seed the diagnostics entity.
+    // `ShellView::new` recomputes both from `services.config` and folds
+    // them into its own `note_config` call, in `apply_reload`'s order —
+    // neither diagnostic lives in `config.diagnostics`, so seeding from
+    // that list alone used to leave both out of the diagnostics tile
+    // until the first hot reload happened to add them.
     let (mod_alias, mod_diags) = mod_alias_from_config(&config);
     for diag in &mod_diags {
         print_diagnostic(diag);

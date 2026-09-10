@@ -259,7 +259,13 @@ no default; `default_factory()` is deleted; `ModuleRoster::kinds()`
 gains its first production caller (§3.2). A user layer that still sets
 `modules.default` gets a `warn`-level config diagnostic at load and
 reload — "`modules.default` is no longer read; tiles are added by kind
-(ctrl+k → Add …)" — and is otherwise ignored.
+(ctrl+k → Add …)" — and is otherwise ignored. Both paths reach the
+`Diagnostics` entity, not just the log: `apply_reload` folds the
+diagnostic into `new_config.diagnostics` before `note_config`, and
+(2026-09-09) `ShellView::new` recomputes it — alongside the refused
+`keymap.mod` alias, the same shape of computed-not-loaded diagnostic —
+when it seeds the entity's config section, so the diagnostics tile shows
+it from the first frame rather than only after some later reload.
 
 ### 7.2 Placeholders
 

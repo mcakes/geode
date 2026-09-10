@@ -1228,11 +1228,29 @@ impl ShellView {
         // recorded here too so the diagnostics tile's "config" section
         // has it from the very first frame, not only from the first live
         // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
+        //
+        // Plus the two diagnostics that are NOT in that list, because
+        // they are computed from the config rather than by loading it:
+        // the refused `keymap.mod` alias (Phase 4a Task 4b, an error) and
+        // the retired `[app] modules.default` key (spec 2026-09-08
+        // add-tile §7.1, a warning). `main.rs` only logged those at
+        // startup, so before this a trader who never edited config
+        // mid-session saw neither in the diagnostics tile — while
+        // `apply_reload` had been folding both in all along, meaning the
+        // tile's contents depended on whether a reload had happened yet.
+        // Same order as `apply_reload`'s extends, so the section reads
+        // identically either way. Both functions are pure over `&Config`
+        // and cheap; recomputing them here is what keeps this seam from
+        // needing `main.rs` to hand its copies over.
+        let startup_diagnostics = {
+            let cfg = &services.config;
+            let mut diags = cfg.diagnostics.clone();
+            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags
+        };
         diagnostics.update(cx, |d, _cx| {
-            d.note_config(
-                services.config.diagnostics.clone(),
-                std::time::SystemTime::now(),
-            );
+            d.note_config(startup_diagnostics, std::time::SystemTime::now());
         });
         // Same drain-only shape as the frame's own observer above, minus
         // the `Window` — none of `on_diagnostics_changed`'s three drains

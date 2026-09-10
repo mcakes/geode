@@ -1279,6 +1279,61 @@ fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppCont
     });
 }
 
+/// The *startup* half of the same diagnostic. `ShellView::new` used to
+/// seed the entity's config section with `services.config.diagnostics`
+/// alone — but `modules_default_diagnostic` and the refused-`keymap.mod`
+/// alias are computed OUTSIDE that list (by `main.rs`, which only logged
+/// them), so a trader who never edited config mid-session saw neither in
+/// the diagnostics tile. `new` now folds both in, in `apply_reload`'s
+/// order.
+#[gpui::test]
+fn a_modules_default_key_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("app", "[modules]\ndefault = \"blotter\"\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("modules.default"))
+        .unwrap_or_else(|| panic!("expected a modules.default diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Warning,
+        "the key is dead config, not invalid config: {hit:?}"
+    );
+}
+
+/// The other half of the startup seeding: the refused `keymap.mod =
+/// "ctrl"` alias (Phase 4a Task 4b) is an *error*, and the diagnostics
+/// tile is where a trader would look to find out why their mod key is
+/// not what they wrote.
+#[gpui::test]
+fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.config = config_with_mod("ctrl");
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    let hit = config_diags
+        .iter()
+        .find(|d| d.message.contains("keymap.mod"))
+        .unwrap_or_else(|| panic!("expected a keymap.mod diagnostic, got {config_diags:?}"));
+    assert_eq!(
+        hit.severity,
+        geode_core::config::Severity::Error,
+        "a refused alias is an error, not a warning: {hit:?}"
+    );
+}
+
 /// `settings_view::set_add_direction` (the add-direction row's setter,
 /// driven directly for the same reason `set_theme`'s and `set_find_
 /// style`'s tests drive the handler rather than the control) updates
