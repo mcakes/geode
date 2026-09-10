@@ -47,7 +47,10 @@
 # --anchors-only runs no cargo at all: it checks every selected entry's
 # anchor against its file and reports the ones that no longer match
 # (ANCHOR) or match more than once (AMBIG), then a one-line summary.
-# About ten seconds over the whole file. Run it before every merge and after
+# Under a second over the whole file (one python pass, each source file
+# read once). Exits non-zero on any finding, so it can gate a merge; a
+# selection that matches nothing says so rather than passing. Run it
+# before every merge and after
 # any edit near an anchored line — a normal run reports these two only
 # for the entries it happens to select, and an ambiguous anchor is the
 # quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
@@ -97,6 +100,9 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
+# --anchors-only collects (name, file, anchor) NUL-separated here and
+# checks them all in one pass at the end.
+anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
 # Restore whatever is mutated right now, however we leave.
@@ -108,7 +114,7 @@ restore() {
 }
 cleanup() {
   restore
-  rm -f "$bak" "$log"
+  rm -f "$bak" "$log" "$anchors"
   rmdir "$lock" 2>/dev/null || true
 }
 # A signal handler that merely returns lets the script carry on to the next
@@ -158,10 +164,15 @@ elif [[ "${1:-}" == --changed=* ]]; then
   shift
 fi
 only="${1:-}"
+if [[ "$only" == --* ]]; then
+  # Flags are positional: --anchors-only first, then --changed, then the
+  # substring. A flag in the wrong slot used to become the substring, match
+  # no entry, and exit 0 having checked nothing.
+  echo "usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]" >&2
+  echo "unexpected argument in the substring slot: $only" >&2
+  exit 2
+fi
 skipped=0
-checked=0
-stale=0
-ambiguous=0
 changed_files=""
 if [[ -n "$changed_ref" ]]; then
   # Computed once, now, before any entry mutates a file — the harness
@@ -191,30 +202,40 @@ run_mutation() {
   if [[ "$pkg" == "geode-app" ]]; then
     target_flag="--bins"
   fi
-  checked=$((checked + 1))
+  if (( anchors_only )); then
+    printf '%s\0%s\0%s\0' "$name" "$file" "$from" >> "$anchors"
+    return 0
+  fi
+  # A moved or deleted file is a stale entry, reported by name, not a
+  # traceback that ends the run (`set -e` would otherwise stop here).
+  if [[ ! -f "$file" ]]; then
+    echo "ANCHOR    $name  <-- file missing: $file"
+    return 0
+  fi
   # How many times the anchor occurs, checked before anything is written.
   # 0 is a stale entry; more than 1 is an ambiguous one, and both are
-  # findings whether or not cargo runs afterwards.
+  # findings whether or not cargo runs afterwards. Declared and assigned
+  # on separate lines on purpose: `local hits=$(…)` would mask python's
+  # exit status, and a failure would then read as "0 hits".
   local hits
   hits=$(python3 - "$file" "$from" <<'PY'
 import sys, pathlib
 print(pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2]))
 PY
-  )
+  ) || hits=-1
+  if (( hits < 0 )); then
+    echo "ANCHOR    $name  <-- could not read $file"
+    return 0
+  fi
   if (( hits == 0 )); then
     # A stale anchor is a finding in its own right: the mutation no longer
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
-    stale=$((stale + 1))
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
     return 0
   fi
   if (( hits > 1 )); then
-    ambiguous=$((ambiguous + 1))
     echo "AMBIG x$hits  $name  <-- anchor matches $hits times; only the first is mutated"
-  fi
-  if (( anchors_only )); then
-    return 0
   fi
   cp "$file" "$bak"
   in_flight="$file"
@@ -5405,5 +5426,38 @@ if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
 if (( anchors_only )); then
-  echo "checked $checked anchors: $stale stale, $ambiguous ambiguous"
+  # One pass: each file read once, every selected entry's anchor counted.
+  # Non-zero on any finding so this can gate a merge (MIN-2 of its own
+  # review); "nothing selected" is reported as such, never as a pass.
+  python3 - "$anchors" <<'PY' || exit 1
+import sys, pathlib
+raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
+fields = raw.split(b"\0")[:-1] if raw else []
+entries = [tuple(f.decode() for f in fields[i:i + 3]) for i in range(0, len(fields), 3)]
+if not entries:
+    print("checked 0 anchors (nothing selected)")
+    sys.exit(1)
+texts = {}
+stale = ambiguous = 0
+for name, file, anchor in entries:
+    if file not in texts:
+        try:
+            texts[file] = pathlib.Path(file).read_text()
+        except OSError:
+            texts[file] = None
+    text = texts[file]
+    if text is None:
+        stale += 1
+        print(f"ANCHOR    {name}  <-- file missing: {file}")
+        continue
+    hits = text.count(anchor)
+    if hits == 0:
+        stale += 1
+        print(f"ANCHOR    {name}  <-- anchor no longer matches; mutation is stale")
+    elif hits > 1:
+        ambiguous += 1
+        print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
+print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous")
+sys.exit(1 if stale or ambiguous else 0)
+PY
 fi
