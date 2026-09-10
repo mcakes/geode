@@ -251,6 +251,13 @@ pub mod recording {
         pub completions: Vec<String>,
         /// What `command` answers.
         pub command_result: Result<(), String>,
+        /// The `FocusHandle` of the most recently created view. A test
+        /// that needs to put keyboard focus INSIDE a tile without going
+        /// through a mouse-down — the one route that does not re-arm
+        /// `pending_focus_restore` — has no other way to reach it: the
+        /// view type is private and the roster hands back `&dyn
+        /// ModuleFactory`. `None` until the first `create`.
+        pub last_focus: Rc<RefCell<Option<FocusHandle>>>,
     }
 
     impl RecordingFactory {
@@ -260,6 +267,7 @@ pub mod recording {
                 log: Rc::new(RefCell::new(Vec::new())),
                 completions: vec!["delta01".into(), "gamma01".into()],
                 command_result: Ok(()),
+                last_focus: Rc::new(RefCell::new(None)),
             }
         }
     }
@@ -359,6 +367,7 @@ pub mod recording {
                 .borrow_mut()
                 .push(Recorded::Created(tile, restored.cloned()));
             let focus = cx.focus_handle();
+            *self.last_focus.borrow_mut() = Some(focus.clone());
             let view = cx.new(|_| RecordingView { tile, focus });
             TileOccupant {
                 kind: self.kind,

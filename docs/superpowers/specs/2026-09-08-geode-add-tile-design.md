@@ -259,7 +259,17 @@ no default; `default_factory()` is deleted; `ModuleRoster::kinds()`
 gains its first production caller (§3.2). A user layer that still sets
 `modules.default` gets a `warn`-level config diagnostic at load and
 reload — "`modules.default` is no longer read; tiles are added by kind
-(ctrl+k → Add …)" — and is otherwise ignored.
+(ctrl+k → Add …)" — and is otherwise ignored. Both paths reach the
+`Diagnostics` entity, not just the log: `apply_reload` folds the
+diagnostic into `new_config.diagnostics` before `note_config`, and
+(2026-09-09) `ShellView::new` recomputes it — alongside the refused
+`keymap.mod` alias, the same shape of computed-not-loaded diagnostic —
+when it seeds the entity's config section, so the diagnostics tile shows
+it from the first frame rather than only after some later reload. The
+same seeding carries `build_keymap`'s own diagnostics as its fourth and
+last group, through `ShellServices::keymap_diagnostics` — those cannot
+be recomputed from the config (they need the startup registry), so
+`main.rs` hands them over.
 
 ### 7.2 Placeholders
 
@@ -408,7 +418,8 @@ layer's first entries.
 
 ## 13. Implementation notes (2026-09-08)
 
-Four things the build settled that the design above did not say:
+Four things the build settled that the design above did not say (plus
+(e) and (f), later rulings):
 
 (a) `Workspace::toggle_dock`'s show branch exits main-tree fullscreen
 first. A fullscreen tile plus a focused dock is a state `render` cannot
@@ -451,3 +462,39 @@ rows always add (or fill) rather than ever focusing an existing tile —
 `register_add_actions`'s rows never did the existing-occupant search
 `open_module` does, so this only removes a second, now-redundant way to
 reach the same tile.
+
+(f) **Follow-up closed, 2026-09-09: the drag grab's focus trap.** A tile
+mouse-down that arms a drag (`try_arm_tile_drag`) returns before the
+caller's click-to-focus tail, which is where a plain click re-arms
+`pending_focus_restore` — so grabbing a focus-tracking occupant and then
+switching workspaces mid-drag (the keyboard stays live during a drag)
+unmounted that occupant while gpui's `Window::focus` still pointed at
+its id, leaving the window with no live focus and every key dead until
+a mouse click claimed focus somewhere. The grab now arms the same
+restore. Two backstops sit under it, covering different states — the
+first review round conflated them, so the distinction is the point.
+
+`render` carries `window.focused(cx).is_none()` directly under the
+flag's consumption, and that covers exactly one thing: a focused
+`FocusHandle` that was **dropped**, i.e. a focus-tracking tile *closed*
+while focused. It cannot fire on a workspace switch, because
+`ensure_occupants` retains occupants for tiles in every workspace
+(`fill_all_tiles`): the switched-away view is unmounted but alive, its
+handle's refcount never reaches zero, and focus stays `Some`. What
+breaks there is dispatch — gpui resolves the focused id against the
+RENDERED tree and falls back to `root_node_id`, which carries none of
+`ShellView`'s key listeners.
+
+So `ensure_occupants` carries the second backstop, at the point where
+tiles leave the visible set: if any tile left AND window focus is on a
+handle that is none of the shell's own (`focus_handle` plus the four
+`Entity<InputState>` surfaces — `holds_shell_focus`), the shell root
+takes focus immediately. Immediately, not via the flag: the flag is
+consumed at the *top* of render, so setting it here would leave one
+whole frame with the keyboard dead.
+
+Both conditions are deliberately narrow — a live focused `Input`
+(palette filter, dialog, scope bar, command line) must keep its caret
+through either path. `shell/tests/drag.rs`'s workspace-switch cancel
+test no longer arms the flag by hand; both backstops have their own
+heals-it/leaves-it-alone pair in `shell/tests/occupants.rs`.

@@ -695,6 +695,7 @@ role = "key"
             action_tail: std::sync::Arc::new(std::sync::Mutex::new(
                 geode_shell::diagnostics::ActionTail::new(),
             )),
+            keymap_diagnostics: Vec::new(),
         }
     }
 

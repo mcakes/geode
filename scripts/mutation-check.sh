@@ -41,8 +41,25 @@
 #     earlier abort did exactly that, and the mutation was found committed
 #     to a working tree days later.
 #
-# Usage: zsh scripts/mutation-check.sh [--changed[=REF]] [substring]
+# Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
 #   (from the repo root)
+#
+# --anchors-only runs no cargo at all: it checks every selected entry's
+# anchor against its file and reports the ones that no longer match
+# (ANCHOR) or match more than once (AMBIG), then a one-line summary.
+# Under a second over the whole file (one python pass, each source file
+# read once). Exits non-zero on any finding, so it can gate a merge; a
+# selection that matches nothing says so rather than passing. Run it
+# before every merge and after
+# any edit near an anchored line — a normal run reports these two only
+# for the entries it happens to select, and an ambiguous anchor is the
+# quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
+# anchor is duplicated by a later verbatim reuse (the final review of the
+# health follow-ups found exactly that — a seed loop copied the ingest
+# sink's emit closure, and the entry guarding the sink mutated the seed
+# instead) keeps printing "caught" while defending nothing. A normal run
+# now prints AMBIG for the entries it does select, and still mutates the
+# first match.
 #
 # With a substring, only entries whose name contains it are run — for
 # iterating on the entries you just added. Always finish with an unfiltered
@@ -83,6 +100,9 @@ fi
 
 bak="$(mktemp -t mutate-bak)"
 log="$(mktemp -t mutate-log)"
+# --anchors-only collects (name, file, anchor) NUL-separated here and
+# checks them all in one pass at the end.
+anchors="$(mktemp -t mutate-anchors)"
 in_flight=""
 
 # Restore whatever is mutated right now, however we leave.
@@ -94,7 +114,7 @@ restore() {
 }
 cleanup() {
   restore
-  rm -f "$bak" "$log"
+  rm -f "$bak" "$log" "$anchors"
   rmdir "$lock" 2>/dev/null || true
 }
 # A signal handler that merely returns lets the script carry on to the next
@@ -130,6 +150,11 @@ trap 'cleanup; exit 143' TERM
 #                                           back to the full suite for a
 #                                           plain caught/SURVIVED verdict
 # Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+anchors_only=0
+if [[ "${1:-}" == --anchors-only ]]; then
+  anchors_only=1
+  shift
+fi
 changed_ref=""
 if [[ "${1:-}" == --changed ]]; then
   changed_ref="main"
@@ -139,6 +164,14 @@ elif [[ "${1:-}" == --changed=* ]]; then
   shift
 fi
 only="${1:-}"
+if [[ "$only" == --* ]]; then
+  # Flags are positional: --anchors-only first, then --changed, then the
+  # substring. A flag in the wrong slot used to become the substring, match
+  # no entry, and exit 0 having checked nothing.
+  echo "usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]" >&2
+  echo "unexpected argument in the substring slot: $only" >&2
+  exit 2
+fi
 skipped=0
 changed_files=""
 if [[ -n "$changed_ref" ]]; then
@@ -169,24 +202,48 @@ run_mutation() {
   if [[ "$pkg" == "geode-app" ]]; then
     target_flag="--bins"
   fi
-  cp "$file" "$bak"
-  in_flight="$file"
-  local rc=0
-  python3 - "$file" "$from" "$to" <<'PY' || rc=$?
+  if (( anchors_only )); then
+    printf '%s\0%s\0%s\0' "$name" "$file" "$from" >> "$anchors"
+    return 0
+  fi
+  # A moved or deleted file is a stale entry, reported by name, not a
+  # traceback that ends the run (`set -e` would otherwise stop here).
+  if [[ ! -f "$file" ]]; then
+    echo "ANCHOR    $name  <-- file missing: $file"
+    return 0
+  fi
+  # How many times the anchor occurs, checked before anything is written.
+  # 0 is a stale entry; more than 1 is an ambiguous one, and both are
+  # findings whether or not cargo runs afterwards. Declared and assigned
+  # on separate lines on purpose: `local hits=$(…)` would mask python's
+  # exit status, and a failure would then read as "0 hits".
+  local hits
+  hits=$(python3 - "$file" "$from" <<'PY'
 import sys, pathlib
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
-if sys.argv[2] not in s:
-    print("ANCHOR-MISSING"); sys.exit(3)
-p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
+print(pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2]))
 PY
-  if (( rc != 0 )); then
+  ) || hits=-1
+  if (( hits < 0 )); then
+    echo "ANCHOR    $name  <-- could not read $file"
+    return 0
+  fi
+  if (( hits == 0 )); then
     # A stale anchor is a finding in its own right: the mutation no longer
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
-    restore
     return 0
   fi
+  if (( hits > 1 )); then
+    echo "AMBIG x$hits  $name  <-- anchor matches $hits times; only the first is mutated"
+  fi
+  cp "$file" "$bak"
+  in_flight="$file"
+  python3 - "$file" "$from" "$to" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
+PY
   if [[ -n "$filter" ]]; then
     if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
@@ -351,10 +408,20 @@ run_mutation "as-of: NULL book dropped from the values tuple" \
   'None => "'\'\''".to_string(),' \
   geode-data the_predicate_selects_a_null_book_partition_from_either_side
 
+# Anchored through the two lines below the tie-break, not the tie-break
+# alone: the test-only `resolve_from_tables` oracle repeats the same
+# window clause verbatim, and `from generations where dataset = ?` is the
+# nearest line that tells the real resolve apart from it. The intended
+# site is `resolve_generations` -- the oracle is what the tests compare
+# against, so mutating it would break the comparison from the wrong end.
 run_mutation "as-of: source-time tie breaks on gen_id" \
   crates/geode-data/src/query/as_of.rs \
-  'order by source_time desc, gen_id desc' \
-  'order by source_time desc'
+  '                        order by source_time desc, gen_id desc
+                    ) as rn
+             from generations where dataset = ? and source_time <= ?' \
+  '                        order by source_time desc
+                    ) as rn
+             from generations where dataset = ? and source_time <= ?'
 
 # Retention deletes. A wrong query shows a wrong number and can be
 # re-run; a wrong sweep destroys history that no longer exists to be
@@ -541,12 +608,16 @@ run_mutation "generations: the union across tables no longer collapses a generat
 # `rebuild_generations`'s insert, before this line ever runs, and no
 # longer sees this mutation at all. A named filter is required here
 # because the string this anchors is duplicated verbatim in the test-only
-# `resolve_from_tables` oracle right below it in the file, and the two
-# unfiltered occurrences are otherwise indistinguishable to the harness.
+# `resolve_from_tables` oracle right below it in the file. The anchor now
+# carries the last line of the comment above the real one, so it matches
+# `resolve_generations` and nothing else; the filter stays anyway, since
+# it is the test that proves the entry guards what its name says.
 run_mutation "as-of: error propagation" \
   crates/geode-data/src/query/as_of.rs \
-  'rows.collect::<Result<Vec<_>, _>>().map_err(err)' \
-  'Ok(rows.filter_map(|r| r.ok()).collect())' \
+  '    // query that answers with less data than it should and says nothing.
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)' \
+  '    // query that answers with less data than it should and says nothing.
+    Ok(rows.filter_map(|r| r.ok()).collect())' \
   geode-data a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer
 
 # Repaired (review round 1, MIN-7): the previous replacement here
@@ -586,10 +657,17 @@ run_mutation "provenance: a join is labelled with its own instant" \
   '                    resolved_as_of.insert(join.dataset.clone(), oldest);' \
   '                    let _ = oldest;'
 
+# The spine's own resolve, not the join's: `era_for` and the joined-dataset
+# arm below it pick the oldest the same way, so the anchor carries the
+# `resolve_generations` call above it, which names `dataset` in one and
+# `&join.dataset` in the other. The join site has its own entry
+# ("provenance: a join is labelled with its own instant").
 run_mutation "provenance: stalest partition, not newest" \
   crates/geode-data/src/query/compile.rs \
-  'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
-  'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
+  '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
+  '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
 run_mutation "enum: a stale value degrades rather than failing the query" \
   crates/geode-data/src/query/compile.rs \
@@ -679,10 +757,48 @@ run_mutation "dimensions: a config_version header is not a spurious diagnostic" 
 
 # ---- findings from the phase-2b/prerequisites review round
 
+# The plain-measure half of the §6.3 blanking, the pair to the derived
+# entry below. A measure whose grain cannot be attributed at this depth is
+# emitted as `case when s.row_depth in (…) then null else agg."x" end`;
+# without it the cell shows the value belonging to an ANCESTOR row, which
+# is the double-count §6.3 exists to prevent, and it shows it as an
+# ordinary number with no marker a reader could notice. Added 2026-09-09:
+# until then the entry below was anchored on the bare
+# `let expr = if blank.is_empty() {`, whose first occurrence is this site,
+# so re-aiming it at the derived site left this one bare.
+run_mutation "measure: a non-attributable measure is blanked, not an ancestor's number" \
+  crates/geode-data/src/query/compile.rs \
+  '                .filter(|d| by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+
+            let expr = if blank.is_empty() {' \
+  '                .filter(|d| by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+
+            let expr = if true {' \
+  geode-data \
+  grouping_by_a_carried_dimension_sums_like_the_key_it_depends_on_and_blanks_coarser_measures
+
+# Re-anchored (2026-09-09): the bare `let expr = if blank.is_empty() {`
+# occurs twice in this file -- once for a plain measure, once for a
+# DERIVED column -- and `replace(..., 1)` was hitting the measure site,
+# which is not what this entry's name claims to guard. The `blank` build
+# above each differs (`by_depth` vs `attribution_by_depth`), so the anchor
+# now carries it and lands on the derived one; the measure site is the
+# entry directly above.
 run_mutation "derived: the value is blanked, not just the marker" \
   crates/geode-data/src/query/compile.rs \
-  '            let expr = if blank.is_empty() {' \
-  '            let expr = if true {'
+  '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+            let expr = if blank.is_empty() {' \
+  '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+            let expr = if true {' \
+  geode-data a_derived_column_is_blanked_where_its_inputs_are
 
 run_mutation "derived: comments are stripped before scanning for columns" \
   crates/geode-data/src/query/compile.rs \
@@ -968,10 +1084,13 @@ run_mutation "order: grouping columns break ties" \
 
 # ---- the snapshot read path (spec §6.6, §6.3)
 
+# A MEASURE, so the site is `f64_in`'"'"'s Float64 arm; `str_in` ends in the
+# same expression verbatim, and the `return ` prefix is what tells them
+# apart at the nearest possible distance.
 run_mutation "snapshot: a null measure is not zero" \
   crates/geode-core/src/snapshot.rs \
-  '(row < values.len() && !values.is_null(row)).then(|| values.value(row))' \
-  '(row < values.len()).then(|| values.value(row))' \
+  '        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));' \
+  '        return (row < values.len()).then(|| values.value(row));' \
   geode-core
 
 # "probe: a blanked cell renders blank, not 0.00" retired (Phase 3c
@@ -1052,10 +1171,15 @@ run_mutation "pool: the tag is echoed, not regenerated" \
 
 # ---- service (spec §5.1)
 
+# The Query arm, which is what `an_outcome_is_addressed_to_the_key_that_asked`
+# reads; the Distinct arm right below copies the same field verbatim and is
+# covered by `a_distinct_query_returns_value_counts_on_the_distinct_event`.
 run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
-  '                    key: r.key,' \
-  '                    key: QueryKey(0),' \
+  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
+                    key: r.key,' \
+  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
+                    key: QueryKey(0),' \
   geode-data \
   an_outcome_is_addressed_to_the_key_that_asked
 
@@ -1657,11 +1781,13 @@ run_mutation "hosting: a closed tile drops its occupant" \
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
             }
         }' \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             let _ = id;
         }' \
   geode-shell \
@@ -2278,11 +2404,16 @@ run_mutation "tile: the configured threshold is the one used" \
   geode-blotter \
   a_tiles_stale_threshold_is_the_factorys_configured_value
 
+# `Command::FilterExpr`, which is the arm the named test drives
+# (`filter model_code = 'EURP'`); `Command::FilterText` right below it
+# assigns and requeries identically.
 run_mutation "blotter: :filter narrows only this tile" \
   crates/geode-blotter/src/tile.rs \
-  '                self.tile_scope = scope;
+  '                self.validate_tile_scope(&scope)?;
+                self.tile_scope = scope;
                 self.requery(cx);' \
-  '                self.requery(cx);' \
+  '                self.validate_tile_scope(&scope)?;
+                self.requery(cx);' \
   geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
 
 run_mutation "blotter: an unscoped tile keeps its own filter" \
@@ -2750,10 +2881,17 @@ run_mutation "frame: undo is bounded" \
   '        if false {' \
   geode-shell undo_and_redo_walk_a_bounded_stack
 
+# `push_undo`, not `clear_history` -- both end in the same line, and only
+# the former is "a new set clears redo". `clear_history` is the restored-
+# session path and clears both stacks deliberately.
 run_mutation "frame: a new set clears redo" \
   crates/geode-shell/src/frame.rs \
-  '        self.scope_redo.clear();' \
-  '        let _ = &self.scope_redo;' \
+  '            self.scope_undo.remove(0);
+        }
+        self.scope_redo.clear();' \
+  '            self.scope_undo.remove(0);
+        }
+        let _ = &self.scope_redo;' \
   geode-shell undo_and_redo_walk_a_bounded_stack
 
 run_mutation "frame: a text session pushes once" \
@@ -4827,16 +4965,29 @@ run_mutation "service: an identical re-report restamps its slot, so the calling 
 }' \
   geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
 
-# The anchor below occurs twice (one door each); run_mutation replaces the
-# first, which is the discovery door — enough to break the invariant the
-# named test pins. The mutation writes the updated `Lanes` back afterwards,
-# so it breaks ONLY the lock-holding, not the bookkeeping (a mutation that
-# also dropped the commit would be caught by half the module for reasons
-# that have nothing to do with its name).
+# `lanes.offer(emit)` ends both doors, so the anchor carries the
+# discovery lane's own write above it -- the load door writes
+# `lanes.load.insert(...)` instead. Anchoring on the bare line relied on
+# `replace(..., 1)` happening to reach the discovery door first, which is
+# exactly the silent-flip this pass exists to remove. The mutation writes
+# the updated `Lanes` back afterwards, so it breaks ONLY the lock-holding,
+# not the bookkeeping (a mutation that also dropped the commit would be
+# caught by half the module for reasons that have nothing to do with its
+# name).
 run_mutation "service: the discovery door emits after dropping the tracker lock, so two reporters can reorder" \
   crates/geode-data/src/service.rs \
-  '        lanes.offer(emit)' \
-  '        let mut detached = lanes.clone();
+  '        lanes.discovery = Some(LaneValue {
+            health,
+            detail,
+            changed,
+        });
+        lanes.offer(emit)' \
+  '        lanes.discovery = Some(LaneValue {
+            health,
+            detail,
+            changed,
+        });
+        let mut detached = lanes.clone();
         drop(sources);
         let out = detached.offer(emit);
         self.sources
@@ -5424,7 +5575,145 @@ run_mutation "objectdialog: writes_by_destination ignores a source-only change" 
             out.entry(Destination::Doc).or_default();
         }' \
   geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+# ---- the drag grab's focus trap (2026-09-09) ---------------------------
+#
+# Two halves of the same defect: a tile mouse-down that arms a drag
+# returns before the caller's click-to-focus tail, so it has to re-arm
+# `pending_focus_restore` itself, and `render` carries a safety net for
+# the no-focus state generally. Both failure modes are silent — the app
+# paints perfectly and simply stops answering the keyboard.
+
+run_mutation "focus: the drag grab re-arms the focus restore" \
+  crates/geode-shell/src/shell/drag.rs \
+  '        self.pending_focus_restore = true;
+        cx.stop_propagation();' \
+  '        cx.stop_propagation();' \
+  geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
+
+run_mutation "focus: a window with nothing focused gets the shell root back" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if false {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame
+
+# The other direction on the same line: the net's condition is exactly
+# `is_none()`, and the tempting broader form ("focus isn't the shell
+# root") pulls the caret out of every live focused `Input` on every
+# frame. Without a test that keeps one focused across a redraw, nothing
+# would notice.
+run_mutation "focus: the no-focus net never steals from a live focused element" \
+  crates/geode-shell/src/shell/render.rs \
+  '        if window.focused(cx).is_none() {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if !self.focus_handle.is_focused(window) {
+            self.focus_handle.focus(window, cx);
+        }' \
+  geode-shell the_focus_net_leaves_a_live_focused_input_alone
+
+# The `is_none()` net above cannot see a workspace switch (occupants are
+# retained across workspaces, so focus stays `Some`); `ensure_occupants`
+# carries the backstop that can. Same two directions: it must reclaim,
+# and it must not reclaim from a live shell surface.
+run_mutation "focus: a departed tile's focus returns to the shell root" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            let _ = &focused;
+        }' \
+  geode-shell a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell
+
+run_mutation "focus: the departed-tile backstop spares the shell's own surfaces" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            && !self.holds_shell_focus(&focused, cx)' \
+  '            && !false' \
+  geode-shell a_tile_leaving_the_visible_set_leaves_the_palette_focused
+
+# ---- startup config diagnostics reach the entity (2026-09-09) ---------
+#
+# The mutation is the old code: seed the entity from
+# `config.diagnostics` alone. Neither the refused `keymap.mod` alias nor
+# the retired `[app] modules.default` key lives in that list, so the
+# diagnostics tile silently omitted both until a hot reload happened to
+# add them — a diagnostic that exists, is logged, and is invisible where
+# a trader would look for it.
+
+# The anchor deliberately ENDS on the keymap extend rather than on the
+# block's bare `diags` tail (fix round 2). Matching is exact-substring,
+# so a `from` ending in `\n            diags` matches the PREFIX of the
+# next line, `diags.extend(services.keymap_diagnostics…)` — the mutated
+# body then read `services.config.diagnostics.clone().extend(…); diags`
+# with `diags` unbound, and a compile error is reported as a plain
+# `caught` with the named test never run. The header's "an entry can lie"
+# case, and the reason an anchor must end somewhere no live line begins.
+run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            let mut diags = cfg.diagnostics.clone();
+            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '            let mut diags = cfg.diagnostics.clone();
+            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
+
+# The fourth group is the one that cannot be recomputed — it rides on
+# `ShellServices::keymap_diagnostics` — so dropping the extend is silent
+# in a way the other three are not: nothing else would ever put a
+# `build_keymap` diagnostic in front of a trader at startup.
+run_mutation "diagnostics: the startup seeding carries build_keymap's own diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell startup_keymap_diagnostics_are_in_the_diagnostics_entity
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
+fi
+if (( anchors_only )); then
+  # One pass: each file read once, every selected entry's anchor counted.
+  # Non-zero on any finding so this can gate a merge (MIN-2 of its own
+  # review); "nothing selected" is reported as such, never as a pass.
+  python3 - "$anchors" <<'PY' || exit 1
+import sys, pathlib
+raw = pathlib.Path(sys.argv[1]).read_bytes() if pathlib.Path(sys.argv[1]).exists() else b""
+fields = raw.split(b"\0")[:-1] if raw else []
+entries = [tuple(f.decode() for f in fields[i:i + 3]) for i in range(0, len(fields), 3)]
+if not entries:
+    print("checked 0 anchors (nothing selected)")
+    sys.exit(1)
+texts = {}
+stale = ambiguous = 0
+for name, file, anchor in entries:
+    if file not in texts:
+        try:
+            texts[file] = pathlib.Path(file).read_text()
+        except OSError:
+            texts[file] = None
+    text = texts[file]
+    if text is None:
+        stale += 1
+        print(f"ANCHOR    {name}  <-- file missing: {file}")
+        continue
+    hits = text.count(anchor)
+    if hits == 0:
+        stale += 1
+        print(f"ANCHOR    {name}  <-- anchor no longer matches; mutation is stale")
+    elif hits > 1:
+        ambiguous += 1
+        print(f"AMBIG x{hits}  {name}  <-- anchor matches {hits} times; only the first is mutated")
+print(f"checked {len(entries)} anchors: {stale} stale, {ambiguous} ambiguous")
+sys.exit(1 if stale or ambiguous else 0)
+PY
 fi

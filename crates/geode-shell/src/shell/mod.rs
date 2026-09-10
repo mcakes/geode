@@ -59,7 +59,7 @@ use crate::session;
 use crate::theme::ThemeService;
 use crate::tiling::{TileId, Workspaces};
 use crate::vimfind::FindStyle;
-use geode_core::config::{Config, ConfigSources, LayerDoc};
+use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::log::{LevelControl, LogLevels, Ring};
 use geode_core::query::{DistinctOutcome, QueryKey};
@@ -126,6 +126,19 @@ pub struct ShellServices {
     /// to be captured by the 'static panic hook closure alongside
     /// `ActionRegistry::hash_names`'s own `Arc<RwLock<_>>`.
     pub action_tail: Arc<Mutex<ActionTail>>,
+    /// What `build_keymap` reported at startup; `main.rs` fills it,
+    /// fixtures leave it empty.
+    ///
+    /// It cannot be recomputed from `config` alone the way the mod-alias
+    /// and `modules.default` diagnostics can: `build_keymap` is resolved
+    /// against the `ActionRegistry` as it stood at startup, after the
+    /// roster's and the pick/scope/add registrations. Carrying the list
+    /// is what lets `ShellView::new` seed the diagnostics entity's config
+    /// section with the same four groups `apply_reload` extends, in the
+    /// same order — otherwise a keymap diagnostic (a binding naming an
+    /// action nothing registered, say) was logged at startup and then
+    /// invisible in the diagnostics tile until some later hot reload.
+    pub keymap_diagnostics: Vec<Diagnostic>,
 }
 
 /// The pieces of the installed `tracing` subscriber the shell needs at
@@ -1228,11 +1241,32 @@ impl ShellView {
         // recorded here too so the diagnostics tile's "config" section
         // has it from the very first frame, not only from the first live
         // reload (`apply_reload`'s own `note_config` call, `hot_reload.rs`).
+        //
+        // Plus the two diagnostics that are NOT in that list, because
+        // they are computed from the config rather than by loading it:
+        // the refused `keymap.mod` alias (Phase 4a Task 4b, an error) and
+        // the retired `[app] modules.default` key (spec 2026-09-08
+        // add-tile §7.1, a warning). `main.rs` only logged those at
+        // startup, so before this a trader who never edited config
+        // mid-session saw neither in the diagnostics tile — while
+        // `apply_reload` had been folding both in all along, meaning the
+        // tile's contents depended on whether a reload had happened yet.
+        // Same four groups `apply_reload` extends, in the same order
+        // (config, mod alias, `modules.default`, keymap), so the section
+        // reads the same whichever path filled it. The first two are pure
+        // over `&Config` and recomputed here; the keymap diagnostics are
+        // not — `build_keymap` needs the startup registry — so they ride
+        // on `ShellServices::keymap_diagnostics`, which `main.rs` fills.
+        let startup_diagnostics = {
+            let cfg = &services.config;
+            let mut diags = cfg.diagnostics.clone();
+            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
+            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
+            diags.extend(services.keymap_diagnostics.iter().cloned());
+            diags
+        };
         diagnostics.update(cx, |d, _cx| {
-            d.note_config(
-                services.config.diagnostics.clone(),
-                std::time::SystemTime::now(),
-            );
+            d.note_config(startup_diagnostics, std::time::SystemTime::now());
         });
         // Same drain-only shape as the frame's own observer above, minus
         // the `Window` — none of `on_diagnostics_changed`'s three drains

@@ -66,6 +66,7 @@ fn services_with_pickable() -> ShellServices {
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
+        keymap_diagnostics: Vec::new(),
     }
 }
 
