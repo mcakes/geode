@@ -5278,7 +5278,7 @@ run_mutation "groupings: the summary drops the malformed/empty branches" \
         GroupingSlots::label_of(&names)
     }' \
   '    GroupingSlots::label_of(&names)' \
-  geode-shell the_summary_names_the_dimension_chain
+  geode-shell a_malformed_slot_still_describes_itself
 
 run_mutation "groupings: fields duplicates a chain column instead of deduping against the catalogue" \
   crates/geode-shell/src/shell/objectdialog/groupings.rs \
