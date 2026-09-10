@@ -776,7 +776,8 @@ run_mutation "derived: the value is blanked, not just the marker" \
   '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
                 .map(|d| d.to_string())
                 .collect();
-            let expr = if true {'
+            let expr = if true {' \
+  geode-data a_derived_column_is_blanked_where_its_inputs_are
 
 run_mutation "derived: comments are stripped before scanning for columns" \
   crates/geode-data/src/query/compile.rs \
