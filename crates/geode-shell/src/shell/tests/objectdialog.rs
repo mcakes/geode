@@ -9,6 +9,7 @@
 use super::*;
 use crate::dialogmode::DialogMode;
 use crate::shell::objectdialog;
+use geode_core::scope::{DimensionSelection, Scope};
 
 /// A `views` doc across two layers: `tree` defined by both (so its row is
 /// an override) and `wide` by the builtin layer alone. Built through
@@ -1813,4 +1814,162 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     );
     let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap_or_default();
     assert!(!written.contains('3'), "{written}");
+}
+
+// ---------------------------------------------------------------------
+// `Domain::Scopes` (Part 2a Task 5): the thinnest adapter, and its one
+// new verb, `o`.
+// ---------------------------------------------------------------------
+
+/// A `scopes` doc with one saved scope, `mine`, selecting `book = BK001`
+/// — deliberately different from whatever a test then puts on the
+/// frame, so an assertion that the doc changed cannot pass by accident.
+fn services_with_a_saved_scope() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    let scopes =
+        LayerDoc::builtin("scopes", "[mine]\n[mine.dimensions]\nbook = [\"BK001\"]\n").unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            scopes,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// `mine`'s `book` selection, read straight off the live config the same
+/// way every other test here reads a doc back — `None` when the scope or
+/// the selection is gone entirely.
+fn saved_scope_books(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> Option<Vec<String>> {
+    shell.read_with(cx, |s, _| {
+        s.services
+            .config
+            .doc("scopes")
+            .and_then(|d| d.value.get("mine"))
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("dimensions"))
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("book"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+    })
+}
+
+/// **The point of Task 5.** `o` overwrites the saved scope under the
+/// cursor with whatever the frame currently holds: the same
+/// `commit_edit` → debounced flush → `apply_reload` → write pipeline
+/// every other field edit goes through (spec §7.1), not a direct
+/// `config_write` call — and the frame's own scope is untouched by it,
+/// because `o` only ever writes config, never frame state (this is the
+/// asymmetry `arm_overwrite`'s doc comment describes: the frame is the
+/// input, the doc is the only thing written).
+#[gpui::test]
+fn o_overwrites_the_saved_scope_with_the_frames_current_one(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_a_saved_scope();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+
+    let frame_scope = Scope {
+        dimensions: vec![DimensionSelection {
+            column: "book".to_string(),
+            values: vec!["BK002".to_string(), "BK003".to_string()],
+        }],
+        ..Scope::default()
+    };
+    shell.update(&mut cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(frame_scope.clone());
+        });
+    });
+
+    // Into `mine`'s edit stage — the only saved scope, so already
+    // selected.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "o must ask before overwriting"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        saved_scope_books(&shell, &cx),
+        Some(vec!["BK002".to_string(), "BK003".to_string()]),
+        "the saved scope must now hold the frame's selection"
+    );
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap_or_default();
+    assert!(
+        written.contains("BK002") && written.contains("BK003"),
+        "{written}"
+    );
+
+    // The frame itself is unchanged — `o` writes config, never frame
+    // state.
+    let frame_after = shell.read_with(&cx, |s, cx| s.frame.read(cx).scope().clone());
+    assert_eq!(frame_after, frame_scope);
+}
+
+/// `o` must confirm before acting, since it destroys the saved scope's
+/// previous contents: pressing it alone must not touch the doc, and
+/// declining (`n`) must leave `mine` exactly as it was.
+#[gpui::test]
+fn o_confirms_before_overwriting(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_a_saved_scope();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+
+    let frame_scope = Scope {
+        dimensions: vec![DimensionSelection {
+            column: "book".to_string(),
+            values: vec!["BK099".to_string()],
+        }],
+        ..Scope::default()
+    };
+    shell.update(&mut cx, |s, cx| {
+        s.frame.update(cx, |f, _| {
+            f.set_scope(frame_scope.clone());
+        });
+    });
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "o must ask before overwriting"
+    );
+
+    // Declining leaves the saved scope untouched.
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert_eq!(
+        saved_scope_books(&shell, &cx),
+        Some(vec!["BK001".to_string()]),
+        "declining the confirm must not overwrite the saved scope"
+    );
 }

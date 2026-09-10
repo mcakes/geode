@@ -69,6 +69,7 @@
 pub mod apply;
 mod groupings;
 pub mod render;
+mod scopes;
 mod views;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,6 +86,7 @@ use crate::dialogmode::DialogMode;
 pub enum Domain {
     Views,
     Groupings,
+    Scopes,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -157,6 +159,7 @@ impl Domain {
         match self {
             Domain::Views => views::DOC,
             Domain::Groupings => groupings::DOC,
+            Domain::Scopes => scopes::DOC,
         }
     }
 
@@ -165,6 +168,7 @@ impl Domain {
         match self {
             Domain::Views => "Views",
             Domain::Groupings => "Groupings",
+            Domain::Scopes => "Scopes",
         }
     }
 
@@ -175,6 +179,7 @@ impl Domain {
         match self {
             Domain::Views => views::summary,
             Domain::Groupings => groupings::summary,
+            Domain::Scopes => scopes::summary,
         }
     }
 
@@ -191,7 +196,10 @@ impl Domain {
     fn presentation_doc(self) -> Option<&'static str> {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
-            Domain::Groupings => None,
+            // Scopes has no presentation doc for the same reason
+            // Groupings does not: every field this domain has is
+            // `Destination::Doc` (`scopes.rs`'s module doc).
+            Domain::Groupings | Domain::Scopes => None,
         }
     }
 
@@ -365,6 +373,12 @@ impl Destination {
             (Destination::Presentation, Domain::Groupings) => {
                 unreachable!("Groupings has no Presentation-destined fields")
             }
+            // Every Scopes field is `Destination::Doc` too (`scopes.rs`'s
+            // module doc: the whole object is a read-only summary), so
+            // this arm exists only to keep the match exhaustive.
+            (Destination::Presentation, Domain::Scopes) => {
+                unreachable!("Scopes has no Presentation-destined fields")
+            }
         }
     }
 }
@@ -470,6 +484,11 @@ pub enum Confirm {
     /// (spec §4.1). The one edit in this dialog that asks before acting,
     /// and the reason it asks is that the cost lands weeks later.
     Fork,
+    /// `o` on a saved scope (`Domain::Scopes` only): overwrite its
+    /// contents with whatever the frame currently holds. Destructive in
+    /// its own direction — the scope's previous selection is gone — so
+    /// it asks first, exactly like the other three.
+    Overwrite,
 }
 
 impl Confirm {
@@ -482,6 +501,11 @@ impl Confirm {
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
             Confirm::Fork => {
                 format!("Copy '{name}' to your config? It stops following the desk.")
+            }
+            Confirm::Overwrite => {
+                format!(
+                    "Replace '{name}' with the frame's current scope? Its saved selection is lost."
+                )
             }
         }
     }
@@ -801,6 +825,7 @@ impl Domain {
         match self {
             Domain::Views => views::fields(config, object),
             Domain::Groupings => groupings::fields(config, object),
+            Domain::Scopes => scopes::fields(config, object),
         }
     }
 
@@ -838,6 +863,7 @@ impl Domain {
         match self {
             Domain::Views => views::to_table(draft, dest),
             Domain::Groupings => groupings::to_table(draft, dest),
+            Domain::Scopes => scopes::to_table(draft, dest),
         }
     }
 
@@ -848,6 +874,7 @@ impl Domain {
         match self {
             Domain::Views => views::validate(draft, config),
             Domain::Groupings => groupings::validate(draft, config),
+            Domain::Scopes => scopes::validate(draft, config),
         }
     }
 }

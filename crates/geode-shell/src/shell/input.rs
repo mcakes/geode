@@ -153,6 +153,11 @@ impl ShellView {
             // `Domain::Groupings` (`shell::objectdialog::groupings`).
             // Palette-only, like `config::views` above.
             objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
+        } else if action.0 == "config::scopes" {
+            // Part 2a Task 5: the object dialog's browse stage over
+            // `Domain::Scopes` (`shell::objectdialog::scopes`).
+            // Palette-only, like `config::views` above.
+            objectdialog::render::open(self, objectdialog::Domain::Scopes, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

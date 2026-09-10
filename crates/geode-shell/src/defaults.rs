@@ -434,6 +434,16 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // itself (`frame::slot_*`, below), not the occasional edit of what a
     // slot groups by.
     action(reg, "config::groupings", "Edit groupings", "Configuration");
+    // Part 2a Task 5: the object dialog over `scopes` — the saved scopes
+    // `:scope load <name>` and the palette's own `scope::<name>` actions
+    // recall. Palette-only for the same reason `config::views` and
+    // `config::groupings` are: the chord that matters day to day is
+    // `:scope load` / the palette's own scope row, not the occasional
+    // management act (rename is unbuilt; there is no "load into frame"
+    // verb here either — both are design-review departures from spec
+    // §8.4, recorded in this crate's Part 2a Task 5 report) this dialog
+    // exists for.
+    action(reg, "config::scopes", "Edit scopes", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no

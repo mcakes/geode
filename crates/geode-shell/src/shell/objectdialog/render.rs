@@ -84,6 +84,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
+use super::scopes;
 use super::{
     Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
 };
@@ -589,6 +590,7 @@ fn handle_edit_key(
         }
         NormalCommand::Verb('d') => arm_delete(shell),
         NormalCommand::Verb('r') => arm_revert(shell),
+        NormalCommand::Verb('o') => arm_overwrite(shell),
         NormalCommand::EnterFilter => {
             // The one key the browse stage has that this one does not —
             // said out loud, because a `/` that silently did nothing
@@ -873,6 +875,37 @@ fn arm_revert(shell: &mut ShellView) {
     }
 }
 
+/// `o`: arm the confirm to overwrite the saved scope under the cursor
+/// with the frame's current one — `Domain::Scopes`'s one genuinely new
+/// verb (this crate's Part 2a Task 5). Every other domain has no object
+/// this letter could act on, so it falls through to the same "not a
+/// verb here" wording the general catch-all in [`handle_edit_key`] uses,
+/// worded identically wherever a stray letter fires.
+///
+/// Unlike `arm_delete`/`arm_revert`, this has no layer/override
+/// precondition to check: overwriting a desk-owned scope still lands
+/// through `apply::commit_edit`, which forks it into the user layer the
+/// same way any other definitional edit would — the destructive act this
+/// confirm guards is losing the scope's *previous* contents, not which
+/// layer receives the write.
+fn arm_overwrite(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        set_notice(shell, "nothing is open".to_string());
+        return;
+    };
+    if state.domain != Domain::Scopes {
+        set_notice(shell, "o is not a verb here".to_string());
+        return;
+    }
+    if state.draft.is_none() {
+        set_notice(shell, "nothing is open".to_string());
+        return;
+    }
+    if let Some(draft) = draft_mut(shell) {
+        draft.confirm = Some(Confirm::Overwrite);
+    }
+}
+
 /// Carry out the destructive act the second keystroke just confirmed.
 ///
 /// Delete and revert remove the same two things — the object from the
@@ -901,6 +934,27 @@ fn run_confirmed(
         // error diagnostic rejects still cannot join the batch from
         // here either.
         Confirm::Fork => {
+            if let Some(notice) = super::apply::commit_edit(shell, cx) {
+                set_notice(shell, notice);
+            }
+            cx.notify();
+        }
+        // `o`'s confirmed answer. `shell.frame` (an `Entity<Frame>`) is
+        // read here, at the gpui call site, precisely so `Domain`'s pure
+        // core never has to know a `Frame` exists — the one place in
+        // this dialog a frame is read at all. The new value replaces the
+        // draft's source and fields (`scopes::overwrite_with`), which is
+        // what makes `commit_edit` see a change to write; it goes
+        // through that same door rather than a direct `config_write`
+        // call, so a failed write still reverts the way any other edit's
+        // does, and `revalidate` runs first so the diagnostics on screen
+        // describe the new content rather than the old.
+        Confirm::Overwrite => {
+            let scope = shell.frame.read(cx).scope().clone();
+            if let Some(draft) = draft_mut(shell) {
+                scopes::overwrite_with(draft, &scope);
+            }
+            revalidate(shell);
             if let Some(notice) = super::apply::commit_edit(shell, cx) {
                 set_notice(shell, notice);
             }
@@ -1005,6 +1059,18 @@ fn actions(shell: &ShellView) -> Vec<Action> {
         out.push(Action {
             key: "r",
             label: "Revert to desk".to_string(),
+            destructive: true,
+        });
+    }
+    // The one new verb this domain adds (this module's `arm_overwrite`
+    // doc has the full reasoning): available whenever a scope is open,
+    // regardless of layer or override, since `Confirm::Overwrite`'s own
+    // commit forks a desk-owned scope the same way any other definitional
+    // edit would.
+    if state.domain == Domain::Scopes {
+        out.push(Action {
+            key: "o",
+            label: "Overwrite from frame".to_string(),
             destructive: true,
         });
     }
@@ -1586,6 +1652,7 @@ fn confirm_row(
                     Confirm::Delete => "Delete",
                     Confirm::Revert => "Revert",
                     Confirm::Fork => "Copy to user layer",
+                    Confirm::Overwrite => "Overwrite",
                 })
                 .on_click(move |_event, window, cx| {
                     go_ahead.update(cx, |shell, cx| {
@@ -1627,6 +1694,7 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
     match key {
         "d" => arm_delete(shell),
         "r" => arm_revert(shell),
+        "o" => arm_overwrite(shell),
         _ => {}
     }
     cx.notify();
