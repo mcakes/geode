@@ -5342,6 +5342,48 @@ run_mutation "objectdialog: d/r ask for a presentation doc even when the domain 
   '            let docs = [Destination::Doc.doc(domain), Destination::Presentation.doc(domain)];' \
   geode-shell deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exist
 
+# ---- Phase 4c part 2a, Task 5: the Scopes adapter ----------------------
+#
+# The thinnest adapter (both its fields are read-only `Text`, painted
+# from `draft.source` and never fed back into `to_table`), and its one
+# new verb: `o` overwrites the saved scope under the cursor with the
+# frame's current one. Two properties nothing else in this suite can
+# see: that `o` asks before acting (the same "confirm, not immediate"
+# shape `d`/`r`/the fork question all share, but this is the one test
+# that exercises *this* verb's own arm/confirm wiring), and that the
+# write lands in `scopes.toml` rather than in the frame it reads from.
+
+run_mutation "objectdialog: o overwrites immediately instead of asking first" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  "        NormalCommand::Verb('o') => arm_overwrite(shell)," \
+  "        NormalCommand::Verb('o') => {
+            arm_overwrite(shell);
+            let armed = shell
+                .object_dialog
+                .as_ref()
+                .and_then(|state| state.draft.as_ref())
+                .and_then(|draft| draft.confirm);
+            if let Some(confirm) = armed {
+                disarm_confirm(shell);
+                run_confirmed(shell, confirm, window, cx);
+            }
+        }" \
+  geode-shell o_confirms_before_overwriting
+
+run_mutation "objectdialog: o writes the frame instead of the saved scope" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            if let Some(draft) = draft_mut(shell) {
+                scopes::overwrite_with(draft, &scope);
+            }
+            revalidate(shell);
+            if let Some(notice) = super::apply::commit_edit(shell, cx) {
+                set_notice(shell, notice);
+            }' \
+  '            shell.frame.update(cx, |f, _| {
+                f.set_scope(scope.clone());
+            });' \
+  geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
