@@ -1133,7 +1133,10 @@ run_mutation "spine: the grand total row is constant" \
 # failure that says nothing about the aggregation. It also left `keys`
 # unused inside the `format!`, so the crate did not compile and the entry
 # was printing "caught" for a build failure — CLAUDE.md's "no test behind
-# it" lie, found in the 2026-09-10 filter sweep.
+# it" lie, found in the 2026-09-10 filter sweep. Keep the filter: with it
+# the entry takes ~3s, while the full-suite fallback under this mutation
+# takes ~15 minutes (the multiplied reference rows blow up elsewhere in the
+# suite) against ~36s for an ordinary geode-data entry.
 run_mutation "join: aggregate to the join key" \
   crates/geode-data/src/query/compile.rs \
   'group by {keys}) {alias} on {on}' \
