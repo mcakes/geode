@@ -51,7 +51,8 @@ pub(super) fn test_services_with_log() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    services_with_rec_roster()
+    let (services, log, _focus) = services_with_rec_roster();
+    (services, log)
 }
 
 /// The shell fixtures' one roster: a `RecordingFactory` of kind "rec" —
@@ -65,6 +66,7 @@ pub(super) fn test_services_with_log() -> (
 fn services_with_rec_roster() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    RecFocus,
 ) {
     // No compiled-in builtin layer in this fixture, so a reload has
     // nothing to preserve. `ShellServices::config_and_builtin` is the
@@ -100,6 +102,7 @@ fn services_with_rec_roster() -> (
     crate::defaults::register_add_actions(&mut registry, &["rec"]);
     let recorder = crate::module::recording::RecordingFactory::new("rec");
     let log = recorder.log.clone();
+    let last_focus = recorder.last_focus.clone();
     let mut roster = crate::module::ModuleRoster::new();
     roster.add(Box::new(recorder));
     // Module actions exist before `build_keymap`, exactly as `main.rs`
@@ -126,8 +129,9 @@ fn services_with_rec_roster() -> (
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
+        keymap_diagnostics: Vec::new(),
     };
-    (services, log)
+    (services, log, last_focus)
 }
 
 /// [`test_services`] plus a binding into the recording module's own key
@@ -138,7 +142,30 @@ pub(super) fn services_with_recorder() -> (
     ShellServices,
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
 ) {
-    let (mut services, log) = services_with_rec_roster();
+    let (services, log, _focus) = services_with_recorder_focus_inner();
+    (services, log)
+}
+
+/// The cell a `RecordingFactory` publishes its most recent view's
+/// `FocusHandle` into — see that field's doc comment for why a test
+/// cannot reach the handle any other way.
+pub(super) type RecFocus = std::rc::Rc<std::cell::RefCell<Option<gpui::FocusHandle>>>;
+
+/// [`services_with_recorder`], plus the recorder's focus cell — for the
+/// one test that must put keyboard focus inside a tile WITHOUT a
+/// mouse-down (a mouse-down re-arms `pending_focus_restore`, which is
+/// the very thing that test must not have happen).
+pub(super) fn services_with_recorder_focus() -> (ShellServices, RecFocus) {
+    let (services, _log, focus) = services_with_recorder_focus_inner();
+    (services, focus)
+}
+
+fn services_with_recorder_focus_inner() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    RecFocus,
+) {
+    let (mut services, log, focus) = services_with_rec_roster();
     // A binding into the module's own key context, so a key can be seen
     // to reach it.
     let module_doc = LayerDoc::builtin(
@@ -147,7 +174,7 @@ pub(super) fn services_with_recorder() -> (
     )
     .unwrap();
     services.keymap = test_keymap(&services.registry, &[module_doc]);
-    (services, log)
+    (services, log, focus)
 }
 
 pub(super) fn open_shell(

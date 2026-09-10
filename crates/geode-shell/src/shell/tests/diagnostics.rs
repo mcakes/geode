@@ -376,6 +376,7 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),
         )),
+        keymap_diagnostics: Vec::new(),
     };
 
     let window = cx

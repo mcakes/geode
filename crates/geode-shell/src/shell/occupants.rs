@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 
-use gpui::{App, Context, Window};
+use gpui::{App, Context, FocusHandle, Focusable as _, Window};
 
 use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
@@ -292,7 +292,9 @@ impl ShellView {
             .retain(|id, _| all.contains(&TileId(*id)));
         self.scratch_all_tiles = all;
 
+        let mut any_tile_left_the_screen = false;
         for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
             }
@@ -302,8 +304,61 @@ impl ShellView {
                 o.content.set_visible(true, cx);
             }
         }
+        // The focus backstop (review finding, Important 1). A tile that
+        // leaves the visible set is unmounted as an *element* but keeps
+        // its occupant: `fill_all_tiles` spans every workspace, so a
+        // `mod+2` switch retains the view entity — and with it the
+        // `FocusHandle` a focus-tracking view holds as a field. The
+        // handle's refcount never reaches zero, so `Window::focused` is
+        // still `Some` and `render`'s `is_none()` net cannot see this at
+        // all. What actually breaks is dispatch: gpui resolves the
+        // focused id against the RENDERED tree and falls back to
+        // `root_node_id` when it is absent (`Window::focused_node_id`,
+        // pinned rev), and that node carries none of `ShellView`'s
+        // element key listeners — so `handle_key_down` stops firing and
+        // every shell chord is dead until a click claims focus.
+        //
+        // Focus is taken back HERE rather than through
+        // `pending_focus_restore`, because the flag is consumed at the
+        // TOP of render: setting it now would leave one whole frame in
+        // which the keyboard is dead, and this runs inside the very
+        // render that unmounts the tile.
+        //
+        // The condition mirrors the net's restraint. Focus on any handle
+        // that is not one of the shell's OWN — the root, plus the four
+        // `Entity<InputState>` surfaces a user can be typing into — is,
+        // by this crate's design, a tile view's, and a tile view's focus
+        // is never meant to outlive a render (every tile mouse-down
+        // re-arms the restore for exactly that reason). A shell surface
+        // that is legitimately focused across the switch — the palette
+        // filter, a dialog field, a per-tile command line, the scope bar
+        // — keeps its caret. If `ShellView` ever gains another focusable
+        // field, it belongs in `holds_shell_focus` below.
+        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            self.focus_handle.focus(window, cx);
+        }
         self.visible_tiles.clear();
         self.visible_tiles.extend(active.iter().copied());
         self.scratch_active_tiles = active;
+    }
+
+    /// Is `handle` one of the shell's own focusable surfaces — the root,
+    /// or one of the four `Entity<InputState>`s a user can be typing
+    /// into? Anything else that holds window focus belongs to a tile's
+    /// occupant view (see `ensure_occupants`'s backstop, the only
+    /// caller, for why that distinction is the whole decision).
+    fn holds_shell_focus(&self, handle: &FocusHandle, cx: &App) -> bool {
+        *handle == self.focus_handle
+            || [
+                &self.palette_input,
+                &self.dialog_input,
+                &self.command_input,
+                &self.filter_input,
+            ]
+            .iter()
+            .any(|input| input.read(cx).focus_handle(cx) == *handle)
     }
 }
