@@ -278,7 +278,7 @@ impl ShellView {
             });
         } else if let Some((kind, direction)) = crate::defaults::parse_add_action(&action.0) {
             // A palette row from `register_add_actions` (spec 2026-09-08
-            // add-tile §3.2) — "Add <Kind>" follows the setting; the
+            // add-tile §3.2) — "<Kind>: Split" follows the setting; the
             // suffixed pair say where. Always adds (or fills); never
             // focuses an existing tile — that is `open_module`'s job.
             let kind = kind.to_string();

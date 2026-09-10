@@ -297,7 +297,7 @@ old state-aware "return" variants are still gone.
 
 `Workspace::toggle_dock` showing a hidden dock now calls
 `enter_region(Dock(side))`: the dock is visible and focused in one
-step, whether or not its tree has tiles, so `ctrl+[` then "Add Blotter"
+step, whether or not its tree has tiles, so `ctrl+[` then "Blotter: Split"
 fills the left dock. Hiding a dock is unchanged (focus falls back per
 `fallback_region`).
 
@@ -342,13 +342,13 @@ Weight follows spec §10.3: pure cores first.
   file, preserves other tables, refuses an unparseable file.
 
 **Shell (`#[gpui::test]`, real keystrokes and palette rows):**
-- On an empty workspace, palette "Add Blotter" makes one blotter tile
-  that is the tree's root and focused.
-- On a placeholder tile, "Add Blotter" fills it in place: same
+- On an empty workspace, palette "Blotter: Split" makes one blotter
+  tile that is the tree's root and focused.
+- On a placeholder tile, "Blotter: Split" fills it in place: same
   `TileId`, kind now `blotter`, tile count unchanged.
-- On a blotter tile with the setting `horizontal`, "Add Diagnostics"
+- On a blotter tile with the setting `horizontal`, "Diagnostics: Split"
   lands a diagnostics tile to the right; with `vertical`, below;
-  "Add Diagnostics Vertical" lands below regardless of the setting.
+  "Diagnostics: Split Vertical" lands below regardless of the setting.
 - With the setting `auto`, a wide tile splits to the right and a tall
   one below (two-step: split right first, then add again in the
   now-tall half).
@@ -356,7 +356,7 @@ Weight follows spec §10.3: pure cores first.
   factory received `view = "wide"`; `ctrl+shift+d` stacks it.
 - `ctrl+v` and `ctrl+h` change nothing (tile count and layout
   identical before and after).
-- `ctrl+[` focuses the (empty) left dock; a following "Add Blotter"
+- `ctrl+[` focuses the (empty) left dock; a following "Blotter: Split"
   lands inside it; `ctrl+[` again hides it and focus returns to `Main`.
 - Two `open_module("diagnostics", ..)` calls (the status bar's summary
   click, the door's one production caller since `diagnostics::open`

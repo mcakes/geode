@@ -448,7 +448,7 @@ impl Workspace {
     /// Toggle one dock's visibility. Hidden→visible always works, even on
     /// an empty dock, and takes focus (spec 2026-09-08 add-tile §8: it
     /// shows, renders its "move a tile here" hint, and now also focuses
-    /// it, empty or not, so "ctrl+[ then Add Blotter" fills the dock) —
+    /// it, empty or not, so "ctrl+[ then Blotter: Split" fills the dock) —
     /// exiting any main-tree fullscreen first (same precedent as
     /// [`Workspace::move_to_dock`]'s `Main` arm), since fullscreen and a
     /// focused dock is a combination `render` cannot paint (no docks
@@ -1998,7 +1998,7 @@ mod tests {
     }
 
     /// Spec `2026-09-08-geode-add-tile-design.md` §8: showing a dock
-    /// focuses it, empty or not, so "ctrl+[ then Add Blotter" fills the
+    /// focuses it, empty or not, so "ctrl+[ then Blotter: Split" fills the
     /// dock. Hiding it again falls back to `Main` exactly as before.
     #[test]
     fn toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty() {
