@@ -556,6 +556,81 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
     assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
 }
 
+/// **A draft whose own reader rejects it must not reach the batch.**
+///
+/// Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
+/// config holding an error diagnostic — so if an error-severity edit
+/// joined the pending batch anyway, the flush's merge would be refused
+/// while the file write still fired, leaving memory and disk disagreeing
+/// (`objectdialog::apply`'s module doc, "the previous config's
+/// diagnostics"). Nothing keyed today can make `Domain::validate` return
+/// `Severity::Error` — `views::validate` only ever emits `Warning` (a
+/// stale dataset name warns, by design, so a desk rename cannot break a
+/// trader's personal file) — so this drives `Draft::diagnostics`
+/// directly, exactly as the task brief allows: the rule still needs
+/// pinning now, for Part 2b's `Text`, which will reach it through real
+/// keys.
+///
+/// `shift+j` (`NormalCommand::MoveItem`) is the vehicle because it is the
+/// one path into `commit_or_confirm` that does not call `revalidate`
+/// first — `Toggle`/`ToggleBack` do, which would recompute the (all-
+/// `Warning`) diagnostics and erase the injected error before the gate
+/// ever saw it. Using it here does not claim `MoveItem` is where a real
+/// error would be produced; it is only how this test reaches the gate
+/// without recomputing over it.
+#[gpui::test]
+fn an_edit_the_reader_rejects_does_not_join_the_batch(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    shell.update(&mut cx, |shell, _| {
+        shell
+            .object_dialog
+            .as_mut()
+            .unwrap()
+            .draft
+            .as_mut()
+            .unwrap()
+            .diagnostics = vec![geode_core::config::Diagnostic {
+            severity: geode_core::config::Severity::Error,
+            layer: None,
+            file: None,
+            message: "dataset 'nope' does not exist".to_string(),
+            path: None,
+        }];
+    });
+
+    // `shift+j` still moves the item in the draft — the keystroke is not
+    // swallowed and the trader's own action stays visible — but it must
+    // not queue anything to write.
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.list_items("columns").unwrap()[0]
+            .name
+            .clone()),
+        "npv",
+        "the reorder itself still happens — a blocked edit must not lose \
+         the keystroke that produced it"
+    );
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_none()),
+        "an edit an error diagnostic rejects must never join the batch"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("nope")),
+        "the notice has to name what the reader objected to, got {notice:?}"
+    );
+
+    flush_config_write(&mut cx);
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "no file may appear: the write must not fire for an edit that \
+         never joined the batch"
+    );
+}
+
 /// **The requirement, in one test.** Changing a config field is INSTANT:
 /// the keystroke changes what the dialog shows, with no save key — and
 /// the config and the file both follow on their own, together, a

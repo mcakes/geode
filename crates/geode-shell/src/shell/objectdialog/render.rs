@@ -77,7 +77,7 @@
 
 use std::rc::Rc;
 
-use geode_core::config::Layer;
+use geode_core::config::{Layer, Severity};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -681,6 +681,32 @@ fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         .and_then(|state| state.draft.as_ref())
         .is_some_and(|draft| draft.is_dirty());
     if !dirty {
+        return;
+    }
+    // Spec §7.1's no-carry-forward rule: `reload::decide` rejects any
+    // config holding an error-severity diagnostic, so an edit the
+    // reader itself rates `Severity::Error` must never reach the batch
+    // — the merge would be refused a flush later while the file write
+    // still fired, leaving memory and disk disagreeing (see
+    // `apply`'s module doc). The draft is left exactly as the keystroke
+    // made it: this refuses only the *commit*, not the field mutation
+    // that already happened, so the trader can see and correct what
+    // they typed rather than having it reverted out from under them.
+    // Warnings do not reach here — a stale name warns by design, and
+    // blocking on that would make a personal file unsaveable.
+    if let Some(diagnostic) = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .and_then(|draft| {
+            draft
+                .diagnostics
+                .iter()
+                .find(|d| d.severity == Severity::Error)
+        })
+    {
+        set_notice(shell, format!("not saved — {}", diagnostic.message));
+        cx.notify();
         return;
     }
     if super::apply::would_fork(shell, domain) {

@@ -3524,6 +3524,22 @@ run_mutation "objectdialog: a definitional change forks without asking" \
   geode-shell \
   a_definitional_change_to_a_desk_view_confirms_before_forking
 
+# Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
+# config holding an error diagnostic, so an error-severity edit that
+# still joined the pending batch would be a silent in-memory no-op a
+# flush later — while the file write fires anyway, leaving memory and
+# disk disagreeing. Matching against a severity nothing in this draft's
+# `diagnostics` ever holds is the same as deleting the gate: the `find`
+# never matches, so the batch check below it never sees a reason to
+# refuse. Every other objectdialog test stays green (none of them ever
+# put an error diagnostic on a draft); only a test that does can see it.
+run_mutation "objectdialog: an error diagnostic no longer blocks the batch" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '.find(|d| d.severity == Severity::Error)' \
+  '.find(|d| d.severity == Severity::Warning && false)' \
+  geode-shell \
+  an_edit_the_reader_rejects_does_not_join_the_batch
+
 # `Config::all_docs` is the other half of the loader split: it is what
 # hands `from_docs` the documents to merge, and dropping the layers below
 # the user's is the plausible "we only changed the user layer" shortcut.
