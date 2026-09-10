@@ -79,9 +79,8 @@ use geode_core::config::{Config, Diagnostic, Layer};
 use crate::dialogmode::DialogMode;
 
 /// Which config domain a dialog is browsing. One variant per adapter
-/// module under this directory (spec §8 has three more — Sources,
-/// Scopes, and the read-only Schema — each still to arrive with its own
-/// adapter).
+/// module under this directory (spec §8 has two more — Sources and the
+/// read-only Schema — still to arrive with their own adapters).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
     Views,
@@ -485,10 +484,23 @@ pub enum Confirm {
     /// and the reason it asks is that the cost lands weeks later.
     Fork,
     /// `o` on a saved scope (`Domain::Scopes` only): overwrite its
-    /// contents with whatever the frame currently holds. Destructive in
-    /// its own direction — the scope's previous selection is gone — so
-    /// it asks first, exactly like the other three.
-    Overwrite,
+    /// contents with whatever the frame currently holds.
+    ///
+    /// `forks` is decided at arm time (`render::arm_overwrite`), from
+    /// whether the scope under the cursor is the user layer's own —
+    /// never from destructiveness alone. When it is not, the write does
+    /// two things at once: it replaces the scope's content, and it
+    /// forks it into the user layer, which **freezes** the desk's copy
+    /// out the same way `Fork` does (spec §4.1) — invisible until weeks
+    /// later if the prompt does not say so (spec §16). One confirm
+    /// either way, not two in sequence (§16 keeps every confirm to a
+    /// single row that never changes length): the payload is what lets
+    /// one prompt disclose whichever consequence is real for *this*
+    /// object, since "saved selection is lost" is true only when there
+    /// is no desk copy underneath to fall back to.
+    Overwrite {
+        forks: bool,
+    },
 }
 
 impl Confirm {
@@ -502,11 +514,18 @@ impl Confirm {
             Confirm::Fork => {
                 format!("Copy '{name}' to your config? It stops following the desk.")
             }
-            Confirm::Overwrite => {
-                format!(
-                    "Replace '{name}' with the frame's current scope? Its saved selection is lost."
-                )
-            }
+            // User-owned: nothing underneath to fall back to, so the
+            // scope's previous contents really are gone.
+            Confirm::Overwrite { forks: false } => format!(
+                "Replace '{name}' with the frame's current scope? Its saved selection is lost."
+            ),
+            // Not user-owned: nothing is lost — the desk's own copy is
+            // still there — but the write forks this one into the user
+            // layer, exactly like `Fork`'s own consequence, and `r`
+            // reverts it same as any other fork.
+            Confirm::Overwrite { forks: true } => format!(
+                "Replace '{name}' with the frame's current scope? It stops following the desk — 'r' reverts."
+            ),
         }
     }
 }
@@ -550,6 +569,19 @@ pub struct Draft {
     /// declined [`Confirm::Fork`] restores from here
     /// ([`Draft::revert_to_baseline`]).
     baseline: Vec<Field>,
+    /// `source` as it stood at the same moment `baseline` did. For every
+    /// domain but Scopes this never diverges from `source` after
+    /// construction — nothing else in this scaffold mutates `source`
+    /// directly — so it costs those domains nothing. Scopes' `o`
+    /// (`scopes::overwrite_with`) is the one verb that replaces `source`
+    /// wholesale while leaving the *painted* fields free to describe it
+    /// however a summary function likes; comparing only `fields` against
+    /// `baseline` would then make dirtiness depend on two summary
+    /// strings never colliding, which is not a property `selects_summary`
+    /// promises to keep as it grows. Comparing `source` directly closes
+    /// that by construction: the actual object decides whether anything
+    /// changed, not its rendering.
+    baseline_source: toml::Table,
     /// Cursor over [`Draft::rows`]. The edit stage's only cursor;
     /// `ObjectDialogState::selected` is the browse stage's. One per
     /// stage, never both live at once.
@@ -609,15 +641,21 @@ impl Draft {
     /// moves the baseline as it records the change. It is `true` only
     /// *within* the keystroke that changed a field, and while a
     /// [`Confirm::Fork`] is waiting on its answer.
+    ///
+    /// `source` is compared too, not just `fields` — see
+    /// [`Draft::baseline_source`]'s own doc for why a fields-only
+    /// comparison is not enough once a verb (Scopes' `o`) can replace
+    /// `source` out from under a painted summary.
     pub fn is_dirty(&self) -> bool {
-        self.fields != self.baseline
+        self.fields != self.baseline || self.source != self.baseline_source
     }
 
-    /// Put every field back to the last applied state — what a declined
-    /// [`Confirm::Fork`] leaves behind, so the screen never shows a value
-    /// that is neither applied nor persisted.
+    /// Put every field, and `source`, back to the last applied state —
+    /// what a declined [`Confirm::Fork`] leaves behind, so the screen
+    /// never shows a value that is neither applied nor persisted.
     pub fn revert_to_baseline(&mut self) {
         self.fields = self.baseline.clone();
+        self.source = self.baseline_source.clone();
     }
 
     /// The items of the ordered-list field named `key`.
@@ -776,6 +814,14 @@ impl Draft {
                     .push(field.key.clone());
             }
         }
+        // `source` underlies only `Destination::Doc` renderings
+        // (`views::doc_table`, `scopes::to_table`) — nothing presentation-
+        // destined ever reads it — so a `source` change no field noticed
+        // (see `Draft::baseline_source`'s own doc) still has to reach the
+        // batch as a `Doc` write, with no field key of its own to name.
+        if self.source != self.baseline_source {
+            out.entry(Destination::Doc).or_default();
+        }
         out
     }
 
@@ -792,6 +838,7 @@ impl Draft {
     /// config, baseline and all.
     pub fn mark_saved(&mut self) {
         self.baseline = self.fields.clone();
+        self.baseline_source = self.source.clone();
     }
 }
 
@@ -843,6 +890,7 @@ impl Domain {
             name: object.to_string(),
             baseline: fields.clone(),
             fields,
+            baseline_source: source.clone(),
             source,
             selected: 0,
             diagnostics: Vec::new(),
@@ -1496,6 +1544,7 @@ mod tests {
             baseline: vec![field.clone()],
             fields: vec![field],
             source: toml::Table::new(),
+            baseline_source: toml::Table::new(),
             selected: 0,
             diagnostics: Vec::new(),
             confirm: None,
@@ -2034,6 +2083,40 @@ mod tests {
         assert!(fork.contains("tree"), "{fork}");
         assert!(fork.contains("desk"), "{fork}");
     }
+
+    /// `Confirm::Overwrite`'s two prompts must each be true of the case
+    /// they describe (Part 2a Task 5 review round 1, the Major): a
+    /// user-owned scope really does lose its previous contents, but a
+    /// desk/builtin-owned one does not — the desk's copy is still there,
+    /// `r`-revertible — so it must disclose the fork instead, the same
+    /// way `Confirm::Fork`'s own prompt names "the desk" rather than
+    /// merely "are you sure".
+    #[test]
+    fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
+        let owned = Confirm::Overwrite { forks: false }.prompt("mine");
+        assert!(owned.contains("mine"), "{owned}");
+        assert!(owned.contains("lost"), "{owned}");
+        assert!(
+            !owned.contains("desk"),
+            "a user-owned scope's prompt must not claim a fork: {owned}"
+        );
+
+        let forked = Confirm::Overwrite { forks: true }.prompt("mine");
+        assert!(forked.contains("mine"), "{forked}");
+        assert!(
+            forked.contains("desk"),
+            "a desk-owned scope's prompt must disclose the fork: {forked}"
+        );
+        assert!(
+            forked.contains("reverts"),
+            "it must say r reverts: {forked}"
+        );
+        assert!(
+            !forked.contains("lost"),
+            "nothing is lost when the desk's own copy is still there: {forked}"
+        );
+    }
+
     /// Rows are ordered by name, not by the order three separate files
     /// happen to list them in.
     #[test]

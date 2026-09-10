@@ -1973,3 +1973,86 @@ fn o_confirms_before_overwriting(cx: &mut gpui::TestAppContext) {
         "declining the confirm must not overwrite the saved scope"
     );
 }
+
+/// A `scopes` doc with one saved scope, `mine`, defined in the **user**
+/// layer only — the non-forking twin of [`services_with_a_saved_scope`]
+/// (whose `mine` is builtin-owned), so a test built on this fixture
+/// exercises `arm_overwrite`'s `forks: false` branch instead.
+fn services_with_a_user_owned_scope() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    let user = LayerDoc {
+        layer: Layer::User,
+        name: "scopes".to_string(),
+        file: "<test:user>".into(),
+        table: "[mine]\n[mine.dimensions]\nbook = [\"BK001\"]\n"
+            .parse()
+            .unwrap(),
+    };
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            user,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// Task 5 review round 1, the Major: `o` on a scope the user layer does
+/// not already own also forks it into the user layer (the same
+/// consequence any other definitional edit through this dialog has), and
+/// that has to be disclosed in the prompt *before* the second keystroke —
+/// not discovered weeks later when the desk's changes stop arriving
+/// (spec §16). `mine` here is builtin-owned only
+/// (`services_with_a_saved_scope` — no user-layer `scopes` doc at all),
+/// so `o` must arm `Confirm::Overwrite { forks: true }`, not `{ forks:
+/// false }`. `overwrite_prompts_tell_the_truth_about_what_it_costs`
+/// (`mod.rs`) pins that the `true` prompt's wording is honest once armed
+/// this way; this test pins that `arm_overwrite` actually arms it this
+/// way for a real desk-owned object, through the real dispatch path
+/// (`editing_row`, not a hand-built `ObjectRow`).
+#[gpui::test]
+fn o_on_a_desk_owned_scope_discloses_the_fork_before_writing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_a_saved_scope();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+
+    assert_eq!(
+        edit_draft(&shell, &cx, |draft| draft.confirm),
+        Some(objectdialog::Confirm::Overwrite { forks: true }),
+        "mine is builtin-owned, not user-owned, so o must disclose the fork"
+    );
+}
+
+/// The non-forking twin: `o` on a scope the user layer already owns must
+/// not claim it will fork anything.
+#[gpui::test]
+fn o_on_a_user_owned_scope_does_not_claim_a_fork(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let services = services_with_a_user_owned_scope();
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::scopes");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("o");
+    cx.run_until_parked();
+
+    assert_eq!(
+        edit_draft(&shell, &cx, |draft| draft.confirm),
+        Some(objectdialog::Confirm::Overwrite { forks: false }),
+        "mine is already user-owned, so o must not claim a fork"
+    );
+}

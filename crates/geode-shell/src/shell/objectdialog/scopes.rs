@@ -35,16 +35,28 @@
 //!
 //! ## `o`: the one new verb
 //!
-//! `render.rs`'s `Verb('o')` arm reads `shell.frame`'s current
-//! [`Scope`] — the one place in this whole plan a gpui `Entity` is read
-//! for a config dialog, and deliberately *not* here: [`overwrite_with`]
-//! takes the `Scope` value already read out, so this module, like every
-//! other adapter, never touches a `Frame`. It replaces both
-//! `draft.source` (what [`to_table`] renders) and `draft.fields` (the
-//! read-only summary painted above it) with the frame's own scope, which
-//! is what makes `Draft::is_dirty` — the fields-vs-baseline comparison
-//! every other edit is detected by — see a change to write, without this
-//! adapter needing a write path of its own.
+//! `render.rs`'s `Verb('o')` arm (`arm_overwrite`) only *arms* the
+//! confirm — it decides at that moment whether the write will also fork
+//! the object (whether the user layer already owns this name), so the
+//! prompt can disclose it, but it reads no `Frame`. The frame is read a
+//! keystroke later, in `run_confirmed`'s `Confirm::Overwrite` arm: `shell.
+//! frame.read(cx).scope().clone()` — the only place a `Frame` is read
+//! for *this dialog* at all (narrower than "the only entity": the shared
+//! filter field's `Entity<InputState>` is read elsewhere same as in every
+//! other dialog). [`overwrite_with`] takes the resulting `Scope` value,
+//! already read out, so this module, like every other adapter, never
+//! touches a `Frame` or `gpui` itself.
+//!
+//! It replaces both `draft.source` (what [`to_table`] renders) and
+//! `draft.fields` (the read-only summary painted above it) with the
+//! frame's own scope. Only `source` is what `Draft::is_dirty` and
+//! `Draft::writes_by_destination` actually key the write decision on —
+//! comparing the two *painted* fields alone would make "did anything
+//! change" a question about whether `selects_summary` happens to render
+//! two different scopes identically, which is not a property it
+//! promises to keep as it grows (see `Draft::baseline_source`'s own doc
+//! in `mod.rs`). Rebuilding `fields` here is still necessary — nothing
+//! else repaints them — it just is not what decides whether `o` writes.
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
@@ -216,15 +228,17 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 
 /// `o`, confirmed: overwrite `draft` with `scope`'s own contents.
 ///
-/// `scope` is a plain value, not a `Frame` — `render.rs` reads
-/// `shell.frame.read(cx).scope().clone()` at the call site and hands the
-/// result in here, which is what keeps a gpui `Entity` out of this
-/// module (and out of `Domain`'s whole surface) entirely. Both
-/// `draft.source` (what [`to_table`] renders) and `draft.fields` (the
-/// summary painted above it) are replaced, so `Draft::is_dirty` — the
-/// fields-vs-baseline comparison [`super::Draft::writes_by_destination`]
-/// is built on — sees a change to write through `apply::commit_edit`,
-/// the same door every other field edit already goes through.
+/// `scope` is a plain value, not a `Frame` — `render.rs`'s
+/// `run_confirmed` reads `shell.frame.read(cx).scope().clone()` at the
+/// call site and hands the result in here, which is what keeps a gpui
+/// `Entity` out of this module (and out of `Domain`'s whole surface)
+/// entirely. Both `draft.source` (what [`to_table`] renders) and
+/// `draft.fields` (the summary painted above it) are replaced —
+/// `draft.source` is what `Draft::is_dirty` and
+/// [`super::Draft::writes_by_destination`] key the actual write decision
+/// on, so `apply::commit_edit` sees a change regardless of what the
+/// painted summary says, and goes through that same door every other
+/// field edit already does.
 pub fn overwrite_with(draft: &mut Draft, scope: &Scope) {
     draft.source = scope_table_as_toml(scope);
     draft.fields = fields_from_table(Some(&draft.source));
@@ -446,6 +460,51 @@ mod tests {
         let (saved, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(saved["mine"], frame_scope);
+    }
+
+    /// The review's own named collision (Task 5 review round 1, MINOR):
+    /// `selects_summary` joins a dimension's values with `", "`, so a
+    /// single value that itself contains `", "` paints identically to
+    /// two separate values. If dirtiness were judged from the painted
+    /// `Selects` field alone, overwriting `["BK001", "BK002"]` with the
+    /// single value `"BK001, BK002"` would look like no change at all
+    /// and `o` would silently fail to write. Pins that `Draft::is_dirty`
+    /// (and so `apply::commit_edit`) still sees it, because dirtiness is
+    /// judged from `source` — the actual object — not its summary.
+    #[test]
+    fn overwrite_with_is_seen_even_when_the_painted_summary_collides() {
+        let config =
+            config_with_scope("[mine]\n[mine.dimensions]\nbook = [\"BK001\", \"BK002\"]\n");
+        let mut draft = Domain::Scopes.draft(&config, "mine");
+        assert!(!draft.is_dirty(), "a freshly opened draft starts clean");
+
+        let colliding = Scope {
+            dimensions: vec![DimensionSelection {
+                column: "book".to_string(),
+                values: vec!["BK001, BK002".to_string()],
+            }],
+            ..Scope::default()
+        };
+        overwrite_with(&mut draft, &colliding);
+
+        // The painted summary really does collide — otherwise this test
+        // would not be exercising the branch it claims to.
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Text("book ∈ BK001, BK002".to_string()),
+            "the two scopes must paint identically for this test to mean anything"
+        );
+        // ...but the draft is still dirty, and still queues a write,
+        // because `source` — the actual object — is not the same table.
+        assert!(
+            draft.is_dirty(),
+            "a genuinely different scope must register as dirty even when its summary collides"
+        );
+        assert!(
+            draft
+                .writes_by_destination()
+                .contains_key(&Destination::Doc)
+        );
     }
 
     /// The shared walk every domain gets for free (`Domain::objects`,

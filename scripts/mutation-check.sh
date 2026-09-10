@@ -5384,6 +5384,47 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
             });' \
   geode-shell o_overwrites_the_saved_scope_with_the_frames_current_one
 
+# ---- Phase 4c part 2a, Task 5 review round 1: fork disclosure + -------
+# ---- source-based dirtiness --------------------------------------------
+#
+# The Major: `o` used to fork a desk-owned scope into the user layer with
+# no disclosure at all — `arm_overwrite` decides `forks` from whether the
+# user layer already owns the object, independently of the prompt it
+# feeds, so this is the one line that decision collapses to.
+#
+# The Minor: `is_dirty`/`writes_by_destination` used to compare only the
+# painted `Selects`/`Text filter` summaries, which are lossy on purpose
+# (`selects_summary` joins values with ", "). A single value containing
+# ", " paints identically to several separate values, so a fields-only
+# comparison would call that pair "no change" and `o` would silently
+# refuse to write. Comparing `source` (the actual object) closes it.
+
+run_mutation "objectdialog: o discloses no fork for a desk-owned scope" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let forks = editing_row(shell).is_some_and(|row| row.layer != Layer::User);' \
+  '    let forks = false;' \
+  geode-shell o_on_a_desk_owned_scope_discloses_the_fork_before_writing
+
+run_mutation "objectdialog: is_dirty ignores a source-only change" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    pub fn is_dirty(&self) -> bool {
+        self.fields != self.baseline || self.source != self.baseline_source
+    }' \
+  '    pub fn is_dirty(&self) -> bool {
+        self.fields != self.baseline
+    }' \
+  geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+
+run_mutation "objectdialog: writes_by_destination ignores a source-only change" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.source != self.baseline_source {
+            out.entry(Destination::Doc).or_default();
+        }' \
+  '        if false {
+            out.entry(Destination::Doc).or_default();
+        }' \
+  geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

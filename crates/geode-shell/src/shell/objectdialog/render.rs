@@ -600,10 +600,26 @@ fn handle_edit_key(
                 "the object's own rows are not filtered — escape goes back to the list".to_string(),
             );
         }
-        // `enter` and `i` have no row to act on in a Views draft: its
-        // fields are a choice and a list, and both are `space`'s.
+        // `enter` and `i` have no row to act on in any draft built so
+        // far: every field is a choice, a list, or (Groupings' `slot`,
+        // both of Scopes' rows) a read-only `Text` — and `space` only
+        // helps for the first two. Checked here rather than always
+        // pointing at `space`, because that used to be false on a
+        // Scopes row: pressing `space` right after would immediately say
+        // "nothing on this row changes with space" — two verbs
+        // disagreeing about the same row in the same breath.
         NormalCommand::Commit | NormalCommand::EditText => {
-            set_notice(shell, "press space to change the selected row".to_string());
+            let steppable = shell
+                .object_dialog
+                .as_ref()
+                .and_then(|state| state.draft.as_ref())
+                .is_some_and(selected_field_is_steppable);
+            let notice = if steppable {
+                "press space to change the selected row"
+            } else {
+                "this row is read-only — nothing here has a verb"
+            };
+            set_notice(shell, notice.to_string());
         }
         // A letter this stage has no verb for. Named rather than
         // dropped: `d` and `r` have just taught the user that
@@ -624,6 +640,24 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
         .object_dialog
         .as_mut()
         .and_then(|state| state.draft.as_mut())
+}
+
+/// Would `space` change anything on the row the cursor is on? A
+/// read-only mirror of [`Draft::step_selected`]'s own dispatch — never
+/// calling it, since that mutates — kept in one place so the "press
+/// space" notice and the actual stepping behaviour cannot say different
+/// things about the same row (the defect this function's own call site
+/// fixes: `enter`/`i` used to point at `space` unconditionally, which
+/// was false on a Scopes row).
+fn selected_field_is_steppable(draft: &Draft) -> bool {
+    match draft.selected_row() {
+        Some(EditRow::Field(i)) => !matches!(
+            draft.fields[i].kind,
+            FieldKind::Text(_) | FieldKind::MultiChoice { .. } | FieldKind::OrderedList { .. }
+        ),
+        Some(EditRow::Item { .. }) => true,
+        None => false,
+    }
 }
 
 /// Set the footer notice, if a dialog is open at all.
@@ -882,12 +916,19 @@ fn arm_revert(shell: &mut ShellView) {
 /// verb here" wording the general catch-all in [`handle_edit_key`] uses,
 /// worded identically wherever a stray letter fires.
 ///
-/// Unlike `arm_delete`/`arm_revert`, this has no layer/override
-/// precondition to check: overwriting a desk-owned scope still lands
-/// through `apply::commit_edit`, which forks it into the user layer the
-/// same way any other definitional edit would — the destructive act this
-/// confirm guards is losing the scope's *previous* contents, not which
-/// layer receives the write.
+/// **Whether the write also forks the object is decided here, not by
+/// how destructive it is.** Overwriting a scope the user layer does not
+/// already own lands through `apply::commit_edit` exactly like any other
+/// definitional edit — which forks it into the user layer (spec §4.1),
+/// freezing the desk's copy out. That has to be *disclosed*, in the
+/// prompt, or a trader learns it weeks later when the desk's changes
+/// stop arriving (spec §16) — it is not enough that the confirm already
+/// asks about something else. `editing_row` (already `arm_delete`'s and
+/// `arm_revert`'s own test for "does the user layer own this") answers
+/// it directly; `apply::would_fork` cannot be used here, because it
+/// reads `draft.writes_by_destination()`, which is still empty at arm
+/// time — `overwrite_with` has not run yet, so it would always say
+/// `false` regardless of who owns the object.
 fn arm_overwrite(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_ref() else {
         set_notice(shell, "nothing is open".to_string());
@@ -901,8 +942,9 @@ fn arm_overwrite(shell: &mut ShellView) {
         set_notice(shell, "nothing is open".to_string());
         return;
     }
+    let forks = editing_row(shell).is_some_and(|row| row.layer != Layer::User);
     if let Some(draft) = draft_mut(shell) {
-        draft.confirm = Some(Confirm::Overwrite);
+        draft.confirm = Some(Confirm::Overwrite { forks });
     }
 }
 
@@ -941,15 +983,27 @@ fn run_confirmed(
         }
         // `o`'s confirmed answer. `shell.frame` (an `Entity<Frame>`) is
         // read here, at the gpui call site, precisely so `Domain`'s pure
-        // core never has to know a `Frame` exists — the one place in
-        // this dialog a frame is read at all. The new value replaces the
-        // draft's source and fields (`scopes::overwrite_with`), which is
-        // what makes `commit_edit` see a change to write; it goes
-        // through that same door rather than a direct `config_write`
-        // call, so a failed write still reverts the way any other edit's
-        // does, and `revalidate` runs first so the diagnostics on screen
-        // describe the new content rather than the old.
-        Confirm::Overwrite => {
+        // core never has to know a `Frame` exists — the only place a
+        // `Frame` is read for this dialog at all (an `Entity<InputState>`
+        // is read elsewhere, e.g. the shared filter field, so this is
+        // narrower than "the only entity"). Re-checks the domain rather
+        // than trusting `arm_overwrite`'s own gate — the same "the gate
+        // lives in the acting function, not just the one that arms it"
+        // rule `commit_edit`'s own `blocking_diagnostic` check follows.
+        // The new value replaces the draft's source and fields
+        // (`scopes::overwrite_with`), which is what makes `commit_edit`
+        // see a change to write; it goes through that same door rather
+        // than a direct `config_write` call, so a failed write still
+        // reverts the way any other edit's does, and `revalidate` runs
+        // first so the diagnostics on screen describe the new content
+        // rather than the old. `forks` was already spent on the prompt
+        // (`Confirm::prompt`, chosen back in `arm_overwrite`) — nothing
+        // here needs it again.
+        Confirm::Overwrite { .. } => {
+            if domain != Domain::Scopes {
+                cx.notify();
+                return;
+            }
             let scope = shell.frame.read(cx).scope().clone();
             if let Some(draft) = draft_mut(shell) {
                 scopes::overwrite_with(draft, &scope);
@@ -1652,7 +1706,7 @@ fn confirm_row(
                     Confirm::Delete => "Delete",
                     Confirm::Revert => "Revert",
                     Confirm::Fork => "Copy to user layer",
-                    Confirm::Overwrite => "Overwrite",
+                    Confirm::Overwrite { .. } => "Overwrite",
                 })
                 .on_click(move |_event, window, cx| {
                     go_ahead.update(cx, |shell, cx| {
