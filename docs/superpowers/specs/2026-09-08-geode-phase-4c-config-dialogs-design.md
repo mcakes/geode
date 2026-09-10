@@ -357,6 +357,10 @@ impl Domain {
     /// `false` for `Schema`: the scaffold then shows no `+ New` and no
     /// action block, and a field edit cannot apply at all rather than
     /// being merely refused.
+    ///
+    /// NOT BUILT as of Part 2a — every domain so far is writable, so
+    /// nothing has needed it. It arrives with the schema inspector
+    /// (§9) in Part 2b, which is its only consumer.
     fn writable(self) -> bool;
     fn to_table(self, draft: &Draft) -> toml_edit::Table;
     fn validate(self, draft: &Draft, config: &Config) -> Vec<Diagnostic>;
@@ -670,28 +674,68 @@ harness entries.
 
 ### 8.2 Groupings
 
-- `slot` — `Number`, 1–9.
-- `name` — `Text`.
+- `slot` — **display-only `Text`, not the `Number` this sketch says**
+  (Part 2a ruling). The slot number is the object's own *identity* — the
+  top-level key in `groupings.toml` (`3 = ["book", "lhu"]`) — not a field
+  inside it, so editing it is a rename, and renames are unbuilt (below).
+- ~~`name` — `Text`.~~ **Not built.** Groupings have no name beyond their
+  slot; see the rename ruling below.
 - `dimensions` — `OrderedList` over `pickable_columns(config)`, no
   per-item `width`. All `Doc`.
+
+**Renaming an object is unbuilt everywhere, on a Part 2a ruling**, which
+is why neither this section's `name` nor §8.4's survives. Under
+instant-apply a per-keystroke rename writes a table per prefix while the
+trader types through it, orphaning every intermediate key — so a rename
+needs a committed-edit vocabulary (`Text` that applies on `enter`, Part
+2b) before any domain can offer one. Half-building it on these two
+domains alone was rejected.
 
 ### 8.3 Sources
 
 - `dataset` — `Choice`. `paths` — `Text`. `readiness`, `priority` —
   `Choice`. `poll_interval`, `pending_timeout` — `Text`, duration-parsed
   by the reader. `batch_pattern` — `Text`. All `Doc`.
-- A write here opens the reload prompt of old 4c §5.7, unchanged:
-  "Sources or datasets changed. Reload data now?", backed by the
-  swappable `DataHandle` and a `DataService` restart on the background
-  executor.
+- A write here opens the reload prompt of old 4c §5.7: "Sources or
+  datasets changed. Reload data now?", backed by the swappable
+  `DataHandle` and a `DataService` restart on the background executor.
+  **Not "unchanged" — a Part 2b constraint this sketch predates.** That
+  prompt was designed to hang on an explicit save keystroke, and there
+  is none any more (§16: edits are instant, `s` is deleted). Triggered
+  from the debounced flush instead, it would fire mid-typing — once per
+  250 ms pause while a trader edits a glob. So **Sources cannot ship
+  until `Text` commits on `enter`** (the committed-edit vocabulary §8.2's
+  rename ruling also waits on); the prompt then hangs on that commit.
+  Sources is the one domain of the five where this is load-bearing
+  rather than cosmetic, because its writes restart a service.
 
 ### 8.4 Scopes
 
 Deliberately the thinnest, and the one narrowing of "full CRUD":
 
-- `name` — `Text`. A read-only summary of what the scope selects.
-- Action rows: `Load into frame`, `Replace with the current scope`,
-  `Delete`, and `Revert to desk` when overridden.
+- **Two read-only `Text` fields, not one** (as built): `Selects`, in the
+  scope bar's own `column ∈ values` spelling, and `Text filter`. The
+  single `name` field this sketch asked for is not built — see §8.2's
+  rename ruling — and a scope carries no as-of to show beside them:
+  `Frame::save_scope` saves the `Scope` alone, and `scope_to_table`'s
+  three keys (`dimensions`, `text`, `expression`) have no fourth. As-of
+  is frame state, not scope state.
+- Action rows: `o` (`Replace with the current scope`), `d`
+  (`Delete`), and `r` (`Revert to desk`) when overridden.
+  **`Load into frame` is not built**, on a Part 2a ruling: it would
+  duplicate `:scope load <name>` and the palette's own `scope::<name>`
+  action, and it would be the only row in any of these dialogs that
+  mutates frame state rather than config — with nothing to confirm,
+  since it destroys nothing.
+
+`o` confirms through `Confirm::Overwrite { forks: bool }`, whose payload
+`render::arm_overwrite` decides from the object's winning layer so the
+prompt can disclose a fork *before* it happens — `o` reaches
+`commit_edit` directly and so never passes `commit_or_confirm`'s own
+`would_fork` gate (that gate reads the draft's pending writes, which are
+empty until the overwrite has been applied). One confirm, not two: the
+fork is disclosed in the prompt rather than asked as a second question,
+keeping §16's single fixed-length `Confirm` row.
 
 A scope's *values* are not edited here. The dimension picker and
 `:scope save` already author them, and a `MultiChoice` editor per
@@ -722,7 +766,8 @@ required the offending text to still be on screen. `Display` appends
 ## 9. The schema inspector
 
 `config::schema` opens the same scaffold as `Domain::Schema`, whose
-`writable()` is `false` (§4), over `datasets` and `dimensions`: browse
+`writable()` is `false` (§4 — neither `Domain::Schema` nor `writable()`
+exists yet; both are Part 2b), over `datasets` and `dimensions`: browse
 the datasets, open one to see its
 columns with type, role, grain, and the `categorical`/`textual` flags,
 each row showing the layer it came from (`Config::explain`).
@@ -760,9 +805,16 @@ which is true of every other modal in this shell.
 
 ## 11. Error handling
 
-- **A write that fails** (permissions, a full disk) shows its `io::Error`
-  text on the object header row and leaves the draft intact so it can be
-  retried. It is never silent, unlike the six existing persists, which
+- **A write that fails** (permissions, a full disk) **reverts** — as
+  built, not "leaves the draft intact so it can be retried", which
+  described the deleted staged-save design. `apply::revert_failed_write`
+  restores the pre-edit documents through `apply_reload`, rebuilds the
+  draft from the config that just went back (so no row keeps painting a
+  value the file refused), and reports on **`ShellView`'s status bar**,
+  not only the dialog's notice: `pending_config_write` outlives the
+  dialog that started it on purpose, so the commonest way to reach this
+  path has no dialog left on screen. It is never silent, unlike the six
+  existing persists, which
   warn to stderr — those keep that behaviour when called from their own
   paths and gain the dialog's reporting when called from one.
 - **A file that does not parse** is refused untouched by
@@ -814,9 +866,12 @@ particular attention to the ones a green suite would not see:
   shadowed layer's;
 - revert deleting the doc entry but not the `overrides.toml` entry;
 - validation run against the merged doc rather than the draft alone;
-- a field edit writing immediately instead of staging into the draft
-  (§3.2), which would fire the watcher mid-edit and reload a
-  half-finished object;
+- ~~a field edit writing immediately instead of staging into the
+  draft~~ — **void**: staging and the `s` key are deleted (§16), so this
+  names machinery that no longer exists. Its replacement, built in Part
+  2a, is that an **error-severity diagnostic blocks the batch**, checked
+  inside `apply::commit_edit` itself rather than only by its caller, so
+  no call site can route around it;
 - `escape` on a dirty draft discarding it without the confirm row;
 - a held `OrderedList` item moving the selection rather than the item;
 - `config_write` writing in place rather than temp-and-rename.
@@ -995,11 +1050,15 @@ the correction.
   joining it, so the row list never changes length. Discard is gone with
   the staging it guarded.
 - **Diagnostics attach to the object, not to the field whose `key`
-  matches `path`** (§7.2 step 3, §8.5). `Diagnostic` has no `path` field
-  yet — adding one touches all of its construction sites across
-  `geode-core` plus every reader that would need to fill it in, none of
-  which Part 1's tasks built. Validation still runs (§7.2 steps 1–2); its
-  diagnostics render against the object header instead.
+  matches `path`** (§7.2 step 3, §8.5). **`Diagnostic.path` now exists**
+  — `path: Option<String>` and `with_path` landed with the Phase 4b
+  merge, *after* this section was written, so the sentence that used to
+  stand here ("`Diagnostic` has no `path` field yet") is false and is
+  corrected rather than kept. The remaining blocker is the other half:
+  no *reader* fills it in, so there is nothing for a field row to match
+  on. Filling it (`ViewSpec::from_doc` and its siblings) is Part 2b.
+  Validation still runs (§7.2 steps 1–2); its diagnostics render against
+  the object header meanwhile.
 - **The write door takes a `user_dir`, has no `read`, and returns
   `Result<(), String>`.** §6's signature block is a sketch and all three
   of its details are false as built (`geode-shell/src/config_write.rs`):
@@ -1080,7 +1139,7 @@ list. It is not blocked on a prerequisite: `ShellEvent` already carries
 diagnostics in hand at the point it decides to keep the last good
 config.
 
-Its cost has risen since the sketch. `bridge.rs:209` discards the
+Its cost has risen since the sketch. `bridge.rs:303` discards the
 presentation diagnostics on the reload path — `let (views, _) =
 load_views(config)` — exactly as `data_setup` does at startup, where
 they *are* reported. So a `view_presentation.toml` entry naming a view
@@ -1091,3 +1150,60 @@ presentation name is silent in every path after startup: the trader
 renames a view, their personal order and hidden columns quietly stop
 applying, and nothing anywhere says so. Whichever of the two is built
 first should carry the other's fix with it.
+
+## 17. As built — Part 2a
+
+Part 2a added reverse stepping, the error-diagnostic gate, and the two
+thin adapters (`Groupings`, `Scopes`). §8.2, §8.4, §11 and §13 above are
+corrected in place where they disagree with what shipped; this section
+records what has no home in those sections. The three dialogs that
+remain — Sources, the schema inspector, per-field diagnostics, width
+editing — are Part 2b.
+
+- **Reverse stepping is one key, not a per-kind gap.**
+  `NormalCommand::ToggleBack` (`shift+space`) joined `dialogmode.rs`, and
+  both `Choice` and `Number` consume it through `Draft::step_selected`.
+  §16's "Unmet done-state items" item 3 is closed. Implementing it for
+  `Number` alone would have satisfied a `Number`-shaped task name while
+  leaving `Choice` wrapping forward with no way back, which is why the
+  task was the key rather than either consumer.
+- **The error-diagnostic gate lives inside `apply::commit_edit`.**
+  `commit_or_confirm` keeps its own earlier `blocking_diagnostic` peek,
+  but that is UX only — it avoids asking a trader to confirm a fork and
+  then refusing it. The safety property is the check *inside*
+  `commit_edit`, which both of its call sites therefore pass through. A
+  `Severity::Warning` never blocks; only `Severity::Error` does, which is
+  what makes `Domain::Scopes` unblockable in practice —
+  `saved_scopes_from_doc` only ever warns.
+- **`d`/`r` join the same batch as a field edit**, through
+  `apply::commit_removal`, and are as instant as everything else. Two
+  deliberate asymmetries: a removal skips `blocking_diagnostic` entirely
+  (the diagnostic it would be gated on is usually the very thing the
+  removal exists to clear), and it flushes with `Duration::ZERO` rather
+  than `WRITE_DEBOUNCE`, since a confirmed removal is one already-decided
+  act with nothing to coalesce. `commit_removal` takes bare `(doc,
+  object)` keys rather than the `ObjectEdit`-valued map `commit_edit`
+  fills — a structural choice, so no future caller has a parameter in
+  which to smuggle a value past the gate it skips.
+- **A grouping's object is a bare array, not a table.** `3 = ["book",
+  "lhu"]` is the first adapter whose rendered object is not a
+  `toml_edit::Table`, which is why `Domain::to_table`, `set_object`,
+  `object_text` and `apply::object_value`/`run_writes` all carry a
+  `toml_edit::Item`. The §4 signature block still shows
+  `-> toml_edit::Table`; `Item` is what shipped.
+- **`Draft` carries `baseline_source` beside `baseline`.** Both Scopes
+  fields are painted summaries, so comparing `fields` against `baseline`
+  alone could call a real change clean: two different scopes can render
+  the same `column ∈ values` line. `is_dirty` is
+  `fields != baseline || source != baseline_source`, and
+  `writes_by_destination` consults `source` the same way. This was a
+  review finding rather than a design decision — the collision is
+  unreachable today for values without `", "` in them, but any elision
+  added to the summary would have made `o` silently stop writing whole
+  classes of scopes, with no test able to see it.
+- **Still open, and named so it is not rediscovered:** `drifted` is on
+  every `ObjectRow` and still always `false` (§5.2's `overrides.toml` is
+  unbuilt), and `ShellEvent::ReloadRejected` is still not built — §16's
+  "Deferred, and not blocked on anything" note stands unchanged, as does
+  its observation that `bridge.rs:303` discards the presentation
+  diagnostics on the reload path.
