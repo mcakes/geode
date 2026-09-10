@@ -1334,6 +1334,55 @@ fn a_refused_keymap_mod_is_in_the_diagnostics_entity_at_startup(cx: &mut gpui::T
     );
 }
 
+/// The third startup group, and the one that cannot be recomputed: what
+/// `build_keymap` reported. `apply_reload` extends `keymap_diags`;
+/// `ShellView::new` has no way to rebuild them (the registry as it stood
+/// at startup is gone), so they ride on `ShellServices::keymap_
+/// diagnostics` — filled by `main.rs`, and modelled here the same way.
+/// Without it a binding naming an action nothing registered was logged at
+/// startup and then absent from the diagnostics tile until some later hot
+/// reload happened to put it there (review finding, Important 2).
+#[gpui::test]
+fn startup_keymap_diagnostics_are_in_the_diagnostics_entity(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let user_doc = LayerDoc {
+        layer: Layer::User,
+        name: "keymap".to_string(),
+        file: "<test:user>".into(),
+        table: "[[bindings]]\n[bindings.keys]\n\"ctrl+q\" = \"nosuch::action\"\n"
+            .parse()
+            .unwrap(),
+    };
+    let (keymap, keymap_diags) = crate::keymap::build_keymap(
+        &[
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            user_doc,
+        ],
+        default_mod(),
+        &services.registry,
+    );
+    assert!(
+        keymap_diags
+            .iter()
+            .any(|d| d.message.contains("nosuch::action")),
+        "fixture check: build_keymap must have diagnosed the unknown action, got {keymap_diags:?}"
+    );
+    // Exactly what `main.rs` does with the pair.
+    services.keymap = keymap;
+    services.keymap_diagnostics = keymap_diags;
+
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
+    let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
+    assert!(
+        config_diags
+            .iter()
+            .any(|d| d.message.contains("nosuch::action")),
+        "the keymap diagnostic must reach the entity at startup, got {config_diags:?}"
+    );
+}
+
 /// `settings_view::set_add_direction` (the add-direction row's setter,
 /// driven directly for the same reason `set_theme`'s and `set_find_
 /// style`'s tests drive the handler rather than the control) updates

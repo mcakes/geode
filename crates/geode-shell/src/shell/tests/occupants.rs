@@ -576,6 +576,109 @@ fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
     );
 }
 
+/// The reachable half of the same trap, and the one the workspace-switch
+/// story is really about (review finding, Important 1): `ensure_occupants`
+/// keeps occupants for tiles in EVERY workspace, so a switch unmounts the
+/// tile's *element* while its view entity — and the `FocusHandle` it holds
+/// as a field — stays alive. `window.focused` is therefore still `Some`,
+/// the `is_none()` net above cannot fire, and gpui falls back to
+/// `root_node_id` dispatch for a focus id absent from the rendered tree:
+/// the shell's own `on_key_down` never runs and every key is dead.
+///
+/// Focus is put on the tile DIRECTLY here, never through a mouse-down —
+/// a mouse-down is exactly the path that re-arms `pending_focus_restore`,
+/// so clicking would test the arming, not the backstop.
+#[gpui::test]
+fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, rec_focus) = services_with_recorder_focus();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let tile_focus = rec_focus
+        .borrow()
+        .clone()
+        .expect("the recorder's view took a focus handle when it was created");
+    cx.update(|window, cx| tile_focus.focus(window, cx));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        cx.update(|window, _| tile_focus.is_focused(window)),
+        "sanity: the tile's own view holds keyboard focus"
+    );
+
+    // Keys still work while the tile holds focus — the shell root is an
+    // ancestor of the focused node, so `alt-2` bubbles to it.
+    cx.simulate_keystrokes("alt-2");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        2,
+        "sanity: the switch itself happened"
+    );
+
+    let root = shell.read_with(&cx, |s, _| s.focus_handle.clone());
+    assert!(
+        cx.update(|window, _| root.is_focused(window)),
+        "the tile left the visible set holding focus, so the shell root took it back"
+    );
+    cx.simulate_keystrokes("alt-1");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        1,
+        "and the keyboard still reaches the shell afterwards"
+    );
+}
+
+/// The backstop's own restraint, matched to the net's: a tile leaving the
+/// visible set must NOT pull focus off a live shell surface. The palette
+/// is open (its `Input` focused) when the workspace switches, and the
+/// switch is dispatched rather than typed precisely because typing would
+/// go to the palette.
+#[gpui::test]
+fn a_tile_leaving_the_visible_set_leaves_the_palette_focused(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-k");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        palette_is_focused(&shell, &mut cx),
+        "sanity: the palette's filter field is focused while it is open"
+    );
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(
+                &ActionId("workspace::switch_2".to_string()),
+                None,
+                window,
+                cx,
+            );
+        });
+    });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert!(
+        palette_is_focused(&shell, &mut cx),
+        "a tile leaving the visible set never steals focus from a live shell surface"
+    );
+}
+
 /// The net's other half, and why its condition is exactly `is_none()`:
 /// it must never steal focus from a LIVE focused element. The palette's
 /// filter `Input` holds focus while the palette is open and redraws land
@@ -591,18 +694,8 @@ fn the_focus_net_leaves_a_live_focused_input_alone(cx: &mut gpui::TestAppContext
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let palette_focused = |shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext| {
-        cx.update(|window, cx| {
-            shell
-                .read(cx)
-                .palette_input
-                .read(cx)
-                .focus_handle(cx)
-                .is_focused(window)
-        })
-    };
     assert!(
-        palette_focused(&shell, &mut cx),
+        palette_is_focused(&shell, &mut cx),
         "the palette's filter field takes focus when it opens"
     );
 
@@ -610,7 +703,7 @@ fn the_focus_net_leaves_a_live_focused_input_alone(cx: &mut gpui::TestAppContext
         let _ = window.draw(cx);
     });
     assert!(
-        palette_focused(&shell, &mut cx),
+        palette_is_focused(&shell, &mut cx),
         "a redraw with a live focused element leaves it focused"
     );
     let root = shell.read_with(&cx, |s, _| s.focus_handle.clone());
@@ -1203,4 +1296,18 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
         1,
         "a dropped request leaves the kind openable: {diagnostics:?}"
     );
+}
+
+/// Does the command palette's own filter `Input` hold focus? (The
+/// toolbar's scope-bar field has `filter_is_focused` in `tests/mod.rs`;
+/// this is the palette's, used by the two focus-restraint tests above.)
+fn palette_is_focused(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> bool {
+    cx.update(|window, cx| {
+        shell
+            .read(cx)
+            .palette_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+    })
 }

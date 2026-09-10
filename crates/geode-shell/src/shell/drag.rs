@@ -116,7 +116,12 @@ pub(super) const TILE_DRAG_GHOST_OFFSET: f32 = 12.0;
 /// sloppy mod+click can never rearrange the layout. Recorded decisions:
 /// - mod+down does NOT change focus at arm time — focus follows the moved
 ///   tile only on a successful drop, and an abandoned below-threshold
-///   mod+click leaves everything untouched, focus included.
+///   mod+click leaves everything untouched, focus included. That is about
+///   TILE focus (the workspace's own notion). WINDOW focus is separate:
+///   the grab re-arms `pending_focus_restore` exactly as a plain tile
+///   click does, so keyboard focus is back on the shell root by the next
+///   frame either way — see the comment at that assignment for the trap
+///   this closes.
 /// - The mod key does NOT need to stay held once the drag is armed
 ///   (standard WM behavior — releasing the modifier mid-drag continues
 ///   the drag; only the mouse button's release ends it). Modifier state

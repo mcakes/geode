@@ -94,19 +94,24 @@ impl Render for ShellView {
             self.focus_handle.focus(window, cx);
         }
 
-        // The safety net under that flag (focus-trap fix): a window with
-        // NOTHING focused sends keys nowhere at all, so every shell chord
-        // is dead until a mouse click claims focus somewhere. That state
-        // is reachable whenever the view holding the focused
-        // `FocusHandle` is unmounted while gpui's `Window::focus` still
-        // points at its id — the id outlives the handles, and
-        // `Window::focused` (which resolves the id back through the focus
-        // map, refusing a zero-refcount entry — verified against the
-        // pinned rev's `FocusHandle::for_id`) then reports `None`. Every
-        // path we know of that can do this also arms
-        // `pending_focus_restore` above; this catches the one we haven't
-        // thought of, one frame later, with no key lost that a click
-        // wouldn't have lost anyway.
+        // The safety net under that flag: a window with NOTHING focused
+        // sends keys nowhere at all, so every shell chord is dead until a
+        // mouse click claims focus somewhere.
+        //
+        // Read the scope narrowly (review finding, Important 1). This
+        // covers exactly one thing: a focused `FocusHandle` that was
+        // actually DROPPED — every clone of it gone, so `Window::focused`
+        // (which resolves the stored id back through the focus map and
+        // refuses a zero-refcount entry — pinned rev's
+        // `FocusHandle::for_id`) reports `None`. In this crate that means
+        // a focus-tracking tile view destroyed while focused, i.e. its
+        // tile CLOSED. It does NOT cover a workspace switch: occupants
+        // are retained for tiles in every workspace (`fill_all_tiles`),
+        // so a switched-away view is unmounted but very much alive,
+        // focus still `Some`, and this branch never fires. That case is
+        // handled where it is actually visible — `ensure_occupants`'s
+        // departed-tile backstop, just below — and the two are
+        // complementary, not redundant.
         //
         // The condition is EXACTLY `is_none()`, deliberately: taking
         // focus is only unambiguously right when nobody has it. Anything
@@ -576,6 +581,12 @@ impl Render for ShellView {
                         // mouse-down instead arms a pending tile drag
                         // (tile-drag task) — and deliberately does NOT
                         // focus: see `try_arm_tile_drag` / `TileDrag`.
+                        // "Does not focus" is about TILE focus, the
+                        // workspace's own notion. Window focus is a
+                        // separate matter: the grab re-arms
+                        // `pending_focus_restore` like every other tile
+                        // mouse-down, so keyboard focus is back on the
+                        // shell root by the next frame regardless.
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |view, event: &MouseDownEvent, window, cx| {

@@ -668,6 +668,11 @@ fn build_shell_services(
         // hash_names()`, which only exists once `registry` — moved into
         // `services` above — is built).
         action_tail: Arc::new(Mutex::new(ActionTail::new())),
+        // What `build_keymap` reported above. Printed already; carried
+        // here because `ShellView::new` cannot recompute it (it needs
+        // this registry, not just the config) and the diagnostics tile's
+        // config section would otherwise miss it until a hot reload.
+        keymap_diagnostics: keymap_diags,
     };
     (services, desk, user, bridge, diagnostics_factory)
 }

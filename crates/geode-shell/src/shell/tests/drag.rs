@@ -715,11 +715,15 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
     // tracks its focus handle, as `DataTable` does), and switching to
     // the empty workspace 2 unmounted it — the orphaned-`FocusId` state
     // `pending_focus_restore` exists for, in which `handle_key_down`
-    // stops firing until something claims focus again. The grab itself
-    // re-arms that restore (`try_arm_tile_drag`), exactly as a plain
-    // tile click does, so the shell has already reclaimed focus by the
-    // draw above and the `alt-1` below still travels the real key
-    // pipeline.
+    // stops firing until something claims focus again — except it is not
+    // orphaned here at all: occupants are retained for tiles in every
+    // workspace, so the view (and the handle it holds) is alive and
+    // merely unmounted, and gpui falls back to `root_node_id` dispatch,
+    // which reaches none of the shell's key listeners. What saves the
+    // `alt-1` below is `ensure_occupants`'s departed-tile backstop,
+    // firing in the draw above (the grab's own re-arm is real, and has
+    // `a_grab_leaves_the_shell_focused_on_the_next_frame` to itself —
+    // this path no longer depends on it).
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.services.workspaces.active_index()),
@@ -816,6 +820,42 @@ fn a_plain_click_still_focuses_and_never_arms_a_drag(cx: &mut gpui::TestAppConte
         shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
         "no drag arms without the mod key"
     );
+}
+
+/// The grab's own focus restore, isolated from the backstop that also
+/// covers it (round-1 harness finding: with `ensure_occupants`'s
+/// departed-tile backstop in place, deleting this re-arm no longer
+/// failed the workspace-switch test — the backstop caught it instead,
+/// leaving the re-arm's own behaviour untested).
+///
+/// Nothing leaves the visible set here, so the backstop cannot fire and
+/// this is the re-arm alone. The invariant it upholds is the one
+/// `a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame`
+/// states for a plain click: after ANY tile mouse-down, the shell root
+/// holds keyboard focus again on the next frame. A grab is a tile
+/// mouse-down, and the fixture's recorder takes focus on it exactly as
+/// `DataTable` would.
+#[gpui::test]
+fn a_grab_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
+    let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
+    cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.tile_drag.is_some()),
+        "sanity: the grab armed a drag, so the click-to-focus tail was skipped"
+    );
+
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let root = shell.read_with(&cx, |shell, _| shell.focus_handle.clone());
+    assert!(
+        cx.update(|window, _| root.is_focused(window)),
+        "the grab re-armed the focus restore, so the shell root has focus again"
+    );
+
+    // Leave no drag in flight for the fixture's teardown.
+    cx.simulate_mouse_up(grab, MouseButton::Left, gpui::Modifiers::none());
 }
 
 /// Review blocker regression: a keystroke mid-drag flips gpui's

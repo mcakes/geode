@@ -1657,11 +1657,13 @@ run_mutation "hosting: a closed tile drops its occupant" \
 run_mutation "hosting: leaving the screen is announced" \
   crates/geode-shell/src/shell/occupants.rs \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             if let Some(o) = self.occupants.get(id) {
                 o.content.set_visible(false, cx);
             }
         }' \
   '        for id in self.visible_tiles.difference(&active) {
+            any_tile_left_the_screen = true;
             let _ = id;
         }' \
   geode-shell \
@@ -5181,7 +5183,7 @@ run_mutation "focus: the drag grab re-arms the focus restore" \
   '        self.pending_focus_restore = true;
         cx.stop_propagation();' \
   '        cx.stop_propagation();' \
-  geode-shell switching_workspaces_mid_tile_drag_cancels_with_nothing_applied
+  geode-shell a_grab_leaves_the_shell_focused_on_the_next_frame
 
 run_mutation "focus: a window with nothing focused gets the shell root back" \
   crates/geode-shell/src/shell/render.rs \
@@ -5208,6 +5210,32 @@ run_mutation "focus: the no-focus net never steals from a live focused element" 
         }' \
   geode-shell the_focus_net_leaves_a_live_focused_input_alone
 
+# The `is_none()` net above cannot see a workspace switch (occupants are
+# retained across workspaces, so focus stays `Some`); `ensure_occupants`
+# carries the backstop that can. Same two directions: it must reclaim,
+# and it must not reclaim from a live shell surface.
+run_mutation "focus: a departed tile's focus returns to the shell root" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            self.focus_handle.focus(window, cx);
+        }' \
+  '        if any_tile_left_the_screen
+            && let Some(focused) = window.focused(cx)
+            && !self.holds_shell_focus(&focused, cx)
+        {
+            let _ = &focused;
+        }' \
+  geode-shell a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell
+
+run_mutation "focus: the departed-tile backstop spares the shell's own surfaces" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            && !self.holds_shell_focus(&focused, cx)' \
+  '            && !false' \
+  geode-shell a_tile_leaving_the_visible_set_leaves_the_palette_focused
+
 # ---- startup config diagnostics reach the entity (2026-09-09) ---------
 #
 # The mutation is the old code: seed the entity from
@@ -5226,6 +5254,16 @@ run_mutation "diagnostics: startup seeding folds in the computed config diagnost
             diags' \
   '            services.config.diagnostics.clone()' \
   geode-shell a_modules_default_key_is_in_the_diagnostics_entity_at_startup
+
+# The fourth group is the one that cannot be recomputed — it rides on
+# `ShellServices::keymap_diagnostics` — so dropping the extend is silent
+# in a way the other three are not: nothing else would ever put a
+# `build_keymap` diagnostic in front of a trader at startup.
+run_mutation "diagnostics: the startup seeding carries build_keymap's own diagnostics" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            diags.extend(services.keymap_diagnostics.iter().cloned());' \
+  '' \
+  geode-shell startup_keymap_diagnostics_are_in_the_diagnostics_entity
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
