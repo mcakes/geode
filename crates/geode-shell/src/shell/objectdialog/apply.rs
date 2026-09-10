@@ -88,7 +88,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use geode_core::config::{CONFIG_VERSION, Config, Layer, LayerDoc};
+use geode_core::config::{CONFIG_VERSION, Config, Layer, LayerDoc, Severity};
 use gpui::Context;
 
 use super::{Destination, Domain};
@@ -292,6 +292,33 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         .is_some_and(|row| row.layer != Layer::User)
 }
 
+/// The open draft's first error-severity diagnostic, formatted as the
+/// notice a refused commit shows — or `None` when nothing blocks it.
+///
+/// Spec §7.1's no-carry-forward rule: `reload::decide` rejects any
+/// config holding an error diagnostic, so an edit `Domain::validate`
+/// rated `Severity::Error` must never reach the batch — the merge would
+/// be refused a flush later while the file write still fired, leaving
+/// memory and disk disagreeing. `Severity::Warning` never matches: a
+/// desk renaming a column produces a warning by design (a stale name is
+/// meant to be ignorable, not fatal), and blocking on it would make a
+/// personal file unsaveable through the dialog built to manage it.
+///
+/// `Severity`, not "has any diagnostics", is the sole discriminator —
+/// see `an_edit_with_only_warnings_still_joins_the_batch` for the test
+/// that pins the difference.
+pub(super) fn blocking_diagnostic(shell: &ShellView) -> Option<String> {
+    let diagnostic = shell
+        .object_dialog
+        .as_ref()?
+        .draft
+        .as_ref()?
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Severity::Error)?;
+    Some(format!("not saved — {}", diagnostic.message))
+}
+
 /// Record the draft's change and put it on the debounced queue.
 ///
 /// The keystroke's whole job. It does **not** merge and does **not**
@@ -308,6 +335,18 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
 /// to prevent. The draft keeps the value, and the row still paints it,
 /// which is the honest picture of a shell with nowhere to write.
 pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
+    // The actual gate: checked here, inside the one function every path
+    // that can queue a batch calls, rather than trusted to each caller.
+    // `render::commit_or_confirm` also checks this early (see
+    // `blocking_diagnostic`'s own doc) so a `Confirm::Fork` question is
+    // never asked over an edit that can never be saved — but that early
+    // check is a UX nicety, not the safety property. This one is: it
+    // covers `run_confirmed`'s `Confirm::Fork` arm, which calls this
+    // function directly, and any future caller, without depending on
+    // anything about how keys are dispatched while a confirm is armed.
+    if let Some(notice) = blocking_diagnostic(shell) {
+        return Some(notice);
+    }
     let edits = edits_for(shell);
     if edits.is_empty() {
         return None;

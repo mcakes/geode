@@ -77,7 +77,7 @@
 
 use std::rc::Rc;
 
-use geode_core::config::{Layer, Severity};
+use geode_core::config::Layer;
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -683,29 +683,16 @@ fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if !dirty {
         return;
     }
-    // Spec §7.1's no-carry-forward rule: `reload::decide` rejects any
-    // config holding an error-severity diagnostic, so an edit the
-    // reader itself rates `Severity::Error` must never reach the batch
-    // — the merge would be refused a flush later while the file write
-    // still fired, leaving memory and disk disagreeing (see
-    // `apply`'s module doc). The draft is left exactly as the keystroke
-    // made it: this refuses only the *commit*, not the field mutation
-    // that already happened, so the trader can see and correct what
-    // they typed rather than having it reverted out from under them.
-    // Warnings do not reach here — a stale name warns by design, and
-    // blocking on that would make a personal file unsaveable.
-    if let Some(diagnostic) = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .and_then(|draft| {
-            draft
-                .diagnostics
-                .iter()
-                .find(|d| d.severity == Severity::Error)
-        })
-    {
-        set_notice(shell, format!("not saved — {}", diagnostic.message));
+    // An early, UX-only check: skip the fork question entirely for an
+    // edit that can never be saved, rather than asking the trader to
+    // confirm a fork and then refusing it. The actual gate is
+    // `apply::blocking_diagnostic` itself, checked again inside
+    // `apply::commit_edit` — this call and `run_confirmed`'s
+    // `Confirm::Fork` arm are both refused by that inner check
+    // regardless of this one, so this dialog has exactly one *safety*
+    // gate even though it has two call sites into it.
+    if let Some(notice) = super::apply::blocking_diagnostic(shell) {
+        set_notice(shell, notice);
         cx.notify();
         return;
     }
@@ -908,7 +895,12 @@ fn run_confirmed(
     };
     match confirm {
         // The fork was the point of the question; answering yes applies
-        // exactly the edit that armed it, down the one commit path.
+        // exactly the edit that armed it, down the one commit path. This
+        // is the second of `commit_edit`'s two call sites — it skips
+        // `commit_or_confirm`'s early `blocking_diagnostic` peek, but
+        // `commit_edit` checks the same thing itself, so an edit an
+        // error diagnostic rejects still cannot join the batch from
+        // here either.
         Confirm::Fork => {
             if let Some(notice) = super::apply::commit_edit(shell, cx) {
                 set_notice(shell, notice);

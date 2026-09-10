@@ -3533,12 +3533,33 @@ run_mutation "objectdialog: a definitional change forks without asking" \
 # never matches, so the batch check below it never sees a reason to
 # refuse. Every other objectdialog test stays green (none of them ever
 # put an error diagnostic on a draft); only a test that does can see it.
+# `blocking_diagnostic` (apply.rs) is the one check both call sites into
+# `commit_edit` share (render.rs's `commit_or_confirm` peeks it early for
+# UX; `commit_edit` itself checks it again, unconditionally). Disabling
+# it here disables the gate everywhere at once — this is CI's regression
+# test for the whole rule, not just one caller of it.
 run_mutation "objectdialog: an error diagnostic no longer blocks the batch" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '.find(|d| d.severity == Severity::Error)' \
-  '.find(|d| d.severity == Severity::Warning && false)' \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '.find(|d| d.severity == Severity::Error)?;' \
+  '.find(|_d| false)?;' \
   geode-shell \
   an_edit_the_reader_rejects_does_not_join_the_batch
+
+# The other failure mode of the same rule: gate on "has a diagnostic" —
+# no severity check at all — rather than "has an error", and a
+# `Warning` blocks too. A desk renaming a column produces a `Warning`
+# by design (`views::validate`'s dataset check); this is precisely the
+# mutation that would make that trader's personal `view_presentation.
+# toml` unsaveable through the dialog built to manage it, and every
+# blocking test above stays green because it only ever puts an
+# `Error` on the draft — none of them can see a severity check
+# widening.
+run_mutation "objectdialog: a warning blocks the batch as if it were an error" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '.find(|d| d.severity == Severity::Error)?;' \
+  '.find(|_d| true)?;' \
+  geode-shell \
+  an_edit_with_only_warnings_still_joins_the_batch
 
 # `Config::all_docs` is the other half of the loader split: it is what
 # hands `from_docs` the documents to merge, and dropping the layers below

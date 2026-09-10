@@ -631,6 +631,154 @@ fn an_edit_the_reader_rejects_does_not_join_the_batch(cx: &mut gpui::TestAppCont
     );
 }
 
+/// **The gate is inside `commit_edit` itself, not only in front of it.**
+///
+/// `commit_or_confirm`'s own early check
+/// (`apply::blocking_diagnostic`) is a UX nicety — it skips asking to
+/// fork an edit that can never be saved — but `run_confirmed`'s
+/// `Confirm::Fork` arm calls `apply::commit_edit` directly, bypassing
+/// that early check entirely. This test answers the fork question
+/// after the diagnostic turns to `Error`, which the real dialog cannot
+/// do today (armed, every other key is claimed and dropped, so nothing
+/// can call `revalidate` in between) — the point is to prove
+/// `commit_edit` itself refuses regardless of *how* the draft came to
+/// carry an error, rather than relying on that key-claiming behaviour
+/// as the reason this call site is safe.
+#[gpui::test]
+fn a_confirmed_fork_still_refuses_an_error_diagnostic(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A second dataset, so the `Dataset` choice has somewhere to step to
+    // and arms `Confirm::Fork` — same fixture as
+    // `a_definitional_change_to_a_desk_view_confirms_before_forking`.
+    let services = desk_view_services(&[(
+        "datasets",
+        "[other_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )]);
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "forking a desk view has to ask first"
+    );
+
+    shell.update(&mut cx, |shell, _| {
+        shell
+            .object_dialog
+            .as_mut()
+            .unwrap()
+            .draft
+            .as_mut()
+            .unwrap()
+            .diagnostics = vec![geode_core::config::Diagnostic {
+            severity: geode_core::config::Severity::Error,
+            layer: None,
+            file: None,
+            message: "dataset 'other_snapshot' does not exist".to_string(),
+            path: None,
+        }];
+    });
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_none()),
+        "the second call site into commit_edit must refuse an error diagnostic exactly as the first one does"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice
+            .as_deref()
+            .is_some_and(|n| n.contains("other_snapshot")),
+        "got {notice:?}"
+    );
+
+    flush_config_write(&mut cx);
+    assert!(
+        std::fs::read_dir(dir.path()).unwrap().next().is_none(),
+        "no file may appear: the fork must not have been applied or written"
+    );
+}
+
+/// **The other half of the rule: a warning must never block.**
+///
+/// A view naming a dataset the schema no longer has is exactly the
+/// reachable, by-design case (`views::validate`'s dataset check) — a
+/// desk renaming a column produces this, and the whole point of it
+/// being a `Warning` rather than an `Error` is that a trader's personal
+/// `view_presentation.toml` must still be editable and saveable through
+/// it. If the gate ever widened from "has an error" to "has any
+/// diagnostic", this is the test that would catch it: the view's
+/// diagnostic is present (and stays present) from the moment the draft
+/// is built, entirely through real keys, with no direct `Draft` access.
+#[gpui::test]
+fn an_edit_with_only_warnings_still_joins_the_batch(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+    )
+    .unwrap();
+    // `tree`'s dataset names nothing in the schema above — the desk-rename
+    // shape `views::validate` warns on rather than errors on.
+    let desk = LayerDoc {
+        layer: Layer::Desk,
+        name: "views".to_string(),
+        file: "<test:desk>".into(),
+        table: "[tree]\ndataset = \"a_renamed_dataset\"\ngrouping = [\"book\"]\n\
+                [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                [[tree.columns]]\nname = \"npv\"\n"
+            .parse()
+            .unwrap(),
+    };
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![datasets, desk],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.diagnostics.iter().any(|diag| diag
+            .severity
+            == geode_core::config::Severity::Warning
+            && diag.message.contains("a_renamed_dataset"))),
+        "the fixture has to actually start with the by-design warning"
+    );
+    assert!(
+        !edit_draft(&shell, &cx, |d| d
+            .diagnostics
+            .iter()
+            .any(|diag| diag.severity == geode_core::config::Severity::Error)),
+        "and nothing about it may be an error"
+    );
+
+    // Past `Dataset` and onto the `Columns` list's first item, then hide
+    // it — a real, ordinary presentation edit.
+    cx.simulate_keystrokes("j j space");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.pending_config_write.is_some()),
+        "a warning-only draft must still be able to join the batch"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        None,
+        "the edit applied cleanly — there is nothing to announce"
+    );
+
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
+        .expect("a warning must not have stopped the write");
+    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+}
+
 /// **The requirement, in one test.** Changing a config field is INSTANT:
 /// the keystroke changes what the dialog shows, with no save key — and
 /// the config and the file both follow on their own, together, a
