@@ -55,6 +55,7 @@ cargo bench -p geode-blotter                           # run criterion benchmark
 zsh scripts/mutation-check.sh                          # mutation harness (461 entries) — see below
 zsh scripts/mutation-check.sh "scope:"                 # just the entries whose name contains a substring
 zsh scripts/mutation-check.sh --changed                # only entries whose file changed since main (the everyday form)
+zsh scripts/mutation-check.sh --anchors-only           # no cargo: report stale or ambiguous anchors (~10 s) — run before every merge
 ```
 
 CI (`.github/workflows/ci.yml`) runs the four checks above plus `cargo check -p geode-shell --features test-support --all-targets` (added in Phase 3c, handoff finding M14: `test-support` is the feature modules' tests depend on, and nothing was otherwise keeping it building) on **both macOS and Windows** — keep both platforms building.

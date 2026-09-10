@@ -41,8 +41,22 @@
 #     earlier abort did exactly that, and the mutation was found committed
 #     to a working tree days later.
 #
-# Usage: zsh scripts/mutation-check.sh [--changed[=REF]] [substring]
+# Usage: zsh scripts/mutation-check.sh [--anchors-only] [--changed[=REF]] [substring]
 #   (from the repo root)
+#
+# --anchors-only runs no cargo at all: it checks every selected entry's
+# anchor against its file and reports the ones that no longer match
+# (ANCHOR) or match more than once (AMBIG), then a one-line summary.
+# About ten seconds over the whole file. Run it before every merge and after
+# any edit near an anchored line — a normal run reports these two only
+# for the entries it happens to select, and an ambiguous anchor is the
+# quiet one: `replace(..., 1)` mutates the FIRST match, so an entry whose
+# anchor is duplicated by a later verbatim reuse (the final review of the
+# health follow-ups found exactly that — a seed loop copied the ingest
+# sink's emit closure, and the entry guarding the sink mutated the seed
+# instead) keeps printing "caught" while defending nothing. A normal run
+# now prints AMBIG for the entries it does select, and still mutates the
+# first match.
 #
 # With a substring, only entries whose name contains it are run — for
 # iterating on the entries you just added. Always finish with an unfiltered
@@ -130,6 +144,11 @@ trap 'cleanup; exit 143' TERM
 #                                           back to the full suite for a
 #                                           plain caught/SURVIVED verdict
 # Omitting `test_filter` keeps the old behaviour: run the full crate suite.
+anchors_only=0
+if [[ "${1:-}" == --anchors-only ]]; then
+  anchors_only=1
+  shift
+fi
 changed_ref=""
 if [[ "${1:-}" == --changed ]]; then
   changed_ref="main"
@@ -140,6 +159,9 @@ elif [[ "${1:-}" == --changed=* ]]; then
 fi
 only="${1:-}"
 skipped=0
+checked=0
+stale=0
+ambiguous=0
 changed_files=""
 if [[ -n "$changed_ref" ]]; then
   # Computed once, now, before any entry mutates a file — the harness
@@ -169,24 +191,38 @@ run_mutation() {
   if [[ "$pkg" == "geode-app" ]]; then
     target_flag="--bins"
   fi
-  cp "$file" "$bak"
-  in_flight="$file"
-  local rc=0
-  python3 - "$file" "$from" "$to" <<'PY' || rc=$?
+  checked=$((checked + 1))
+  # How many times the anchor occurs, checked before anything is written.
+  # 0 is a stale entry; more than 1 is an ambiguous one, and both are
+  # findings whether or not cargo runs afterwards.
+  local hits
+  hits=$(python3 - "$file" "$from" <<'PY'
 import sys, pathlib
-p = pathlib.Path(sys.argv[1]); s = p.read_text()
-if sys.argv[2] not in s:
-    print("ANCHOR-MISSING"); sys.exit(3)
-p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
+print(pathlib.Path(sys.argv[1]).read_text().count(sys.argv[2]))
 PY
-  if (( rc != 0 )); then
+  )
+  if (( hits == 0 )); then
     # A stale anchor is a finding in its own right: the mutation no longer
     # names live code. It is not a reason to abort mid-run with the tree
     # half-mutated.
+    stale=$((stale + 1))
     echo "ANCHOR    $name  <-- anchor no longer matches; mutation is stale"
-    restore
     return 0
   fi
+  if (( hits > 1 )); then
+    ambiguous=$((ambiguous + 1))
+    echo "AMBIG x$hits  $name  <-- anchor matches $hits times; only the first is mutated"
+  fi
+  if (( anchors_only )); then
+    return 0
+  fi
+  cp "$file" "$bak"
+  in_flight="$file"
+  python3 - "$file" "$from" "$to" <<'PY'
+import sys, pathlib
+p = pathlib.Path(sys.argv[1]); s = p.read_text()
+p.write_text(s.replace(sys.argv[2], sys.argv[3], 1))
+PY
   if [[ -n "$filter" ]]; then
     if cargo test -p "$pkg" $target_flag -- "$filter" >"$log" 2>&1; then
       if grep -q "running 0 tests" "$log"; then
@@ -5170,4 +5206,7 @@ run_mutation "pool: the refusal warning is latched once per worker" \
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
+fi
+if (( anchors_only )); then
+  echo "checked $checked anchors: $stale stale, $ambiguous ambiguous"
 fi
