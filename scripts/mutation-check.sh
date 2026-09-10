@@ -387,10 +387,20 @@ run_mutation "as-of: NULL book dropped from the values tuple" \
   'None => "'\'\''".to_string(),' \
   geode-data the_predicate_selects_a_null_book_partition_from_either_side
 
+# Anchored through the two lines below the tie-break, not the tie-break
+# alone: the test-only `resolve_from_tables` oracle repeats the same
+# window clause verbatim, and `from generations where dataset = ?` is the
+# nearest line that tells the real resolve apart from it. The intended
+# site is `resolve_generations` -- the oracle is what the tests compare
+# against, so mutating it would break the comparison from the wrong end.
 run_mutation "as-of: source-time tie breaks on gen_id" \
   crates/geode-data/src/query/as_of.rs \
-  'order by source_time desc, gen_id desc' \
-  'order by source_time desc'
+  '                        order by source_time desc, gen_id desc
+                    ) as rn
+             from generations where dataset = ? and source_time <= ?' \
+  '                        order by source_time desc
+                    ) as rn
+             from generations where dataset = ? and source_time <= ?'
 
 # Retention deletes. A wrong query shows a wrong number and can be
 # re-run; a wrong sweep destroys history that no longer exists to be
@@ -577,12 +587,16 @@ run_mutation "generations: the union across tables no longer collapses a generat
 # `rebuild_generations`'s insert, before this line ever runs, and no
 # longer sees this mutation at all. A named filter is required here
 # because the string this anchors is duplicated verbatim in the test-only
-# `resolve_from_tables` oracle right below it in the file, and the two
-# unfiltered occurrences are otherwise indistinguishable to the harness.
+# `resolve_from_tables` oracle right below it in the file. The anchor now
+# carries the last line of the comment above the real one, so it matches
+# `resolve_generations` and nothing else; the filter stays anyway, since
+# it is the test that proves the entry guards what its name says.
 run_mutation "as-of: error propagation" \
   crates/geode-data/src/query/as_of.rs \
-  'rows.collect::<Result<Vec<_>, _>>().map_err(err)' \
-  'Ok(rows.filter_map(|r| r.ok()).collect())' \
+  '    // query that answers with less data than it should and says nothing.
+    rows.collect::<Result<Vec<_>, _>>().map_err(err)' \
+  '    // query that answers with less data than it should and says nothing.
+    Ok(rows.filter_map(|r| r.ok()).collect())' \
   geode-data a_summary_row_that_cannot_be_read_is_an_error_not_a_smaller_answer
 
 # Repaired (review round 1, MIN-7): the previous replacement here
@@ -622,10 +636,17 @@ run_mutation "provenance: a join is labelled with its own instant" \
   '                    resolved_as_of.insert(join.dataset.clone(), oldest);' \
   '                    let _ = oldest;'
 
+# The spine's own resolve, not the join's: `era_for` and the joined-dataset
+# arm below it pick the oldest the same way, so the anchor carries the
+# `resolve_generations` call above it, which names `dataset` in one and
+# `&join.dataset` in the other. The join site has its own entry
+# ("provenance: a join is labelled with its own instant").
 run_mutation "provenance: stalest partition, not newest" \
   crates/geode-data/src/query/compile.rs \
-  'if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
-  'if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
+  '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
+  '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
 
 run_mutation "enum: a stale value degrades rather than failing the query" \
   crates/geode-data/src/query/compile.rs \
@@ -715,10 +736,25 @@ run_mutation "dimensions: a config_version header is not a spurious diagnostic" 
 
 # ---- findings from the phase-2b/prerequisites review round
 
+# Re-anchored (2026-09-09): the bare `let expr = if blank.is_empty() {`
+# occurs twice in this file -- once for a plain measure, once for a
+# DERIVED column -- and `replace(..., 1)` was hitting the measure site,
+# which is not what this entry's name claims to guard. The `blank` build
+# above each differs (`by_depth` vs `attribution_by_depth`), so the anchor
+# now carries it and lands on the derived one. NOTE: the plain-measure
+# site has no entry of its own -- while this anchor pointed at it, the
+# derived blanking (the harder case, and the one §6.3's double-count
+# depends on) was undefended; now it is the measure blanking that is.
 run_mutation "derived: the value is blanked, not just the marker" \
   crates/geode-data/src/query/compile.rs \
-  '            let expr = if blank.is_empty() {' \
-  '            let expr = if true {'
+  '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+            let expr = if blank.is_empty() {' \
+  '                .filter(|d| attribution_by_depth[*d] == Attribution::NonAttributable)
+                .map(|d| d.to_string())
+                .collect();
+            let expr = if true {'
 
 run_mutation "derived: comments are stripped before scanning for columns" \
   crates/geode-data/src/query/compile.rs \
@@ -1004,10 +1040,13 @@ run_mutation "order: grouping columns break ties" \
 
 # ---- the snapshot read path (spec §6.6, §6.3)
 
+# A MEASURE, so the site is `f64_in`'"'"'s Float64 arm; `str_in` ends in the
+# same expression verbatim, and the `return ` prefix is what tells them
+# apart at the nearest possible distance.
 run_mutation "snapshot: a null measure is not zero" \
   crates/geode-core/src/snapshot.rs \
-  '(row < values.len() && !values.is_null(row)).then(|| values.value(row))' \
-  '(row < values.len()).then(|| values.value(row))' \
+  '        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));' \
+  '        return (row < values.len()).then(|| values.value(row));' \
   geode-core
 
 # "probe: a blanked cell renders blank, not 0.00" retired (Phase 3c
@@ -1088,10 +1127,15 @@ run_mutation "pool: the tag is echoed, not regenerated" \
 
 # ---- service (spec §5.1)
 
+# The Query arm, which is what `an_outcome_is_addressed_to_the_key_that_asked`
+# reads; the Distinct arm right below copies the same field verbatim and is
+# covered by `a_distinct_query_returns_value_counts_on_the_distinct_event`.
 run_mutation "service: an outcome carries the caller's key" \
   crates/geode-data/src/service.rs \
-  '                    key: r.key,' \
-  '                    key: QueryKey(0),' \
+  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
+                    key: r.key,' \
+  '                RequestKind::Query => sink(DataEvent::Query(QueryOutcome {
+                    key: QueryKey(0),' \
   geode-data \
   an_outcome_is_addressed_to_the_key_that_asked
 
@@ -2314,11 +2358,16 @@ run_mutation "tile: the configured threshold is the one used" \
   geode-blotter \
   a_tiles_stale_threshold_is_the_factorys_configured_value
 
+# `Command::FilterExpr`, which is the arm the named test drives
+# (`filter model_code = 'EURP'`); `Command::FilterText` right below it
+# assigns and requeries identically.
 run_mutation "blotter: :filter narrows only this tile" \
   crates/geode-blotter/src/tile.rs \
-  '                self.tile_scope = scope;
+  '                self.validate_tile_scope(&scope)?;
+                self.tile_scope = scope;
                 self.requery(cx);' \
-  '                self.requery(cx);' \
+  '                self.validate_tile_scope(&scope)?;
+                self.requery(cx);' \
   geode-blotter filter_narrows_only_this_tile_marks_it_and_round_trips_the_session
 
 run_mutation "blotter: an unscoped tile keeps its own filter" \
@@ -2786,10 +2835,17 @@ run_mutation "frame: undo is bounded" \
   '        if false {' \
   geode-shell undo_and_redo_walk_a_bounded_stack
 
+# `push_undo`, not `clear_history` -- both end in the same line, and only
+# the former is "a new set clears redo". `clear_history` is the restored-
+# session path and clears both stacks deliberately.
 run_mutation "frame: a new set clears redo" \
   crates/geode-shell/src/frame.rs \
-  '        self.scope_redo.clear();' \
-  '        let _ = &self.scope_redo;' \
+  '            self.scope_undo.remove(0);
+        }
+        self.scope_redo.clear();' \
+  '            self.scope_undo.remove(0);
+        }
+        let _ = &self.scope_redo;' \
   geode-shell undo_and_redo_walk_a_bounded_stack
 
 run_mutation "frame: a text session pushes once" \
@@ -4793,16 +4849,29 @@ run_mutation "service: an identical re-report restamps its slot, so the calling 
 }' \
   geode-data repeated_identical_polls_at_the_same_rank_do_not_flap_the_decision
 
-# The anchor below occurs twice (one door each); run_mutation replaces the
-# first, which is the discovery door — enough to break the invariant the
-# named test pins. The mutation writes the updated `Lanes` back afterwards,
-# so it breaks ONLY the lock-holding, not the bookkeeping (a mutation that
-# also dropped the commit would be caught by half the module for reasons
-# that have nothing to do with its name).
+# `lanes.offer(emit)` ends both doors, so the anchor carries the
+# discovery lane's own write above it -- the load door writes
+# `lanes.load.insert(...)` instead. Anchoring on the bare line relied on
+# `replace(..., 1)` happening to reach the discovery door first, which is
+# exactly the silent-flip this pass exists to remove. The mutation writes
+# the updated `Lanes` back afterwards, so it breaks ONLY the lock-holding,
+# not the bookkeeping (a mutation that also dropped the commit would be
+# caught by half the module for reasons that have nothing to do with its
+# name).
 run_mutation "service: the discovery door emits after dropping the tracker lock, so two reporters can reorder" \
   crates/geode-data/src/service.rs \
-  '        lanes.offer(emit)' \
-  '        let mut detached = lanes.clone();
+  '        lanes.discovery = Some(LaneValue {
+            health,
+            detail,
+            changed,
+        });
+        lanes.offer(emit)' \
+  '        lanes.discovery = Some(LaneValue {
+            health,
+            detail,
+            changed,
+        });
+        let mut detached = lanes.clone();
         drop(sources);
         let out = detached.offer(emit);
         self.sources
