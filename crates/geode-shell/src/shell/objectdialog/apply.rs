@@ -385,17 +385,27 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
 /// field edit would join — the same [`PendingConfigWrite`], the same
 /// [`promote`] → [`apply_in_memory`] → [`run_writes`] → [`finish_flush`],
 /// so a delete or revert is no longer invisible until the 500 ms watcher
-/// notices the write `spawn_removals` used to make on its own. `render::
-/// removal_edits` builds `edits`; every value in it is `None` (see
-/// [`ObjectEdit`]) — a removal never carries a value for anything to
-/// reject.
+/// notices the write `spawn_removals` used to make on its own.
+///
+/// Takes bare `(doc, object)` keys, not `edits` — **on purpose, and this
+/// is the property the rest of this doc leans on.** An earlier version
+/// took the same `BTreeMap<(&'static str, String), ObjectEdit>` shape
+/// [`commit_edit`] does and trusted `render::removal_edits` to fill
+/// every value with `None`; nothing in that signature stopped a future
+/// caller passing `Some(value)` instead, which would join the batch,
+/// flush at zero delay and skip [`blocking_diagnostic`] entirely — the
+/// exact hole Task 2 closed, reopened through the one door built not to
+/// need the gate. Building the `None`s here, from keys that carry no
+/// value at all, makes that unrepresentable rather than conventional: a
+/// caller cannot pass a value through this door because there is no
+/// parameter to put one in.
 ///
 /// **Deliberately does not call [`blocking_diagnostic`].** That gate
 /// exists so an edit `Domain::validate` rated `Severity::Error` can never
 /// join the batch, because `reload::decide` would refuse the merge a
 /// flush later while the file write had already fired. A removal cannot
-/// hit that: it does not write the value the reader would reject, it
-/// erases the object carrying it. Gating a delete or revert on the very
+/// hit that: it does not write a value the reader could reject, it
+/// erases the object carrying one. Gating a delete or revert on the very
 /// diagnostic it would resolve would trap a trader in the one dialog
 /// built to fix that state, refusing the only action that helps — see
 /// this crate's Task 3 report for the fuller reasoning.
@@ -410,9 +420,11 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
 /// instead of racing it.
 pub(super) fn commit_removal(
     shell: &mut ShellView,
-    edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    keys: impl IntoIterator<Item = (&'static str, String)>,
     cx: &mut Context<ShellView>,
 ) -> Option<String> {
+    let edits: BTreeMap<(&'static str, String), ObjectEdit> =
+        keys.into_iter().map(|key| (key, None)).collect();
     queue_batch(
         shell,
         edits,

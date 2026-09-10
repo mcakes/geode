@@ -75,7 +75,6 @@
 //! bar's remaining verbs are exactly the destructive and structural
 //! ones.
 
-use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use geode_core::config::Layer;
@@ -765,22 +764,27 @@ fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
 }
 
 /// `name`'s removal from each of `docs` whose **user layer** actually
-/// contains it, as the `None`-valued edits [`apply::commit_removal`]
+/// contains it, as the bare `(doc, name)` keys [`apply::commit_removal`]
 /// queues onto the same batch a field edit would — so a delete never
-/// creates an empty file to say nothing (no edit means no entry means no
+/// creates an empty file to say nothing (no key means no entry means no
 /// write) and never touches a doc it does not own.
+///
+/// Deliberately keys only, never a `None`-valued edit map: building the
+/// `Option<toml::Value>` is `commit_removal`'s job now, precisely so
+/// nothing on this side of the door can hand it a `Some`. See
+/// `commit_removal`'s own doc for why that used to be a mere convention.
 ///
 /// This used to write the file itself, straight off the render thread,
 /// with no in-memory merge at all — invisible until the 500 ms watcher
-/// noticed. Building the edit map and handing it to `commit_removal`
-/// instead means a delete or revert rides the exact path an edit does:
-/// merged through `Config::from_docs`, applied through `apply_reload`,
-/// written by the same `run_writes`, reverted by the same
-/// `revert_failed_write` if the write fails.
+/// noticed. Building the touched-key list and handing it to
+/// `commit_removal` instead means a delete or revert rides the exact
+/// path an edit does: merged through `Config::from_docs`, applied
+/// through `apply_reload`, written by the same `run_writes`, reverted by
+/// the same `revert_failed_write` if the write fails.
 fn removal_edits(
     shell: &ShellView,
     docs: &[&'static str],
-) -> Result<BTreeMap<(&'static str, String), apply::ObjectEdit>, String> {
+) -> Result<Vec<(&'static str, String)>, String> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object }) => object.clone(),
         _ => return Err("nothing is open".to_string()),
@@ -800,10 +804,7 @@ fn removal_edits(
     if touched.is_empty() {
         return Err(format!("nothing of yours defines {name}"));
     }
-    Ok(touched
-        .into_iter()
-        .map(|doc| ((doc, name.clone()), None))
-        .collect())
+    Ok(touched.into_iter().map(|doc| (doc, name.clone())).collect())
 }
 
 /// `d`: arm the delete confirm, or say why there is nothing to delete.
@@ -916,18 +917,18 @@ fn run_confirmed(
                 Destination::Presentation.doc(domain),
             ];
             match removal_edits(shell, &docs) {
-                Ok(edits) => {
-                    // Preserves `docs`' own order rather than the edit
-                    // map's `(doc, object)` sort, so a notice naming both
-                    // files reads "views and view_presentation" the way
-                    // it always has, not the map's alphabetical order.
+                Ok(keys) => {
+                    // Preserves `docs`' own order rather than whatever
+                    // order `keys` happens to hold, so a notice naming
+                    // both files reads "views and view_presentation" the
+                    // way it always has.
                     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
                         Some(Stage::Edit { object }) => object.clone(),
                         _ => String::new(),
                     };
                     let files: Vec<String> = docs
                         .into_iter()
-                        .filter(|doc| edits.contains_key(&(*doc, name.clone())))
+                        .filter(|doc| keys.iter().any(|(d, _)| d == doc))
                         .map(|doc| format!("{doc}.toml"))
                         .collect();
                     let verb = if confirm == Confirm::Delete {
@@ -935,7 +936,7 @@ fn run_confirmed(
                     } else {
                         "reverted"
                     };
-                    let outcome = apply::commit_removal(shell, edits, cx);
+                    let outcome = apply::commit_removal(shell, keys, cx);
                     leave_edit(shell, window, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no
