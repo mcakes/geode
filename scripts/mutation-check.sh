@@ -1121,10 +1121,25 @@ run_mutation "spine: the grand total row is constant" \
   geode-data \
   a_scope_selecting_nothing_still_yields_the_grand_total_row
 
+# The mutation groups the reference side one row per source row instead of
+# one row per join key, which is exactly what "aggregate to the join key"
+# forbids: two reference rows for one instrument then duplicate every spine
+# row they match. `random()` is the defeat because no deterministic
+# expression here can be finer than the key — a function of `{keys}` is
+# only ever coarser, and the relation is sometimes a subquery, so `rowid`
+# does not bind. Simply deleting `group by {keys}` is NOT the mutation to
+# write: the projection holds `any_value(...)` beside the bare key columns,
+# so DuckDB raises a binder error and the entry reports "caught" for a
+# failure that says nothing about the aggregation. It also left `keys`
+# unused inside the `format!`, so the crate did not compile and the entry
+# was printing "caught" for a build failure — CLAUDE.md's "no test behind
+# it" lie, found in the 2026-09-10 filter sweep.
 run_mutation "join: aggregate to the join key" \
   crates/geode-data/src/query/compile.rs \
   'group by {keys}) {alias} on {on}' \
-  ') {alias} on {on}'
+  'group by {keys}, random()) {alias} on {on}' \
+  geode-data \
+  a_reference_row_per_holder_does_not_multiply_the_spine
 
 run_mutation "aggregate: sub_depth level guard" \
   crates/geode-data/src/query/compile.rs \
