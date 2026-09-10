@@ -5168,6 +5168,27 @@ run_mutation "pool: the refusal warning is latched once per worker" \
     }' \
   geode-data a_refusal_is_logged_once_per_worker_not_once_per_result
 
+# Phase 4c part 2a, Task 1: the modal vocabulary had a forward step
+# (`space`) and no way back. Restoring forward-only by dropping the
+# `shift+space` arm is invisible to a green suite unless a test asserts
+# what `shift+space` maps to.
+run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
+  crates/geode-shell/src/dialogmode.rs \
+  '            "space" => Some(NormalCommand::ToggleBack),' \
+  '' \
+  geode-shell shift_space_steps_a_value_backward
+
+# `Number` used to refuse at `max` with no way down at all — Groupings'
+# `slot` would otherwise inherit a field that can be raised and never
+# lowered. Making the backward arm always refuse (`return false`) is the
+# old defect, and only a test asserting the value actually moves down —
+# not just that the row is steppable — can see it.
+run_mutation "objectdialog: Number refuses to step down" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),' \
+  '                        StepDirection::Backward => return false,' \
+  geode-shell a_number_steps_both_ways_and_stops_at_each_end
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

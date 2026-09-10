@@ -67,6 +67,11 @@ pub enum NormalCommand {
     EnterFilter,
     Commit,
     Toggle,
+    /// `shift+space`: step the selected row's value backward. The
+    /// vocabulary had a forward step (`Toggle`) and no way back — added
+    /// so a `Number` can be lowered and a `Choice` can reach the option
+    /// just behind it without wrapping all the way around.
+    ToggleBack,
     /// Move the selected *item* rather than the selection: `shift+j` /
     /// `shift+k`. This is what replaces the pick-up sub-mode an earlier
     /// draft of Phase 4c needed when no key was free.
@@ -91,6 +96,7 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
             "j" => Some(NormalCommand::MoveItem(1)),
             "k" => Some(NormalCommand::MoveItem(-1)),
             "g" => Some(NormalCommand::Nav(NavCommand::Bottom)),
+            "space" => Some(NormalCommand::ToggleBack),
             _ => None,
         };
     }
@@ -173,6 +179,22 @@ mod tests {
         assert_eq!(normal_command(&bare("i")), Some(EditText));
         assert_eq!(normal_command(&ks("j", SHIFT)), Some(MoveItem(1)));
         assert_eq!(normal_command(&ks("k", SHIFT)), Some(MoveItem(-1)));
+    }
+
+    /// `shift+space` steps a value backward; the forward key and the
+    /// `shift+j`/`shift+k` item movers are unchanged by adding it.
+    #[test]
+    fn shift_space_steps_a_value_backward() {
+        assert_eq!(
+            normal_command(&ks("space", SHIFT)),
+            Some(NormalCommand::ToggleBack)
+        );
+        // The forward key is unchanged, and shift+j/k still move items.
+        assert_eq!(normal_command(&bare("space")), Some(NormalCommand::Toggle));
+        assert_eq!(
+            normal_command(&ks("j", SHIFT)),
+            Some(NormalCommand::MoveItem(1))
+        );
     }
 
     /// Arrows and the ctrl-steps keep working in normal mode: the two

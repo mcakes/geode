@@ -560,6 +560,18 @@ fn handle_edit_key(
                 set_notice(shell, "nothing on this row changes with space".to_string());
             }
         }
+        NormalCommand::ToggleBack => {
+            let changed = draft_mut(shell).is_some_and(|draft| draft.toggle_selected_back());
+            if changed {
+                revalidate(shell);
+                commit_or_confirm(shell, cx);
+            } else {
+                set_notice(
+                    shell,
+                    "nothing on this row changes with shift+space".to_string(),
+                );
+            }
+        }
         NormalCommand::MoveItem(delta) => {
             let moved = draft_mut(shell).is_some_and(|draft| draft.move_item(delta));
             if moved {
@@ -1388,6 +1400,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 chip("k"),
                 sep("move ·"),
                 chip("space"),
+                chip("shift+space"),
                 sep("change ·"),
                 chip("shift+j"),
                 chip("shift+k"),

@@ -497,6 +497,15 @@ pub struct Draft {
     pub confirm: Option<Confirm>,
 }
 
+/// Which way [`Draft::step_selected`] moves the value under the cursor.
+/// A parameter rather than a second copy of the stepping match, so the
+/// forward and backward paths cannot drift apart from each other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepDirection {
+    Forward,
+    Backward,
+}
+
 impl Draft {
     /// The rows the edit stage paints, in order: every field, each
     /// ordered list's items directly under it.
@@ -561,35 +570,63 @@ impl Draft {
             })
     }
 
-    /// `space`: change the value under the cursor, recording it in the
-    /// draft. `false` when the row has no value `space` can change, which
-    /// the caller turns into a notice — a key that appears inert is the
-    /// defect class this interaction model exists to remove.
+    /// `space`: change the value under the cursor forward, recording it
+    /// in the draft. `false` when the row has no value `space` can
+    /// change, which the caller turns into a notice — a key that appears
+    /// inert is the defect class this interaction model exists to
+    /// remove.
     pub fn toggle_selected(&mut self) -> bool {
+        self.step_selected(StepDirection::Forward)
+    }
+
+    /// `shift+space`: change the value under the cursor backward — the
+    /// reverse twin of [`Draft::toggle_selected`]. Both share
+    /// [`Draft::step_selected`] rather than carrying two near-identical
+    /// copies of the same match, which is the failure this codebase keeps
+    /// hitting (a fix applied to one copy and not the other).
+    pub fn toggle_selected_back(&mut self) -> bool {
+        self.step_selected(StepDirection::Backward)
+    }
+
+    /// Shared body of [`Draft::toggle_selected`] and
+    /// [`Draft::toggle_selected_back`]: change the value under the
+    /// cursor one step in `direction`, recording it in the draft. `false`
+    /// when the row has no value to change, or when the step would be a
+    /// no-op (a `Number` already at the end `direction` points toward).
+    fn step_selected(&mut self, direction: StepDirection) -> bool {
         let Some(row) = self.selected_row() else {
             return false;
         };
         match row {
             EditRow::Field(i) => match &mut self.fields[i].kind {
+                // A bool has only two values, so either direction is the
+                // same flip.
                 FieldKind::Bool(b) => {
                     *b = !*b;
                     true
                 }
-                // Steps forward and wraps, which is what makes one key
-                // enough to reach every option — `settings_view::step`'s
-                // own behaviour, on a key that is free here.
+                // Steps and wraps in both directions, which is what
+                // makes the option just behind the current one reachable
+                // in one key rather than the long way round —
+                // `settings_view::step`'s own forward behaviour, mirrored
+                // for `shift+space`.
                 FieldKind::Choice { options, selected } => {
                     if options.len() < 2 {
                         return false;
                     }
-                    *selected = (*selected + 1) % options.len();
+                    *selected = match direction {
+                        StepDirection::Forward => (*selected + 1) % options.len(),
+                        StepDirection::Backward => (*selected + options.len() - 1) % options.len(),
+                    };
                     true
                 }
                 FieldKind::Number { value, min, max } => {
-                    if *value >= *max {
-                        return false;
+                    match direction {
+                        StepDirection::Forward if *value >= *max => return false,
+                        StepDirection::Backward if *value <= *min => return false,
+                        StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
+                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
                     }
-                    *value = (*value + 1).clamp(*min, *max);
                     true
                 }
                 // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
@@ -607,6 +644,7 @@ impl Draft {
                 let Some(entry) = items.get_mut(item) else {
                     return false;
                 };
+                // Inclusion is binary too, so both directions flip it.
                 entry.included = !entry.included;
                 true
             }
@@ -1351,6 +1389,118 @@ mod tests {
             list_names(&draft)[1],
             before[0],
             "the item moved, not the cursor"
+        );
+    }
+
+    /// A draft with a single field of `kind`, cursor already on it —
+    /// mirrors `Domain::draft`'s own construction so a directly-built
+    /// field behaves exactly as one that came from a real config would.
+    fn single_field_draft(kind: FieldKind) -> Draft {
+        let field = Field {
+            key: "value".to_string(),
+            label: "Value".to_string(),
+            kind,
+            dest: Destination::Doc,
+        };
+        Draft {
+            name: "test".to_string(),
+            baseline: vec![field.clone()],
+            fields: vec![field],
+            source: toml::Table::new(),
+            selected: 0,
+            diagnostics: Vec::new(),
+            confirm: None,
+        }
+    }
+
+    /// `Number` refused at `max` and had no way down at all, so the first
+    /// adapter with a real `Number` — Groupings' `slot` — would inherit a
+    /// field that can be raised and never lowered.
+    #[test]
+    fn a_number_steps_both_ways_and_stops_at_each_end() {
+        // At min: stepping back is a no-op returning false; forward moves it.
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 0,
+            min: 0,
+            max: 2,
+        });
+        assert!(
+            !draft.toggle_selected_back(),
+            "already at min, so backward changes nothing"
+        );
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 0,
+                min: 0,
+                max: 2
+            }
+        );
+        assert!(draft.toggle_selected());
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 1,
+                min: 0,
+                max: 2
+            }
+        );
+
+        // At max: forward is a no-op; backward moves it.
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 2,
+            min: 0,
+            max: 2,
+        });
+        assert!(
+            !draft.toggle_selected(),
+            "already at max, so forward changes nothing"
+        );
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 2,
+                min: 0,
+                max: 2
+            }
+        );
+        assert!(draft.toggle_selected_back());
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 1,
+                min: 0,
+                max: 2
+            }
+        );
+    }
+
+    /// `Choice` wraps forward; it must wrap backward symmetrically, or the
+    /// last option is three keystrokes away and the first is unreachable
+    /// from it.
+    #[test]
+    fn a_choice_wraps_in_both_directions() {
+        let options = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options: options.clone(),
+            selected: 0,
+        });
+        assert!(draft.toggle_selected_back());
+        assert_eq!(
+            draft.choice("value"),
+            Some("c"),
+            "from 0, back wraps to last"
+        );
+
+        let mut draft = single_field_draft(FieldKind::Choice {
+            options,
+            selected: 2,
+        });
+        assert!(draft.toggle_selected());
+        assert_eq!(
+            draft.choice("value"),
+            Some("a"),
+            "from last, forward wraps to 0"
         );
     }
 
