@@ -79,7 +79,13 @@
 # with a covering test filter ("pool: the tag is echoed, not
 # regenerated", filtered to the one test) took ~3s; the same entry with
 # no filter, running the whole geode-data --lib suite, took ~36s — the
-# filter is why the Phase 3a entries above name one. `.cargo/config.toml`
+# filter is why every entry now names one. The last 79 that did not were
+# filled in by probing each mutation against the full suite and reading
+# back which test failed; a `--changed` run over service.rs and catalog.rs
+# had been taking over an hour on those alone. An entry added from here on
+# names its test too: without one, "caught" says nothing about WHICH test
+# saw the mutation, which is the "two defences overlapping" lie the header
+# above warns about. `.cargo/config.toml`
 # pinning `profile.dev.split-debuginfo = "unpacked"` was also tried, to
 # skip dsymutil packing on macOS: measured with `time` across two warm
 # runs of a single entry, before (~3.1-3.4s) and after (~3.0-3.1s) adding
@@ -284,22 +290,30 @@ PY
 run_mutation "discovery: a sentinel older than its CSV means still writing" \
   crates/geode-data/src/source/discovery.rs \
   '    if sentinel_mtime < mtime {' \
-  '    if false {'
+  '    if false {' \
+  geode-data \
+  a_sentinel_older_than_its_csv_means_the_file_is_being_rewritten
 
 run_mutation "discovery: no sentinel means pending, not ready" \
   crates/geode-data/src/source/discovery.rs \
   '    let Ok(sentinel_meta) = std::fs::metadata(sentinel_path) else {' \
-  '    let Ok(sentinel_meta) = std::fs::metadata(csv_path) else {'
+  '    let Ok(sentinel_meta) = std::fs::metadata(csv_path) else {' \
+  geode-data \
+  a_csv_without_a_sentinel_is_pending_not_broken
 
 run_mutation "discovery: waiting too long is reported, not waited on forever" \
   crates/geode-data/src/source/discovery.rs \
   '        return Ok(if waited > spec.pending_timeout {' \
-  '        return Ok(if false {'
+  '        return Ok(if false {' \
+  geode-data \
+  pending_past_the_timeout_becomes_pending_too_long
 
 run_mutation "discovery: an unimplemented readiness strategy is surfaced" \
   crates/geode-data/src/source/discovery.rs \
   '    if let Readiness::StableMtime { polls } = spec.readiness {' \
-  '    if let Readiness::StableMtime { polls } = Readiness::Sentinel {'
+  '    if let Readiness::StableMtime { polls } = Readiness::Sentinel {' \
+  geode-data \
+  an_unimplemented_readiness_strategy_says_so_instead_of_going_quiet
 
 run_mutation "discovery: an unparsable sentinel is orphaned, not merely pending" \
   crates/geode-data/src/source/discovery.rs \
@@ -317,7 +331,9 @@ run_mutation "discovery: an unparsable sentinel is orphaned, not merely pending"
             let _ = e;
             return Ok(CandidateState::Pending);
         }
-    };'
+    };' \
+  geode-data \
+  a_malformed_sentinel_is_orphaned_with_the_reason
 
 run_mutation "discovery: a changed file is reloaded" \
   crates/geode-data/src/source/discovery.rs \
@@ -370,12 +386,16 @@ run_mutation "as-of: relation filters the archive side too" \
 run_mutation "as-of: probe era" \
   crates/geode-data/src/query/scope_sql.rs \
   'era.relation(&ds.name, probe),' \
-  'table_name(&ds.name, probe, TableKind::Live),'
+  'table_name(&ds.name, probe, TableKind::Live),' \
+  geode-data \
+  an_as_of_query_reads_only_the_archive_even_through_a_semi_join
 
 run_mutation "as-of: ENUM cast era guard" \
   crates/geode-data/src/query/compile.rs \
   'if era.kind != TableKind::Live {' \
-  'if false {'
+  'if false {' \
+  geode-data \
+  as_of_survives_a_value_that_has_since_left_live
 
 # The generation predicate used to be a per-generation OR chain, then a
 # gen_id range plus a tuple semi-join (Phase 4a's as-of baseline fix,
@@ -421,7 +441,9 @@ run_mutation "as-of: source-time tie breaks on gen_id" \
              from generations where dataset = ? and source_time <= ?' \
   '                        order by source_time desc
                     ) as rn
-             from generations where dataset = ? and source_time <= ?'
+             from generations where dataset = ? and source_time <= ?' \
+  geode-data \
+  a_tie_on_source_time_resolves_to_the_newest_gen_id_every_time
 
 # Retention deletes. A wrong query shows a wrong number and can be
 # re-run; a wrong sweep destroys history that no longer exists to be
@@ -431,42 +453,58 @@ run_mutation "as-of: source-time tie breaks on gen_id" \
 run_mutation "retention: an empty policy evicts nothing" \
   crates/geode-data/src/store/retention.rs \
   '        if !policy.is_empty() {' \
-  '        if true {'
+  '        if true {' \
+  geode-data \
+  an_empty_policy_evicts_nothing
 
 run_mutation "retention: the bookless partition is matchable by its keys" \
   crates/geode-data/src/store/retention.rs \
   '                       and k.book is not distinct from a.book' \
-  '                       and k.book = a.book'
+  '                       and k.book = a.book' \
+  geode-data \
+  a_null_book_does_not_disable_the_whole_sweep
 
 run_mutation "retention: age keeps the recent, not the ancient" \
   crates/geode-data/src/store/retention.rs \
   '                    "source_time >= '"'"'{}'"'"'::timestamptz",' \
-  '                    "source_time <= '"'"'{}'"'"'::timestamptz",'
+  '                    "source_time <= '"'"'{}'"'"'::timestamptz",' \
+  geode-data \
+  keep_by_age_evicts_on_source_time
 
 run_mutation "retention: every configured rule must be satisfied" \
   crates/geode-data/src/store/retention.rs \
   'keep = keep.join(" and "),' \
-  'keep = keep.join(" or "),'
+  'keep = keep.join(" or "),' \
+  geode-data \
+  both_policies_apply_together
 
 run_mutation "retention: the generation count bound is what it says" \
   crates/geode-data/src/store/retention.rs \
   'keep.push(format!("rn <= {n}"));' \
-  'keep.push(format!("rn <= {}", n + 1));'
+  'keep.push(format!("rn <= {}", n + 1));' \
+  geode-data \
+  keep_by_count_is_per_partition
 
 run_mutation "retention: the remaining bound is the oldest, not the newest" \
   crates/geode-data/src/store/retention.rs \
   '            (Some(a), Some(b)) => Some(a.min(b)),' \
-  '            (Some(a), Some(b)) => Some(a.max(b)),'
+  '            (Some(a), Some(b)) => Some(a.max(b)),' \
+  geode-data \
+  the_oldest_remaining_bound_spans_every_grain_swept
 
 run_mutation "retention: eviction is counted from the rows actually removed" \
   crates/geode-data/src/store/retention.rs \
   'report.evicted_rows += (before - after).max(0) as usize;' \
-  'report.evicted_rows += 0;'
+  'report.evicted_rows += 0;' \
+  geode-data \
+  keep_by_count_is_per_partition
 
 run_mutation "retention: source-time tie breaks on gen_id" \
   crates/geode-data/src/store/retention.rs \
   'order by source_time desc, gen_id desc' \
-  'order by source_time desc'
+  'order by source_time desc' \
+  geode-data \
+  a_tie_on_source_time_keeps_the_generation_as_of_would_pick
 
 # ---- the generations summary table (docs/perf.md, "the as-of baseline"
 # and its follow-up): a small table maintained inside the publish and
@@ -655,7 +693,9 @@ run_mutation "provenance: resolved vs requested time" \
 run_mutation "provenance: a join is labelled with its own instant" \
   crates/geode-data/src/query/compile.rs \
   '                    resolved_as_of.insert(join.dataset.clone(), oldest);' \
-  '                    let _ = oldest;'
+  '                    let _ = oldest;' \
+  geode-data \
+  an_as_of_join_labels_each_side_with_the_instant_it_actually_read
 
 # The spine's own resolve, not the join's: `era_for` and the joined-dataset
 # arm below it pick the oldest the same way, so the anchor carries the
@@ -667,37 +707,46 @@ run_mutation "provenance: stalest partition, not newest" \
   '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
             if let Some(oldest) = gens.iter().map(|g| g.source_time).min() {' \
   '            let gens = crate::query::as_of::resolve_generations(conn, dataset, *t)?;
-            if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {'
+            if let Some(oldest) = gens.iter().map(|g| g.source_time).max() {' \
+  geode-data \
+  as_of_after_the_current_generation_reads_the_current_generation
 
 run_mutation "enum: a stale value degrades rather than failing the query" \
   crates/geode-data/src/query/compile.rs \
   'selects.push(format!("try_cast(s.\"{g}\" as {ty}) as \"{g}\""));' \
-  'selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));'
+  'selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));' \
+  geode-data \
+  a_stale_enum_degrades_that_column_instead_of_failing_the_query
 
 run_mutation "scope: an ordering comparison on a derived dimension is caught at entry" \
   crates/geode-core/src/scope/mod.rs \
   'if dims.get(column).is_some() && !matches!(op, CompareOp::Eq | CompareOp::Ne) {' \
   'if false {' \
-  geode-core
+  geode-core \
+  an_ordering_comparison_on_a_derived_dimension_is_caught_at_entry
 
 run_mutation "scope: a contradiction still names its dimension" \
   crates/geode-core/src/scope/mod.rs \
   'dimensions.retain(|d| !d.values.is_empty() || contradicted.contains(&d.column));' \
   'dimensions.retain(|d| !d.values.is_empty());' \
-  geode-core
+  geode-core \
+  a_contradiction_still_names_the_dimension_that_caused_it
 
 # ---- derived column attribution (spec §6.3)
 
 run_mutation "derived: a derived column inherits its inputs' attribution" \
   crates/geode-data/src/query/compile.rs \
   '            let referenced = referenced_columns(sql, &columns);' \
-  '            let referenced: Vec<&CompiledColumn> = Vec::new();'
+  '            let referenced: Vec<&CompiledColumn> = Vec::new();' \
+  geode-data \
+  a_derived_column_inherits_the_attribution_of_what_it_references
 
 run_mutation "derived: attribution meet takes the weaker claim" \
   crates/geode-core/src/attribution.rs \
   '            (NonAttributable, _) | (_, NonAttributable) => NonAttributable,' \
   '            (NonAttributable, _) | (_, NonAttributable) => Additive,' \
-  geode-core
+  geode-core \
+  the_attribution_meet_takes_the_weaker_claim
 
 run_mutation "derived: a name inside a string literal is not a reference" \
   crates/geode-data/src/query/compile.rs \
@@ -706,32 +755,39 @@ run_mutation "derived: a name inside a string literal is not a reference" \
         }' \
   '        if false {
             continue;
-        }'
+        }' \
+  geode-data \
+  a_column_name_inside_a_string_literal_is_not_a_reference
 
 # ---- config validation (spec §10.1, §6.8)
 
 run_mutation "validation: views are checked when the service opens" \
   crates/geode-data/src/service.rs \
   '            .flat_map(|v| v.validate(&config.schema, &config.dimensions))' \
-  '            .flat_map(|_v| Vec::<Diagnostic>::new())'
+  '            .flat_map(|_v| Vec::<Diagnostic>::new())' \
+  geode-data \
+  a_misconfigured_view_is_a_diagnostic_at_open_not_a_binder_error_later
 
 run_mutation "validation: a scope column is checked against the dataset" \
   crates/geode-core/src/scope/mod.rs \
   '                None if ds.column(&c).is_none() => {' \
   '                None if false => {' \
-  geode-core
+  geode-core \
+  validation_rejects_unknown_columns_with_a_diagnostic
 
 run_mutation "validation: a derived dimension is not an unknown grouping" \
   crates/geode-core/src/view.rs \
   '            if let Some(d) = dims.get(g) {' \
   '            if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
-  geode-core
+  geode-core \
+  grouping_by_a_derived_dimension_is_not_an_unknown_column
 
 run_mutation "validation: a derived dimension shadowing a column is reported" \
   crates/geode-core/src/view.rs \
   '                if ds.column(g).is_some() {' \
   '                if false {' \
-  geode-core
+  geode-core \
+  a_derived_dimension_that_shadows_a_real_column_is_reported
 
 run_mutation "views: a config_version header is not a spurious diagnostic" \
   crates/geode-core/src/view.rs \
@@ -803,24 +859,30 @@ run_mutation "derived: the value is blanked, not just the marker" \
 run_mutation "derived: comments are stripped before scanning for columns" \
   crates/geode-data/src/query/compile.rs \
   '    let stripped = strip_sql_comments(sql);' \
-  '    let stripped = sql.to_string();'
+  '    let stripped = sql.to_string();' \
+  geode-data \
+  a_comment_does_not_drag_in_columns_the_expression_never_names
 
 run_mutation "order: tie-breakers use the spine, not the ENUM-cast alias" \
   crates/geode-data/src/query/compile.rs \
   '            order_keys.push(format!("s.\"{g}\" asc"));' \
-  '            order_keys.push(format!("\"{g}\" asc"));'
+  '            order_keys.push(format!("\"{g}\" asc"));' \
+  geode-data \
+  the_row_order_is_total_so_a_requery_does_not_reshuffle
 
 run_mutation "validation: a derived dimension is a legal view column" \
   crates/geode-core/src/view.rs \
   '                    if let Some(d) = dims.get(name) {' \
   '                    if let Some(d) = None::<&crate::dimensions::DerivedDimension> {' \
-  geode-core
+  geode-core \
+  a_derived_dimension_is_accepted_as_a_column_not_only_as_a_grouping
 
 run_mutation "scope: a contradiction survives further composition" \
   crates/geode-core/src/scope/mod.rs \
   '        let mut contradicted: Vec<String> = if self.impossible {' \
   '        let mut contradicted: Vec<String> = if false {' \
-  geode-core
+  geode-core \
+  a_contradiction_still_names_the_dimension_that_caused_it
 
 run_mutation "snapshot: dimension codes report a null row as null" \
   crates/geode-core/src/snapshot.rs \
@@ -830,56 +892,73 @@ run_mutation "snapshot: dimension codes report a null row as null" \
   '        if false {
             return None;
         }' \
-  geode-core
+  geode-core \
+  dimension_codes_report_a_rolled_up_row_as_having_none
 
 run_mutation "snapshot: dimensions read at UInt32 key width" \
   crates/geode-core/src/snapshot.rs \
   '    let d = arr.as_any().downcast_ref::<DictionaryArray<UInt32Type>>()?;' \
   '    let d = None::<&DictionaryArray<UInt32Type>>?;' \
-  geode-core
+  geode-core \
+  a_dimension_past_the_65535_value_cliff_still_reads
 
 run_mutation "snapshot: a summed i64 measure is readable" \
   crates/geode-core/src/snapshot.rs \
   '    if let Some(values) = arr.as_any().downcast_ref::<Decimal128Array>() {' \
   '    if let Some(values) = None::<&Decimal128Array> {' \
-  geode-core
+  geode-core \
+  a_summed_integer_measure_is_readable_as_a_number
 
 run_mutation "pool: shutdown does not deliver its own interrupt" \
   crates/geode-data/src/query/pool.rs \
   'if stale || cancelled || q.shutdown {' \
-  'if stale || cancelled {'
+  'if stale || cancelled {' \
+  geode-data \
+  shutdown_does_not_deliver_its_own_interrupt_as_a_failure
 
 run_mutation "catalog: the migration clears a crashed load's orphan id" \
   crates/geode-data/src/store/catalog.rs \
   'let start = if latest == 0 { 1 } else { latest + 2 };' \
-  'let start = if latest == 0 { 1 } else { latest + 1 };'
+  'let start = if latest == 0 { 1 } else { latest + 1 };' \
+  geode-data \
+  the_migration_skips_the_id_a_crashed_pre_sequence_load_could_hold
 
 run_mutation "catalog: the bookless partition rolls up into the unscoped as-of" \
   crates/geode-data/src/store/catalog.rs \
   '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_some_and(|b| books.contains(b)))' \
-  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_none_or(|b| books.contains(b)))'
+  '            .filter(|(b, _)| books.is_empty() || b.as_ref().is_none_or(|b| books.contains(b)))' \
+  geode-data \
+  the_bookless_partition_is_in_the_unscoped_as_of_but_not_a_named_scope
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (named book)" \
   crates/geode-data/src/store/catalog.rs \
   'where fg.dataset = ? and fg.batch = ? and fb.book = ?' \
-  'where ? is not null and fg.batch = ? and fb.book = ?'
+  'where ? is not null and fg.batch = ? and fb.book = ?' \
+  geode-data \
+  the_backfill_guard_does_not_read_another_datasets_source_times
 
 run_mutation "catalog: the backfill guard is scoped to its dataset (bookless)" \
   crates/geode-data/src/store/catalog.rs \
   'where fg.dataset = ? and fg.batch = ? and fb.book is null' \
-  'where ? is not null and fg.batch = ? and fb.book is null'
+  'where ? is not null and fg.batch = ? and fb.book is null' \
+  geode-data \
+  the_backfill_guard_does_not_read_another_datasets_source_times
 
 run_mutation "catalog: a generation that never went live is not fresh" \
   crates/geode-data/src/store/catalog.rs \
   '                       where fg.dataset = ?
                          and coalesce(fg.archived_only, false) = false' \
   '                       where fg.dataset = ?
-                         and true'
+                         and true' \
+  geode-data \
+  a_generation_that_never_went_live_does_not_move_freshness
 
 run_mutation "ingest: the publish event names the partitions written" \
   crates/geode-data/src/ingest/runner.rs \
   'books: loaded.partitions.clone(),' \
-  'books: Vec::new(),'
+  'books: Vec::new(),' \
+  geode-data \
+  works_a_plan_and_reports_every_publish
 
 # ---- the ingest queue dedupe (2026-09-07 display: 3051 generations of 17
 # files that never changed — the ingest queue appended every poll's plan
@@ -909,102 +988,138 @@ run_mutation "ingest: the runner re-checks change detection at pop time" \
 run_mutation "ingest: an archived-only load is recorded as such" \
   crates/geode-data/src/ingest/load.rs \
   '    let archived_only = !published.is_empty()' \
-  '    let archived_only = false && !published.is_empty()'
+  '    let archived_only = false && !published.is_empty()' \
+  geode-data \
+  an_older_file_cannot_overwrite_the_bookless_partition
 
 run_mutation "catalog: the archived_only column is added to old catalogs" \
   crates/geode-data/src/store/catalog.rs \
   'ALTER TABLE file_generations ADD COLUMN IF NOT EXISTS archived_only BOOLEAN;' \
-  '-- migration removed'
+  '-- migration removed' \
+  geode-data \
+  a_catalog_written_before_archived_only_gains_the_column
 
 # ---- the bookless partition in the catalog (spec §4.5)
 
 run_mutation "catalog: the bookless partition gets a file_books row" \
   crates/geode-data/src/store/catalog.rs \
   '        for book in &rec.books {' \
-  '        for book in rec.books.iter().filter(|b| b.is_some()) {'
+  '        for book in rec.books.iter().filter(|b| b.is_some()) {' \
+  geode-data \
+  the_bookless_partition_has_freshness_of_its_own
 
 run_mutation "catalog: freshness can be asked about a null book" \
   crates/geode-data/src/store/catalog.rs \
   'and fg.batch = ? and fb.book is null' \
-  'and fg.batch = ? and fb.book is not null'
+  'and fg.batch = ? and fb.book is not null' \
+  geode-data \
+  the_backfill_guard_sees_the_bookless_partition
 
 run_mutation "ingest: the backfill guard covers every partition written" \
   crates/geode-data/src/ingest/load.rs \
   '    for partition in &partitions {' \
-  '    for partition in partitions.iter().filter(|p| p.book.is_some()) {'
+  '    for partition in partitions.iter().filter(|p| p.book.is_some()) {' \
+  geode-data \
+  an_older_file_cannot_overwrite_the_bookless_partition
 
 # ---- generation id allocation (spec §4.3)
 
 run_mutation "catalog: a gen_id is reserved, not peeked" \
   crates/geode-data/src/store/catalog.rs \
   "        let sql = \"select nextval('file_generations_gen_id')\";" \
-  '        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";'
+  '        let sql = "select coalesce(max(gen_id), 0) + 1 from file_generations";' \
+  geode-data \
+  a_reserved_gen_id_is_never_handed_out_twice
 
 run_mutation "catalog: the gen_id sequence starts above existing generations" \
   crates/geode-data/src/store/catalog.rs \
   'let start = if latest == 0 { 1 } else { latest + 2 };' \
-  'let start = 1;'
+  'let start = 1;' \
+  geode-data \
+  a_database_that_predates_the_sequence_continues_above_its_generations
 
 # ---- the grain vocabulary (spec §3.3, §6.3)
 
 run_mutation "vocabulary: pair grain does not carry the underlying dimension" \
   crates/geode-core/src/schema/grain.rs \
   'Grain::UnderlyingPair => &K_INSTRUMENT,' \
-  'Grain::UnderlyingPair => &K_PAIR,'
+  'Grain::UnderlyingPair => &K_PAIR,' \
+  geode-data \
+  cross_gamma_is_blank_below_instrument_level_and_present_above_it
 
 run_mutation "attribution: a derived dimension resolves to its base column" \
   crates/geode-core/src/attribution.rs \
   '        .map(|c| dims.base_column(c.as_str()))' \
-  '        .map(|c| c.as_str())'
+  '        .map(|c| c.as_str())' \
+  geode-data \
+  a_derived_dimension_finer_than_a_measures_grain_blanks_that_measure
 
 run_mutation "attribution: decided on dimension keys" \
   crates/geode-core/src/attribution.rs \
   '    let key = ds.dimensions_at(grain);' \
-  '    let key: Vec<&str> = grain.key_columns().to_vec();'
+  '    let key: Vec<&str> = grain.key_columns().to_vec();' \
+  geode-data \
+  cross_gamma_is_blank_below_instrument_level_and_present_above_it
 
 # ---- scope lowering (spec §6.2, §6.3)
 
 run_mutation "scope: a same-grain measure is direct" \
   crates/geode-data/src/query/scope_sql.rs \
   '|| ds.column(base).and_then(|c| c.grain()) == Some(grain)' \
-  '|| false'
+  '|| false' \
+  geode-data \
+  a_measure_predicate_is_direct_not_semi_joined
 
 run_mutation "scope: probe keys are the shared dimension keys" \
   crates/geode-data/src/query/scope_sql.rs \
   '.filter(|k| probe.dimension_key_columns().contains(k))' \
-  '.filter(|k| probe.key_columns().contains(k))'
+  '.filter(|k| probe.key_columns().contains(k))' \
+  geode-data \
+  a_pair_measure_predicate_reaches_both_underlyings_of_the_pair
 
 run_mutation "scope: single-pass param assembly" \
   crates/geode-data/src/query/scope_sql.rs \
   'let inner_params: Vec<Value> = mine.iter().flat_map(|(_, p)| p.clone()).collect();' \
-  'let inner_params: Vec<Value> = Vec::new();'
+  'let inner_params: Vec<Value> = Vec::new();' \
+  geode-data \
+  a_finer_and_a_direct_predicate_bind_to_their_own_placeholders
 
 run_mutation "scope: text filter reaches other grains" \
   crates/geode-data/src/query/scope_sql.rs \
   'terms.push(membership(ds, grain, probe, era, &test));' \
-  '{ let _ = probe; continue; }'
+  '{ let _ = probe; continue; }' \
+  geode-data \
+  a_text_filter_reaches_coarse_measures_by_membership
 
 run_mutation "scope: LIKE wildcards escaped" \
   crates/geode-data/src/query/scope_sql.rs \
   'if matches!(ch,' \
-  'if false && matches!(ch,'
+  'if false && matches!(ch,' \
+  geode-data \
+  the_text_filter_escapes_likes_own_wildcards
 
 run_mutation "scope: conjuncts routed separately" \
   crates/geode-data/src/query/scope_sql.rs \
   'for term in conjuncts(expr) {' \
-  'for term in [expr] {'
+  'for term in [expr] {' \
+  geode-data \
+  conjuncts_of_different_grains_route_separately
 
 # ---- the compiler (spec §6.3, §6.4, §6.8)
 
 run_mutation "spine: assembled from every aggregate, not the finest" \
   crates/geode-data/src/query/compile.rs \
   '.filter(|d| own_present[*d] == *d).collect();' \
-  '.filter(|d| own_present[*d] == *d && own.len() == depth).collect();'
+  '.filter(|d| own_present[*d] == *d && own.len() == depth).collect();' \
+  geode-data \
+  a_cash_only_position_has_a_row_at_the_lhu_level
 
 run_mutation "spine: the grand total row is constant" \
   crates/geode-data/src/query/compile.rs \
   'spine_sources.join(" union all ")' \
-  'spine_sources[1..].join(" union all ")'
+  'spine_sources[1..].join(" union all ")' \
+  geode-data \
+  a_scope_selecting_nothing_still_yields_the_grand_total_row
 
 run_mutation "join: aggregate to the join key" \
   crates/geode-data/src/query/compile.rs \
@@ -1014,24 +1129,32 @@ run_mutation "join: aggregate to the join key" \
 run_mutation "aggregate: sub_depth level guard" \
   crates/geode-data/src/query/compile.rs \
   '.chain(std::iter::once(level))' \
-  ''
+  '' \
+  geode-data \
+  a_real_null_in_a_grouping_column_does_not_fan_out_the_tree
 
 run_mutation "derived: scalar projection" \
   crates/geode-data/src/query/compile.rs \
   '    if derived.is_empty() {' \
-  '    if true {'
+  '    if true {' \
+  geode-data \
+  grouping_by_a_derived_dimension_produces_its_mapped_values
 
 # ---- publish (spec §4.3, §4.4)
 
 run_mutation "publish: the bookless partition is replaced" \
   crates/geode-data/src/store/publish.rs \
   'None => "book is null".to_string(),' \
-  'None => "book = %".to_string(),'
+  'None => "book = %".to_string(),' \
+  geode-data \
+  the_bookless_partition_is_replaced_like_any_other
 
 run_mutation "ingest: the bookless partition is published" \
   crates/geode-data/src/ingest/load.rs \
   '.chain((unattributed_rows > 0).then_some(None))' \
-  '.chain(None)'
+  '.chain(None)' \
+  geode-data \
+  republishing_a_file_with_bookless_rows_does_not_accumulate_them
 
 # ---- the query pool (spec §6.7, §7.3, §10.1)
 
@@ -1043,7 +1166,9 @@ run_mutation "pool: a panicking query does not wedge its view" \
             Ok(r) => r.map_err(|e| e.to_string()),
             Err(payload) => Err(panic_message(&*payload)),
         };' \
-  '        let outcome = run(&conn, &req).map_err(|e| e.to_string());'
+  '        let outcome = run(&conn, &req).map_err(|e| e.to_string());' \
+  geode-data \
+  a_panicking_query_degrades_its_view_without_wedging_it
 
 run_mutation "pool: a post-shutdown submit is not queued" \
   crates/geode-data/src/query/pool.rs \
@@ -1052,12 +1177,16 @@ run_mutation "pool: a post-shutdown submit is not queued" \
         }' \
   '        if false {
             return id;
-        }'
+        }' \
+  geode-data \
+  a_post_shutdown_submit_is_not_queued
 
 run_mutation "pool: a cancelled query delivers nothing, not an error" \
   crates/geode-data/src/query/pool.rs \
   'let cancelled = q.cancelled.remove(&id);' \
-  'let cancelled = { q.cancelled.remove(&id); false };'
+  'let cancelled = { q.cancelled.remove(&id); false };' \
+  geode-data \
+  cancelling_a_running_query_delivers_no_failure
 
 # No entry for allocating the query id under the lock, nor for holding the
 # lock across the stale check and the send. Both are races: the mutation is
@@ -1070,17 +1199,23 @@ run_mutation "pool: a cancelled query delivers nothing, not an error" \
 run_mutation "order: emitted even when the view declares no sort" \
   crates/geode-data/src/query/compile.rs \
   'let order = format!(" order by {}", order_keys.join(", "));' \
-  'let order = if view.sort.is_empty() { String::new() } else { format!(" order by {}", order_keys.join(", ")) };'
+  'let order = if view.sort.is_empty() { String::new() } else { format!(" order by {}", order_keys.join(", ")) };' \
+  geode-data \
+  rows_arrive_shallowest_first_when_the_view_declares_no_sort
 
 run_mutation "order: shallowest first" \
   crates/geode-data/src/query/compile.rs \
   'let mut order_keys = vec!["s.row_depth asc".to_string()];' \
-  'let mut order_keys: Vec<String> = Vec::new();'
+  'let mut order_keys: Vec<String> = Vec::new();' \
+  geode-data \
+  rows_arrive_shallowest_first_when_the_view_declares_no_sort
 
 run_mutation "order: grouping columns break ties" \
   crates/geode-data/src/query/compile.rs \
   '    for g in view.grouping.iter().take(depth) {' \
-  '    for g in view.grouping.iter().take(0) {'
+  '    for g in view.grouping.iter().take(0) {' \
+  geode-data \
+  the_row_order_is_total_so_a_requery_does_not_reshuffle
 
 # ---- the snapshot read path (spec §6.6, §6.3)
 
@@ -1091,7 +1226,8 @@ run_mutation "snapshot: a null measure is not zero" \
   crates/geode-core/src/snapshot.rs \
   '        return (row < values.len() && !values.is_null(row)).then(|| values.value(row));' \
   '        return (row < values.len()).then(|| values.value(row));' \
-  geode-core
+  geode-core \
+  a_null_measure_reads_as_none_not_zero
 
 # "probe: a blanked cell renders blank, not 0.00" retired (Phase 3c
 # Task 9): the throwaway diagnostic tile it anchored on is deleted
@@ -1105,18 +1241,22 @@ run_mutation "snapshot: depth reads at DuckDB's own integer width" \
   '    read_at_width!(Int64Type);
     read_at_width!(Int32Type);' \
   '    read_at_width!(Int64Type);' \
-  geode-core
+  geode-core \
+  depth_is_read_at_whatever_integer_width_it_arrives_in
 
 run_mutation "snapshot: depth reads at DuckDB's own width, end to end" \
   crates/geode-core/src/snapshot.rs \
   '        let depth = self.i64_at(self.depth_col?, row)?;' \
-  '        let depth = *self.i64_column("row_depth")?.get(row)?;'
+  '        let depth = *self.i64_column("row_depth")?.get(row)?;' \
+  geode-data \
+  a_blanked_cross_gamma_is_still_blank_after_the_snapshot_boundary
 
 run_mutation "snapshot: a rolled-up dimension cell is null" \
   crates/geode-core/src/snapshot.rs \
   'if row >= d.len() || d.is_null(row) {' \
   'if row >= d.len() {' \
-  geode-core
+  geode-core \
+  a_rolled_up_dimension_cell_is_none_not_the_first_dictionary_entry
 
 run_mutation "snapshot: dimension cells read at UInt16 key width" \
   crates/geode-core/src/snapshot.rs \
@@ -1126,13 +1266,15 @@ run_mutation "snapshot: dimension cells read at UInt16 key width" \
   '    if let Some(d) = None::<&DictionaryArray<UInt16Type>> {
         return dictionary_cell(d, row);
     }' \
-  geode-core
+  geode-core \
+  a_dimension_past_the_255_value_cliff_reads_at_either_width
 
 run_mutation "snapshot: dictionary columns expose UInt16 codes" \
   crates/geode-core/src/snapshot.rs \
   '        return Some((DictCodes::U16(d.keys().values(), d.nulls()), values));' \
   '        return None;' \
-  geode-core
+  geode-core \
+  a_dimension_past_the_255_value_cliff_reads_at_either_width
 
 # No entry for the UInt16 arm of concat_preserving_dictionaries. Removing
 # it falls back to arrow's own concat, which — measured, not assumed —
@@ -1145,13 +1287,15 @@ run_mutation "snapshot: every batch contributes its dictionary keys" \
   crates/geode-core/src/snapshot.rs \
   'let keys: Vec<&dyn Array> = dicts.iter().map(|d| d.keys() as &dyn Array).collect();' \
   'let keys: Vec<&dyn Array> = dicts[..1].iter().map(|d| d.keys() as &dyn Array).collect();' \
-  geode-core
+  geode-core \
+  dictionary_batches_concatenate_at_either_key_width
 
 run_mutation "snapshot: text reads a dimension under either era encoding" \
   crates/geode-core/src/snapshot.rs \
   '    dict_cell_in(arr, row).or_else(|| str_in(arr, row))' \
   '    str_in(arr, row)' \
-  geode-core
+  geode-core \
+  a_dimension_reads_the_same_under_either_era_encoding
 
 # ---- query pool (spec §2.4, §5.1)
 
