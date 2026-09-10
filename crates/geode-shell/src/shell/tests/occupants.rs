@@ -553,7 +553,14 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
 
-    cx.simulate_keystrokes("alt-shift-d");
+    // Drive `open_module` directly — the status bar's diagnostics-summary
+    // click is the one production caller since `diagnostics::open` was
+    // retired (user ruling 2026-09-09), so there is no chord to press.
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+        });
+    });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -577,7 +584,11 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     });
     assert_ne!(second_split_tile, first_tile);
 
-    cx.simulate_keystrokes("alt-shift-d");
+    cx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.open_module("diagnostics", window, cx);
+        });
+    });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -604,8 +615,9 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
 
 /// MIN-7 (Phase 4b Task 5 fix round 1), carried forward to the addressed
 /// pending map (spec 2026-09-08 add-tile §4.3): two `open_module` calls
-/// for the same kind within one render (a double `mod+shift+d` press, or
-/// key-repeat) both miss the "existing occupant" search (the first
+/// for the same kind within one render (a double click on the status
+/// bar's diagnostics summary, or its equivalent) both miss the "existing
+/// occupant" search (the first
 /// call's new tile has no occupant yet; `ensure_occupants` only creates
 /// one at the top of the *next* render), so without the pending-kind
 /// guard the second call would add a second tile and leave one hosting
@@ -755,7 +767,7 @@ fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::T
 fn add_on_a_placeholder_tile_fills_it_in_place(cx: &mut gpui::TestAppContext) {
     // `test_services`'s default kind is "placeholder", so a tile created
     // by a bare `split_active` — no pending request of its own — is one;
-    // the fixture's recorder is what "Add Rec" fills it with.
+    // the fixture's recorder is what "Rec: Split" fills it with.
     let (services, log) = test_services_with_log();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);

@@ -574,7 +574,8 @@ fn build_shell_services(
 
     // The diagnostics module (Phase 4b Task 5, spec §4.6): registered
     // unconditionally, unlike the blotter factory just below — it needs
-    // no data handle, so `mod+shift+d` opens a tile even with no
+    // no data handle, so the palette's `Diagnostics: Split` row (or the
+    // status bar's diagnostics-summary click) opens a tile even with no
     // `[sources]`/`[datasets]` configured at all. `diagnostics_factory` is
     // returned to the caller so it can subscribe to `ShellEvent::
     // ConfigReloaded` once a window (and so a `ShellView` to subscribe to)
@@ -588,8 +589,8 @@ fn build_shell_services(
     // The data bridge (spec §5.1, §5.4): `None` when the config declares
     // no datasets/views. A blotter with no data handle would panic on its
     // first requery, so a roster with no bridge simply gets no blotter
-    // factory at all — the palette then lists no "Add Blotter" row, and a
-    // tile nothing else claims paints the placeholder (2026-09-08
+    // factory at all — the palette then lists no "Blotter: Split" row,
+    // and a tile nothing else claims paints the placeholder (2026-09-08
     // add-tile §7.1).
     let db = bridge::db_path(
         &config,
@@ -605,10 +606,11 @@ fn build_shell_services(
         bridge
     });
 
-    // One "Add <Kind>" palette row per registered kind (spec 2026-09-08
-    // add-tile §3.2), from the roster as it finally stands — so a build
-    // with no data bridge lists no "Add Blotter". Before `build_keymap`,
-    // like every other registration in this function.
+    // One "<Kind>: Split" palette row (plus the Horizontal/Vertical
+    // pair) per registered kind (spec 2026-09-08 add-tile §3.2, retitled
+    // by user ruling 2026-09-09), from the roster as it finally stands —
+    // so a build with no data bridge lists no "Blotter: Split". Before
+    // `build_keymap`, like every other registration in this function.
     register_add_actions(&mut registry, &roster.kinds());
     // Modules register their actions before the keymap builds (§3.2).
     roster.register_actions(&mut registry);

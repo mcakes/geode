@@ -1221,7 +1221,8 @@ cargo run --release -p geode-app -- --demo 1000000
    (`perf::reset`, palette-only) and hold `j` in a blotter tile for a
    few seconds the way the Phase 3 wide-view reading above did; read
    **p50**/**p95**/**max** before releasing.
-2. Open a diagnostics tile (`mod+shift+d`), switch to the `log`
+2. Open a diagnostics tile (`ctrl+k` → "Diagnostics: Split", or the
+   status bar's diagnostics-summary click), switch to the `log`
    section (`]`/`[` or `:section log`) so it is following the tail,
    trigger some log activity (an ingest tick, a `:level` change),
    `perf::reset` again, and repeat the same `j` hold in the blotter

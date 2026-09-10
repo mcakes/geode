@@ -1,6 +1,9 @@
 //! The diagnostics module (Phase 4b Task 5, spec §4.6): one tile, five
 //! sections over the shell-owned `Diagnostics` entity and the log ring —
-//! `:section`/`:level`/`:overlay`, `[`/`]` to cycle, `mod+shift+d` to open.
+//! `:section`/`:level`/`:overlay`, `[`/`]` to cycle. Opened via the status
+//! bar's diagnostics-summary click (`ShellView::open_module`) or the
+//! palette's `Diagnostics: Split` rows — `diagnostics::open` was retired
+//! by user ruling 2026-09-09.
 
 pub mod commands;
 pub mod sections;
@@ -30,7 +33,6 @@ pub use tile::DiagnosticsTile;
 pub fn init(_cx: &mut App) {}
 
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("diagnostics::open", "Open diagnostics"),
     ("diagnostics::down", "Cursor down"),
     ("diagnostics::up", "Cursor up"),
     ("diagnostics::top", "Cursor to top"),
@@ -156,8 +158,8 @@ mod tests {
     /// never depends on a module), so `geode_shell::defaults` carries its
     /// own copy of these ids and titles to reserve, ahead of
     /// `DiagnosticsFactory::register_actions`, so `BUILTIN_KEYMAP`'s
-    /// `diagnostics::*` bindings (including `mod+shift+d`) are never
-    /// dropped as unregistered and the palette shows the same title
+    /// `diagnostics::*` bindings are never dropped as unregistered and
+    /// the palette shows the same title
     /// either way — same shape as `geode_blotter::tile::tests::
     /// the_shells_reserved_blotter_actions_match_ours`.
     #[test]

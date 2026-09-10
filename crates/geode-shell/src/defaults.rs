@@ -127,7 +127,6 @@ context = "workspace"
 "mod+/" = "frame::focus_text"
 "mod+p" = "frame::pick"
 "mod+t" = "frame::as_of"
-"mod+shift+d" = "diagnostics::open"
 
 [[bindings]]
 context = "tile"
@@ -255,15 +254,16 @@ pub const BLOTTER_ACTIONS: &[&str] = &[
 
 /// Mirrors `geode_diagnostics::ACTIONS` (id, title) exactly — same
 /// reasoning as [`BLOTTER_ACTION_DEFS`]'s own doc comment: `BUILTIN_KEYMAP`'s
-/// `diagnostics::*` bindings (including `mod+shift+d` = `diagnostics::open`
-/// in the general bindings block above) carry their own copy of the ids
-/// they name, registered here so `build_keymap` never drops them for want
-/// of a registered action even in a shell-only build that never loaded
+/// `diagnostics::*` bindings carry their own copy of the ids they name,
+/// registered here so `build_keymap` never drops them for want of a
+/// registered action even in a shell-only build that never loaded
 /// `geode-diagnostics` — `cargo check -p geode-shell --features
 /// test-support --all-targets` is exactly that build. `pub` for the same
-/// cross-crate mirror-test reason.
+/// cross-crate mirror-test reason. `diagnostics::open` was retired by user
+/// ruling 2026-09-09: the status bar's diagnostics-summary click is the
+/// one focus-or-add door (`ShellView::open_module`), and the palette's
+/// `Diagnostics: Split` rows (`register_add_actions`) always add or fill.
 pub const DIAGNOSTICS_ACTION_DEFS: &[(&str, &str)] = &[
-    ("diagnostics::open", "Open diagnostics"),
     ("diagnostics::down", "Cursor down"),
     ("diagnostics::up", "Cursor up"),
     ("diagnostics::top", "Cursor to top"),
@@ -278,7 +278,6 @@ pub const DIAGNOSTICS_ACTION_DEFS: &[(&str, &str)] = &[
 
 /// Just the ids from [`DIAGNOSTICS_ACTION_DEFS`], for the mirror test.
 pub const DIAGNOSTICS_ACTIONS: &[&str] = &[
-    "diagnostics::open",
     "diagnostics::down",
     "diagnostics::up",
     "diagnostics::top",
@@ -547,9 +546,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         action(reg, id, title, "Blotter");
     }
     // The diagnostics module's own actions (Phase 4b Task 5), reserved
-    // here so BUILTIN_KEYMAP's `diagnostics::*` bindings (including
-    // `mod+shift+d`) never get dropped as unregistered — see
-    // `DIAGNOSTICS_ACTION_DEFS`'s doc comment.
+    // here so BUILTIN_KEYMAP's `diagnostics::*` bindings never get dropped
+    // as unregistered — see `DIAGNOSTICS_ACTION_DEFS`'s doc comment.
     for (id, title) in DIAGNOSTICS_ACTION_DEFS {
         action(reg, id, title, "Diagnostics");
     }
@@ -597,10 +595,14 @@ pub fn register_scope_actions(reg: &mut ActionRegistry, saved: &geode_core::scop
     }
 }
 
-/// Three palette rows per module kind (spec 2026-09-08 add-tile §3.2):
-/// `tile::add_<kind>` ("Add <Kind>", the setting decides the direction),
-/// `tile::add_<kind>_horizontal` ("… Horizontal", to the right) and
-/// `tile::add_<kind>_vertical` ("… Vertical", below), category "Tiles".
+/// Three palette rows per module kind (spec 2026-09-08 add-tile §3.2,
+/// retitled by user ruling 2026-09-09 to the crate's `Category: Verb`
+/// pattern — see `register_pick_actions`'s "Pick: <column>" and
+/// `register_scope_actions`'s "Scope: <name>"): `tile::add_<kind>`
+/// ("<Kind>: Split", the setting decides the direction),
+/// `tile::add_<kind>_horizontal` ("<Kind>: Split Horizontal", to the
+/// right) and `tile::add_<kind>_vertical` ("<Kind>: Split Vertical",
+/// below), category "Tiles". Action ids are unchanged — only titles.
 /// Registered from the roster's kinds right beside `register_pick_actions`
 /// / `register_scope_actions` — after the builtins, before `build_keymap`
 /// — so a desk keymap can bind e.g. `mod+b = "tile::add_blotter"`.
@@ -610,19 +612,19 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) {
         action(
             reg,
             &format!("tile::add_{kind}"),
-            &format!("Add {title}"),
+            &format!("{title}: Split"),
             "Tiles",
         );
         action(
             reg,
             &format!("tile::add_{kind}_horizontal"),
-            &format!("Add {title} Horizontal"),
+            &format!("{title}: Split Horizontal"),
             "Tiles",
         );
         action(
             reg,
             &format!("tile::add_{kind}_vertical"),
-            &format!("Add {title} Vertical"),
+            &format!("{title}: Split Vertical"),
             "Tiles",
         );
     }
@@ -895,9 +897,9 @@ mod tests {
         assert_eq!(ids, DIAGNOSTICS_ACTIONS.to_vec());
     }
 
-    /// Every `diagnostics::*` id the builtin keymap binds (`mod+shift+d`
-    /// plus the `diagnostics` context block) must be registered here —
-    /// same reasoning as [`every_blotter_binding_target_is_reserved`].
+    /// Every `diagnostics::*` id the builtin keymap binds (the
+    /// `diagnostics` context block) must be registered here — same
+    /// reasoning as [`every_blotter_binding_target_is_reserved`].
     #[test]
     fn every_diagnostics_binding_target_is_reserved() {
         let mut reg = ActionRegistry::default();
@@ -935,10 +937,10 @@ mod tests {
             assert_eq!(def.title, title);
             assert_eq!(def.category, "Tiles");
         };
-        expect("tile::add_blotter", "Add Blotter");
-        expect("tile::add_blotter_horizontal", "Add Blotter Horizontal");
-        expect("tile::add_blotter_vertical", "Add Blotter Vertical");
-        expect("tile::add_diagnostics", "Add Diagnostics");
+        expect("tile::add_blotter", "Blotter: Split");
+        expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
+        expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
+        expect("tile::add_diagnostics", "Diagnostics: Split");
         assert_eq!(reg.iter().count(), 6);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
