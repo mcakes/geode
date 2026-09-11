@@ -5953,10 +5953,15 @@ run_mutation "objectdialog: an added item moves into the member block" \
 
 # Reordering across the boundary would put an available column among the
 # members without changing its flag — painted in one block, written in none.
+# Task 6 (§18.3) rewrote `move_item` to walk to the next VISIBLE
+# neighbour rather than swap with the literal next one, so the boundary
+# check moved from a `swap`-adjacent comparison to this loop's own — the
+# anchor follows it there. `false` disables only the member/available
+# comparison, leaving the array-bounds half of the condition live.
 run_mutation "objectdialog: reorder never crosses the member boundary" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if items[target].member != items[item].member {' \
-  '        if false {' \
+  '            if next >= items.len() || items[next].member != block {' \
+  '            if next >= items.len() || false {' \
   geode-shell \
   reordering_never_crosses_the_member_boundary
 
@@ -6172,6 +6177,39 @@ run_mutation "objectdialog: n empties a leftover browse filter before naming" \
   '                    input.read(cx).focus_handle(cx).focus(window, cx);' \
   geode-shell \
   n_opens_an_empty_name_field_even_after_a_browse_filter
+
+# ---- Task 6: filtering the edit stage (§18.3) --------------------------
+
+# The cursor indexes the FILTERED list. Reading rows()[selected] instead
+# acts on whatever row happens to sit at that unfiltered index.
+run_mutation "objectdialog: the edit cursor indexes the filtered rows" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.visible_rows()
+            .get(self.selected)
+            .and_then(|m| rows.get(m.row).copied())' \
+  '        rows.get(self.selected).copied()' \
+  geode-shell \
+  the_edit_stage_filters_by_label_and_the_cursor_indexes_the_filtered_list
+
+# A reorder under a filter must land past the hidden neighbours, not swap
+# with one of them (which looks like nothing happened).
+run_mutation "objectdialog: reorder skips hidden rows" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if row_of(target).is_some_and(|r| visible.contains(&r)) {
+                break;
+            }' \
+  '            break;' \
+  geode-shell \
+  reordering_under_a_filter_moves_past_the_hidden_rows_and_says_how_many
+
+# set_query has to reach the draft, or typing narrows the browse copy and
+# the edit stage keeps painting every row.
+run_mutation "objectdialog: set_query mirrors into the open draft" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            draft.query = query.clone();' \
+  '            draft.query = String::new();' \
+  geode-shell \
+  slash_filters_the_edit_stage_and_escape_walks_the_full_ladder
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

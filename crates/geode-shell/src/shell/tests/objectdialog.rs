@@ -2672,3 +2672,61 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("slots"), "{notice}");
 }
+
+// ---- Task 6: filtering the edit stage (§18.3) -------------------------
+
+/// `/` filters the edit stage's own rows, exactly as it does in browse:
+/// the field labels are ranked against the query, a hidden row's element
+/// does not paint, `escape` walks the whole ladder one visible rung at a
+/// time (leave filter keeping the query, clear the query, back a stage),
+/// and every verb along the way still acts on the row the trader is
+/// actually looking at.
+#[gpui::test]
+fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+
+    cx.simulate_input("npv");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-item-npv").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-item-book").is_none(),
+        "hidden by the filter"
+    );
+    assert!(cx.debug_bounds("objectdialog-field-dataset").is_none());
+
+    // Leave filter, keep query.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(
+        cx.debug_bounds("objectdialog-item-book").is_none(),
+        "query still applied"
+    );
+
+    // `space` acts on npv, the filtered row — not on whatever unfiltered
+    // row happens to sit at index 0.
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| !d
+        .list_items("columns")
+        .unwrap()[1]
+        .included));
+
+    // Clear the query.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-item-book").is_some());
+
+    // Back a stage.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+}

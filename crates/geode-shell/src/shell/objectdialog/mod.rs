@@ -661,10 +661,16 @@ pub struct Draft {
     /// that by construction: the actual object decides whether anything
     /// changed, not its rendering.
     baseline_source: toml::Table,
-    /// Cursor over [`Draft::rows`]. The edit stage's only cursor;
-    /// `ObjectDialogState::selected` is the browse stage's. One per
-    /// stage, never both live at once.
+    /// Cursor over [`Draft::visible_rows`] (§18.3) — the FILTERED list,
+    /// not [`Draft::rows`] — the same convention
+    /// `ObjectDialogState::selected` holds for the browse stage. One
+    /// cursor per stage, never both live at once.
     pub selected: usize,
+    /// The edit stage's filter (§18.3), mirrored from the shared `Input`
+    /// by `ObjectDialogState::set_query` exactly as the browse query is.
+    /// Lives on the draft rather than beside it because `selected`
+    /// indexes the FILTERED list and both must move together.
+    pub query: String,
     /// [`Domain::validate`]'s output for the draft as it stands, refreshed
     /// on every change (spec §7.2).
     ///
@@ -735,9 +741,57 @@ impl Draft {
         out
     }
 
-    /// The row the cursor is on, if the cursor is in range.
+    /// What the filter ranks a row by: exactly the text the row paints as
+    /// its label — a field's label, an item's name — and nothing more
+    /// (the browse list's own rule, for the same reason: matching text
+    /// the user cannot see breaks the agreement between what ranked and
+    /// what is highlighted).
+    pub fn row_label(&self, row: EditRow) -> String {
+        match row {
+            EditRow::Field(i) => self.fields[i].label.clone(),
+            EditRow::Item { field, item } => match &self.fields[field].kind {
+                FieldKind::OrderedList { items } => items[item].name.clone(),
+                _ => String::new(),
+            },
+        }
+    }
+
+    /// The rows the edit stage shows, ranked by [`crate::listfilter::rank`]
+    /// over [`Draft::row_label`]; every row in natural order when the
+    /// query is empty. `Ranked::row` indexes [`Draft::rows`].
+    pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
+        let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
+        crate::listfilter::rank(&labels, &self.query)
+    }
+
+    /// The row the cursor is on, if the cursor is in range — indexed
+    /// through [`Draft::visible_rows`], so every verb acts on the row the
+    /// trader is actually looking at, filtered or not (§18.3).
     pub fn selected_row(&self) -> Option<EditRow> {
-        self.rows().get(self.selected).copied()
+        let rows = self.rows();
+        self.visible_rows()
+            .get(self.selected)
+            .and_then(|m| rows.get(m.row).copied())
+    }
+
+    /// Re-point the cursor at `row`'s own position in the FILTERED list,
+    /// after a verb has changed which row that is — the identity-based
+    /// replacement for the arithmetic `self.selected = self.selected -
+    /// item + end` used to do when `selected` indexed the unfiltered
+    /// [`Draft::rows`] directly. Leaves `selected` where it is if `row`
+    /// is no longer visible under the current query, which none of this
+    /// task's callers can actually produce (moving or (un)membering an
+    /// item never changes its own label), but is the honest fallback for
+    /// a future one that might.
+    fn follow(&mut self, row: EditRow) {
+        let rows = self.rows();
+        if let Some(position) = self
+            .visible_rows()
+            .iter()
+            .position(|m| rows.get(m.row) == Some(&row))
+        {
+            self.selected = position;
+        }
     }
 
     /// Has anything changed since the last applied edit? Compared against
@@ -902,9 +956,8 @@ impl Draft {
                     entry.member = true;
                     entry.included = true;
                     items.insert(end, entry);
-                    // The cursor follows the item: item rows of one list
-                    // are contiguous, so the row moves by (end - item).
-                    self.selected = self.selected - item + end;
+                    // The cursor follows the item to its new row.
+                    self.follow(EditRow::Item { field, item: end });
                     return Step::Changed;
                 }
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
@@ -923,33 +976,48 @@ impl Draft {
         }
     }
 
-    /// `shift+j` / `shift+k`: move the *item* under the cursor by `delta`,
-    /// carrying the cursor with it so a held key keeps moving the same
-    /// item. `false` at either end of the list, on a row that is not a
+    /// `shift+j` / `shift+k`: move the item under the cursor past the next
+    /// VISIBLE item in that direction within its own list and member
+    /// block (§18.3) — under a filter that is what reordering means, and
+    /// the count of hidden rows jumped over is returned so the notice can
+    /// say so. `None` at either end of the block, on a row that is not a
     /// list item, or when the move would cross the member/available
     /// boundary — an available column reordered among the members would
     /// be painted in one block while still being written in neither.
-    pub fn move_item(&mut self, delta: i32) -> bool {
-        let Some(EditRow::Item { field, item }) = self.selected_row() else {
-            return false;
+    pub fn move_item(&mut self, delta: i32) -> Option<usize> {
+        let EditRow::Item { field, item } = self.selected_row()? else {
+            return None;
+        };
+        let visible: BTreeSet<usize> = self.visible_rows().iter().map(|m| m.row).collect();
+        let rows = self.rows();
+        let row_of = |i: usize| {
+            rows.iter()
+                .position(|r| *r == EditRow::Item { field, item: i })
         };
         let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
-            return false;
+            return None;
         };
-        let Ok(target) = usize::try_from(item as i64 + delta as i64) else {
-            return false;
-        };
-        if target >= items.len() {
-            return false;
+        let block = items[item].member;
+        let mut target = item;
+        let mut skipped = 0usize;
+        loop {
+            let next = target.checked_add_signed(delta as isize)?;
+            if next >= items.len() || items[next].member != block {
+                return None;
+            }
+            target = next;
+            if row_of(target).is_some_and(|r| visible.contains(&r)) {
+                break;
+            }
+            skipped += 1;
         }
-        if items[target].member != items[item].member {
-            return false;
-        }
-        items.swap(item, target);
-        // The item rows of one list are contiguous, so the item's move is
-        // the row's move — the cursor stays on the thing it picked up.
-        self.selected = self.selected.saturating_add_signed(delta as isize);
-        true
+        let entry = items.remove(item);
+        items.insert(target, entry);
+        self.follow(EditRow::Item {
+            field,
+            item: target,
+        });
+        Some(skipped)
     }
 
     /// `x`: take the item under the cursor out of the object (§18.2) —
@@ -995,7 +1063,7 @@ impl Draft {
         entry.included = false;
         items.push(entry);
         let last = items.len() - 1;
-        self.selected = self.selected - item + last;
+        self.follow(EditRow::Item { field, item: last });
         Step::Changed
     }
 
@@ -1068,6 +1136,7 @@ impl Draft {
             baseline: Vec::new(),
             baseline_source: toml::Table::new(),
             selected: 0,
+            query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
         }
@@ -1134,6 +1203,7 @@ impl Domain {
             baseline_source: source.clone(),
             source,
             selected: 0,
+            query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
         };
@@ -1336,10 +1406,17 @@ impl ObjectDialogState {
     /// `PreviousStage` rung on by constructing [`Stage::Edit`], and it
     /// sets the two things that decide where the next keystroke goes:
     ///
-    /// - the **query is dropped**, because the edit stage does not filter
-    ///   its own rows (see [`render`]'s module doc), so a query left
-    ///   applied would be ranking nothing while `escape`'s `ClearQuery`
-    ///   rung silently ate the keystroke meant to go back a stage;
+    /// - the **browse query is dropped**, because the edit stage has its
+    ///   OWN filter (`Draft::query`, §18.3) — a separate cursor space
+    ///   from the browse list's, since `Draft::selected` indexes the
+    ///   draft's own `visible_rows()`, never `ObjectDialogState::
+    ///   selected`'s list. A stale browse query left in `state.query`
+    ///   would rank nothing here (the edit stage never reads it) while
+    ///   still being live enough to eat `escape`'s `ClearQuery` rung the
+    ///   moment the trader stepped back to browse — the newly-built
+    ///   draft's own `query` is separately guaranteed empty here too,
+    ///   defensively, though every constructor already starts it that
+    ///   way;
     /// - the **mode goes back to `Normal`**, because `enter` opens an
     ///   object from filter mode too, and a stage left in `Filter` sends
     ///   the next `escape` down the `LeaveFilter` rung — which the edit
@@ -1356,7 +1433,9 @@ impl ObjectDialogState {
     /// live in one *door* instead, and this method is visible only inside
     /// this module's subtree so nothing else can reach half of it.
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
-        self.draft = Some(self.domain.draft(config, object));
+        let mut draft = self.domain.draft(config, object);
+        draft.query.clear();
+        self.draft = Some(draft);
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
@@ -1379,7 +1458,10 @@ impl ObjectDialogState {
     /// [`Self::enter_edit`] is: [`render::enter_edit_stage`] is the one
     /// door onto either, and a caller reaching this directly would skip
     /// the `Input` clear and focus blur that door's other half does.
-    pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, draft: Draft) {
+    pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, mut draft: Draft) {
+        // Same defensive clear `enter_edit` gives its own freshly-derived
+        // draft — see that method's doc.
+        draft.query.clear();
         self.stage = Stage::Edit {
             object: draft.name.clone(),
         };
@@ -1406,6 +1488,14 @@ impl ObjectDialogState {
     /// notice, which named a row the re-ranked list has just moved the
     /// selection off.
     pub fn set_query(&mut self, query: String) {
+        // Mirrors into the open draft too (§18.3), so the edit stage's
+        // filter is exactly this same subscription rather than a second
+        // one it would be easy to forget to wire — see `Draft::query`'s
+        // own doc.
+        if let Some(draft) = self.draft.as_mut() {
+            draft.query = query.clone();
+            draft.selected = 0;
+        }
         self.query = query;
         self.selected = 0;
         self.notice = None;
@@ -1919,6 +2009,7 @@ mod tests {
             source: toml::Table::new(),
             baseline_source: toml::Table::new(),
             selected: 0,
+            query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
         }
@@ -2334,9 +2425,12 @@ mod tests {
     fn an_item_does_not_move_past_either_end() {
         let mut draft = draft_for("tree");
         let before = list_names(&draft);
-        assert!(!draft.move_item(-1), "the first item has nowhere up to go");
+        assert!(
+            draft.move_item(-1).is_none(),
+            "the first item has nowhere up to go"
+        );
         draft.selected += 2;
-        assert!(!draft.move_item(1), "nor the last one down");
+        assert!(draft.move_item(1).is_none(), "nor the last one down");
         assert_eq!(list_names(&draft), before);
     }
 
@@ -2436,9 +2530,12 @@ mod tests {
     }
 
     /// Entering the edit stage turns the ladder's `PreviousStage` rung on
-    /// and drops the browse query with it — the edit stage does not filter
-    /// its rows, so a query left applied would eat the `escape` that was
-    /// meant to go back.
+    /// and drops the browse query with it: `state.query` (browse) and
+    /// `Draft::query` (edit, §18.3) are two separate cursor spaces, so a
+    /// stale browse query left applied would rank a list the trader is no
+    /// longer looking at, and would also eat the `escape` that was meant
+    /// to go back a stage before the ladder ever reached the edit stage's
+    /// own query.
     #[test]
     fn entering_the_edit_stage_arms_the_previous_stage_rung() {
         let config = demo_config();
@@ -2586,5 +2683,86 @@ mod tests {
         draft.selected = 2; // the one item row: npv
         assert!(draft.remove_selected().changed());
         assert!(!draft.list_items("columns").unwrap()[0].member);
+    }
+
+    // ---- Task 6: filtering the edit stage (§18.3) --------------------
+
+    /// The edit stage's own filter narrows [`Draft::visible_rows`], and
+    /// [`Draft::selected`] indexes that filtered list — the same
+    /// convention the browse stage already has — so a verb like `space`
+    /// acts on the row the trader is looking at, not on whatever
+    /// unfiltered row happened to sit at that position.
+    #[test]
+    fn the_edit_stage_filters_by_label_and_the_cursor_indexes_the_filtered_list() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::User, "groupings", "3 = [\"book\", \"lhu\"]\n"),
+        ]);
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.query = "lhu".to_string();
+        let visible = draft.visible_rows();
+        assert_eq!(visible.len(), 1);
+        draft.selected = 0;
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Item { field: 1, item: 1 })
+        );
+        assert!(
+            draft.toggle_selected().changed(),
+            "the verb acts on the filtered row"
+        );
+    }
+
+    /// `shift+j`/`shift+k` under a filter move the item past the next
+    /// VISIBLE neighbour, not the next literal one — jumping over
+    /// whatever the query is hiding — and report how many rows it
+    /// skipped so the caller's notice can say so. Single-letter column
+    /// names cannot carry this test (a one-character candidate cannot
+    /// hold a query long enough to pick two of three of them out from
+    /// the third — see `listfilter::rank`'s subsequence matcher), so the
+    /// fixture uses longer names and a query ("al") that is a subsequence
+    /// of `alpha` and of `charlie` but not of `bravo`.
+    #[test]
+    fn reordering_under_a_filter_moves_past_the_hidden_rows_and_says_how_many() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.alpha]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.bravo]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.charlie]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (
+                Layer::User,
+                "groupings",
+                "3 = [\"alpha\", \"bravo\", \"charlie\"]\n",
+            ),
+        ]);
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.query = "al".to_string(); // hides bravo, the middle item
+        assert_eq!(
+            draft.visible_rows().len(),
+            2,
+            "sanity: the query must hide exactly bravo"
+        );
+        draft.selected = 0; // alpha
+        assert_eq!(draft.move_item(1), Some(1), "one hidden row skipped");
+        let names: Vec<&str> = draft
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(&names[..3], ["bravo", "charlie", "alpha"]);
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Item { field: 1, item: 2 }),
+            "the cursor followed alpha"
+        );
     }
 }

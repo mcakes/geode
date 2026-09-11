@@ -354,7 +354,10 @@ mod tests {
             .iter()
             .position(|r| matches!(r, EditRow::Item { .. }))
             .expect("the fixture slot has dimensions");
-        assert!(draft.move_item(1), "book should move down past lhu");
+        assert!(
+            draft.move_item(1).is_some(),
+            "book should move down past lhu"
+        );
         let item = to_table(&draft, Destination::Doc);
         let text = super::super::object_text("3", item);
         let table: toml::Table = text.parse().unwrap();

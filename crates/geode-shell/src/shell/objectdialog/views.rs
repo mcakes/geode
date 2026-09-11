@@ -228,6 +228,12 @@ pub fn refresh_available(draft: &mut Draft, config: &Config) {
     if let Some(dataset) = schema.dataset(&current) {
         push_dataset_columns(items, dataset);
     }
+    // The rebuild can shrink the FILTERED list out from under the cursor
+    // (an active query that matched an available column the old dataset
+    // had, say), and `selected` is an index into `visible_rows()`
+    // (§18.3) rather than a value this function can leave to chance.
+    let last_visible = draft.visible_rows().len().saturating_sub(1);
+    draft.selected = draft.selected.min(last_visible);
 }
 
 /// Append `dataset`'s columns that are not already on `items`, as
@@ -769,7 +775,7 @@ mod tests {
         let mut draft = Domain::Views.draft(&config, "tree");
         draft.selected = 2; // npv, the only member
         assert!(
-            !draft.move_item(1),
+            draft.move_item(1).is_none(),
             "book is not a member; npv cannot move past it"
         );
     }

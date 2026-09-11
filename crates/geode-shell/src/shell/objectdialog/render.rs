@@ -35,14 +35,26 @@
 //! notice's doors, the `escape` ladder, the claim-and-drop contract — has
 //! to behave identically across them or a user learns three dialogs.
 //!
-//! The edit stage does **not** filter its own rows, which the browse stage
-//! does. `/` there would need a second cursor space (a filtered position
-//! beside the draft's own row index) and would make `shift+j` ambiguous —
-//! moving an item past a neighbour the filter is hiding. Entering the
-//! stage therefore drops the browse query, which also keeps the `escape`
-//! ladder honest: with no query, `escape` reaches
-//! [`EscapeStep::PreviousStage`] rather than silently spending itself on
-//! `ClearQuery`.
+//! The edit stage filters its own rows too (§18.3), through
+//! [`super::Draft::query`] — a second cursor space from the browse
+//! stage's own `state.query`, since [`super::Draft::selected`] already
+//! indexes [`super::Draft::rows`] rather than [`super::ObjectRow`]s.
+//! `shift+j`/`shift+k` resolve the ambiguity a naive reorder-under-a-
+//! filter would have (moving an item past a neighbour the filter is
+//! hiding) by not treating it as ambiguous at all: [`super::Draft::
+//! move_item`] walks the *unfiltered* list for the next VISIBLE neighbour
+//! in the item's own member block, so a filtered reorder still moves
+//! something and reports how many hidden rows it jumped. Entering the
+//! stage still drops the BROWSE query (`enter_edit`/`enter_edit_with`
+//! clear both `state.query` and the freshly-built draft's own, separate
+//! `query`) — the two lists are unrelated, and a browse filter left
+//! applied here would rank rows the trader never typed anything to
+//! filter. At the moment the stage opens that also keeps the `escape`
+//! ladder honest, reaching [`EscapeStep::PreviousStage`] directly rather
+//! than spending itself on `ClearQuery` first — though once a trader
+//! types into the edit stage's own filter, `ClearQuery` becomes a real,
+//! reachable rung again, ahead of `PreviousStage`, exactly as it is in
+//! the browse stage.
 //!
 //! ## The dialog is instant; the merge and the applier ride one timer
 //!
@@ -578,10 +590,19 @@ fn enter_edit_stage(
 /// 1. an armed [`Confirm`] owns **every** keystroke until it is answered
 ///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
 ///    bar rather than adding a row, so nothing above it moves;
-/// 2. `escape` walks the ladder, whose `PreviousStage` rung this stage
-///    exists to reach — going back a stage, with nothing to discard
-///    because every edit already applied;
-/// 3. everything else goes through [`dialogmode::normal_command`], and a
+/// 2. in [`DialogMode::Filter`] (§18.3, entered by `/` the same as
+///    browse) `escape` leaves filter mode keeping the query, `enter`
+///    gives the same notice normal mode's `Commit` does (there is
+///    nothing here to open), navigation goes through
+///    [`listfilter::nav_command`] against [`Draft::visible_rows`], and
+///    `tab`/`shift+tab` are claimed and dropped — everything else is
+///    unclaimed (`false`), reaching the focused `Input`;
+/// 3. in [`DialogMode::Normal`], `escape` walks the ladder, whose
+///    `PreviousStage` rung this stage exists to reach — going back a
+///    stage, with nothing to discard because every edit already applied,
+///    though a non-empty `Draft::query` takes the `ClearQuery` rung
+///    first, same as browse;
+/// 4. everything else goes through [`dialogmode::normal_command`], and a
 ///    key it does not claim is swallowed, exactly as in browse.
 ///
 /// Every branch that changes a field's *value* ends in [`revalidate`]:
@@ -634,34 +655,104 @@ fn handle_edit_key(
         return true;
     }
 
-    if ks.key == "escape" {
-        let step = shell.object_dialog.as_ref().map(|state| {
-            dialogmode::escape_step(
-                state.mode,
-                state.query.is_empty(),
-                state.has_previous_stage(),
-            )
-        });
-        if step == Some(EscapeStep::PreviousStage) {
-            // Straight back, with no discard question: there is nothing
-            // to discard. Every field edit is already on the pending
-            // batch, which outlives this stage and the whole dialog
-            // (`ShellView::pending_config_write`) and still merges,
-            // applies and writes on its own timer; and a fork the user
-            // has not confirmed was taken back off the draft when they
-            // declined it. Leaving abandons exactly nothing.
-            leave_edit(shell, window, cx);
+    let input = shell.dialog_input.clone();
+
+    // ---- Filter mode (§18.3) ------------------------------------------
+    //
+    // The one switch, exactly as browse's own: while the shared `Input`
+    // holds focus, bare letters are text, so this branch claims only the
+    // handful of keys that input does not consume first.
+    let filtering = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.mode == DialogMode::Filter);
+    if filtering {
+        if ks.key == "escape" {
+            // `LeaveFilter`: back to normal, keeping the query applied —
+            // leaving a search leaves you on the match.
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.mode = DialogMode::Normal;
+            }
+            shell.focus_handle.focus(window, cx);
+            cx.notify();
             return true;
         }
-        // `LeaveFilter` and `ClearQuery` are both unreachable here, and
-        // by construction rather than by luck: `enter_edit` forces the
-        // mode to `Normal` and empties the query, so this stage is always
-        // the ladder's third rung. They are still folded into one `false`
-        // rather than special-cased away, because `escape_step` is the
-        // one ladder every modal surface walks and forking it per call
-        // site is how the rungs drift apart. The `false` hands the
-        // keystroke to the shell's modal branch, which closes the dialog.
+        if ks.mods == Modifiers::NONE && ks.key == "enter" {
+            // Nothing here to open — the same notice normal mode's
+            // `Commit` gives, so `enter` says the same thing in either
+            // mode.
+            edit_commit_notice(shell);
+            cx.notify();
+            return true;
+        }
+        if let Some(cmd) = listfilter::nav_command(ks) {
+            let selected = shell.object_dialog.as_mut().and_then(|state| {
+                let draft = state.draft.as_mut()?;
+                draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), cmd);
+                Some(draft.selected)
+            });
+            if let Some(selected) = selected {
+                shell.object_dialog_scroll.scroll_to_item(selected);
+            }
+            cx.notify();
+            return true;
+        }
+        // `tab`/`shift+tab`: reserved and inert, same reasoning as browse.
+        if ks.key == "tab" {
+            return true;
+        }
         return false;
+    }
+
+    // ---- Normal mode ----------------------------------------------------
+
+    if ks.key == "escape" {
+        let step = shell.object_dialog.as_ref().map(|state| {
+            let query_is_empty = state.draft.as_ref().is_some_and(|d| d.query.is_empty());
+            dialogmode::escape_step(state.mode, query_is_empty, state.has_previous_stage())
+        });
+        match step {
+            Some(EscapeStep::ClearQuery) => {
+                // Reachable now (§18.3): a filter typed into the edit
+                // stage's own query, then `escape` twice — the first
+                // rung (handled above, in the `filtering` branch) leaves
+                // filter mode keeping the query; this one drops it.
+                if let Some(draft) = draft_mut(shell) {
+                    draft.query.clear();
+                    draft.selected = 0;
+                }
+                shell.object_dialog_scroll.scroll_to_item(0);
+                // The `Input` owns the text; clearing only the mirrored
+                // `query` would leave the old one waiting in the field.
+                input.update(cx, |i, cx| i.set_value("", window, cx));
+                cx.notify();
+                return true;
+            }
+            Some(EscapeStep::PreviousStage) => {
+                // Straight back, with no discard question: there is
+                // nothing to discard. Every field edit is already on the
+                // pending batch, which outlives this stage and the whole
+                // dialog (`ShellView::pending_config_write`) and still
+                // merges, applies and writes on its own timer; and a
+                // fork the user has not confirmed was taken back off the
+                // draft when they declined it. Leaving abandons exactly
+                // nothing.
+                leave_edit(shell, window, cx);
+                return true;
+            }
+            // `LeaveFilter` is unreachable at this match — the
+            // `filtering` branch above intercepts `escape` before the
+            // mode can still read `Filter` here — and `Close` is
+            // unreachable too, since `has_previous_stage()` is always
+            // true for `Stage::Edit`. Both are folded into one `false`
+            // rather than special-cased away, because `escape_step` is
+            // the one ladder every modal surface walks and forking it per
+            // call site is how the rungs drift apart. The `false` hands
+            // the keystroke to the shell's modal branch, which — since
+            // neither rung can actually fire here — never gets called for
+            // this reason in practice.
+            _ => return false,
+        }
     }
 
     let Some(cmd) = dialogmode::normal_command(ks) else {
@@ -671,7 +762,7 @@ fn handle_edit_key(
         NormalCommand::Nav(nav) => {
             let selected = shell.object_dialog.as_mut().and_then(|state| {
                 let draft = state.draft.as_mut()?;
-                draft.selected = vimnav::apply(draft.selected, draft.rows().len(), nav);
+                draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), nav);
                 Some(draft.selected)
             });
             if let Some(selected) = selected {
@@ -700,18 +791,26 @@ fn handle_edit_key(
             ),
         },
         NormalCommand::MoveItem(delta) => {
-            let moved = draft_mut(shell).is_some_and(|draft| draft.move_item(delta));
-            if moved {
-                let selected = shell
-                    .object_dialog
-                    .as_ref()
-                    .and_then(|state| state.draft.as_ref())
-                    .map(|draft| draft.selected)
-                    .unwrap_or(0);
-                shell.object_dialog_scroll.scroll_to_item(selected);
-                commit_or_confirm(shell, cx);
-            } else {
-                set_notice(shell, "that is as far as this row goes".to_string());
+            let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
+            match skipped {
+                Some(skipped) => {
+                    let selected = shell
+                        .object_dialog
+                        .as_ref()
+                        .and_then(|state| state.draft.as_ref())
+                        .map(|draft| draft.selected)
+                        .unwrap_or(0);
+                    shell.object_dialog_scroll.scroll_to_item(selected);
+                    // Said out loud only when there was something to
+                    // skip — a plain adjacent-item move under no filter
+                    // (or under a filter that hides nothing between the
+                    // two) is the ordinary case and needs no comment.
+                    if skipped > 0 {
+                        set_notice(shell, format!("moved past {skipped} hidden"));
+                    }
+                    commit_or_confirm(shell, cx);
+                }
+                None => set_notice(shell, "that is as far as this row goes".to_string()),
             }
         }
         NormalCommand::Verb('d') => arm_delete(shell),
@@ -737,13 +836,11 @@ fn handle_edit_key(
             ),
         },
         NormalCommand::EnterFilter => {
-            // The one key the browse stage has that this one does not —
-            // said out loud, because a `/` that silently did nothing
-            // would read as the dialog having stopped responding.
-            set_notice(
-                shell,
-                "the object's own rows are not filtered — escape goes back to the list".to_string(),
-            );
+            // §18.3: the same switch browse's own `/` throws.
+            if let Some(state) = shell.object_dialog.as_mut() {
+                state.mode = DialogMode::Filter;
+            }
+            input.read(cx).focus_handle(cx).focus(window, cx);
         }
         // `enter` and `i` have no row to act on in any draft built so
         // far: every field is a choice, a list, or (Groupings' `slot`,
@@ -753,19 +850,7 @@ fn handle_edit_key(
         // Scopes row: pressing `space` right after would immediately say
         // "nothing on this row changes with space" — two verbs
         // disagreeing about the same row in the same breath.
-        NormalCommand::Commit | NormalCommand::EditText => {
-            let steppable = shell
-                .object_dialog
-                .as_ref()
-                .and_then(|state| state.draft.as_ref())
-                .is_some_and(selected_field_is_steppable);
-            let notice = if steppable {
-                "press space to change the selected row"
-            } else {
-                "this row is read-only — nothing here has a verb"
-            };
-            set_notice(shell, notice.to_string());
-        }
+        NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
         // A letter this stage has no verb for. Named rather than
         // dropped: `d` and `r` have just taught the user that
         // letters act here, so a silent `z` reads as the dialog having
@@ -777,6 +862,26 @@ fn handle_edit_key(
     }
     cx.notify();
     true
+}
+
+/// `enter`/`i` in the edit stage — reachable from either mode
+/// (normal mode's own `Commit`/`EditText` match arm, and filter mode's
+/// `enter`, which gives the identical notice because there is nothing to
+/// open either way): say whether `space` would do anything on the
+/// selected row, since every field here is a choice, a list, or a
+/// read-only `Text`, and `space` only helps for the first two.
+fn edit_commit_notice(shell: &mut ShellView) {
+    let steppable = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(selected_field_is_steppable);
+    let notice = if steppable {
+        "press space to change the selected row"
+    } else {
+        "this row is read-only — nothing here has a verb"
+    };
+    set_notice(shell, notice.to_string());
 }
 
 /// A step the draft declined ([`Step::Refused`]), said with the verb that
@@ -1760,17 +1865,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     }
 
     let rows = draft.rows();
+    let visible = draft.visible_rows();
     let mut list = v_flex()
         .id("objectdialog-fields")
         .w(px(WIDTH))
         .h(px(
-            (rows.len().max(1) as f32 * FIELD_ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            (visible.len().max(1) as f32 * FIELD_ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
         ))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
         .debug_selector(|| "objectdialog-fields".to_string());
 
-    for (position, edit_row) in rows.iter().enumerate() {
+    for (position, m) in visible.iter().enumerate() {
+        let Some(edit_row) = rows.get(m.row).copied() else {
+            continue;
+        };
         let is_selected = position == draft.selected;
         let mut element = h_flex()
             .w_full()
@@ -1783,12 +1892,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if is_selected {
             element = element.bg(theme.selection).text_color(theme.primary);
         }
-        let (selector, label, value) = match *edit_row {
+        let (selector, label, value) = match edit_row {
             EditRow::Field(index) => {
                 let field = &draft.fields[index];
                 (
                     format!("objectdialog-field-{}", field.key),
-                    div().child(field.label.clone()).into_any_element(),
+                    highlighted_text(&field.label, &m.indices, theme.primary),
                     div()
                         .text_sm()
                         .text_color(theme.muted_foreground)
@@ -1805,19 +1914,25 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 };
                 // The tick is the inclusion state, and a hidden item is
                 // muted as well as unticked — one signal is a thing a
-                // glance misses on a 30-row list.
+                // glance misses on a 30-row list. The mark is plain text
+                // (it is never part of what the filter ranked — see
+                // `Draft::row_label`); only the name itself is
+                // highlighted.
                 let mark = if entry.included { "[x]" } else { "[ ]" };
-                let name = div()
-                    .pl_4()
-                    .when(!entry.included, |d| d.text_color(theme.muted_foreground))
-                    .child(format!("{mark}  {}", entry.name));
+                let mut name_row = h_flex().pl_4().gap_1().items_center().child(mark);
+                if !entry.included {
+                    name_row = name_row.text_color(theme.muted_foreground);
+                }
+                let name = name_row
+                    .child(highlighted_text(&entry.name, &m.indices, theme.primary))
+                    .into_any_element();
                 let width = match entry.width {
                     Some(width) => format!("{width:.0}px"),
                     None => "auto".to_string(),
                 };
                 (
                     format!("objectdialog-item-{}", entry.name),
-                    name.into_any_element(),
+                    name,
                     div()
                         .text_xs()
                         .text_color(theme.muted_foreground)
@@ -1838,6 +1953,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         on_edit_row_clicked(shell, clicked, window, cx);
                     });
                 }),
+        );
+    }
+
+    if visible.is_empty() {
+        // Unlike browse, this can only ever be "no matches" — every draft
+        // this scaffold builds has at least a `Dataset`/`Slot` field row,
+        // so an empty `rows()` never happens here.
+        list = list.child(
+            div()
+                .px_2()
+                .py_1()
+                .text_sm()
+                .text_color(theme.muted_foreground)
+                .debug_selector(|| "objectdialog-empty".to_string())
+                .child("no matches"),
         );
     }
 
@@ -1877,6 +2007,25 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 sep("leave it alone"),
             ],
         )
+    } else if state.mode == DialogMode::Filter {
+        // §18.3: the same filter-mode hints browse paints, since the
+        // vocabulary — type to narrow, the shared nav keys, `escape` back
+        // to normal — is identical in both stages.
+        (
+            vec![
+                sep("type to filter ·"),
+                chip("up"),
+                chip("down"),
+                sep("move ·"),
+                chip("ctrl+d"),
+                chip("ctrl+u"),
+                sep("±5 ·"),
+                chip("ctrl+f"),
+                chip("ctrl+b"),
+                sep("±10"),
+            ],
+            vec![chip("escape"), sep("back to normal")],
+        )
     } else {
         let mut motion = vec![
             chip("j"),
@@ -1899,7 +2048,20 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         } else {
             motion.push(sep("reorder"));
         }
-        (motion, vec![chip("escape"), sep("back to the list")])
+        let action = vec![
+            chip("/"),
+            sep("filter ·"),
+            chip("escape"),
+            // Honest about which rung the next escape takes — the same
+            // rule browse's own footer keeps (§18.3): with a query still
+            // applied it clears the query, and only then goes back.
+            sep(if draft.query.is_empty() {
+                "back to the list"
+            } else {
+                "clear the filter"
+            }),
+        ];
+        (motion, action)
     };
 
     let footer = v_flex()
@@ -1924,10 +2086,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             ),
         );
 
+    // The live `Input` renders only when it actually owns the keystrokes
+    // — see this module's own "one switch" note, now also the edit
+    // stage's rule (§18.3).
+    let frozen_query = (state.mode == DialogMode::Normal).then_some(draft.query.as_str());
+    let filter = dialog::filter_row(&shell.dialog_input, frozen_query, cx);
+
     v_flex()
         .gap_2()
         .child(header)
         .child(diagnostics)
+        .child(filter)
         .child(list)
         .child(action_block)
         .child(footer)
@@ -2101,7 +2270,11 @@ fn on_edit_row_clicked(
         cx.notify();
     }
     if let Some(draft) = draft_mut(shell) {
-        if position >= draft.rows().len() {
+        // `position` is the FILTERED index `build_edit` painted this row
+        // at (§18.3), so the bound to check — and the value to store,
+        // unchanged — is against `visible_rows`, not the unfiltered
+        // `rows`.
+        if position >= draft.visible_rows().len() {
             return;
         }
         draft.selected = position;
