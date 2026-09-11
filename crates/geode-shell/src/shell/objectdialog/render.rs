@@ -5,11 +5,14 @@
 //! Everything here is the shell around [`super`]'s pure core, and it is
 //! deliberately the same shell `keybindings_view` grew — same door
 //! ([`dialog::open_shell_dialog_with_key`]), same two-mode routing, same
-//! mode pill above the same shared filter row, same muted footer stating
-//! only the *current* mode's vocabulary. A second routing shape would be
-//! a second set of edge cases (which key blurs the filter, which escape
-//! rung closes the modal) for a user to learn twice and a maintainer to
-//! fix twice.
+//! shared filter row, same muted footer stating only the *current*
+//! mode's vocabulary, and the same mode pill — which since §18.1 is not
+//! a row either dialog paints at all, but the modal title row's own
+//! `title_extra` slot, filled here in [`open`] via
+//! [`dialog::set_title_extra`]. A second routing shape would be a second
+//! set of edge cases (which key blurs the filter, which escape rung
+//! closes the modal) for a user to learn twice and a maintainer to fix
+//! twice.
 //!
 //! ## The one switch: normal mode is a blurred filter
 //!
@@ -154,6 +157,15 @@ pub fn open(
         // or as one of the edit stage's verbs.
         false,
     );
+    // §18.1: pill-only for now — Task 8 replaces this with a crumb plus
+    // the pill, sharing the same title-row slot every Geode modal has.
+    dialog::set_title_extra(view, |shell, cx| {
+        shell
+            .object_dialog
+            .as_ref()
+            .map(|s| dialog::mode_pill(s.mode, cx))
+            .unwrap_or_else(|| div().into_any_element())
+    });
 }
 
 /// The [`dialog::ModalKeyHandler`] for this dialog: the front door every
@@ -1762,13 +1774,6 @@ fn build(
 
     v_flex()
         .gap_2()
-        .child(
-            h_flex()
-                .w(px(WIDTH))
-                .items_center()
-                .justify_end()
-                .child(dialog::mode_pill(state.mode, cx)),
-        )
         .child(top_row)
         .child(list)
         .child(footer)

@@ -933,17 +933,21 @@ impl Render for ShellView {
         });
         let registry = &self.services.registry;
 
-        // Task 9 instant-modal redesign: clone the two cheap pieces
-        // (`title`: `SharedString`, `build`: `Rc<dyn Fn>`) out of `self.
-        // modal` up front — the same "extract into a local ahead of the
-        // render chain" move `pending`/`registry` just above already make,
-        // one field further in. See `ShellModal`'s own doc comment for why
-        // this step is required rather than just reading `self.modal.
-        // as_ref()` inline inside the `when_some` below.
-        let modal = self
-            .modal
-            .as_ref()
-            .map(|modal| (modal.title.clone(), modal.build.clone()));
+        // Task 9 instant-modal redesign: clone the cheap pieces (`title`:
+        // `SharedString`, `title_extra`: `Option<Rc<dyn Fn>>`, `build`:
+        // `Rc<dyn Fn>`) out of `self.modal` up front — the same "extract
+        // into a local ahead of the render chain" move `pending`/
+        // `registry` just above already make, one field further in. See
+        // `ShellModal`'s own doc comment for why this step is required
+        // rather than just reading `self.modal.as_ref()` inline inside the
+        // `when_some` below.
+        let modal = self.modal.as_ref().map(|modal| {
+            (
+                modal.title.clone(),
+                modal.title_extra.clone(),
+                modal.build.clone(),
+            )
+        });
 
         // Extracted ahead of the render chain like `modal` above: all the
         // drag catcher below needs from the active drag is which resize
@@ -1327,10 +1331,12 @@ impl Render for ShellView {
             // block above never both add a child in the same frame, but
             // the ordering here is what would govern it if that ever
             // changed.
-            .when_some(modal, |el, (title, build)| {
+            .when_some(modal, |el, (title, title_extra, build)| {
+                let extra = title_extra.map(|f| f(self, cx));
                 let content = build(self, window, cx);
                 el.child(dialog::render_modal(
                     title,
+                    extra,
                     content,
                     width,
                     viewport_height,

@@ -58,8 +58,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Focusable as _, MouseButton, SharedString, Window, div, hsla,
-    px,
+    AnyElement, App, Context, Entity, Focusable as _, Hsla, MouseButton, SharedString, Window, div,
+    hsla, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputState};
@@ -150,12 +150,37 @@ pub struct ShellModal {
     /// this type's signature entirely rather than threaded through as a
     /// second parameter alongside it.
     pub build: ModalBuilder,
+    /// What a dialog paints in the title row between the title and the
+    /// close button (§18.1): a count crumb, the mode pill. Built per
+    /// frame like `build`, and for the same `&ShellView` reason. `None`
+    /// for a dialog with nothing to say there (settings).
+    pub title_extra: Option<TitleExtraBuilder>,
     /// This modal's optional key-handling seam (Part B) — see
     /// [`ModalKeyHandler`]'s own doc comment. Both shipped dialogs (the
     /// keybinding dialog, and the settings dialog since its row-list
     /// rewrite) now pass a handler; `open_shell_dialog` still sets this to
     /// `None` unconditionally for any future modal without key needs.
     pub on_key: Option<ModalKeyHandler>,
+}
+
+/// A modal's title-row extra builder (§18.1) — see [`ShellModal::
+/// title_extra`]. Same `&ShellView`-not-`Entity<ShellView>` shape as
+/// [`ModalBuilder`], and for the identical reason: it runs from inside
+/// [`ShellView::render`] with `self` reborrowed, not read through the
+/// entity.
+pub type TitleExtraBuilder = Rc<dyn Fn(&ShellView, &mut App) -> AnyElement>;
+
+/// Give the open modal a title-row extra (§18.1). Called straight after
+/// [`open_shell_dialog_with_key`] by the dialogs that want one, rather
+/// than as an eighth parameter on a door six callers already pass
+/// through — a modal without one is the common case.
+pub fn set_title_extra(
+    view: &mut ShellView,
+    build: impl Fn(&ShellView, &mut App) -> AnyElement + 'static,
+) {
+    if let Some(modal) = view.modal.as_mut() {
+        modal.title_extra = Some(Rc::new(build));
+    }
 }
 
 /// Reclaim every key gpui-component binds by default that collides with
@@ -419,6 +444,7 @@ pub fn open_shell_dialog_with_key<F>(
 
     view.modal = Some(ShellModal {
         title: title.into(),
+        title_extra: None,
         build: Rc::new(build),
         on_key,
     });
@@ -492,11 +518,43 @@ pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
 /// hand-matches `Input`'s own medium-size prefix gap (`px(6.)`,
 /// `input.rs:504-508`), so entering and leaving capture doesn't shift the
 /// query text sideways.
+///
+/// `Some("")` — a frozen filter with nothing typed into it, which is the
+/// state every normal-mode dialog OPENS in — is the one case that paints
+/// something the query itself did not supply: a muted `press / to filter`
+/// placeholder (§18.1). Nothing else on screen says the key exists, and
+/// the alternative is a row showing only an icon, which reads as a
+/// disabled control rather than an unfocused one.
 pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) -> AnyElement {
     let theme = cx.theme();
     let row = div().w_full().border_b_1().border_color(theme.border);
     let search_icon = || Icon::new(IconName::Search).text_color(theme.muted_foreground);
     match frozen {
+        // §18.1: a frozen, EMPTY query is the state every normal-mode
+        // dialog opens in — nothing yet says `/` exists. A placeholder
+        // in the search icon's own row is the one place a trader's eye
+        // already goes to check "is this thing typeable right now". The
+        // selector rides the text itself, not the row around it — a row
+        // paints regardless of what its text says, so a selector on the
+        // row alone would still be found even if the label emptied out
+        // from under it (exactly the "markers, not values" failure this
+        // crate's mutation harness exists to catch — see the harness's
+        // own header comment).
+        Some("") => row
+            .py_1()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_color(theme.muted_foreground)
+                    .child(search_icon())
+                    .child(
+                        div()
+                            .debug_selector(|| "dialog-filter-placeholder".to_string())
+                            .child("press / to filter"),
+                    ),
+            )
+            .into_any_element(),
         Some(query) => row
             .py_1()
             .child(
@@ -598,6 +656,52 @@ pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+/// A bordered mono pill for a *classification* — a layer, `overridden`,
+/// `drifted`, a field's destination (§18.1). Distinct from
+/// [`super::keybindings_view::key_chip`]
+/// (filled, for a keystroke) and [`mode_pill`] (filled, for a state): a
+/// badge is outlined so a row wearing three of them still reads as one
+/// row. `fg` colours text and `border` the outline; the fill is the
+/// panel's own — a badge never paints a background, which is the whole
+/// reason three of them stack readably where three filled chips do not.
+///
+/// `cx` is taken and unused on purpose: every other element helper in
+/// this module reads the theme itself, and a caller that already has the
+/// two tokens in hand should not have to remember that THIS one is the
+/// exception. It also leaves room for the badge to start reading a token
+/// of its own without touching six call sites.
+///
+/// Not called yet — Task 8 (§18.1's drift and destination markers) is its
+/// first caller, and the browse rows' filled `overridden`/`layer` chips
+/// are what it replaces there. It lands with the shared chrome rather
+/// than with its first user so that the three surfaces Task 8 touches all
+/// reach for the same helper instead of one of them inventing a second.
+#[allow(dead_code)]
+pub(crate) fn badge(
+    label: impl Into<SharedString>,
+    fg: Hsla,
+    border: Hsla,
+    selector: Option<String>,
+    cx: &App,
+) -> AnyElement {
+    let _ = cx;
+    let label = label.into();
+    let mut el = div()
+        .font_family(crate::fonts::MONO)
+        .text_xs()
+        .text_color(fg)
+        .border_1()
+        .border_color(border)
+        .px_1()
+        .rounded(px(3.))
+        .flex_shrink_0()
+        .child(label);
+    if let Some(selector) = selector {
+        el = el.debug_selector(move || selector.clone());
+    }
+    el.into_any_element()
+}
+
 /// Cap on the modal panel's height, as a fraction of the window's viewport
 /// height — a *max*, not a fixed size (see [`render_modal`]'s `.max_h`
 /// use): a small dialog's panel still hugs its own content, this only
@@ -629,9 +733,12 @@ pub(crate) const MODAL_TOP_RATIO: f32 = 0.1;
 /// `delta = 1.0` (i.e. its fully-open, fully-opaque end state) — reproduced
 /// here as a constant instead of an animation, since there is no animation:
 /// this modal is already at that end state the first frame it exists. A
-/// title row carries `title` plus a small ghost close button
+/// title row carries `title`, then (§18.1) whatever `title_extra` built —
+/// a count crumb, the mode pill — then a small ghost close button
 /// (`gpui_component::button::Button`, `IconName::Close`, matching that same
-/// pinned `Dialog`'s own close-button styling).
+/// pinned `Dialog`'s own close-button styling). `title_extra` and the
+/// close button share one right-hand `h_flex`, so `.justify_between()`
+/// still reads as exactly two sides: the title, and everything else.
 ///
 /// `viewport_width`/`viewport_height` are the window's drawable size, same
 /// convention as `palette::render`/`whichkey::render` — passed in rather
@@ -666,6 +773,7 @@ pub(crate) const MODAL_TOP_RATIO: f32 = 0.1;
 /// modal is open, which is a key-dispatch concern, not a rendering one.
 pub(crate) fn render_modal(
     title: SharedString,
+    title_extra: Option<AnyElement>,
     content: AnyElement,
     viewport_width: f32,
     viewport_height: f32,
@@ -687,15 +795,22 @@ pub(crate) fn render_modal(
         .gap_3()
         .px_4()
         .pt_4()
-        .child(div().text_lg().child(title))
         .child(
-            Button::new("shell-modal-close")
-                .small()
-                .ghost()
-                .icon(IconName::Close)
-                .on_click(cx.listener(|view, _event, window, cx| {
-                    view.close_modal(window, cx);
-                })),
+            div()
+                .text_lg()
+                .child(title)
+                .debug_selector(|| "shell-modal-title".to_string()),
+        )
+        .child(
+            h_flex().gap_2().items_center().children(title_extra).child(
+                Button::new("shell-modal-close")
+                    .small()
+                    .ghost()
+                    .icon(IconName::Close)
+                    .on_click(cx.listener(|view, _event, window, cx| {
+                        view.close_modal(window, cx);
+                    })),
+            ),
         );
 
     let panel = v_flex()

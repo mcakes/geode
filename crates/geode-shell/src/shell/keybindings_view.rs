@@ -553,6 +553,16 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         // starts from the same blank slate `state.query` does.
         false,
     );
+    // §18.1: the mode pill now lives in the modal's own title row rather
+    // than in this dialog's content — see `dialog::render_modal`'s
+    // `title_extra` slot.
+    dialog::set_title_extra(view, |shell, cx| {
+        shell
+            .keybindings
+            .as_ref()
+            .map(|s| dialog::mode_pill(s.mode, cx))
+            .unwrap_or_else(|| div().into_any_element())
+    });
 }
 
 /// One keystroke as a small muted pill — the look of gpui-component's
@@ -1544,19 +1554,10 @@ fn build(
 
     v_flex()
         .gap_2()
-        // The mode badge sits above the filter, right-aligned, where the
-        // eye already goes to check what a keystroke will do next. (It is
-        // not in the modal's own title row: `dialog::render_modal` paints
-        // that chrome from `ShellModal`'s fixed title alone, and it is
-        // shared with every other modal — a per-dialog, per-frame mode
-        // would have to be threaded through that type to live there.)
-        .child(
-            h_flex()
-                .w(px(WIDTH))
-                .items_center()
-                .justify_end()
-                .child(dialog::mode_pill(state.mode, cx)),
-        )
+        // §18.1: the mode badge lives in the modal's own title row now
+        // (`dialog::render_modal`'s `title_extra` slot, set in `open` via
+        // `dialog::set_title_extra`) rather than as a row here — the pill
+        // was moved out of this dialog's content entirely.
         .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
         .child(footer)

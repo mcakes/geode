@@ -389,6 +389,37 @@ fn edit_draft<T>(
     })
 }
 
+/// §18.1: this dialog's mode pill lives in the modal's shared title row,
+/// in BOTH stages. Browse used to paint a pill row of its own above the
+/// filter and the edit stage painted none at all — `build` returns to
+/// `build_edit` before ever reaching that row — so the two stages
+/// disagreed about whether the dialog told you what mode it was in.
+/// `title_extra` is set once in `open`, which is what makes them agree.
+#[gpui::test]
+fn the_object_dialogs_pill_sits_in_the_title_row_in_both_stages(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+
+    let assert_in_title_row = |cx: &mut gpui::VisualTestContext, stage: &str| {
+        let pill = cx
+            .debug_bounds("dialog-mode-pill-normal")
+            .unwrap_or_else(|| panic!("{stage}: the pill should paint"));
+        let title = cx
+            .debug_bounds("shell-modal-title")
+            .unwrap_or_else(|| panic!("{stage}: the title should paint"));
+        assert!(
+            (pill.origin.y - title.origin.y).abs() < title.size.height,
+            "{stage}: the pill should share the title's row"
+        );
+    };
+
+    assert_in_title_row(&mut cx, "browse");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_in_title_row(&mut cx, "edit");
+}
+
 /// `enter` opens the object, and the edit stage paints the fields and
 /// every column as its own row — the rows `space` and `shift+j` act on.
 #[gpui::test]

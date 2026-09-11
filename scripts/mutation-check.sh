@@ -6238,6 +6238,28 @@ run_mutation "objectdialog: the edit stage's visible rows stay in row order" \
   geode-shell \
   visible_rows_lists_matches_in_row_order_not_score_order
 
+# ---- Task 7: shared chrome — the modal title slot (§18.1) --------------
+
+# The placeholder is what tells a trader in normal mode that `/` exists.
+run_mutation "dialog: the frozen empty filter shows its placeholder" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '"press / to filter"' \
+  '""' \
+  geode-shell \
+  the_keybinding_dialogs_pill_sits_in_the_title_row
+
+# The title row's own slot: drop what a dialog built for it and every
+# modal silently loses its pill (and, from Task 8, its crumb) while the
+# title, the close button and the whole dialog below still paint — the
+# "a marker is missing, not wrong" failure a bounds-only test on the
+# dialog's content cannot see.
+run_mutation "dialog: the modal title row paints its title_extra" \
+  crates/geode-shell/src/shell/dialog.rs \
+  'children(title_extra)' \
+  'children(None::<AnyElement>)' \
+  geode-shell \
+  the_object_dialogs_pill_sits_in_the_title_row_in_both_stages
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -596,6 +596,32 @@ fn the_mode_pill_paints_the_mode_it_is_actually_in(cx: &mut gpui::TestAppContext
     );
 }
 
+/// §18.1: the mode pill lives in the modal's title row, not in the
+/// dialog's content, and the frozen empty filter shows a placeholder.
+#[gpui::test]
+fn the_keybinding_dialogs_pill_sits_in_the_title_row(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    let pill = cx
+        .debug_bounds("dialog-mode-pill-normal")
+        .expect("pill paints");
+    let title = cx.debug_bounds("shell-modal-title").expect("title paints");
+    assert!(
+        (pill.origin.y - title.origin.y).abs() < title.size.height,
+        "same row as the title"
+    );
+    let placeholder = cx
+        .debug_bounds("dialog-filter-placeholder")
+        .expect("placeholder paints");
+    // Width, not just presence: the selector rides the text itself, so an
+    // emptied label (the mutation this test is named as covering) shrinks
+    // this to zero width — a bare `.is_some()` would not notice, since
+    // the row around it still paints either way.
+    assert!(
+        placeholder.size.width > gpui::px(0.0),
+        "the placeholder text itself must paint, not just its row"
+    );
+}
+
 /// `/` enters filter mode and typing narrows, exactly as it does today.
 #[gpui::test]
 fn slash_enters_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {
