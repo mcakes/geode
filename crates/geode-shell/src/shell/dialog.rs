@@ -519,6 +519,32 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
     }
 }
 
+/// The name field a dialog shows while creating an object (§18.2): the
+/// same shared `Input`, with a muted label (`New view · name`) where the
+/// filter row has its search icon. The `Input` is the filter's — the
+/// dialog's `set_query` subscription mirrors the name the way it mirrors
+/// a query — so there is no second text buffer to reset or focus.
+pub fn name_row(input: &Entity<InputState>, label: &str, cx: &App) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .w_full()
+        .border_b_1()
+        .border_color(theme.border)
+        .debug_selector(|| "dialog-name-row".to_string())
+        .child(
+            Input::new(input)
+                .appearance(false)
+                .prefix(
+                    div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child(label.to_string()),
+                )
+                .w_full(),
+        )
+        .into_any_element()
+}
+
 /// The small pill naming a modal dialog's current mode
 /// (`crate::dialogmode`), for the top-right of its content.
 ///

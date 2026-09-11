@@ -563,14 +563,11 @@ pub(super) fn commit_removal(
 /// list the config derives shows the object on the next executor tick
 /// rather than 250 ms later.
 ///
-/// `pub(crate)`, not `pub(super)`: the `n` keybinding that opens
-/// [`Stage::Naming`](super::Stage::Naming) and calls this on `enter` is
-/// Task 5's, so nothing outside `crate::shell::tests::objectdialog` calls
-/// this yet — the `not(test)` allowance below is temporary in the same
-/// sense `commit_edit`'s and `commit_removal`'s neighbours never needed
-/// one: this door just does not have its production caller wired up in
-/// this task.
-#[cfg_attr(not(test), allow(dead_code))]
+/// `pub(crate)`, not `pub(super)`: `render`'s `create_from_name` — the `n`
+/// keybinding's `enter`, over [`Stage::Naming`](super::Stage::Naming) —
+/// is `render`'s production caller; `crate::shell::tests::objectdialog`
+/// also calls it directly, to pin this door's own contract apart from the
+/// keybinding that reaches it.
 pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
     if let Some(notice) = blocking_diagnostic(shell) {
         return Some(notice);

@@ -2485,3 +2485,136 @@ fn commit_create_writes_one_doc_entry_immediately(cx: &mut gpui::TestAppContext)
     });
     assert!(in_config);
 }
+
+// ---------------------------------------------------------------------
+// Task 5: `n` — the naming row, create, and the edit stage on a new
+// object (§18.2).
+// ---------------------------------------------------------------------
+
+/// §18.2, Views: `n` opens the name field; `enter` on a valid name
+/// writes the object, opens its edit stage, and the browse list has it.
+#[gpui::test]
+fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert!(cx.debug_bounds("dialog-name-row").is_some());
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the name field owns the keys"
+    );
+    cx.simulate_input("mine");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { object } if object == "mine"
+    ));
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+    assert!(cx.debug_bounds("objectdialog-new-badge").is_some());
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
+        Some("risk_snapshot".into())
+    );
+    // Zero debounce: on disk and in the config with no clock advance.
+    let written = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+    assert!(written.contains("[mine]"), "{written}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-row-mine").is_some(),
+        "back in browse, the new row is there"
+    );
+}
+
+/// A name a layer already holds must be refused: creating `tree` would
+/// fork the desk's view under a verb that never said so.
+#[gpui::test]
+fn n_refuses_a_name_any_layer_already_holds(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("tree");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming,
+        "still naming"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("already exists"), "{notice}");
+    assert!(!dir.path().join("views.toml").exists());
+    // escape backs out with nothing written and the query gone.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| (s.stage.clone(), s.query.clone())),
+        (objectdialog::Stage::Browse, String::new())
+    );
+}
+
+/// Scopes' `n` saves the FRAME's current scope, not an empty object —
+/// the same read `run_confirmed`'s `Confirm::Overwrite` arm makes, made
+/// here instead because there is no existing object's row to read it
+/// from.
+#[gpui::test]
+fn n_on_a_scope_saves_the_frames_current_scope(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_saved_scope(),
+        dir.path(),
+        "config::scopes",
+    );
+    shell.update(&mut cx, |shell, cx| {
+        shell.frame.update(cx, |f, _| {
+            f.set_scope(Scope {
+                dimensions: vec![DimensionSelection {
+                    column: "book".to_string(),
+                    values: vec!["BK007".to_string()],
+                }],
+                ..Scope::default()
+            });
+        });
+    });
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("today");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let written = std::fs::read_to_string(dir.path().join("scopes.toml")).unwrap();
+    assert!(
+        written.contains("[today") && written.contains("BK007"),
+        "{written}"
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.is_new));
+}
+
+/// Groupings' nine slots are a fixed keyboard (§18.4) — there is nothing
+/// `n` could create that is not already on the list, so it must say why
+/// rather than silently doing nothing.
+#[gpui::test]
+fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("slots"), "{notice}");
+}

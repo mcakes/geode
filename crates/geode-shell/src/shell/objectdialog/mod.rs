@@ -219,7 +219,7 @@ impl Domain {
     /// Slot `0` is not here: `ctrl+0` is `frame::slot_clear`, the view's
     /// own grouping, and `GroupingSlots` is nine wide (user ruling
     /// 2026-09-10).
-    fn roster(self) -> Option<&'static [&'static str]> {
+    pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
             Domain::Views | Domain::Scopes => None,
@@ -1360,6 +1360,30 @@ impl ObjectDialogState {
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
+        self.query.clear();
+        self.mode = DialogMode::Normal;
+        self.selected = 0;
+        self.notice = None;
+    }
+
+    /// [`Self::enter_edit`]'s twin for a name `n` has just committed
+    /// (§18.2): the same stage transition, over an already-built `draft`
+    /// rather than one derived from `config`. A committed name has
+    /// nothing in `config` to derive from yet — the write is still on its
+    /// way through the debounced flush — and Scopes' caller has already
+    /// replaced the draft's fields with the frame's current scope
+    /// (`scopes::overwrite_with`), which a fresh `domain.draft(config,
+    /// name)` call would throw away.
+    ///
+    /// Visible only inside this subtree for the same reason
+    /// [`Self::enter_edit`] is: [`render::enter_edit_stage`] is the one
+    /// door onto either, and a caller reaching this directly would skip
+    /// the `Input` clear and focus blur that door's other half does.
+    pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, draft: Draft) {
+        self.stage = Stage::Edit {
+            object: draft.name.clone(),
+        };
+        self.draft = Some(draft);
         self.query.clear();
         self.mode = DialogMode::Normal;
         self.selected = 0;

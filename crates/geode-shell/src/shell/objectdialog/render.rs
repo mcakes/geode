@@ -1,5 +1,5 @@
 //! The object dialog's gpui half: opening it, the one
-//! [`dialog::ModalKeyHandler`] both its stages come through, and the
+//! [`dialog::ModalKeyHandler`] every stage comes through, and the
 //! painted browse list, field rows and action bar.
 //!
 //! Everything here is the shell around [`super`]'s pure core, and it is
@@ -25,14 +25,15 @@
 //! is not receiving the keys is the single most misleading thing a modal
 //! surface can show.
 //!
-//! ## Two stages, one routing shape
+//! ## Three stages, one routing shape
 //!
 //! `enter` on a browse row opens the **edit stage** over a [`super::Draft`]
-//! of that object. The two stages share this file's one
-//! [`dialog::ModalKeyHandler`] and split at its front door
-//! ([`handle_key`]), because everything below the split — the notice's two
-//! doors, the `escape` ladder, the claim-and-drop contract — has to behave
-//! identically in both or a user learns two dialogs.
+//! of that object; `n` opens the **naming stage** (§18.2) over a fresh
+//! name, on its way to becoming a draft of its own. All three stages
+//! share this file's one [`dialog::ModalKeyHandler`] and split at its
+//! front door ([`handle_key`]), because everything below the split — the
+//! notice's doors, the `escape` ladder, the claim-and-drop contract — has
+//! to behave identically across them or a user learns three dialogs.
 //!
 //! The edit stage does **not** filter its own rows, which the browse stage
 //! does. `/` there would need a second cursor space (a filtered position
@@ -77,7 +78,7 @@
 
 use std::rc::Rc;
 
-use geode_core::config::Layer;
+use geode_core::config::{Layer, check_object_name};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -143,10 +144,10 @@ pub fn open(
     );
 }
 
-/// The [`dialog::ModalKeyHandler`] for this dialog: the front door both
-/// stages come through, splitting on the stage and on nothing else.
+/// The [`dialog::ModalKeyHandler`] for this dialog: the front door every
+/// stage comes through, splitting on the stage and on nothing else.
 ///
-/// The split is here rather than inside each branch so the two stages
+/// The split is here rather than inside each branch so the three stages
 /// cannot drift on the things they must agree about — which keys are
 /// claimed, when the notice is dropped, and which `escape` rung applies.
 fn handle_key(
@@ -155,14 +156,10 @@ fn handle_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let editing = shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(|state| matches!(state.stage, Stage::Edit { .. }));
-    if editing {
-        handle_edit_key(shell, ks, window, cx)
-    } else {
-        handle_browse_key(shell, ks, window, cx)
+    match shell.object_dialog.as_ref().map(|s| &s.stage) {
+        Some(Stage::Edit { .. }) => handle_edit_key(shell, ks, window, cx),
+        Some(Stage::Naming) => handle_naming_key(shell, ks, window, cx),
+        _ => handle_browse_key(shell, ks, window, cx),
     }
 }
 
@@ -287,10 +284,22 @@ fn handle_browse_key(
                 open_selected(shell, window, cx);
                 return true;
             }
-            // `Toggle`, `EditText`, `MoveItem` and the letter verbs are
-            // the edit stage's, and the browse footer advertises none of
-            // them — so they are claimed and dropped here like any other
-            // unclaimed key.
+            // `n`: the naming stage (§18.2), unless the domain's own
+            // roster already names every row there is — Groupings' nine
+            // fixed slots, where nothing can be created that is not
+            // already on the list (`Domain::roster`'s own doc).
+            NormalCommand::Verb('n') => {
+                if state.domain.roster().is_some() {
+                    state.notice = Some("the slots are fixed — open one to fill it".to_string());
+                } else {
+                    state.begin_naming();
+                    input.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            }
+            // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
+            // verbs are the edit stage's, and the browse footer
+            // advertises none of them — so they are claimed and dropped
+            // here like any other unclaimed key.
             _ => {}
         }
         cx.notify();
@@ -345,6 +354,87 @@ fn handle_browse_key(
     }
 
     false
+}
+
+/// The naming stage's keys (§18.2): `escape` backs out to browse with
+/// nothing written; `enter` checks the name and creates; everything
+/// else is the focused `Input`'s to type. The name is `state.query` —
+/// mirrored from the field by the same subscription a filter uses.
+fn handle_naming_key(
+    shell: &mut ShellView,
+    ks: &Keystroke,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) -> bool {
+    let input = shell.dialog_input.clone();
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    if ks.key == "escape" {
+        if let Some(state) = shell.object_dialog.as_mut() {
+            state.cancel_naming();
+        }
+        input.update(cx, |i, cx| i.set_value("", window, cx));
+        shell.focus_handle.focus(window, cx);
+        cx.notify();
+        return true;
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        create_from_name(shell, window, cx);
+        return true;
+    }
+    if ks.key == "tab" {
+        return true;
+    }
+    false
+}
+
+/// `enter` in the naming row. The one moment a name is typed and the
+/// one place it is checked: [`check_object_name`]'s rule (the same one
+/// `:scope save` applies), then "no layer already holds it" — creating
+/// over a desk object would be a fork the trader did not ask for.
+fn create_from_name(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let domain = state.domain;
+    let name = match check_object_name(&state.query) {
+        Ok(name) => name.to_string(),
+        Err(reason) => {
+            set_notice(shell, reason);
+            cx.notify();
+            return;
+        }
+    };
+    if derive_rows(shell).iter().any(|row| row.name == name) {
+        set_notice(shell, format!("'{name}' already exists — open it instead"));
+        cx.notify();
+        return;
+    }
+    let mut draft = domain.new_draft(&shell.services.config, &name);
+    if domain == Domain::Scopes {
+        // The frame's current scope IS the new scope (§18.2) — the same
+        // read `run_confirmed`'s `Confirm::Overwrite` arm makes, for the
+        // same reason it is made here and not in the pure core.
+        let scope = shell.frame.read(cx).scope().clone();
+        if scope.is_empty() {
+            set_notice(
+                shell,
+                "the frame's scope is empty — nothing to save".to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        scopes::overwrite_with(&mut draft, &scope);
+        draft.diagnostics = domain.validate(&draft, &shell.services.config);
+    }
+    enter_edit_stage(shell, &name, Some(draft), window, cx);
+    if let Some(notice) = apply::commit_create(shell, cx) {
+        set_notice(shell, notice);
+    }
+    cx.notify();
 }
 
 /// The rows for whatever domain is open, derived fresh from the live
@@ -402,8 +492,8 @@ fn on_row_clicked(
 /// Resolves the row through the same filtered walk everything else here
 /// uses, so what opens is the row the user is looking at even mid-filter.
 /// The shared `Input` is emptied along with the mirrored query (see this
-/// module's own "Two stages" note) and focus goes back to the shell, which
-/// is what makes the edit stage's letters verbs.
+/// module's own "Three stages" note) and focus goes back to the shell,
+/// which is what makes the edit stage's letters verbs.
 fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let rows = derive_rows(shell);
     let name = shell.object_dialog.as_ref().and_then(|state| {
@@ -421,35 +511,47 @@ fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
         cx.notify();
         return;
     };
-    enter_edit_stage(shell, &name, window, cx);
+    enter_edit_stage(shell, &name, None, window, cx);
 }
 
 /// **The one door into the edit stage.** Every way in goes through here —
-/// `enter` from either browse mode today, and Part 2's `n` tomorrow.
+/// `enter` from either browse mode, and (§18.2) `n`'s committed name.
 ///
 /// It exists because the transition has two halves that are worthless
-/// apart: [`ObjectDialogState::enter_edit`] sets the mode and drops the
-/// query, and only this function empties the shared `Input` and moves
-/// focus off it to match. Setting one without the other is not a cosmetic
-/// slip — it is the defect this task shipped and fixed
-/// (`an_object_opened_from_filter_mode_still_escapes_back_a_stage`): a
-/// stage whose mode and focus disagree sends the next `escape` down a
+/// apart: setting the mode and dropping the query, and emptying the
+/// shared `Input`/moving focus off it to match. Setting one without the
+/// other is not a cosmetic slip — it is the defect this task shipped and
+/// fixed (`an_object_opened_from_filter_mode_still_escapes_back_a_stage`):
+/// a stage whose mode and focus disagree sends the next `escape` down a
 /// rung the edit handler does not claim, and the shell closes the whole
 /// dialog out from under the object being edited instead of stepping
 /// back to the list.
 ///
-/// So the halves are not offered separately: `enter_edit` is visible only
-/// inside this module's subtree and its doc points here, and this is the
-/// only function in that subtree that calls it. A new call site gets both
-/// halves or neither.
+/// `new` is `None` for [`open_selected`]'s existing object — the pure
+/// half goes through [`ObjectDialogState::enter_edit`], which derives the
+/// draft from `config` — and `Some(draft)` for [`create_from_name`]'s
+/// freshly named one, which goes through
+/// [`ObjectDialogState::enter_edit_with`] instead so the just-built draft
+/// (Scopes' already carries the frame's scope) is what the stage opens
+/// on, rather than a fresh derivation from a config that has not been
+/// written to yet.
+///
+/// So the halves are not offered separately: both pure-core methods are
+/// visible only inside this module's subtree and their docs point here,
+/// and this is the only function in that subtree that calls either. A new
+/// call site gets both halves or neither.
 fn enter_edit_stage(
     shell: &mut ShellView,
     name: &str,
+    new: Option<Draft>,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
     if let Some(state) = shell.object_dialog.as_mut() {
-        state.enter_edit(&shell.services.config, name);
+        match new {
+            Some(draft) => state.enter_edit_with(draft),
+            None => state.enter_edit(&shell.services.config, name),
+        }
     }
     // The `Input` owns the text; clearing only the mirrored query would
     // leave the old one waiting in the field for the next `/`.
@@ -1208,6 +1310,18 @@ struct Action {
 /// can be true, and in each one the value is either already recorded,
 /// waiting on a confirm that will record it, or refused by a diagnostic a
 /// save key could not get past either.
+///
+/// **`d` and `r` are silent for at least one tick right after `n` creates
+/// an object.** Both are gated on [`editing_row`], which derives from
+/// `services.config` — and `commit_create` queues its write on the same
+/// debounced batch every other edit does, so the object is not yet a row
+/// the config can produce when this stage first paints. That is
+/// deliberate, not a race to close: the edit header's own `new` chip
+/// (`build_edit`) keys on [`Draft::is_new`](super::Draft::is_new) rather
+/// than on this same absence, precisely so the header does not flicker
+/// off the instant the row derives while these two verbs are still
+/// correctly withheld from an object with no layer of its own to delete
+/// or revert yet.
 fn actions(shell: &ShellView) -> Vec<Action> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();
@@ -1254,10 +1368,11 @@ fn object_word(domain: Domain) -> String {
 }
 
 /// The [`dialog::ShellModal::build`] closure body: the mode pill, the
-/// shared filter row, the scrollable browse list, and a muted footer
-/// stating the current mode's vocabulary. `entity` is what each row's
-/// click handler captures to reach [`on_row_clicked`] later, at click
-/// time — `shell` is this call's own plain-borrow read (see
+/// shared filter row (a [`dialog::name_row`] in [`Stage::Naming`]
+/// instead — §18.2), the scrollable browse list, and a muted footer
+/// stating the current stage's and mode's vocabulary. `entity` is what
+/// each row's click handler captures to reach [`on_row_clicked`] later,
+/// at click time — `shell` is this call's own plain-borrow read (see
 /// `ShellModal::build`'s doc comment for why the two are both needed).
 fn build(
     shell: &ShellView,
@@ -1410,52 +1525,82 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
+    // §18.2: the naming stage replaces the filter row with the name field
+    // and states its own two-verb vocabulary — never the browse footer's,
+    // even though `begin_naming` leaves `state.mode` at `Filter` (the
+    // `Input` really does own the keys) — a footer offering `/` or `j`/`k`
+    // while the name field is focused would be advertising keys the
+    // field, not this handler, would consume.
+    let naming = matches!(state.stage, Stage::Naming);
+
     // The hint row states the CURRENT mode's vocabulary, never the union
     // of both: a modal surface's whole risk is a user who cannot tell
     // which mode they are in, and a footer listing keys that are inert
     // right now is exactly the lie the mode pill exists to prevent.
-    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
-        DialogMode::Normal => (
+    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = if naming {
+        (
+            Vec::new(),
             vec![
-                chip("j"),
-                chip("k"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ],
-            vec![
-                chip("/"),
-                sep("filter ·"),
+                chip("enter"),
+                sep("create ·"),
                 chip("escape"),
-                // Honest about which rung the next escape takes: with a
-                // query still applied it clears the query, and only then
-                // closes.
-                sep(if state.query.is_empty() {
-                    "close"
-                } else {
-                    "clear the filter"
-                }),
+                sep("cancel"),
             ],
-        ),
-        DialogMode::Filter => (
-            vec![
-                sep("type to filter ·"),
-                chip("up"),
-                chip("down"),
-                sep("move ·"),
-                chip("ctrl+d"),
-                chip("ctrl+u"),
-                sep("±5 ·"),
-                chip("ctrl+f"),
-                chip("ctrl+b"),
-                sep("±10"),
-            ],
-            vec![chip("escape"), sep("back to normal")],
-        ),
+        )
+    } else {
+        match state.mode {
+            DialogMode::Normal => (
+                vec![
+                    chip("j"),
+                    chip("k"),
+                    sep("move ·"),
+                    chip("ctrl+d"),
+                    chip("ctrl+u"),
+                    sep("±5 ·"),
+                    chip("ctrl+f"),
+                    chip("ctrl+b"),
+                    sep("±10"),
+                ],
+                {
+                    let mut action = Vec::new();
+                    // `n` is not on the footer at all for a domain whose
+                    // roster is fixed (Groupings) — advertising a key that
+                    // only ever says "the slots are fixed" teaches a verb
+                    // with nothing behind it.
+                    if state.domain.roster().is_none() {
+                        action.push(chip("n"));
+                        action.push(sep("new ·"));
+                    }
+                    action.push(chip("/"));
+                    action.push(sep("filter ·"));
+                    action.push(chip("escape"));
+                    // Honest about which rung the next escape takes: with
+                    // a query still applied it clears the query, and only
+                    // then closes.
+                    action.push(sep(if state.query.is_empty() {
+                        "close"
+                    } else {
+                        "clear the filter"
+                    }));
+                    action
+                },
+            ),
+            DialogMode::Filter => (
+                vec![
+                    sep("type to filter ·"),
+                    chip("up"),
+                    chip("down"),
+                    sep("move ·"),
+                    chip("ctrl+d"),
+                    chip("ctrl+u"),
+                    sep("±5 ·"),
+                    chip("ctrl+f"),
+                    chip("ctrl+b"),
+                    sep("±10"),
+                ],
+                vec![chip("escape"), sep("back to normal")],
+            ),
+        }
     };
 
     let footer = v_flex()
@@ -1485,8 +1630,20 @@ fn build(
 
     // The live `Input` renders only when it actually owns the keystrokes.
     // In normal mode the same query paints as static muted text — see
-    // this module's own "one switch" note.
+    // this module's own "one switch" note. Naming always focuses the
+    // field (`begin_naming` sets `Filter`), so `frozen_query` is moot
+    // there — the naming row below is a `name_row`, never a `filter_row`.
     let frozen_query = (state.mode == DialogMode::Normal).then_some(state.query.as_str());
+
+    let top_row = if naming {
+        dialog::name_row(
+            &shell.dialog_input,
+            &format!("New {} · name", object_word(state.domain)),
+            cx,
+        )
+    } else {
+        dialog::filter_row(&shell.dialog_input, frozen_query, cx)
+    };
 
     v_flex()
         .gap_2()
@@ -1497,7 +1654,7 @@ fn build(
                 .justify_end()
                 .child(dialog::mode_pill(state.mode, cx)),
         )
-        .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
+        .child(top_row)
         .child(list)
         .child(footer)
         .into_any_element()
@@ -1540,17 +1697,42 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .gap_3()
         .child(div().text_lg().child(draft.name.clone()))
         .debug_selector(|| "objectdialog-edit-header".to_string());
-    if let Some(row) = row.as_ref() {
+    if row.is_some() || draft.is_new {
         let mut markers = h_flex().gap_1().items_center();
-        if let Some(layer) = row.layer {
-            markers = markers.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(layer.name()),
-            );
+        if let Some(row) = row.as_ref() {
+            if let Some(layer) = row.layer {
+                markers = markers.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child(layer.name()),
+                );
+            }
+            if row.overridden {
+                markers = markers.child(
+                    div()
+                        .text_xs()
+                        .text_color(chip_fg)
+                        .bg(chip_bg)
+                        .px_1()
+                        .py_0p5()
+                        .rounded(px(4.))
+                        .flex_shrink_0()
+                        .child("overridden"),
+                );
+            }
         }
-        if row.overridden {
+        // §18.2: `n` this session, and still true for the whole life of
+        // the stage regardless of `row` — `editing_row` derives from
+        // `services.config`, which stays behind `commit_create`'s own
+        // zero-debounce flush for at least one executor tick, so `row` is
+        // `None` right after creation even though the object is already
+        // queued to exist. Keying on `draft.is_new` alone (never also
+        // `row.is_none()`) is what keeps the chip painted through that
+        // tick instead of flickering off the moment the row derives.
+        // Task 8 restyles this as a real badge; a plain muted chip is
+        // fine here.
+        if draft.is_new {
             markers = markers.child(
                 div()
                     .text_xs()
@@ -1560,7 +1742,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     .py_0p5()
                     .rounded(px(4.))
                     .flex_shrink_0()
-                    .child("overridden"),
+                    .debug_selector(|| "objectdialog-new-badge".to_string())
+                    .child("new"),
             );
         }
         header = header.child(markers);

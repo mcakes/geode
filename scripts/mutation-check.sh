@@ -6137,6 +6137,26 @@ run_mutation "diagnostics: the startup seeding carries build_keymap's own diagno
   '' \
   geode-shell startup_keymap_diagnostics_are_in_the_diagnostics_entity
 
+# ---- `n`: the naming row, create, and the edit stage on a new object
+# (§18.2, Part 2 Task 5) ------------------------------------------------
+
+# A name a layer already holds must be refused: creating `tree` would
+# fork the desk's view under a verb that never said so.
+run_mutation "objectdialog: n refuses an existing name" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if derive_rows(shell).iter().any(|row| row.name == name) {' \
+  '    if false {' \
+  geode-shell \
+  n_refuses_a_name_any_layer_already_holds
+
+# Scopes' n saves the FRAME's scope, not the empty object.
+run_mutation "objectdialog: n on scopes reads the frame" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        scopes::overwrite_with(&mut draft, &scope);' \
+  '        let _ = &scope;' \
+  geode-shell \
+  n_on_a_scope_saves_the_frames_current_scope
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
