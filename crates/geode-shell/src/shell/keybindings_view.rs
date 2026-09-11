@@ -1549,8 +1549,18 @@ fn build(
     // listening, the same query paints as static muted text: a caret
     // blinking in a field that is not receiving the keys is the single
     // most misleading thing a modal surface can show.
-    let frozen_query = (state.listening.is_some() || state.mode == DialogMode::Normal)
-        .then_some(state.query.as_str());
+    //
+    // `slash_filters` is false for the whole of a capture: `handle_key`
+    // hands every keystroke to `press_while_listening` there, so `/` is
+    // the binding being recorded, not the filter's key. This is the one
+    // frozen state in the app where §18.1's `press / to filter`
+    // placeholder would be a lie — see `dialog::FrozenFilter`.
+    let frozen_query = (state.listening.is_some() || state.mode == DialogMode::Normal).then_some(
+        dialog::FrozenFilter {
+            query: state.query.as_str(),
+            slash_filters: state.listening.is_none(),
+        },
+    );
 
     v_flex()
         .gap_2()

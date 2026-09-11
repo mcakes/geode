@@ -6260,6 +6260,19 @@ run_mutation "dialog: the modal title row paints its title_extra" \
   geode-shell \
   the_object_dialogs_pill_sits_in_the_title_row_in_both_stages
 
+# Drop the `slash_filters` half of the placeholder's condition and the
+# hint comes back during a keybinding capture, where `/` is the binding
+# being recorded — a hint for a key that does something else, beside a
+# footer already saying "Listening". The empty-query half alone is not a
+# defence: every other frozen caller passes `true`, so the whole suite
+# stays green on the mutation but for the one dialog that can say `false`.
+run_mutation "dialog: the filter placeholder needs / to actually filter" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '&& frozen.slash_filters' \
+  '&& true' \
+  geode-shell \
+  the_filter_placeholder_is_gone_while_listening_for_a_capture
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

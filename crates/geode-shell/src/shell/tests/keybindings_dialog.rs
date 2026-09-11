@@ -622,6 +622,56 @@ fn the_keybinding_dialogs_pill_sits_in_the_title_row(cx: &mut gpui::TestAppConte
     );
 }
 
+/// §18.1's placeholder claims `/` opens the filter. While this dialog is
+/// *listening* for a capture that is false — `press_while_listening`
+/// takes every keystroke, so `/` would become the new binding — and the
+/// footer beside it already reads "Listening — type keys". Two
+/// contradictory claims on one panel is worse than the bare search icon
+/// that state showed before §18.1, so the placeholder goes away for the
+/// length of the capture and comes back when `escape` ends it.
+#[gpui::test]
+fn the_filter_placeholder_is_gone_while_listening_for_a_capture(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    // Normal mode, nothing typed: the state the dialog opens in, and the
+    // one the placeholder exists for.
+    assert!(
+        cx.debug_bounds("dialog-filter-placeholder").is_some(),
+        "the placeholder should paint before the capture starts"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |shell, _| shell
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_some()),
+        "enter should have started listening — the setup this test needs"
+    );
+    assert!(
+        cx.debug_bounds("dialog-filter-placeholder").is_none(),
+        "`/` is the binding being captured here, not the filter's key"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |shell, _| shell
+            .keybindings
+            .as_ref()
+            .unwrap()
+            .listening
+            .is_none()),
+        "escape should have cancelled the capture"
+    );
+    assert!(
+        cx.debug_bounds("dialog-filter-placeholder").is_some(),
+        "and the hint is true again the moment the capture ends"
+    );
+}
+
 /// `/` enters filter mode and typing narrows, exactly as it does today.
 #[gpui::test]
 fn slash_enters_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {

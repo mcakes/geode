@@ -495,6 +495,36 @@ pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
     ]
 }
 
+/// What [`filter_row`] paints instead of the live `Input`: the query as
+/// static muted text, plus whether `/` is currently the way back to
+/// typing it.
+///
+/// A caret blinking in a field that is not receiving the keys is the
+/// single most misleading thing a modal surface can show, so every
+/// dialog freezes the row whenever the `Input` does not own the
+/// keystrokes. But "the input is frozen" and "`/` opens the filter" are
+/// two different claims, and exactly one frozen state separates them:
+/// the keybinding dialog while it is *listening* for a capture, where
+/// `press_while_listening` swallows every keystroke and `/` becomes the
+/// new binding rather than a request to filter. Painting §18.1's
+/// `press / to filter` placeholder there would put a hint for a key that
+/// does something else on screen beside a footer already reading
+/// "Listening — type keys" — two claims contradicting each other, which
+/// is worse than the bare search icon that state showed before.
+///
+/// Hence the second field. It is not "should we show the hint": it is
+/// "is the hint TRUE here", which is why the caller that knows (the
+/// dialog, which owns the capture state) answers it rather than
+/// `filter_row` guessing from the query.
+pub struct FrozenFilter<'a> {
+    /// The query to echo as static text. Empty is the state every
+    /// normal-mode dialog opens in.
+    pub query: &'a str,
+    /// Whether a bare `/` would enter filter mode from here. `false`
+    /// only while the keybinding dialog is capturing a keystroke.
+    pub slash_filters: bool,
+}
+
 /// The filter row every list dialog wears at the top: the shared
 /// `Input`, chrome stripped (`appearance(false)`) with a bottom border
 /// standing in for it — the palette's own `input_row` idiom
@@ -519,13 +549,19 @@ pub(crate) fn overlay_panel_shadow() -> Vec<gpui::BoxShadow> {
 /// `input.rs:504-508`), so entering and leaving capture doesn't shift the
 /// query text sideways.
 ///
-/// `Some("")` — a frozen filter with nothing typed into it, which is the
-/// state every normal-mode dialog OPENS in — is the one case that paints
-/// something the query itself did not supply: a muted `press / to filter`
-/// placeholder (§18.1). Nothing else on screen says the key exists, and
-/// the alternative is a row showing only an icon, which reads as a
-/// disabled control rather than an unfocused one.
-pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) -> AnyElement {
+/// An empty frozen query — the state every normal-mode dialog OPENS in —
+/// is the one case that paints something the query itself did not
+/// supply: a muted `press / to filter` placeholder (§18.1). Nothing else
+/// on screen says the key exists, and the alternative is a row showing
+/// only an icon, which reads as a disabled control rather than an
+/// unfocused one. It is gated on [`FrozenFilter::slash_filters`], because
+/// "the input is frozen" and "`/` opens the filter" are not the same
+/// claim — see that field's own doc.
+pub fn filter_row(
+    input: &Entity<InputState>,
+    frozen: Option<FrozenFilter<'_>>,
+    cx: &App,
+) -> AnyElement {
     let theme = cx.theme();
     let row = div().w_full().border_b_1().border_color(theme.border);
     let search_icon = || Icon::new(IconName::Search).text_color(theme.muted_foreground);
@@ -540,7 +576,12 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
         // from under it (exactly the "markers, not values" failure this
         // crate's mutation harness exists to catch — see the harness's
         // own header comment).
-        Some("") => row
+        //
+        // `slash_filters` is the second half of the condition, not a
+        // refinement of it: a hint for a key that does something else
+        // where it is painted is worse than no hint, and the keybinding
+        // dialog's capture state is exactly that (see `FrozenFilter`).
+        Some(frozen) if frozen.query.is_empty() && frozen.slash_filters => row
             .py_1()
             .child(
                 h_flex()
@@ -555,7 +596,10 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
                     ),
             )
             .into_any_element(),
-        Some(query) => row
+        // Either a real query to echo, or an empty one in a state where
+        // `/` is not the filter's key — the bare icon this row painted
+        // for every frozen query before §18.1.
+        Some(frozen) => row
             .py_1()
             .child(
                 h_flex()
@@ -563,7 +607,7 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
                     .gap(px(6.))
                     .text_color(theme.muted_foreground)
                     .child(search_icon())
-                    .child(query.to_string()),
+                    .child(frozen.query.to_string()),
             )
             .into_any_element(),
         None => row

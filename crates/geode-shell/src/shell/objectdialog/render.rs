@@ -1760,7 +1760,13 @@ fn build(
     // this module's own "one switch" note. Naming always focuses the
     // field (`begin_naming` sets `Filter`), so `frozen_query` is moot
     // there — the naming row below is a `name_row`, never a `filter_row`.
-    let frozen_query = (state.mode == DialogMode::Normal).then_some(state.query.as_str());
+    // `slash_filters: true` unconditionally — this dialog has no capture
+    // state, so `/` enters filter mode from every frozen moment it has
+    // (see `dialog::FrozenFilter`).
+    let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
+        query: state.query.as_str(),
+        slash_filters: true,
+    });
 
     let top_row = if naming {
         dialog::name_row(
@@ -2094,7 +2100,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // The live `Input` renders only when it actually owns the keystrokes
     // — see this module's own "one switch" note, now also the edit
     // stage's rule (§18.3).
-    let frozen_query = (state.mode == DialogMode::Normal).then_some(draft.query.as_str());
+    // `slash_filters: true` for the same reason as browse's own call.
+    let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
+        query: draft.query.as_str(),
+        slash_filters: true,
+    });
     let filter = dialog::filter_row(&shell.dialog_input, frozen_query, cx);
 
     v_flex()
