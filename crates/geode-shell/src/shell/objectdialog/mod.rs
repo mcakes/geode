@@ -99,6 +99,12 @@ pub enum Domain {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stage {
     Browse,
+    /// The browse list with the filter row replaced by a *name* field
+    /// (§18.2): `n` enters it, `enter` creates, `escape` returns to
+    /// `Browse` with nothing written. A stage rather than a flag on
+    /// `Browse` so `has_previous_stage` turns the escape ladder's third
+    /// rung on by construction, the same way `Edit` did.
+    Naming,
     /// Editing one object's fields. The draft itself lives in
     /// [`ObjectDialogState::draft`] rather than in here, because the
     /// *name* is what identifies the stage (it is what `escape` restores
@@ -600,13 +606,14 @@ impl Confirm {
 /// change never travels through the disk to reach the screen: the flush
 /// merges the documents already in hand, and the watcher's reload of our
 /// own write is a no-op (see [`apply`]).
-///
-/// There is no `is_new` flag, which spec §3.1 sketches: nothing creates
-/// an object in this task (`n` is Part 2's), so a flag nothing can set
-/// would be a claim no test could check. It arrives with the verb.
 #[derive(Debug, Clone)]
 pub struct Draft {
     pub name: String,
+    /// Created by `n` this session and not yet on the browse list the
+    /// config derives — the edit header says `new` beside the layer until
+    /// the dialog is left. Nothing else reads it: the write path treats a
+    /// new object like any other Doc write.
+    pub is_new: bool,
     pub fields: Vec<Field>,
     /// The object exactly as the merged doc holds it, kept so a
     /// [`Destination::Doc`] write can preserve everything the field
@@ -962,6 +969,26 @@ impl Draft {
         self.baseline = self.fields.clone();
         self.baseline_source = self.source.clone();
     }
+
+    /// A draft for an object nothing defines yet. Both baselines are
+    /// EMPTY, so every field reads as changed and `writes_by_destination`
+    /// names every destination — which is why `apply::commit_create`
+    /// builds its own single Doc edit rather than calling `edits_for`: a
+    /// new view's untouched column list would otherwise also queue an
+    /// empty presentation write.
+    pub fn new_object(name: &str, fields: Vec<Field>, source: toml::Table) -> Draft {
+        Draft {
+            name: name.to_string(),
+            is_new: true,
+            fields,
+            source,
+            baseline: Vec::new(),
+            baseline_source: toml::Table::new(),
+            selected: 0,
+            diagnostics: Vec::new(),
+            confirm: None,
+        }
+    }
 }
 
 /// Did an ordered list's membership — the set of item names, ignoring
@@ -1010,6 +1037,8 @@ impl Domain {
             .unwrap_or_default();
         let mut draft = Draft {
             name: object.to_string(),
+            // `draft()` sets `is_new: false` in its literal.
+            is_new: false,
             baseline: fields.clone(),
             fields,
             baseline_source: source.clone(),
@@ -1018,6 +1047,18 @@ impl Domain {
             diagnostics: Vec::new(),
             confirm: None,
         };
+        draft.diagnostics = self.validate(&draft, config);
+        draft
+    }
+
+    /// The draft `n` opens after a name is committed (§18.2): the
+    /// adapter's empty-object fields — `fields(config, None)`, which every
+    /// adapter already answers — over an empty source, validated once.
+    /// Scopes' caller replaces the result with the frame's scope before
+    /// committing (`scopes::overwrite_with`); the empty fields are still
+    /// what this returns, so the pure core never reads a `Frame`.
+    pub fn new_draft(self, config: &Config, name: &str) -> Draft {
+        let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
         draft
     }
@@ -1256,6 +1297,26 @@ impl ObjectDialogState {
         self.notice = None;
     }
 
+    /// `n`: the browse list stays, the filter row becomes the name field.
+    /// The shared `Input` holds the name exactly as it holds a query —
+    /// `set_query` mirrors it into `query` — so there is no second text
+    /// buffer to keep in step.
+    pub fn begin_naming(&mut self) {
+        self.stage = Stage::Naming;
+        self.query.clear();
+        self.mode = DialogMode::Filter;
+        self.notice = None;
+    }
+
+    /// `escape` from [`Stage::Naming`]: back to browse, nothing written.
+    pub fn cancel_naming(&mut self) {
+        self.stage = Stage::Browse;
+        self.query.clear();
+        self.mode = DialogMode::Normal;
+        self.selected = 0;
+        self.notice = None;
+    }
+
     /// Whether `escape` has a stage to step back into before it closes
     /// the dialog — the third rung of
     /// [`crate::dialogmode::escape_step`]'s ladder, and this scaffold is
@@ -1271,7 +1332,7 @@ impl ObjectDialogState {
     /// stage would close the whole dialog out from under the object being
     /// edited, instead of going back one stage.
     pub fn has_previous_stage(&self) -> bool {
-        matches!(self.stage, Stage::Edit { .. })
+        matches!(self.stage, Stage::Edit { .. } | Stage::Naming)
     }
 }
 
@@ -1314,7 +1375,7 @@ pub fn filtered_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::config::{Config, ConfigSources, Layer, LayerDoc};
+    use geode_core::config::{Config, ConfigSources, Layer, LayerDoc, Severity};
 
     /// A `Config` assembled from literal per-layer documents, in the
     /// Builtin → Desk → User order `merge_docs` documents its callers
@@ -1540,6 +1601,58 @@ mod tests {
         assert!(state.has_previous_stage());
     }
 
+    #[test]
+    fn a_new_view_draft_picks_the_first_real_dataset_and_no_columns() {
+        let config = config_from(&[(
+            Layer::Builtin,
+            "datasets",
+            "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+        )]);
+        let draft = Domain::Views.new_draft(&config, "mine");
+        assert!(draft.is_new);
+        assert_eq!(draft.name, "mine");
+        assert_eq!(
+            draft.choice("dataset"),
+            Some("risk"),
+            "not the empty placeholder"
+        );
+        assert!(
+            draft
+                .list_items("columns")
+                .unwrap()
+                .iter()
+                .all(|i| !i.included)
+        );
+        assert!(
+            draft
+                .diagnostics
+                .iter()
+                .all(|d| d.severity != Severity::Error),
+            "{:?}",
+            draft.diagnostics
+        );
+        // Everything counts as a change against an empty baseline.
+        assert!(draft.is_dirty());
+    }
+
+    #[test]
+    fn naming_is_a_stage_escape_can_step_back_from() {
+        let mut state = ObjectDialogState::new(Domain::Views);
+        assert!(!state.has_previous_stage());
+        state.begin_naming();
+        assert_eq!(state.stage, Stage::Naming);
+        assert!(state.has_previous_stage());
+        state.cancel_naming();
+        assert_eq!(state.stage, Stage::Browse);
+    }
+
+    #[test]
+    fn groupings_and_views_answer_a_new_draft_but_the_roster_domain_is_never_asked() {
+        // Documented, not enforced: `n` is inert on Groupings in render.
+        let config = config_from(&[]);
+        assert!(Domain::Groupings.new_draft(&config, "4").is_new);
+    }
+
     /// Editing the query re-ranks the list, so the old index points at an
     /// unrelated row and any notice names a row the selection has just
     /// left.
@@ -1684,6 +1797,7 @@ mod tests {
         };
         Draft {
             name: "test".to_string(),
+            is_new: false,
             baseline: vec![field.clone()],
             fields: vec![field],
             source: toml::Table::new(),

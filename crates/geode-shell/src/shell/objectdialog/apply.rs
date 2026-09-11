@@ -550,6 +550,57 @@ pub(super) fn commit_removal(
     None
 }
 
+/// Record a freshly named object (§18.2) — the third door onto the batch
+/// beside [`commit_edit`] and [`commit_removal`].
+///
+/// One `Destination::Doc` write, built here rather than by `edits_for`: a
+/// new draft's baselines are empty (`Draft::new_object`), so
+/// `writes_by_destination` would also name `Presentation` for an untouched
+/// column list and queue an empty overlay write that means "remove what is
+/// not there". Gated by [`blocking_diagnostic`] like an edit (a new object
+/// the reader rejects must not reach disk); flushed at `Duration::ZERO`
+/// like a removal (one decided act, nothing to coalesce) so the browse
+/// list the config derives shows the object on the next executor tick
+/// rather than 250 ms later.
+///
+/// `pub(crate)`, not `pub(super)`: the `n` keybinding that opens
+/// [`Stage::Naming`](super::Stage::Naming) and calls this on `enter` is
+/// Task 5's, so nothing outside `crate::shell::tests::objectdialog` calls
+/// this yet — the `not(test)` allowance below is temporary in the same
+/// sense `commit_edit`'s and `commit_removal`'s neighbours never needed
+/// one: this door just does not have its production caller wired up in
+/// this task.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) -> Option<String> {
+    if let Some(notice) = blocking_diagnostic(shell) {
+        return Some(notice);
+    }
+    let state = shell.object_dialog.as_ref()?;
+    let draft = state.draft.as_ref()?;
+    let domain = state.domain;
+    let item = domain.to_table(draft, Destination::Doc);
+    let mut edits = BTreeMap::new();
+    match object_value(&draft.name, item, Destination::Doc) {
+        ObjectWrite::Set(value) => {
+            edits.insert(
+                (Destination::Doc.doc(domain), draft.name.clone()),
+                Some(value),
+            );
+        }
+        ObjectWrite::Remove | ObjectWrite::Nothing => {
+            return Some("nothing to create — the object would be empty".to_string());
+        }
+    }
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was changed".to_string());
+    };
+    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
+        draft.mark_saved();
+    }
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    None
+}
+
 /// The tail [`commit_edit`] and [`commit_removal`] share once each has
 /// decided what belongs in `edits` **and** found somewhere to write it:
 /// capture the batch's revert baseline and schedule the flush that applies

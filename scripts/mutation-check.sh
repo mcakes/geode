@@ -3871,12 +3871,24 @@ run_mutation "objectdialog: a warning blocks the batch as if it were an error" \
 # up right, the confirm still fires); only a test reading the row back
 # out of the browse list, with nothing but `run_until_parked` driving it,
 # can see the row that never left.
+#
+# Re-anchored on `commit_removal`'s own "nothing was removed" wording
+# (Task 3, this codebase): `commit_create`'s `queue_batch(..
+# Duration::ZERO..); None }` tail reads identically, and the bare 3-line
+# form this entry used to anchor on stopped being unique the moment that
+# sibling function existed.
 run_mutation "objectdialog: a removal bypasses the batch again" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was removed".to_string());
+    };
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
     None
 }' \
-  '    cx.background_executor()
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was removed".to_string());
+    };
+    cx.background_executor()
         .spawn(async move {
             let _ = run_writes(&user_dir, edits);
         })
@@ -3922,10 +3934,22 @@ run_mutation "config: check_object_name refuses config_version" \
 # unsaved draft with it, without ever asking. Every escape test that opens
 # its object from normal mode stays green; only one that opens it out of a
 # filtered list can see it.
+#
+# Re-anchored on `enter_edit`'s own preceding lines (Task 3): Task 3's
+# `cancel_naming` sets the exact same `self.mode = DialogMode::Normal;` at
+# the same indent, and the bare-line anchor stopped being unique the
+# moment that sibling method existed.
 run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        self.mode = DialogMode::Normal;' \
-  '' \
+  '        self.stage = Stage::Edit {
+            object: object.to_string(),
+        };
+        self.query.clear();
+        self.mode = DialogMode::Normal;' \
+  '        self.stage = Stage::Edit {
+            object: object.to_string(),
+        };
+        self.query.clear();' \
   geode-shell \
   an_object_opened_from_filter_mode_still_escapes_back_a_stage
 
@@ -5674,12 +5698,29 @@ run_mutation "objectdialog: unticking a Doc list's last entry is allowed again" 
 # declined `Confirm::Fork` then reverts onto a value that was never
 # applied and never persisted. Needs `user_dir: None`, which only one
 # fixture in the suite has.
+#
+# Re-anchored on the preceding "Before the baseline moves" comment (Task
+# 3): `commit_create` resolves the SAME `user_dir` with the SAME "nothing
+# was changed" wording, so the bare guard-clause anchor stopped being
+# unique the moment that sibling function existed.
 run_mutation "objectdialog: a shell with nowhere to write still marks the draft saved" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
+  '    // **Before the baseline moves.** A shell with nowhere to write queues
+    // nothing, so nothing has been accounted for and the draft must stay
+    // dirty: a `mark_saved()` here would make the unqueued value the
+    // baseline, and a later declined `Confirm::Fork` would then
+    // `revert_to_baseline` onto a forked value that was never applied and
+    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    let Some(user_dir) = shell.user_dir.clone() else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };' \
-  '    let user_dir = match shell.user_dir.clone() {
+  '    // **Before the baseline moves.** A shell with nowhere to write queues
+    // nothing, so nothing has been accounted for and the draft must stay
+    // dirty: a `mark_saved()` here would make the unqueued value the
+    // baseline, and a later declined `Confirm::Fork` would then
+    // `revert_to_baseline` onto a forked value that was never applied and
+    // never persisted — exactly what `cancel_confirm` exists to prevent.
+    let user_dir = match shell.user_dir.clone() {
         Some(dir) => dir,
         None => {
             if let Some(draft) = shell
@@ -5712,10 +5753,21 @@ run_mutation "objectdialog: a confirmed o that changes nothing says nothing" \
 # a confirmed `d`/`r` is a single act with nothing to coalesce. The
 # covering test advances no clock at all, so the debounce would leave the
 # deleted row in the browse list.
+#
+# Re-anchored on `commit_removal`'s own "nothing was removed" guard (Task
+# 3): `commit_create`'s `queue_batch(.. Duration::ZERO ..)` call reads
+# identically, and the bare-line anchor stopped being unique the moment
+# that sibling function existed.
 run_mutation "objectdialog: a removal waits on the write debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);' \
-  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);' \
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was removed".to_string());
+    };
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);' \
+  '    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was removed".to_string());
+    };
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);' \
   geode-shell deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire
 
 # `Domain::objects` used to ask `Destination::Presentation.doc(self)`
@@ -5842,6 +5894,37 @@ run_mutation "objectdialog: an unconfigured slot never forks" \
   '        .is_some_and(|row| row.layer != Some(Layer::User))' \
   geode-shell \
   ticking_a_dimension_in_an_empty_slot_writes_it_without_asking
+
+# A new view must start on a real dataset, or `commit_create` is blocked
+# by the reader's own "missing dataset" error before a trader can pick.
+run_mutation "objectdialog: a new view starts on the first real dataset" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        None => options.first().cloned().unwrap_or_default(),' \
+  '        None => String::new(),' \
+  geode-shell \
+  a_new_view_draft_picks_the_first_real_dataset_and_no_columns
+
+# Create flushes at zero debounce like a removal, not 250 ms like an edit.
+# The anchor is longer than just the `queue_batch` tail: `commit_removal`
+# ends in the exact same three lines (`queue_batch(..Duration::ZERO..);
+# None }`), so only including `commit_create`'s own `mark_saved()` guard
+# above it keeps the anchor at one match rather than two.
+run_mutation "objectdialog: create does not wait for the edit debounce" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
+        draft.mark_saved();
+    }
+    queue_batch(shell, edits, user_dir, Duration::ZERO, cx);
+    None
+}' \
+  '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
+        draft.mark_saved();
+    }
+    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, cx);
+    None
+}' \
+  geode-shell \
+  commit_create_writes_one_doc_entry_immediately
 # ---- the drag grab's focus trap (2026-09-09) ---------------------------
 #
 # Two halves of the same defect: a tile mouse-down that arms a drag

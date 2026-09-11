@@ -2402,3 +2402,40 @@ fn o_on_a_scope_that_already_matches_the_frame_says_so(cx: &mut gpui::TestAppCon
         "nothing changed, so no file may appear"
     );
 }
+
+/// `commit_create` writes exactly one Doc entry, at zero debounce, and
+/// never an empty presentation table for the untouched column list.
+#[gpui::test]
+fn commit_create_writes_one_doc_entry_immediately(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+    shell.update(&mut cx, |shell, cx| {
+        let draft = objectdialog::Domain::Views.new_draft(&shell.services.config, "mine");
+        let state = shell.object_dialog.as_mut().unwrap();
+        state.draft = Some(draft);
+        state.stage = objectdialog::Stage::Edit {
+            object: "mine".to_string(),
+        };
+        assert_eq!(objectdialog::apply::commit_create(shell, cx), None);
+    });
+    cx.run_until_parked(); // no clock advance: zero debounce
+    let written = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+    assert!(
+        written.contains("[mine]") && written.contains("dataset = \"risk_snapshot\""),
+        "{written}"
+    );
+    assert!(
+        !dir.path().join("view_presentation.toml").exists(),
+        "no overlay write for a new object"
+    );
+    let in_config = shell.read_with(&cx, |shell, _| {
+        shell
+            .services
+            .config
+            .doc("views")
+            .and_then(|d| d.value.get("mine"))
+            .is_some()
+    });
+    assert!(in_config);
+}

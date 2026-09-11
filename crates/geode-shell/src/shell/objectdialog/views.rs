@@ -108,7 +108,14 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .unwrap_or_default();
     let mut options: Vec<String> = schema.datasets.iter().map(|d| d.name.clone()).collect();
     options.sort();
-    let current = view.map(|v| v.dataset.clone()).unwrap_or_default();
+    let current = match view {
+        Some(v) => v.dataset.clone(),
+        // A view that does not exist yet has no dataset to keep; it
+        // starts on the schema's first (sorted) dataset rather than on
+        // an empty placeholder the reader would reject with an error —
+        // which would block `commit_create` before a trader could pick.
+        None => options.first().cloned().unwrap_or_default(),
+    };
     // The view's own dataset is always an option, even when the schema
     // has no such dataset (a desk rename, a missing `datasets` doc): a
     // `Choice` that cannot represent the value it is showing would step
