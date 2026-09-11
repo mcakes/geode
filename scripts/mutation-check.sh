@@ -3905,6 +3905,16 @@ run_mutation "config: all_docs hands the merge the user layer alone" \
   geode-core \
   from_docs_merges_exactly_as_load_does
 
+# The name rule is one function so the dialog and `:scope save` cannot
+# disagree. Dropping the `config_version` clause lets a trader create an
+# object named after the doc's own schema stamp.
+run_mutation "config: check_object_name refuses config_version" \
+  crates/geode-core/src/config/mod.rs \
+  '        || name == "config_version"' \
+  '        || false' \
+  geode-core \
+  object_names_follow_the_frames_rule
+
 # The edit stage is always normal mode. `enter` opens an object from
 # FILTER mode too, and a stage left in `Filter` sends the next `escape`
 # down the ladder's `LeaveFilter` rung — which `handle_edit_key` does not

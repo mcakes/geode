@@ -548,13 +548,8 @@ impl Frame {
     /// Rejects a name that couldn't round-trip through a TOML key or the
     /// reserved `config_version` key.
     pub fn save_scope(&mut self, name: &str) -> Result<(), String> {
-        let name = name.trim();
-        if name.is_empty()
-            || name == "config_version"
-            || name.contains(|c: char| c.is_whitespace() || c == '.' || c == '"')
-        {
-            return Err(format!("'{name}' is not a usable scope name"));
-        }
+        let name = geode_core::config::check_object_name(name)
+            .map_err(|_| format!("'{}' is not a usable scope name", name.trim()))?;
         self.saved_scopes
             .insert(name.to_string(), self.scope.clone());
         self.pending_scope_persist = Some((name.to_string(), self.scope.clone()));

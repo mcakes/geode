@@ -319,6 +319,27 @@ pub mod test_support {
     }
 }
 
+/// Whether `name` can be the top-level key of an object in a layered
+/// config doc (`[name]` in `views.toml`, `name = [...]` in
+/// `groupings.toml`): trimmed, non-empty, not the `config_version`
+/// stamp every doc carries, and free of the three characters that would
+/// make it a quoted or dotted TOML key (whitespace, `.`, `"`).
+///
+/// One rule, two callers — `Frame::save_scope` (`:scope save <name>`)
+/// and the object dialog's `n` — so a name the command line accepts is
+/// a name the dialog accepts, and vice versa. Returns the trimmed name
+/// so a caller cannot check one spelling and write another.
+pub fn check_object_name(name: &str) -> Result<&str, String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name == "config_version"
+        || name.contains(|c: char| c.is_whitespace() || c == '.' || c == '"')
+    {
+        return Err(format!("'{name}' is not a usable name"));
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,5 +543,16 @@ mod tests {
         assert!(config.doc("nope").is_none());
         assert!(config.layered_docs("nope").is_empty());
         assert!(config.get("nope", "a.b").is_none());
+    }
+
+    // --- Object names -----------------------------------------------
+
+    #[test]
+    fn object_names_follow_the_frames_rule() {
+        assert_eq!(check_object_name("  my_books "), Ok("my_books"));
+        assert_eq!(check_object_name("tree-2"), Ok("tree-2"));
+        for bad in ["", "   ", "config_version", "a b", "a.b", "a\"b"] {
+            assert!(check_object_name(bad).is_err(), "{bad:?} must be refused");
+        }
     }
 }
