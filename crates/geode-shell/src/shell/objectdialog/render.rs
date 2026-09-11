@@ -157,15 +157,42 @@ pub fn open(
         // or as one of the edit stage's verbs.
         false,
     );
-    // §18.1: pill-only for now — Task 8 replaces this with a crumb plus
-    // the pill, sharing the same title-row slot every Geode modal has.
+    // §18.1: the crumb plus the pill, sharing the same title-row slot
+    // every Geode modal has — see `crumb_text`'s own doc for what the
+    // crumb says in each stage.
     dialog::set_title_extra(view, |shell, cx| {
-        shell
-            .object_dialog
-            .as_ref()
-            .map(|s| dialog::mode_pill(s.mode, cx))
-            .unwrap_or_else(|| div().into_any_element())
+        let state = shell.object_dialog.as_ref();
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .font_family(crate::fonts::MONO)
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .debug_selector(|| "objectdialog-crumb".to_string())
+                    .child(crumb_text(shell)),
+            )
+            .children(state.map(|s| dialog::mode_pill(s.mode, cx)))
+            .into_any_element()
     });
+}
+
+/// The title-row crumb (§18.1): a count in browse and naming, the slot's
+/// chord in a Groupings edit, nothing otherwise. Pure so a test can read
+/// it without laying out a window.
+pub(crate) fn crumb_text(shell: &ShellView) -> String {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return String::new();
+    };
+    match &state.stage {
+        Stage::Edit { object } if state.domain == Domain::Groupings => format!("ctrl+{object}"),
+        Stage::Edit { .. } => String::new(),
+        Stage::Browse | Stage::Naming => {
+            let n = derive_rows(shell).len();
+            format!("{n} {}", state.domain.crumb_noun())
+        }
+    }
 }
 
 /// The [`dialog::ModalKeyHandler`] for this dialog: the front door every
@@ -1562,47 +1589,51 @@ fn build(
             .child(highlighted_text(&row.name, &name_ix, theme.primary))
             .child(
                 div()
+                    .font_family(crate::fonts::MONO)
                     .text_xs()
                     .text_color(theme.muted_foreground)
                     .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
             );
 
-        // Provenance, right-aligned: the layer that won as plain muted
-        // text, and `overridden` as a muted pill beside it. Both muted
-        // and neither coloured — an override is a classification, not a
-        // warning, and spending a semantic colour on it here would leave
+        // Provenance, right-aligned: the layer that won as a muted outlined
+        // badge, and `overridden` as a `primary` one beside it — a
+        // classification worn on the row, distinct from `overridden`'s
+        // sibling colour because unticking the classification would leave
         // nothing louder for the states that mean something is wrong.
         //
         // `row.layer: None` (§18.4 — an unconfigured Groupings slot)
-        // paints no layer text at all: no layer defines the row, so
+        // paints no layer badge at all: no layer defines the row, so
         // naming one would be a lie about a name it doesn't have.
         let mut markers = h_flex().gap_1().items_center();
         if let Some(layer) = row.layer {
-            let selector_name = row.name.clone();
-            markers = markers.child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .debug_selector(move || format!("objectdialog-layer-{selector_name}"))
-                    .child(layer.name()),
-            );
+            markers = markers.child(dialog::badge(
+                layer.name(),
+                theme.muted_foreground,
+                theme.border,
+                Some(format!("objectdialog-layer-{}", row.name)),
+                cx,
+            ));
         }
         if row.overridden {
-            markers = markers.child(
-                div()
-                    .text_xs()
-                    .text_color(chip_fg)
-                    .bg(chip_bg)
-                    .px_1()
-                    .py_0p5()
-                    .rounded(px(4.))
-                    .flex_shrink_0()
-                    .debug_selector({
-                        let name = row.name.clone();
-                        move || format!("objectdialog-overridden-{name}")
-                    })
-                    .child("overridden"),
-            );
+            markers = markers.child(dialog::badge(
+                "overridden",
+                theme.primary,
+                theme.primary,
+                Some(format!("objectdialog-overridden-{}", row.name)),
+                cx,
+            ));
+        }
+        // Always `false` today (see `ObjectRow::drifted`'s own doc) — the
+        // badge exists so the day `overrides.toml` starts recording real
+        // drift, nothing here needs to change.
+        if row.drifted {
+            markers = markers.child(dialog::badge(
+                "drifted",
+                theme.muted_foreground,
+                theme.border,
+                Some(format!("objectdialog-drifted-{}", row.name)),
+                cx,
+            ));
         }
 
         let entity_for_row = entity.clone();
@@ -1827,25 +1858,22 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         let mut markers = h_flex().gap_1().items_center();
         if let Some(row) = row.as_ref() {
             if let Some(layer) = row.layer {
-                markers = markers.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(layer.name()),
-                );
+                markers = markers.child(dialog::badge(
+                    layer.name(),
+                    theme.muted_foreground,
+                    theme.border,
+                    None,
+                    cx,
+                ));
             }
             if row.overridden {
-                markers = markers.child(
-                    div()
-                        .text_xs()
-                        .text_color(chip_fg)
-                        .bg(chip_bg)
-                        .px_1()
-                        .py_0p5()
-                        .rounded(px(4.))
-                        .flex_shrink_0()
-                        .child("overridden"),
-                );
+                markers = markers.child(dialog::badge(
+                    "overridden",
+                    theme.primary,
+                    theme.primary,
+                    None,
+                    cx,
+                ));
             }
         }
         // §18.2: `n` this session, and still true for the whole life of
@@ -1854,27 +1882,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // zero-debounce flush for at least one executor tick, so `row` is
         // `None` right after creation even though the object is already
         // queued to exist. Keying on `draft.is_new` alone (never also
-        // `row.is_none()`) is what keeps the chip painted through that
+        // `row.is_none()`) is what keeps the badge painted through that
         // tick instead of flickering off the moment the row derives.
-        // Task 8 restyles this as a real badge; a plain muted chip is
-        // fine here.
         if draft.is_new {
-            markers = markers.child(
-                div()
-                    .text_xs()
-                    .text_color(chip_fg)
-                    .bg(chip_bg)
-                    .px_1()
-                    .py_0p5()
-                    .rounded(px(4.))
-                    .flex_shrink_0()
-                    .debug_selector(|| "objectdialog-new-badge".to_string())
-                    .child("new"),
-            );
+            markers = markers.child(dialog::badge(
+                "new",
+                theme.primary,
+                theme.primary,
+                Some("objectdialog-new-badge".to_string()),
+                cx,
+            ));
         }
         header = header.child(markers);
     }
 
+    let domain = state.domain;
     let rows = draft.rows();
     let visible = draft.visible_rows();
     let mut list = v_flex()
@@ -1886,6 +1908,10 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
         .debug_selector(|| "objectdialog-fields".to_string());
+
+    // The last item row's `(field, member)` — the boundary a section
+    // header marks. `None` so the very first item row always opens one.
+    let mut last_item_section: Option<(usize, bool)> = None;
 
     for (position, m) in visible.iter().enumerate() {
         let Some(edit_row) = rows.get(m.row).copied() else {
@@ -1903,16 +1929,35 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if is_selected {
             element = element.bg(theme.selection).text_color(theme.primary);
         }
+        // Set only for an item row that opens a new member/available
+        // block — see this loop's own comment on `last_item_section`.
+        let mut section_header: Option<AnyElement> = None;
         let (selector, label, value) = match edit_row {
             EditRow::Field(index) => {
                 let field = &draft.fields[index];
+                let dest_label = match field.dest {
+                    Destination::Doc => "doc",
+                    Destination::Presentation => "pres",
+                };
                 (
                     format!("objectdialog-field-{}", field.key),
                     highlighted_text(&field.label, &m.indices, theme.primary),
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child(field_value(field))
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(field_value(field)),
+                        )
+                        .child(dialog::badge(
+                            dest_label,
+                            theme.muted_foreground,
+                            theme.border,
+                            Some(format!("objectdialog-dest-{}", field.key)),
+                            cx,
+                        ))
                         .into_any_element(),
                 )
             }
@@ -1923,14 +1968,60 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 let Some(entry) = items.get(item) else {
                     continue;
                 };
-                // The tick is the inclusion state, and a hidden item is
-                // muted as well as unticked — one signal is a thing a
-                // glance misses on a 30-row list. The mark is plain text
-                // (it is never part of what the filter ranked — see
-                // `Draft::row_label`); only the name itself is
-                // highlighted.
-                let mark = if entry.included { "[x]" } else { "[ ]" };
-                let mut name_row = h_flex().pl_4().gap_1().items_center().child(mark);
+                let section_key = (field, entry.member);
+                if last_item_section != Some(section_key) {
+                    last_item_section = Some(section_key);
+                    let (text, suffix) = section_header_text(domain, entry.member);
+                    let field_key = draft.fields[field].key.clone();
+                    section_header = Some(
+                        div()
+                            .font_family(crate::fonts::MONO)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .pt_2()
+                            .pb_0p5()
+                            .debug_selector(move || {
+                                format!("objectdialog-section-{suffix}-{field_key}")
+                            })
+                            .child(text)
+                            .into_any_element(),
+                    );
+                }
+                // The grip marks a row as reorderable — every item in
+                // Groupings' `dimensions` (`ListItem::member` is always
+                // `true` there) and only the member block of Views'
+                // `columns`; an available row gets an equal-width spacer
+                // instead, so the tick beside it still lines up. The tick
+                // is the inclusion state, and a hidden item is muted as
+                // well as unticked — one signal is a thing a glance
+                // misses on a 30-row list. Neither the grip nor the tick
+                // is part of what the filter ranked (`Draft::row_label`);
+                // only the name itself is highlighted.
+                let grip = if entry.member {
+                    div()
+                        .text_color(theme.muted_foreground)
+                        .w(px(11.))
+                        .child("⋮")
+                        .into_any_element()
+                } else {
+                    div().w(px(11.)).into_any_element()
+                };
+                let tick = div()
+                    .font_family(crate::fonts::MONO)
+                    .w(px(13.))
+                    .text_color(if entry.included {
+                        theme.success
+                    } else {
+                        theme.muted_foreground
+                    })
+                    .child(if entry.included { "✓" } else { "·" })
+                    .into_any_element();
+                let mut name_row = h_flex()
+                    .pl_4()
+                    .gap_1()
+                    .items_center()
+                    .child(grip)
+                    .child(tick);
                 if !entry.included {
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
@@ -1954,17 +2045,24 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         };
         let entity_for_row = entity.clone();
         let clicked = position;
-        list = list.child(
-            element
-                .child(label)
-                .child(value)
-                .debug_selector(move || selector.clone())
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                    entity_for_row.update(cx, |shell, cx| {
-                        on_edit_row_clicked(shell, clicked, window, cx);
-                    });
-                }),
-        );
+        let row_el = element
+            .child(label)
+            .child(value)
+            .debug_selector(move || selector.clone())
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                entity_for_row.update(cx, |shell, cx| {
+                    on_edit_row_clicked(shell, clicked, window, cx);
+                });
+            });
+        // The header rides on the first item's own element so the list's
+        // child count still equals its row count (`visible.len()`) —
+        // `scroll_to_item` indexes children by that count, and a header
+        // emitted as its own `list.child(header)` before the row would
+        // make every following index off by one.
+        list = list.child(match section_header {
+            Some(header) => v_flex().child(header).child(row_el).into_any_element(),
+            None => row_el.into_any_element(),
+        });
     }
 
     if visible.is_empty() {
@@ -2118,6 +2216,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .into_any_element()
 }
 
+/// The small-caps text and selector suffix for the section header that
+/// opens an ordered list's member or available block (§18.1). `member`
+/// distinguishes Views' own columns from the rest of its dataset's;
+/// Groupings' `dimensions` sets `member` `true` on every item
+/// (`ListItem::member`'s own doc), so only the first arm there is ever
+/// reached.
+fn section_header_text(domain: Domain, member: bool) -> (&'static str, &'static str) {
+    match (domain, member) {
+        (Domain::Views, true) => (
+            "COLUMNS — space hides · shift+j / shift+k reorder · x removes",
+            "members",
+        ),
+        (Domain::Views, false) => ("AVAILABLE — space adds", "available"),
+        (Domain::Groupings, _) => (
+            "DIMENSIONS — space includes · shift+j / shift+k reorder",
+            "members",
+        ),
+        // Scopes has no `OrderedList` field at all (`scopes.rs`'s module
+        // doc — the whole object is a read-only summary), so this arm is
+        // unreachable; kept only to stay exhaustive as domains are added.
+        (Domain::Scopes, _) => ("", "members"),
+    }
+}
+
 /// What a field row shows on its right-hand side.
 fn field_value(field: &super::Field) -> String {
     match &field.kind {
@@ -2150,10 +2272,9 @@ fn field_value(field: &super::Field) -> String {
 /// The action bar: every live verb as a button showing its own letter.
 ///
 /// Buttons, not rows and not bare keys. A key alone has no clickable
-/// target, and every other verb in Geode's dialogs has one; a `ghost`
-/// button is the quiet variant the design guide calls for in a local
-/// command bar, and the destructive ones are `danger` rather than merely
-/// worded strongly.
+/// target, and every other verb in Geode's dialogs has one; an `outline`
+/// button is the mock's own local-command-bar look (§18.1), and the
+/// destructive ones are `danger` rather than merely worded strongly.
 fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> AnyElement {
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;
@@ -2171,7 +2292,7 @@ fn action_bar(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         let selector = format!("objectdialog-action-{key}");
         let mut button = Button::new(gpui::SharedString::from(format!("objectdialog-{key}")))
             .small()
-            .ghost()
+            .outline()
             .child(
                 h_flex()
                     .gap_1p5()

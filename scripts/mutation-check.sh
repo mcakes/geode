@@ -6273,6 +6273,31 @@ run_mutation "dialog: the filter placeholder needs / to actually filter" \
   geode-shell \
   the_filter_placeholder_is_gone_while_listening_for_a_capture
 
+# ---- Task 8: the object dialog to the mock (§18.1) ---------------------
+
+# The section header rides on the first item's element so the edit
+# list's child count still equals its row count; a header emitted as its
+# own `list.child(header)` before the row instead makes `scroll_to_item`
+# follow the wrong row from that point on. Verified by hand (no covering
+# test today asserts on a scroll target, only on which selectors paint,
+# so this mutation SURVIVES the named test and the crate suite both) —
+# recorded anyway per this task's own ruling, since the invariant is
+# real and worth a future scroll-position test closing the gap; the
+# named test at least still proves the header keeps painting under the
+# restructure, which is what it can see.
+run_mutation "objectdialog: section headers do not add list children" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        list = list.child(match section_header {
+            Some(header) => v_flex().child(header).child(row_el).into_any_element(),
+            None => row_el.into_any_element(),
+        });' \
+  '        if let Some(header) = section_header {
+            list = list.child(header);
+        }
+        list = list.child(row_el);' \
+  geode-shell \
+  the_edit_stage_paints_section_headers_destination_badges_and_the_crumb
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

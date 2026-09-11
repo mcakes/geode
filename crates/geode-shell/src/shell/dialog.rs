@@ -715,12 +715,12 @@ pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
 /// exception. It also leaves room for the badge to start reading a token
 /// of its own without touching six call sites.
 ///
-/// Not called yet — Task 8 (§18.1's drift and destination markers) is its
-/// first caller, and the browse rows' filled `overridden`/`layer` chips
-/// are what it replaces there. It lands with the shared chrome rather
-/// than with its first user so that the three surfaces Task 8 touches all
-/// reach for the same helper instead of one of them inventing a second.
-#[allow(dead_code)]
+/// Task 8's object dialog is its first caller — the browse rows' and
+/// edit header's filled `overridden`/`layer`/`new` chips, plus each
+/// field's `doc`/`pres` destination marker — and it lands with the
+/// shared chrome rather than with its first user so that every surface
+/// Task 8 touches reaches for the same helper instead of one of them
+/// inventing a second.
 pub(crate) fn badge(
     label: impl Into<SharedString>,
     fg: Hsla,

@@ -2792,3 +2792,45 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
         );
     });
 }
+
+// ---------------------------------------------------------------------
+// Task 8: the object dialog to the mock — crumb, badges, grip and tick,
+// section headers (§18.1).
+// ---------------------------------------------------------------------
+
+#[gpui::test]
+fn the_edit_stage_paints_section_headers_destination_badges_and_the_crumb(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    assert!(
+        cx.debug_bounds("objectdialog-section-members-columns")
+            .is_some()
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-section-available-columns")
+            .is_some(),
+        "delta01 is available"
+    );
+    assert!(cx.debug_bounds("objectdialog-dest-dataset").is_some());
+    assert!(cx.debug_bounds("objectdialog-dest-columns").is_some());
+    assert!(cx.debug_bounds("dialog-mode-pill-normal").is_some());
+}
+
+#[gpui::test]
+fn the_browse_crumb_counts_and_a_slot_crumb_names_its_chord(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert_eq!(crumb, "9 slots");
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert_eq!(crumb, "ctrl+3");
+}

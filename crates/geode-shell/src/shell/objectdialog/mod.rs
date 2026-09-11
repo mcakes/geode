@@ -180,6 +180,17 @@ impl Domain {
         }
     }
 
+    /// The plural noun the browse crumb counts (`2 views`, `9 slots`,
+    /// `3 saved`) — not `title()`, whose "Groupings" would count the
+    /// wrong thing.
+    pub fn crumb_noun(self) -> &'static str {
+        match self {
+            Domain::Views => "views",
+            Domain::Groupings => "slots",
+            Domain::Scopes => "saved",
+        }
+    }
+
     /// How this domain describes one object on its browse row — the only
     /// genuinely domain-specific part of a row, and therefore the only
     /// part an adapter gets to supply.
