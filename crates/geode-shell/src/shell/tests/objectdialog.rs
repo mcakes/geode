@@ -1699,12 +1699,108 @@ fn services_with_slot_3(dims: &[&str]) -> ShellServices {
     services
 }
 
-/// **The point of Task 4.** `config::groupings` opens over slot 3 (the
-/// only configured slot, so browse opens with it already selected);
-/// reordering its `dimensions` applies through the whole pipeline —
-/// draft, pending batch, debounced flush, `apply_reload`,
-/// `hot_reload::rebuild_slots` — and a later `ctrl+3` regroups off the
-/// NEW order, never the one the slot opened with.
+/// §18.4: an unconfigured slot is a row, opening it shows every pickable
+/// dimension unticked, and ticking the first writes the slot to the user
+/// layer with NO fork question — there is no desk copy to fork.
+#[gpui::test]
+fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // `debug_bounds` takes a `&'static str`, so the nine selectors are
+    // spelled out rather than formatted (same reason
+    // `config_views_opens_in_normal_mode_and_lists_the_views` does).
+    for selector in [
+        "objectdialog-row-1",
+        "objectdialog-row-2",
+        "objectdialog-row-3",
+        "objectdialog-row-4",
+        "objectdialog-row-5",
+        "objectdialog-row-6",
+        "objectdialog-row-7",
+        "objectdialog-row-8",
+        "objectdialog-row-9",
+    ] {
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "{selector} should have painted"
+        );
+    }
+    assert!(
+        cx.debug_bounds("objectdialog-layer-1").is_none(),
+        "an empty slot wears no layer"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-layer-3").is_some(),
+        "a configured slot does"
+    );
+
+    // Row 1 is selected on open. Open it, skip the read-only `Slot`
+    // field AND the `Dimensions` header row (`rows()` emits one for
+    // every field, `OrderedList` included, whether its items are empty
+    // or not — the same two-`j` shape
+    // `reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`
+    // needs to reach a configured slot's first item), then tick the
+    // first dimension.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j space");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "nothing to fork"
+    );
+    // The edit is queued on the keystroke with no confirm in the way —
+    // there is no desk copy for a fork question to be about. The batch
+    // itself, like every other field edit, reaches `services.config`
+    // and disk together behind `WRITE_DEBOUNCE` (`objectdialog::apply`'s
+    // own module doc); `flush_config_write` closes that window the same
+    // way every other test here that asserts on the merged config or
+    // the file does.
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "slot 1 is queued on the keystroke, with nothing asked first"
+    );
+    flush_config_write(&mut cx);
+    let chain = shell.read_with(&cx, |shell, _| {
+        shell
+            .services
+            .config
+            .doc("groupings")
+            .and_then(|doc| doc.value.get("1"))
+            .cloned()
+    });
+    assert!(chain.is_some(), "slot 1 reaches the live config");
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
+    assert!(written.contains("1 = ["), "{written}");
+}
+
+#[gpui::test]
+fn d_on_an_empty_slot_says_there_is_nothing_to_delete(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("enter d");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_none());
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("empty"), "{notice}");
+}
+
+/// **The point of Task 4.** `config::groupings` lists all nine slots
+/// (§18.4), row 1 selected on open, so this test navigates down to slot
+/// 3 before opening it; reordering its `dimensions` applies through the
+/// whole pipeline — draft, pending batch, debounced flush,
+/// `apply_reload`, `hot_reload::rebuild_slots` — and a later `ctrl+3`
+/// regroups off the NEW order, never the one the slot opened with.
 ///
 /// `Frame::active_grouping` is exactly what a following blotter tile
 /// reads to regroup itself on `ctrl+1..9` (spec §4.2,
@@ -1720,7 +1816,10 @@ fn reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order(cx: &mut gpu
     let services = services_with_slot_3(&["book", "lhu"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
-    // Into slot 3's edit stage.
+    // Row 1 is selected on open (§18.4 — all nine slots list); navigate
+    // down to slot 3, then into its edit stage.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
 
@@ -1795,6 +1894,10 @@ fn deleting_a_forked_slot_does_not_look_for_a_presentation_doc_that_does_not_exi
     let services = services_with_slot_3(&["book", "lhu"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
+    // Row 1 is selected on open (§18.4 — all nine slots list); navigate
+    // down to slot 3 first.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");
@@ -1847,8 +1950,11 @@ fn unticking_a_slots_last_dimension_leaves_the_painted_chain_and_the_frame_agree
     let services = services_with_slot_3(&["book"]);
     let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::groupings");
 
-    // Into slot 3's edit stage, past `Slot` and the `Dimensions` header,
-    // onto `book` — the chain's only ticked item.
+    // Row 1 is selected on open (§18.4 — all nine slots list); navigate
+    // down to slot 3, into its edit stage, past `Slot` and the
+    // `Dimensions` header, onto `book` — the chain's only ticked item.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("j j");

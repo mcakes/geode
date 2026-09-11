@@ -534,9 +534,9 @@ mod tests {
         let rows = Domain::Scopes.objects(&config);
         let eu = rows.iter().find(|r| r.name == "eu").expect("eu");
         let us = rows.iter().find(|r| r.name == "us").expect("us");
-        assert_eq!(eu.layer, Layer::User);
+        assert_eq!(eu.layer, Some(Layer::User));
         assert!(eu.overridden);
-        assert_eq!(us.layer, Layer::Builtin);
+        assert_eq!(us.layer, Some(Layer::Builtin));
         assert!(!us.overridden);
     }
 }

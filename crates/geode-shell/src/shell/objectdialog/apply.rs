@@ -374,6 +374,11 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
 /// than the second seeing the first already applied. That is the safe
 /// direction — asking twice loses nothing — and it needs a `Choice`
 /// stepped twice inside a quarter second to happen at all.
+///
+/// `row.layer: None` (§18.4 — an unconfigured Groupings slot) forks
+/// nothing: there is no copy in any layer for a user-layer write to
+/// freeze anyone out of, so filling an empty slot is a plain write, not
+/// a fork.
 pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
     let Some(draft) = shell
         .object_dialog
@@ -392,7 +397,7 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         .objects(&shell.services.config)
         .into_iter()
         .find(|row| row.name == draft.name)
-        .is_some_and(|row| row.layer != Layer::User)
+        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))
 }
 
 /// The open draft's first error-severity diagnostic, formatted as the

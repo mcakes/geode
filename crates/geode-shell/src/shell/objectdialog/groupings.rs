@@ -411,9 +411,9 @@ mod tests {
         let rows = Domain::Groupings.objects(&config);
         let three = rows.iter().find(|r| r.name == "3").expect("slot 3");
         let four = rows.iter().find(|r| r.name == "4").expect("slot 4");
-        assert_eq!(three.layer, Layer::User);
+        assert_eq!(three.layer, Some(Layer::User));
         assert!(three.overridden);
-        assert_eq!(four.layer, Layer::Builtin);
+        assert_eq!(four.layer, Some(Layer::Builtin));
         assert!(!four.overridden);
     }
 }

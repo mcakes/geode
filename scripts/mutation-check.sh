@@ -5791,7 +5791,7 @@ run_mutation "objectdialog: o writes the frame instead of the saved scope" \
 
 run_mutation "objectdialog: o discloses no fork for a desk-owned scope" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let forks = editing_row(shell).is_some_and(|row| row.layer != Layer::User);' \
+  '    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));' \
   '    let forks = false;' \
   geode-shell o_on_a_desk_owned_scope_discloses_the_fork_before_writing
 
@@ -5814,6 +5814,24 @@ run_mutation "objectdialog: writes_by_destination ignores a source-only change" 
             out.entry(Destination::Doc).or_default();
         }' \
   geode-shell overwrite_with_is_seen_even_when_the_painted_summary_collides
+
+# §18.4: the roster is what puts an unfilled slot on the list. Dropping it
+# leaves every configured-slot test green and the empty rows gone.
+run_mutation "objectdialog: groupings roster lists the nine slots" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),' \
+  '            Domain::Groupings => None,' \
+  geode-shell \
+  groupings_always_lists_nine_slots_and_an_unconfigured_one_has_no_layer
+
+# An unconfigured slot has no layer; forking it would ask a confirm over
+# nothing. `is_some_and(.. != User)` says None forks nothing.
+run_mutation "objectdialog: an unconfigured slot never forks" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))' \
+  '        .is_some_and(|row| row.layer != Some(Layer::User))' \
+  geode-shell \
+  ticking_a_dimension_in_an_empty_slot_writes_it_without_asking
 # ---- the drag grab's focus trap (2026-09-09) ---------------------------
 #
 # Two halves of the same defect: a tile mouse-down that arms a drag

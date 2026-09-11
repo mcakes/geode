@@ -664,7 +664,7 @@ fn refuse_step(shell: &mut ShellView, reason: String) {
         // are live here; `r` is the one that restores what is underneath,
         // which is what an emptied override is asking for.
         Some(row) if row.overridden => " — r restores the desk's copy",
-        Some(row) if row.layer == Layer::User => " — d deletes it",
+        Some(row) if row.layer == Some(Layer::User) => " — d deletes it",
         _ => "",
     };
     set_notice(shell, format!("{reason}{hint}"));
@@ -894,13 +894,23 @@ fn removal_edits(
 /// claiming they have nothing — the object reached this branch with
 /// `overridden` set only via `view_presentation.toml`, since a user-layer
 /// doc override would have made the user the winning layer above.
+///
+/// `row.layer: None` (§18.4 — an unconfigured Groupings slot) gets its
+/// own arm rather than falling into the generic refusal below: "comes
+/// from the no layer" is nonsense copy for a row nothing defines yet, so
+/// the message names the real state ("is empty") and the real remedy
+/// (tick a dimension) instead.
 fn arm_delete(shell: &mut ShellView) {
     match editing_row(shell) {
-        Some(row) if row.layer == Layer::User => {
+        Some(row) if row.layer == Some(Layer::User) => {
             if let Some(draft) = draft_mut(shell) {
                 draft.confirm = Some(Confirm::Delete);
             }
         }
+        Some(row) if row.layer.is_none() => set_notice(
+            shell,
+            format!("{} is empty — tick a dimension to fill it", row.name),
+        ),
         Some(row) => {
             let tail = if row.overridden {
                 " — but r reverts your changes to it"
@@ -912,7 +922,7 @@ fn arm_delete(shell: &mut ShellView) {
                 format!(
                     "{} comes from the {} layer — there is nothing of yours to delete{tail}",
                     row.name,
-                    row.layer.name()
+                    row.layer.map(Layer::name).unwrap_or("no")
                 ),
             )
         }
@@ -978,7 +988,7 @@ fn arm_overwrite(shell: &mut ShellView) {
         set_notice(shell, "nothing is open".to_string());
         return;
     }
-    let forks = editing_row(shell).is_some_and(|row| row.layer != Layer::User);
+    let forks = editing_row(shell).is_some_and(|row| row.layer != Some(Layer::User));
     if let Some(draft) = draft_mut(shell) {
         draft.confirm = Some(Confirm::Overwrite { forks });
     }
@@ -1153,7 +1163,7 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     }
     let row = editing_row(shell);
     let mut out = Vec::new();
-    if row.as_ref().is_some_and(|r| r.layer == Layer::User) {
+    if row.as_ref().is_some_and(|r| r.layer == Some(Layer::User)) {
         out.push(Action {
             key: "d",
             label: format!("Delete this {}", object_word(state.domain)),
@@ -1266,12 +1276,21 @@ fn build(
         // and neither coloured — an override is a classification, not a
         // warning, and spending a semantic colour on it here would leave
         // nothing louder for the states that mean something is wrong.
-        let mut markers = h_flex().gap_1().items_center().child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(row.layer.name()),
-        );
+        //
+        // `row.layer: None` (§18.4 — an unconfigured Groupings slot)
+        // paints no layer text at all: no layer defines the row, so
+        // naming one would be a lie about a name it doesn't have.
+        let mut markers = h_flex().gap_1().items_center();
+        if let Some(layer) = row.layer {
+            let selector_name = row.name.clone();
+            markers = markers.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .debug_selector(move || format!("objectdialog-layer-{selector_name}"))
+                    .child(layer.name()),
+            );
+        }
         if row.overridden {
             markers = markers.child(
                 div()
@@ -1468,12 +1487,15 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .child(div().text_lg().child(draft.name.clone()))
         .debug_selector(|| "objectdialog-edit-header".to_string());
     if let Some(row) = row.as_ref() {
-        let mut markers = h_flex().gap_1().items_center().child(
-            div()
-                .text_xs()
-                .text_color(theme.muted_foreground)
-                .child(row.layer.name()),
-        );
+        let mut markers = h_flex().gap_1().items_center();
+        if let Some(layer) = row.layer {
+            markers = markers.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(layer.name()),
+            );
+        }
         if row.overridden {
             markers = markers.child(
                 div()

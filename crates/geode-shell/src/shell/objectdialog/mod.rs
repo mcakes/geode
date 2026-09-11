@@ -123,11 +123,14 @@ pub struct ObjectRow {
     /// second, muted line of the row, and half of what the filter
     /// matches against.
     pub summary: String,
-    /// The last layer whose doc defines this name: the one whose copy
-    /// actually takes effect, since every doc these dialogs edit is
-    /// atomic at depth 1 (`config::merge::atomic_depth`) and so is
-    /// replaced whole rather than merged key-by-key.
-    pub layer: Layer,
+    /// The layer whose copy takes effect, or `None` when no layer defines
+    /// the object at all and it is on the list only because the domain's
+    /// roster names it (`Domain::roster` — a grouping slot nothing has
+    /// filled). `Option` rather than a `configured: bool` beside a
+    /// placeholder `Layer`: every reader of this field decides something
+    /// destructive or forking on it (`arm_delete`, `would_fork`), and a
+    /// placeholder value would answer those questions with a lie.
+    pub layer: Option<Layer>,
     /// The user layer defines this object **and so does an earlier
     /// layer**. Both halves matter: the edit stage offers `Revert to
     /// desk` on an overridden row, and revert deletes the user's copy —
@@ -202,6 +205,21 @@ impl Domain {
         }
     }
 
+    /// The names a domain's browse list always shows, configured or not.
+    /// `Some` only for Groupings (§18.4): the nine `ctrl+1..9` slots are
+    /// a fixed keyboard, so an unfilled slot is a row that reads `empty`
+    /// rather than a row that does not exist — and there is no `n`,
+    /// because nothing can be created that is not already on the list.
+    /// Slot `0` is not here: `ctrl+0` is `frame::slot_clear`, the view's
+    /// own grouping, and `GroupingSlots` is nine wide (user ruling
+    /// 2026-09-10).
+    fn roster(self) -> Option<&'static [&'static str]> {
+        match self {
+            Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
+            Domain::Views | Domain::Scopes => None,
+        }
+    }
+
     /// Every named object in this domain, with its provenance markers.
     ///
     /// **Deliberately not a `match`.** The `layer`/`overridden`
@@ -221,13 +239,22 @@ impl Domain {
             config,
             self.doc(),
             self.presentation_doc(),
+            self.roster(),
             self.summary_fn(),
         )
     }
 }
 
-/// Every object named in `doc`'s layered documents, one row each, sorted
-/// by name.
+/// Every object named in `doc`'s layered documents, plus every name
+/// `roster` fixes as always-listed (§18.4 — Groupings' nine slots), one
+/// row each, sorted by name.
+///
+/// A rostered name no doc defines gets a row with `layer: None` and
+/// `summary: "empty"` — seeded before the layered walk below so a name
+/// the walk does touch overwrites that placeholder in place, and a name
+/// it never touches is left exactly as seeded. `roster: None` (every
+/// domain but Groupings) seeds nothing, so those domains list only what
+/// their docs actually define, as before.
 ///
 /// `Config::layered_docs` hands back the per-layer documents in Builtin →
 /// Desk → User order, so a single ordered walk answers both markers
@@ -267,6 +294,7 @@ fn derive_rows(
     config: &Config,
     doc: &str,
     presentation_doc: Option<&str>,
+    roster: Option<&'static [&'static str]>,
     summary: fn(&toml::Value) -> String,
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
@@ -293,6 +321,27 @@ fn derive_rows(
     // row is every layer that defined it, which is what the `overridden`
     // question below needs and the row itself does not carry.
     let mut rows: BTreeMap<String, (Vec<Layer>, ObjectRow)> = BTreeMap::new();
+    // Seeded before the layered walk, not after: a name the walk touches
+    // has to update this entry in place (`entry.1.layer = Some(..)`
+    // below), and a name it never touches has to survive untouched —
+    // `empty`, `layer: None`. Seeding afterward would need its own
+    // "don't overwrite what the walk already set" check; seeding first
+    // makes the walk's own `or_insert_with`/overwrite the only rule.
+    for name in roster.unwrap_or(&[]) {
+        rows.insert(
+            (*name).to_string(),
+            (
+                Vec::new(),
+                ObjectRow {
+                    name: (*name).to_string(),
+                    summary: "empty".to_string(),
+                    layer: None,
+                    overridden: false,
+                    drifted: false,
+                },
+            ),
+        );
+    }
     for layered in config.layered_docs(doc) {
         for (name, value) in &layered.table {
             if name == "config_version" {
@@ -304,7 +353,7 @@ fn derive_rows(
                     ObjectRow {
                         name: name.clone(),
                         summary: String::new(),
-                        layer: layered.layer,
+                        layer: Some(layered.layer),
                         overridden: false,
                         drifted: false,
                     },
@@ -314,7 +363,7 @@ fn derive_rows(
             // Last writer wins, which is the merge's own rule: both the
             // winning layer and the summary describe the copy that
             // actually takes effect.
-            entry.1.layer = layered.layer;
+            entry.1.layer = Some(layered.layer);
             entry.1.summary = summary(value);
         }
     }
@@ -1294,6 +1343,27 @@ mod tests {
     }
 
     #[test]
+    fn groupings_always_lists_nine_slots_and_an_unconfigured_one_has_no_layer() {
+        let config = config_from(&[(Layer::Desk, "groupings", "3 = [\"book\"]\n")]);
+        let rows = Domain::Groupings.objects(&config);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["1", "2", "3", "4", "5", "6", "7", "8", "9"]);
+        let three = &rows[2];
+        assert_eq!(three.layer, Some(Layer::Desk));
+        assert_eq!(three.summary, "book");
+        let one = &rows[0];
+        assert_eq!(one.layer, None, "nothing defines slot 1");
+        assert_eq!(one.summary, "empty");
+        assert!(!one.overridden);
+    }
+
+    #[test]
+    fn views_have_no_roster_so_a_config_with_no_views_lists_nothing() {
+        let config = config_from(&[]);
+        assert!(Domain::Views.objects(&config).is_empty());
+    }
+
+    #[test]
     fn a_row_carries_the_layer_that_won_and_marks_a_user_override() {
         let config = config_from(&[
             (
@@ -1306,12 +1376,12 @@ mod tests {
         let rows = Domain::Views.objects(&config);
         let tree = rows.iter().find(|r| r.name == "tree").expect("tree");
         let wide = rows.iter().find(|r| r.name == "wide").expect("wide");
-        assert_eq!(tree.layer, Layer::User);
+        assert_eq!(tree.layer, Some(Layer::User));
         assert!(
             tree.overridden,
             "user layer plus an earlier layer means overridden"
         );
-        assert_eq!(wide.layer, Layer::Builtin);
+        assert_eq!(wide.layer, Some(Layer::Builtin));
         assert!(
             !wide.overridden,
             "a view only one layer defines is not overridden"
@@ -1350,7 +1420,7 @@ mod tests {
         let tree = rows.iter().find(|r| r.name == "tree").expect("tree");
         assert_eq!(
             tree.layer,
-            Layer::Desk,
+            Some(Layer::Desk),
             "presentation forks nothing — the desk's copy still wins"
         );
         assert!(
@@ -1395,7 +1465,7 @@ mod tests {
         ]);
         let rows = Domain::Views.objects(&config);
         let tree = rows.iter().find(|r| r.name == "tree").expect("tree");
-        assert_eq!(tree.layer, Layer::User);
+        assert_eq!(tree.layer, Some(Layer::User));
         assert!(tree.overridden);
         assert!(
             tree.summary.contains('d'),
@@ -1403,7 +1473,7 @@ mod tests {
             tree.summary
         );
         let desk_only = rows.iter().find(|r| r.name == "desk_only").expect("desk");
-        assert_eq!(desk_only.layer, Layer::Desk);
+        assert_eq!(desk_only.layer, Some(Layer::Desk));
         assert!(
             !desk_only.overridden,
             "a desk view with no user copy is not overridden — reverting it \
