@@ -2834,3 +2834,89 @@ fn the_browse_crumb_counts_and_a_slot_crumb_names_its_chord(cx: &mut gpui::TestA
     let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
     assert_eq!(crumb, "ctrl+3");
 }
+
+/// A desk view whose dataset has enough columns that its edit stage
+/// overflows `VISIBLE_ROWS` — `book`/`npv` as `tree`'s two members, plus
+/// fourteen more measures (`m0`..`m13`) it has not picked up, so both
+/// section headers paint (members, then available) and reaching the
+/// bottom of the list needs an actual scroll, not just more rows fitting
+/// on screen.
+fn services_with_a_long_desk_view() -> ShellServices {
+    let mut columns = String::from(
+        "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    );
+    for i in 0..14 {
+        columns.push_str(&format!(
+            "[risk_snapshot.columns.m{i}]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n"
+        ));
+    }
+    let datasets = LayerDoc::builtin("datasets", &columns).unwrap();
+    let desk = LayerDoc {
+        layer: Layer::Desk,
+        name: "views".to_string(),
+        file: "<test:desk>".into(),
+        table: "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
+                [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                [[tree.columns]]\nname = \"npv\"\n"
+            .parse()
+            .unwrap(),
+    };
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![datasets, desk],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The structural property the mutation entry `objectdialog: section
+/// headers do not add list children` guards: with the section headers
+/// folded into their block's first item (rather than each being its own
+/// `list.child`), the edit list's child count equals its visible-row
+/// count, so `scroll_to_item(draft.selected)` — driven here by `shift-g`
+/// (`vimnav::NavCommand::Bottom`) — always targets the right child. If a
+/// header were instead a separate child, every row from the first header
+/// onward would be one child index further than `selected` expects, and
+/// `shift-g` would leave the true last row (`m13`, the last available
+/// column) short of the bottom of the scrolled viewport instead of
+/// flush with it.
+#[gpui::test]
+fn the_cursor_stays_in_view_past_a_section_header_on_a_long_list(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_long_desk_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-g");
+    cx.run_until_parked();
+
+    let list = cx
+        .debug_bounds("objectdialog-fields")
+        .expect("the fields list should paint");
+    // `m13` is the dataset's last column and `tree` never picked it up,
+    // so it is the last row of the available block — and so the last row
+    // of the whole list, which is exactly what `shift-g` should scroll
+    // to the bottom of.
+    let row = cx
+        .debug_bounds("objectdialog-item-m13")
+        .expect("the last available column should paint");
+    assert!(
+        row.origin.y + gpui::px(1.0) >= list.origin.y,
+        "the last row's top ({:?}) should not sit above the list's own top ({:?})",
+        row.origin.y,
+        list.origin.y
+    );
+    assert!(
+        row.origin.y + row.size.height <= list.origin.y + list.size.height + gpui::px(1.0),
+        "the last row (bottom {:?}) should be fully inside the list's \
+         viewport (bottom {:?}), not scrolled past it",
+        row.origin.y + row.size.height,
+        list.origin.y + list.size.height
+    );
+}

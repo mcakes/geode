@@ -6277,14 +6277,17 @@ run_mutation "dialog: the filter placeholder needs / to actually filter" \
 
 # The section header rides on the first item's element so the edit
 # list's child count still equals its row count; a header emitted as its
-# own `list.child(header)` before the row instead makes `scroll_to_item`
-# follow the wrong row from that point on. Verified by hand (no covering
-# test today asserts on a scroll target, only on which selectors paint,
-# so this mutation SURVIVES the named test and the crate suite both) —
-# recorded anyway per this task's own ruling, since the invariant is
-# real and worth a future scroll-position test closing the gap; the
-# named test at least still proves the header keeps painting under the
-# restructure, which is what it can see.
+# own `list.child(header)` before the row instead shifts every later
+# child one index further than `Draft::selected` expects, so
+# `scroll_to_item` scrolls the wrong child to the target position. On a
+# fixture long enough to actually need scrolling (§18.1's fixture below,
+# `services_with_a_long_desk_view`: 16 columns, two member and two
+# section headers before the tail of the available block), `shift-g`
+# lands the true last row (`m13`) short of the bottom of the scrolled
+# viewport instead of flush with it — verified by hand: this mutation
+# panics `the_cursor_stays_in_view_past_a_section_header_on_a_long_list`
+# with "the last row (bottom 706px) should be fully inside the list's
+# viewport (bottom 658.5px)".
 run_mutation "objectdialog: section headers do not add list children" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        list = list.child(match section_header {
@@ -6296,7 +6299,7 @@ run_mutation "objectdialog: section headers do not add list children" \
         }
         list = list.child(row_el);' \
   geode-shell \
-  the_edit_stage_paints_section_headers_destination_badges_and_the_crumb
+  the_cursor_stays_in_view_past_a_section_header_on_a_long_list
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
