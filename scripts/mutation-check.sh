@@ -6202,14 +6202,41 @@ run_mutation "objectdialog: reorder skips hidden rows" \
   geode-shell \
   reordering_under_a_filter_moves_past_the_hidden_rows_and_says_how_many
 
-# set_query has to reach the draft, or typing narrows the browse copy and
-# the edit stage keeps painting every row.
-run_mutation "objectdialog: set_query mirrors into the open draft" \
+# set_query has to reach the draft while the edit stage is open, or
+# typing narrows the browse copy and the edit stage keeps painting every
+# row.
+#
+# Review round 1, finding 1: an earlier build of this branch wrote BOTH
+# `draft.query` and `self.query` unconditionally, which leaked the edit
+# stage's own filter into the browse query it steps back onto (a stale
+# `state.query` the edit stage's own `ClearQuery` rung never touches).
+# The mirror is now gated on `stage` — anchored on that gate itself
+# rather than on the assignment inside it, since the assignment alone
+# (`draft.query = query`) looks identical to the buggy version and would
+# not tell the two apart.
+run_mutation "objectdialog: set_query mirrors into the open draft only in the edit stage" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            draft.query = query.clone();' \
-  '            draft.query = String::new();' \
+  '        if matches!(self.stage, Stage::Edit { .. })
+            && let Some(draft) = self.draft.as_mut()' \
+  '        if false
+            && let Some(draft) = self.draft.as_mut()' \
   geode-shell \
   slash_filters_the_edit_stage_and_escape_walks_the_full_ladder
+
+# Review round 1, finding 2: the edit stage's row order IS the data
+# (column order, chain order), so `rank`'s fuzzy-score ordering must be
+# undone afterwards — a mutation that drops the `sort_by_key` leaves
+# `visible_rows` back in score order, exactly the defect this finding
+# reported (a later, better-scoring match painted ahead of an earlier,
+# worse-scoring one).
+run_mutation "objectdialog: the edit stage's visible rows stay in row order" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let mut ranked = crate::listfilter::rank(&labels, &self.query);
+        ranked.sort_by_key(|m| m.row);
+        ranked' \
+  '        crate::listfilter::rank(&labels, &self.query)' \
+  geode-shell \
+  visible_rows_lists_matches_in_row_order_not_score_order
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -2729,4 +2729,35 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Browse
     );
+    // The edit stage's own filter must not leak into the browse query:
+    // `state.query` is a separate cursor space (§18.3), and the mirror
+    // that fed `draft.query` while editing must never have touched it.
+    assert!(
+        dialog_state(&shell, &cx, |s| s.query.clone()).is_empty(),
+        "the browse query must not carry the edit stage's filter"
+    );
+    shell.read_with(&cx, |shell, _| {
+        let state = shell
+            .object_dialog
+            .as_ref()
+            .expect("the object dialog should be open");
+        let rows = state.domain.objects(&shell.services.config);
+        let visible = objectdialog::visible_rows(state, &rows);
+        assert_eq!(
+            visible.len(),
+            rows.len(),
+            "an empty browse query must show every row — this fixture has \
+             only `tree`, so a leaked filter would empty the list rather \
+             than merely narrow it"
+        );
+        let selected_name = visible
+            .get(state.selected)
+            .and_then(|m| rows.get(m.row))
+            .map(|r| r.name.as_str());
+        assert_eq!(
+            selected_name,
+            Some("tree"),
+            "the cursor is back on the object just edited"
+        );
+    });
 }

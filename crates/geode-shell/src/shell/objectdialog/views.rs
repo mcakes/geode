@@ -210,10 +210,29 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// Called from `render::maybe_refresh_available`, after a `Toggle`/
 /// `ToggleBack` step on the `dataset` field itself — never from
 /// `Draft::step_selected`, which has no `Config` to read a schema from.
+///
+/// The cursor is preserved by IDENTITY (review round 1, finding 3), not
+/// by re-clamping its raw index: the caller only ever calls this with
+/// the cursor on the `dataset` field itself
+/// (`render::maybe_refresh_available`'s own `is_dataset_row` guard), and
+/// an index-based clamp — `draft.selected.min(new_len - 1)` — happened
+/// to keep landing on that same field only because [`Draft::visible_rows`]
+/// now sorts by row rather than by fuzzy score (review round 1, finding
+/// 2): the dataset field is always `rows()`'s very first entry, so
+/// whenever it matches the query at all it is unconditionally the first
+/// SURVIVING row too, index-clamp or not. `Draft::follow` is the general,
+/// correct primitive regardless — indexing is what this whole task's
+/// other two fixes replaced everywhere else a cursor had to survive a
+/// list changing under it, and this call site should not be the one
+/// spot still reasoning about a raw index. If the row the cursor was on
+/// is somehow gone (not reachable through today's one caller, but not
+/// this function's job to assume), it falls back to the same clamp as
+/// before rather than leaving `selected` out of bounds.
 pub fn refresh_available(draft: &mut Draft, config: &Config) {
     let Some(current) = draft.choice("dataset").map(str::to_string) else {
         return;
     };
+    let cursor = draft.selected_row();
     let Some(field) = draft.fields.iter_mut().find(|f| f.key == "columns") else {
         return;
     };
@@ -228,12 +247,13 @@ pub fn refresh_available(draft: &mut Draft, config: &Config) {
     if let Some(dataset) = schema.dataset(&current) {
         push_dataset_columns(items, dataset);
     }
-    // The rebuild can shrink the FILTERED list out from under the cursor
-    // (an active query that matched an available column the old dataset
-    // had, say), and `selected` is an index into `visible_rows()`
-    // (§18.3) rather than a value this function can leave to chance.
-    let last_visible = draft.visible_rows().len().saturating_sub(1);
-    draft.selected = draft.selected.min(last_visible);
+    match cursor {
+        Some(row) => draft.follow(row),
+        None => {
+            let last_visible = draft.visible_rows().len().saturating_sub(1);
+            draft.selected = draft.selected.min(last_visible);
+        }
+    }
 }
 
 /// Append `dataset`'s columns that are not already on `items`, as
@@ -565,7 +585,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 #[cfg(test)]
 mod tests {
-    use super::super::{Domain, Step};
+    use super::super::{Domain, EditRow, Step};
     use super::*;
     use geode_core::config::ConfigSources;
 
@@ -866,5 +886,58 @@ mod tests {
     fn a_malformed_view_still_describes_itself() {
         assert_eq!(summary(&toml::Value::String("oops".into())), "not a table");
         assert_eq!(summary(&value("columns = []\n")), "no dataset · 0 columns");
+    }
+
+    /// Review round 1, finding 3: `refresh_available` used to clamp
+    /// `selected` by raw index rather than re-find the cursor's own row
+    /// by identity. A dataset switch tears the available block down and
+    /// rebuilds it from scratch, so a query that matched the OLD
+    /// dataset's available column and not the new one's leaves the
+    /// Dataset row as the only survivor — this pins the cursor there by
+    /// identity (`Draft::follow`) rather than by an index that would
+    /// only coincidentally still be right.
+    #[test]
+    fn refresh_available_preserves_the_cursor_on_the_dataset_field_by_identity() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[onedata.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [onedata.columns.atom]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [twodata.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [twodata.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[v]\ndataset = \"onedata\"\n[[v.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "v");
+        // "at" matches "Dataset" (the field label) and "atom" (onedata's
+        // own available column) — and neither "npv" (the member), nor
+        // "lhu"/"delta01" (twodata's columns, the new available block).
+        draft.query = "at".to_string();
+        assert_eq!(draft.selected, 0);
+        assert_eq!(draft.selected_row(), Some(EditRow::Field(0)));
+
+        // Step the `Choice` from `onedata` to `twodata` (sorted options,
+        // one forward step) — the same sequence `render::maybe_refresh_
+        // available`'s caller performs before calling this function.
+        assert!(draft.toggle_selected().changed());
+        assert_eq!(draft.choice("dataset"), Some("twodata"));
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(0)),
+            "sanity: the cursor is still on the dataset field after the step"
+        );
+
+        refresh_available(&mut draft, &config);
+
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(0)),
+            "the cursor followed the dataset field through the rebuild"
+        );
     }
 }

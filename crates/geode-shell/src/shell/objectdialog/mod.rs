@@ -756,12 +756,33 @@ impl Draft {
         }
     }
 
-    /// The rows the edit stage shows, ranked by [`crate::listfilter::rank`]
-    /// over [`Draft::row_label`]; every row in natural order when the
-    /// query is empty. `Ranked::row` indexes [`Draft::rows`].
+    /// The rows the edit stage shows: every row whose [`Draft::row_label`]
+    /// [`crate::listfilter::rank`] matches the query, in ROW order —
+    /// never score order. `Ranked::row` indexes [`Draft::rows`].
+    ///
+    /// This is where the edit stage's own filtering deliberately parts
+    /// ways with the browse list's (review round 1): browse's rows are
+    /// an unordered catalogue, so ranking by match quality is a pure
+    /// improvement, but the edit stage's row order **is the data** —
+    /// a view's column order, a grouping slot's chain order — and
+    /// reordering it out from under a filter would be actively
+    /// misleading rather than merely surprising. A member hidden by
+    /// `space` and an available column both paint the same `[ ]` mark
+    /// with nothing else on screen to tell them apart; under a
+    /// score-sorted filter a trader has no way to tell whether `space`
+    /// on the row now under the cursor will unhide a member or add
+    /// (and fork) an available one, because the row's POSITION relative
+    /// to its neighbours — the one cue that currently exists — no longer
+    /// says. And `shift+j`/`shift+k` cannot mean anything coherent
+    /// against a list whose order shift+j itself does not control. So
+    /// `rank` is used only to decide which rows survive the query;
+    /// `sort_by_key` afterwards restores row order among the survivors,
+    /// discarding nothing but the score-derived ordering.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
-        crate::listfilter::rank(&labels, &self.query)
+        let mut ranked = crate::listfilter::rank(&labels, &self.query);
+        ranked.sort_by_key(|m| m.row);
+        ranked
     }
 
     /// The row the cursor is on, if the cursor is in range — indexed
@@ -1476,9 +1497,17 @@ impl ObjectDialogState {
     /// the caller, which puts it back on the object just edited — by
     /// name, since the unfiltered list is a different list from the one
     /// the object was opened from.
+    ///
+    /// `query` is cleared here too, belt-and-braces: `set_query`'s
+    /// one-way mirror (§18.3) should already have kept it empty for the
+    /// whole life of the edit stage, but this is the same habit
+    /// `cancel_naming` and `begin_naming` already keep of clearing it on
+    /// every stage transition, rather than trusting an invariant a future
+    /// change to `set_query` could quietly break.
     pub fn leave_edit(&mut self) {
         self.draft = None;
         self.stage = Stage::Browse;
+        self.query.clear();
         self.notice = None;
     }
 
@@ -1487,17 +1516,30 @@ impl ObjectDialogState {
     /// edit the old index points at an unrelated row) and drops the
     /// notice, which named a row the re-ranked list has just moved the
     /// selection off.
+    ///
+    /// The mirror is **one-way per stage**, never both at once: in
+    /// [`Stage::Edit`] the shared `Input` is the edit stage's own filter
+    /// (§18.3), so the keystroke belongs to `Draft::query`, and `state.
+    /// query` — the browse list's cursor space — must not also change
+    /// underneath it; everywhere else (browse, naming) it belongs to
+    /// `state.query` as it always did. Writing both, as an earlier build
+    /// of this method did, left a stale copy in whichever field the
+    /// current stage was NOT reading: the edit stage's own `ClearQuery`
+    /// rung only ever clears `Draft::query`, so a query typed while
+    /// editing was still sitting in `state.query` after `escape` walked
+    /// all the way back to browse — a filtered browse list under an
+    /// empty-looking filter field, and a `leave_edit` cursor restore that
+    /// silently failed to find the object it was looking for.
     pub fn set_query(&mut self, query: String) {
-        // Mirrors into the open draft too (§18.3), so the edit stage's
-        // filter is exactly this same subscription rather than a second
-        // one it would be easy to forget to wire — see `Draft::query`'s
-        // own doc.
-        if let Some(draft) = self.draft.as_mut() {
-            draft.query = query.clone();
+        if matches!(self.stage, Stage::Edit { .. })
+            && let Some(draft) = self.draft.as_mut()
+        {
+            draft.query = query;
             draft.selected = 0;
+        } else {
+            self.query = query;
+            self.selected = 0;
         }
-        self.query = query;
-        self.selected = 0;
         self.notice = None;
     }
 
@@ -2759,10 +2801,59 @@ mod tests {
             .map(|i| i.name.as_str())
             .collect();
         assert_eq!(&names[..3], ["bravo", "charlie", "alpha"]);
+        // Row order, not fuzzy score, decides the filtered index now
+        // (review round 1): after the move, `rows()` reads
+        // [.., charlie (row 3), alpha (row 4)], and since "al" still
+        // scores alpha far higher than charlie, a score-ordered
+        // `visible_rows` would have put alpha BACK at index 0 — the
+        // identity check below would pass either way, which is exactly
+        // why this index is asserted explicitly too.
+        assert_eq!(
+            draft.selected, 1,
+            "alpha is the second VISIBLE row in row order, not the first by score"
+        );
         assert_eq!(
             draft.selected_row(),
             Some(EditRow::Item { field: 1, item: 2 }),
             "the cursor followed alpha"
+        );
+    }
+
+    /// Review round 1: the edit stage's row order IS the data — column
+    /// order, chain order — so a filter must narrow it, never reorder
+    /// it. `visible_rows` used to sort by fuzzy score like the browse
+    /// list does, which put a later, better-scoring match ahead of an
+    /// earlier, worse-scoring one; under a filter that made `space` on a
+    /// `[ ]` row ambiguous (unhide, or add and fork — nothing on screen
+    /// says which) and made `shift+j` unable to change the painted order
+    /// at all. `apple` (row 3) scores far higher against "a" than
+    /// `banana` (row 2) does (an idx-0 match earns a head-start bonus —
+    /// see `palette::fuzzy_match_lowered`), so a score-ordered list would
+    /// paint them in the wrong order despite both matching.
+    #[test]
+    fn visible_rows_lists_matches_in_row_order_not_score_order() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.banana]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.apple]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::User, "groupings", "3 = [\"banana\", \"apple\"]\n"),
+        ]);
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.query = "a".to_string();
+        let rows = draft.rows();
+        let names: Vec<String> = draft
+            .visible_rows()
+            .iter()
+            .filter_map(|m| rows.get(m.row))
+            .map(|r| draft.row_label(*r))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["banana".to_string(), "apple".to_string()],
+            "list order must win over apple's higher fuzzy score"
         );
     }
 }
