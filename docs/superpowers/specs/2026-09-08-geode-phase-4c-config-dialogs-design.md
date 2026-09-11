@@ -1239,3 +1239,155 @@ editing — are Part 2b.
   "Deferred, and not blocked on anything" note stands unchanged, as does
   its observation that `bridge.rs:303` discards the presentation
   diagnostics on the reload path.
+
+## 18. Part 2 refinement — design, ahead of Part 2b
+
+Approved 2026-09-10, before Part 2b starts. Four things a user found
+using Part 2a on a display, each a ruling here rather than a task
+detail: what shipped reads like a terminal UI where the mocks did not;
+nothing can *create* an object; the edit stage cannot be filtered; and
+the Groupings dialog lists only the slots that happen to be configured.
+The mock these rulings are measured against is the "Geode Config
+Dialogs" artifact of 2026-09-09; its chrome is the target, its
+invented palette is not — every colour stays a `cx.theme()` token.
+
+Everything below is scoped to the object dialog and the chrome it
+shares. The command palette, the dimension picker, the as-of selector
+and the settings dialog are untouched except where a *shared* element
+changes underneath them (§18.1). Renaming an existing object stays
+unbuilt everywhere (§8.2's ruling), and the `Text` editing vocabulary
+stays in Part 2b.
+
+### 18.1 Visual refresh
+
+The chrome changes are made once, in `shell::dialog`, so the
+keybindings and settings dialogs inherit them rather than developing a
+second look:
+
+- **The title row gains a right-hand slot.** `ShellModal` carries an
+  optional `title_extra` builder, rendered between the title and the
+  close button. The object dialog puts its *crumb* there — a count in
+  the browse stage (`2 views`, `9 slots`, `3 saved`), the slot's chord
+  in a Groupings edit (`ctrl+3`) — followed by the mode pill, which
+  stops being a row of its own above the filter. The pill's home moves
+  for every modal surface, the keybinding dialog included.
+- **The frozen filter row shows a placeholder** (`press / to filter`,
+  muted) while the query is empty, instead of an empty line under a
+  search icon.
+- **One `badge` helper beside `key_chip`**: a bordered, mono, small
+  pill. Every classification marker wears it — the winning layer
+  (`builtin`/`desk`/`user`), `overridden`, `drifted`, and a field's
+  destination (`doc`/`pres`) on edit rows. Layer and destination
+  badges take the muted pair; `overridden` takes `primary` foreground
+  on a `primary`-tinted border, because it is the one marker a trader
+  acts on (`r`). Nothing here spends `warning` or `danger`: those stay
+  for diagnostics and destructive buttons.
+- **Ordered-list items** get a grip glyph, then a tick — `✓` in
+  `success` for an included item, `·` in the muted foreground for an
+  excluded one — in place of `[x]`/`[ ]`. An excluded item's name stays
+  muted, so a glance down a 30-row list has two signals, as today.
+- **A section header** (uppercase, letter-spaced, small, muted) sits
+  above each ordered list's items, carrying that list's own key hint
+  (`Columns — space includes · shift+j / shift+k reorders`). Headers
+  are not rows: the cursor skips them, and `Draft::rows` does not know
+  they exist.
+- **Action-bar buttons are outlined**, key chip first, then the label;
+  destructive ones keep `danger`. The confirm block keeps its shape.
+- **The footer** keeps its two hint lines and its notice, above a top
+  rule, with the mock's spacing.
+
+### 18.2 Creating an object: `n`
+
+§3.2 names `n` and §3 sketches `is_new`; Part 1 built neither because
+nothing could commit a name under instant-apply. The ruling is that the
+name is typed **once, into a name field, and committed on `enter`** —
+the one keystroke at which a name exists, so no prefix is ever written
+and the rename ruling is intact.
+
+- `n` in the browse stage puts the dialog into a `Naming` sub-state:
+  the filter row becomes the name field, labelled by domain
+  (`New view · name`, `New scope · name`), the shared `Input` focused
+  and empty. `escape` returns to browse with nothing written.
+- `enter` validates the name by the same rule `Frame::save_scope`
+  applies — non-empty, not `config_version`, no whitespace, `.` or
+  `"` — plus one more: a name any layer already holds is refused with
+  a notice (`'tree' already exists — open it instead`), because
+  creating over a desk object would be a fork the trader did not ask
+  for.
+- On a valid name the scaffold builds a draft from the adapter's
+  *empty-object* fields (`Domain::fields(config, None)`, which every
+  adapter already answers), marks it new, writes it through the
+  ordinary batch as a `Doc` write to the user layer, and opens the edit
+  stage on it. The object is therefore in memory, on disk and in the
+  browse list from the same keystroke; nothing on screen is unsaved.
+- `Draft::is_new` exists from this point and is what the edit header
+  reads to say `new` beside the layer badge until the dialog is left.
+
+Per domain:
+
+- **Views.** The empty object is the schema's first dataset and no
+  columns. This exposes a prerequisite §8.1 states and Part 1 did not
+  build: the column list holds only the view's *own* columns, so a new
+  view has nothing to tick. The list becomes **two sections** —
+  `Columns` (the view's members, tick = shown/hidden,
+  `Destination::Presentation`) and `Available` (the chosen dataset's
+  other columns plus derived dimensions, in schema order). `space` on
+  an available column **adds it to the view**: a `Doc` write, going
+  through `Confirm::Fork` when the view is not the user's. `x` on a
+  member **removes it from the view**, same destination and same
+  confirm. Hidden and removed are different states on purpose: hiding
+  never forks, and a desk column the trader hid still comes back when
+  the desk changes it. Changing the dataset empties `Available` and
+  repopulates it; members that the new dataset lacks stay listed, as
+  today, so the diagnostic can name them.
+- **Scopes.** `n` saves the frame's **current** scope under the new
+  name — exactly what `:scope save <name>` does, through the same
+  `scope_table_as_toml` rendering `o` uses, so the two doors cannot
+  write different tables. The empty-object fields are not used here:
+  an empty scope is a valid but useless object, and the frame's scope
+  is what a trader pressing `n` in this dialog has just built.
+- **Groupings.** No `n`; §18.4 makes every slot a permanent row.
+- **Schema (Part 2b).** `Domain::writable()` finally gains its consumer
+  and answers `false`; the browse stage then shows no `n` in its hint
+  row and `n` is inert with a notice.
+
+### 18.3 Filtering the edit stage
+
+`/` enters filter mode in the edit stage exactly as in browse; §3.2's
+table always said so, and `enter_edit_stage` forcing `Normal` with an
+empty query was Part 1 leaving the rung unbuilt, not a ruling. The
+query ranks each row's *label* — a field's label, an item's name —
+through `listfilter::rank`, and `Draft::selected` indexes the filtered
+list, the palette's convention. Every verb acts on the row under the
+cursor by identity: `space`, `x`, `shift+j`/`shift+k` resolve the
+filtered index back to an `EditRow` before acting. A reorder while the
+filter hides neighbours moves the item past the hidden ones — that is
+what reordering a filtered list means — and the notice says so
+(`moved past 2 hidden`). `escape` walks the full ladder: leave filter
+keeping the query, clear the query, back to browse, close.
+
+### 18.4 Groupings: nine fixed rows
+
+The browse stage always lists slots `1`–`9`, in order, whatever
+`groupings.toml` holds. An unconfigured slot's row reads `empty` and
+wears no layer badge. Opening it shows every pickable dimension
+unticked — the empty-object fields the adapter already produces — and
+ticking the first one writes the slot to the user layer, with no fork
+to confirm since nothing lies beneath. `d` on a configured user slot
+returns the row to `empty` rather than removing it; `r` on an
+overridden slot restores the desk's chain as today. Slot `0` does not
+appear: `ctrl+0` is `frame::slot_clear`, the view's own grouping, and
+`GroupingSlots` stays nine wide — a user ruling of 2026-09-10 against
+widening it.
+
+### 18.5 Tests and harness
+
+Pure-core tests: the name check and its already-exists refusal; the
+two-section column list, its destinations and the fork/no-fork split
+between adding and hiding; filtered edit navigation resolving verbs by
+identity; the fixed nine-slot roster with an empty slot's row.
+Window tests: `n` end to end in Views and Scopes (the object is in the
+browse list and on disk after `enter`), and `/` in the edit stage.
+Every behaviour above gets a mutation entry naming the test expected to
+catch it (`--anchors-only` before merge, as always). Visual changes
+are checked on a display against the artifact, not by test.
