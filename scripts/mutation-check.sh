@@ -6157,6 +6157,22 @@ run_mutation "objectdialog: n on scopes reads the frame" \
   geode-shell \
   n_on_a_scope_saves_the_frames_current_scope
 
+# Review round 1: `begin_naming` clears only `state.query`; a stale
+# browse filter left in the shared `Input` (typed, then `escape`'d back
+# to normal mode, which keeps the query applied) must still be emptied
+# before the name field takes focus, or the field opens pre-filled and a
+# few keystrokes on top of it can silently fork the wrong desk object.
+# The anchor spans both the `set_value` and the following focus line,
+# not `set_value` alone — the identical `set_value("", window, cx)` call
+# already exists a few dozen lines up, on the `ClearQuery` rung.
+run_mutation "objectdialog: n empties a leftover browse filter before naming" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                    input.read(cx).focus_handle(cx).focus(window, cx);' \
+  '                    input.read(cx).focus_handle(cx).focus(window, cx);' \
+  geode-shell \
+  n_opens_an_empty_name_field_even_after_a_browse_filter
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

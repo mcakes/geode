@@ -293,6 +293,16 @@ fn handle_browse_key(
                     state.notice = Some("the slots are fixed — open one to fill it".to_string());
                 } else {
                     state.begin_naming();
+                    // The `Input` owns the text; `begin_naming` clears
+                    // only the mirrored `query`, and a stale browse
+                    // filter left in the field (typed, then `escape`'d
+                    // back to normal mode without clearing it) would
+                    // otherwise sit there — visible, focused, and no
+                    // longer synced to `state.query` at all, since
+                    // `set_value` does not emit the `Change` event that
+                    // would re-mirror it. Same pairing as the
+                    // `ClearQuery` rung above.
+                    input.update(cx, |i, cx| i.set_value("", window, cx));
                     input.read(cx).focus_handle(cx).focus(window, cx);
                 }
             }

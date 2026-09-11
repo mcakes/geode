@@ -2533,6 +2533,60 @@ fn n_creates_a_view_on_enter_and_opens_its_edit_stage(cx: &mut gpui::TestAppCont
     );
 }
 
+/// Review round 1: `n` after a browse filter must not open the name
+/// field pre-filled with the leftover query. `begin_naming` clears only
+/// `state.query`; the shared `Input` is a second, separate buffer
+/// (`set_value` does not emit the `Change` event that mirroring relies
+/// on), and the natural sequence — filter to check whether a name is
+/// taken, `escape` back to normal mode (which keeps the query applied),
+/// then `n` — used to leave "tr" visibly sitting in a field `state.query`
+/// no longer knew about. Typing `ee` into that stale text used to create
+/// `tree` (an existing desk view, forked) instead of `ee`.
+#[gpui::test]
+fn n_opens_an_empty_name_field_even_after_a_browse_filter(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_keystrokes("t r");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "tr");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "tr",
+        "leaving filter mode keeps the query applied"
+    );
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "",
+        "the name field must not open pre-filled with the old browse filter"
+    );
+
+    cx.simulate_input("ee");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { object } if object == "ee"
+    ));
+    let written = std::fs::read_to_string(dir.path().join("views.toml")).unwrap();
+    assert!(written.contains("[ee]"), "{written}");
+    assert!(
+        !written.contains("[tree]"),
+        "the stale field text must not have forked the desk's tree view: {written}"
+    );
+}
+
 /// A name a layer already holds must be refused: creating `tree` would
 /// fork the desk's view under a verb that never said so.
 #[gpui::test]

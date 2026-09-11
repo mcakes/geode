@@ -523,7 +523,12 @@ pub fn filter_row(input: &Entity<InputState>, frozen: Option<&str>, cx: &App) ->
 /// same shared `Input`, with a muted label (`New view · name`) where the
 /// filter row has its search icon. The `Input` is the filter's — the
 /// dialog's `set_query` subscription mirrors the name the way it mirrors
-/// a query — so there is no second text buffer to reset or focus.
+/// a query — so there is no second text buffer for THIS function to reset
+/// or focus. It is not a promise that the field arrives empty on its
+/// own: `set_value` does not emit the `Change` event that mirroring
+/// relies on, so the caller entering the naming stage still has to clear
+/// the shared `Input` itself (`render`'s `n` handling does, right beside
+/// the focus call) or a leftover browse filter shows up pre-filled here.
 pub fn name_row(input: &Entity<InputState>, label: &str, cx: &App) -> AnyElement {
     let theme = cx.theme();
     div()
