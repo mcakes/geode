@@ -298,11 +298,17 @@ fn desk_view_services(extra: &[(&str, &str)]) -> ShellServices {
 /// needs the SAME desk with a different `ConfigSources` — a user
 /// directory holding a file that will not parse, say — does not have to
 /// restate the desk and risk it drifting from every other test here.
+///
+/// `delta01` is on the dataset but not on `tree`'s own column list —
+/// deliberately, so the view's edit stage has one column in its
+/// available block (§18.2) without any fixture here having to build a
+/// second dataset just to reach it.
 fn desk_view_docs() -> Vec<LayerDoc> {
     let datasets = LayerDoc::builtin(
         "datasets",
         "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\n",
+         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+         [risk_snapshot.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     )
     .unwrap();
     let desk = LayerDoc {
@@ -402,6 +408,8 @@ fn enter_opens_the_edit_stage_and_paints_every_column(cx: &mut gpui::TestAppCont
         "objectdialog-field-columns",
         "objectdialog-item-book",
         "objectdialog-item-npv",
+        // The available block (§18.2): on the dataset, not on the view.
+        "objectdialog-item-delta01",
     ] {
         assert!(
             cx.debug_bounds(selector).is_some(),
@@ -559,6 +567,39 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
     // keystroke, so a notice would be reporting on something the screen
     // already shows.
     assert_eq!(dialog_state(&shell, &cx, |s| s.notice.clone()), None);
+}
+
+/// **The mirror image of the test above.** Hiding a member is
+/// presentation and asks nothing; adding an AVAILABLE column changes what
+/// the view IS, so it goes through the same fork confirm any other
+/// definitional edit to a desk view does. `delta01` is on the dataset
+/// (`desk_view_docs`) but not on `tree`'s own columns, so it is the one
+/// row in the available block this fixture's `tree` has.
+#[gpui::test]
+fn adding_an_available_column_to_a_desk_view_asks_before_forking(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    // Past `book` and `npv` — both members — onto `delta01`, the
+    // available block's one row.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-item-delta01").is_some());
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "membership forks a desk view"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    let written = std::fs::read_to_string(dir.path().join("views.toml"))
+        .expect("confirming forks the view into the user layer");
+    assert!(written.contains("name = \"delta01\""), "{written}");
+    let _ = shell;
 }
 
 /// **A draft whose own reader rejects it must not reach the batch.**
@@ -1430,16 +1471,21 @@ fn an_object_opened_from_filter_mode_still_escapes_back_a_stage(cx: &mut gpui::T
 /// interaction model exists to eliminate — and it is worse in this stage
 /// than in browse, because `d`/`r` have taught the user that letters act
 /// here.
+///
+/// `z`, not `x`: §18.2 gave Views its own `x` (removing a member column),
+/// so `x` on this fixture's first item (`book`, a member) now does
+/// something instead of nothing. `z` is still unbound anywhere in this
+/// stage.
 #[gpui::test]
 fn an_unbound_letter_in_the_edit_stage_says_it_did_nothing(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
 
-    cx.simulate_keystrokes("x");
+    cx.simulate_keystrokes("z");
     cx.run_until_parked();
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
     assert!(
-        notice.as_deref().is_some_and(|n| n.contains('x')),
+        notice.as_deref().is_some_and(|n| n.contains('z')),
         "an unbound letter must name itself rather than appearing inert, got {notice:?}"
     );
     assert!(

@@ -117,6 +117,10 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             name: name.clone(),
             included: true,
             width: None,
+            // Every item here IS a member — ticking is the whole of
+            // membership for a grouping slot, unlike Views' columns list
+            // (`super::ListItem::member`'s own doc has the full story).
+            member: true,
         })
         .collect();
     for column in crate::shell::pickable_columns(config) {
@@ -127,6 +131,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             name: column.column,
             included: false,
             width: None,
+            member: true,
         });
     }
 

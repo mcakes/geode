@@ -602,6 +602,22 @@ fn handle_edit_key(
         NormalCommand::Verb('d') => arm_delete(shell),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => arm_overwrite(shell),
+        // §18.2: take the column under the cursor out of the view. Views-
+        // only in effect, not in dispatch — `Draft::remove_selected` is
+        // `Step::Inert` wherever a list has no separate membership
+        // (Groupings' `dimensions`, where ticking already IS membership),
+        // so the notice below is what a trader sees there instead.
+        NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
+            Some(Step::Changed) => {
+                revalidate(shell);
+                commit_or_confirm(shell, cx);
+            }
+            Some(Step::Refused(reason)) => refuse_step(shell, reason),
+            _ => set_notice(
+                shell,
+                "x removes a column from the view — here, space unticks".to_string(),
+            ),
+        },
         NormalCommand::EnterFilter => {
             // The one key the browse stage has that this one does not —
             // said out loud, because a `/` that silently did nothing
@@ -634,7 +650,7 @@ fn handle_edit_key(
         }
         // A letter this stage has no verb for. Named rather than
         // dropped: `d` and `r` have just taught the user that
-        // letters act here, so a silent `x` reads as the dialog having
+        // letters act here, so a silent `z` reads as the dialog having
         // stopped responding — and it is the one branch where the key
         // that did nothing is not otherwise on screen to explain itself.
         NormalCommand::Verb(letter) => {
@@ -1694,8 +1710,12 @@ fn field_value(field: &super::Field) -> String {
             n => format!("{n} selected"),
         },
         FieldKind::OrderedList { items } => {
-            let hidden = items.iter().filter(|i| !i.included).count();
-            match (items.len(), hidden) {
+            // Only the member block is the object's own — an available
+            // row nothing has ticked on yet is not one of its columns,
+            // and must not inflate this count or read as "hidden".
+            let total = items.iter().filter(|i| i.member).count();
+            let hidden = items.iter().filter(|i| i.member && !i.included).count();
+            match (total, hidden) {
                 (1, 0) => "1 column".to_string(),
                 (n, 0) => format!("{n} columns"),
                 (n, h) => format!("{n} columns · {h} hidden"),

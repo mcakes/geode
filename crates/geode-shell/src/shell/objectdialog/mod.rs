@@ -461,6 +461,15 @@ pub struct ListItem {
     /// compiler still selects it and unhiding costs nothing.
     pub included: bool,
     pub width: Option<f32>,
+    /// In the object at all (§18.2). A view's column list holds the
+    /// view's own columns (`member: true`) followed by the dataset's
+    /// other columns and every derived dimension (`member: false`), so a
+    /// new view has something to tick. Membership is *definitional* —
+    /// `Destination::Doc`, and a fork on a desk view — where `included`
+    /// is presentation; keeping them apart is what lets hiding a desk
+    /// column never fork it. Groupings sets this `true` everywhere: there,
+    /// ticking IS membership.
+    pub member: bool,
 }
 
 /// The closed vocabulary an object's fields are built from (spec §3.1).
@@ -876,6 +885,18 @@ impl Draft {
                 let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
                     return Step::Inert;
                 };
+                if !items[item].member {
+                    // Adding: into the member block, at its end, shown.
+                    let end = items.iter().position(|i| !i.member).unwrap_or(items.len());
+                    let mut entry = items.remove(item);
+                    entry.member = true;
+                    entry.included = true;
+                    items.insert(end, entry);
+                    // The cursor follows the item: item rows of one list
+                    // are contiguous, so the row moves by (end - item).
+                    self.selected = self.selected - item + end;
+                    return Step::Changed;
+                }
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
@@ -894,8 +915,10 @@ impl Draft {
 
     /// `shift+j` / `shift+k`: move the *item* under the cursor by `delta`,
     /// carrying the cursor with it so a held key keeps moving the same
-    /// item. `false` at either end of the list, or on a row that is not a
-    /// list item.
+    /// item. `false` at either end of the list, on a row that is not a
+    /// list item, or when the move would cross the member/available
+    /// boundary — an available column reordered among the members would
+    /// be painted in one block while still being written in neither.
     pub fn move_item(&mut self, delta: i32) -> bool {
         let Some(EditRow::Item { field, item }) = self.selected_row() else {
             return false;
@@ -909,11 +932,41 @@ impl Draft {
         if target >= items.len() {
             return false;
         }
+        if items[target].member != items[item].member {
+            return false;
+        }
         items.swap(item, target);
         // The item rows of one list are contiguous, so the item's move is
         // the row's move — the cursor stays on the thing it picked up.
         self.selected = self.selected.saturating_add_signed(delta as isize);
         true
+    }
+
+    /// `x`: take the item under the cursor out of the object (§18.2) —
+    /// the definitional twin of `space`'s hide. Inert where a list has
+    /// no separate membership (every item `member`, as Groupings builds
+    /// its list): there `space` already unticks, and a second verb for
+    /// the same act would be two answers to one question.
+    pub fn remove_selected(&mut self) -> Step {
+        let Some(EditRow::Item { field, item }) = self.selected_row() else {
+            return Step::Inert;
+        };
+        let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
+            return Step::Inert;
+        };
+        if items.iter().all(|i| i.member) {
+            return Step::Inert;
+        }
+        if !items[item].member {
+            return Step::Inert;
+        }
+        let mut entry = items.remove(item);
+        entry.member = false;
+        entry.included = false;
+        items.push(entry);
+        let last = items.len() - 1;
+        self.selected = self.selected - item + last;
+        Step::Changed
     }
 
     /// Which files this draft's changes have to be written to, and which
@@ -991,14 +1044,21 @@ impl Draft {
     }
 }
 
-/// Did an ordered list's membership — the set of item names, ignoring
-/// order — change between `before` and `field`? See
-/// [`Draft::writes_by_destination`].
+/// Did an ordered list's membership — the set of MEMBER item names,
+/// ignoring order and ignoring every non-member (available) item — change
+/// between `before` and `field`? See [`Draft::writes_by_destination`].
+///
+/// Comparing every item's name, member or not, would call an add "no
+/// membership change" the moment the added name already sat on the list
+/// as an available row — which is every add there is, since `space` only
+/// ever promotes a row already painted — and route it to the overlay
+/// destination alone, silently never writing the definitional file.
 fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
     let names = |f: &Field| match &f.kind {
         FieldKind::OrderedList { items } => Some(
             items
                 .iter()
+                .filter(|i| i.member)
                 .map(|i| i.name.clone())
                 .collect::<BTreeSet<_>>(),
         ),
@@ -1602,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_view_draft_picks_the_first_real_dataset_and_no_columns() {
+    fn a_new_view_draft_picks_the_first_real_dataset_and_no_member_columns() {
         let config = config_from(&[(
             Layer::Builtin,
             "datasets",
@@ -1616,12 +1676,14 @@ mod tests {
             Some("risk"),
             "not the empty placeholder"
         );
+        // No columns are the view's OWN yet — `npv` is only on the list as
+        // an available (non-member) row for `space` to add (§18.2).
         assert!(
             draft
                 .list_items("columns")
                 .unwrap()
                 .iter()
-                .all(|i| !i.included)
+                .all(|i| !i.member && !i.included)
         );
         assert!(
             draft
@@ -2143,18 +2205,29 @@ mod tests {
 
     /// `fields` takes `Option<&str>` because spec §4 has it serve the
     /// create path too, and a name nothing defines has to come back as an
-    /// empty object rather than a panic — a `Choice` with no dataset
-    /// selected and a list with no items.
+    /// object with no MEMBERS rather than a panic — a `Choice` with no
+    /// dataset selected and a column list with nothing ticked. It is not
+    /// an EMPTY list any more (§18.2): with no view to read, `current`
+    /// falls back to the schema's first dataset (alphabetically, `other`,
+    /// which has one column, `book`), and that column is on the list as
+    /// an available, non-member row for `space` to add.
     #[test]
     fn an_object_that_does_not_exist_has_empty_fields_rather_than_panicking() {
         let config = demo_config();
         for object in [None, Some("nonesuch")] {
             let fields = Domain::Views.fields(&config, object);
             assert_eq!(fields.len(), 2, "{object:?}");
-            assert!(
-                matches!(&fields[1].kind, FieldKind::OrderedList { items } if items.is_empty()),
-                "{object:?} should have no columns, got {:?}",
-                fields[1].kind
+            let FieldKind::OrderedList { items } = &fields[1].kind else {
+                panic!("{object:?} columns field must be an ordered list");
+            };
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|i| (i.name.as_str(), i.member))
+                    .collect::<Vec<_>>(),
+                [("book", false)],
+                "{object:?} should have no columns of its own yet, only the \
+                 dataset's available ones, got {items:?}"
             );
             // The destinations do not depend on the object, which is what
             // lets the create path reuse them unchanged.
@@ -2398,5 +2471,26 @@ mod tests {
             .map(|r| r.name)
             .collect();
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
+    }
+
+    // ---- Task 4: the member/available split -------------------------
+
+    /// `x` is Views-only in effect: Groupings sets `member: true`
+    /// everywhere (there, ticking IS membership), so `remove_selected`
+    /// finds nothing to remove and must say so rather than silently
+    /// unticking — that is `space`'s job on this domain, not `x`'s.
+    #[test]
+    fn remove_selected_is_inert_where_membership_is_inclusion() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::User, "groupings", "3 = [\"book\"]\n"),
+        ]);
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.selected = 2;
+        assert_eq!(draft.remove_selected(), Step::Inert);
     }
 }

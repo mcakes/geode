@@ -5902,7 +5902,7 @@ run_mutation "objectdialog: a new view starts on the first real dataset" \
   '        None => options.first().cloned().unwrap_or_default(),' \
   '        None => String::new(),' \
   geode-shell \
-  a_new_view_draft_picks_the_first_real_dataset_and_no_columns
+  a_new_view_draft_picks_the_first_real_dataset_and_no_member_columns
 
 # Create flushes at zero debounce like a removal, not 250 ms like an edit.
 # The anchor is longer than just the `queue_batch` tail: `commit_removal`
@@ -5925,6 +5925,41 @@ run_mutation "objectdialog: create does not wait for the edit debounce" \
 }' \
   geode-shell \
   commit_create_writes_one_doc_entry_immediately
+
+# ---- Phase 4c part 2 refinement, Task 4: Views' two-section column ----
+# ---- list — members and available --------------------------------------
+
+# Membership is definitional: comparing ALL names (members and available
+# alike) would call an add "no membership change" and route it to the
+# overlay, silently never writing views.toml.
+run_mutation "objectdialog: membership compares member names only" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                .filter(|i| i.member)' \
+  '                .filter(|_i| true)' \
+  geode-shell \
+  adding_an_available_column_is_a_doc_write_and_hiding_is_not
+
+# An added column must join the member BLOCK, or `rows()` paints it under
+# the Available header while the doc write lists it as a member. Covered
+# by promoting a LATER available row, not the first one: for the first
+# available item, its own post-removal index and the member block's end
+# are numerically the same, so that case cannot tell the two anchors apart.
+run_mutation "objectdialog: an added item moves into the member block" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    items.insert(end, entry);' \
+  '                    items.insert(item, entry);' \
+  geode-shell \
+  adding_a_later_available_column_still_joins_the_end_of_the_member_block
+
+# Reordering across the boundary would put an available column among the
+# members without changing its flag — painted in one block, written in none.
+run_mutation "objectdialog: reorder never crosses the member boundary" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if items[target].member != items[item].member {' \
+  '        if false {' \
+  geode-shell \
+  reordering_never_crosses_the_member_boundary
+
 # ---- the drag grab's focus trap (2026-09-09) ---------------------------
 #
 # Two halves of the same defect: a tile mouse-down that arms a drag

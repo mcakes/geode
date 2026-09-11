@@ -16,6 +16,7 @@
 use std::collections::BTreeMap;
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
 
@@ -84,10 +85,14 @@ pub const PRESENTATION_DOC: &str = "view_presentation";
 /// list, which is what a `Config` with no `views` doc has to produce
 /// rather than panicking.
 ///
-/// Read through `load_views`, not `ViewSpec::from_doc`, so the list shows
-/// the columns in the order and with the hidden/width state the trader
-/// actually sees. `Draft::source` keeps the raw pre-presentation table
-/// beside it, which is what a `Doc` write is rendered from.
+/// Read through `load_views`, not `ViewSpec::from_doc`, so the member
+/// block shows the columns in the order and with the hidden/width state
+/// the trader actually sees. Behind the members, the list also carries
+/// every other column the chosen dataset has and every derived dimension
+/// (§18.2), each a non-member row with nothing ticked — the "available"
+/// block a new or growing view has something to add from. `Draft::source`
+/// keeps the raw pre-presentation table beside it, which is what a `Doc`
+/// write is rendered from.
 ///
 /// **Which destination each field carries is decided here and nowhere
 /// else.** `dataset` is `Doc`: it defines what the view selects, so
@@ -125,7 +130,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     }
     let selected = options.iter().position(|o| *o == current).unwrap_or(0);
 
-    let items = view
+    let mut items: Vec<ListItem> = view
         .map(|v| {
             v.columns
                 .iter()
@@ -135,11 +140,45 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                         name: column.name().to_string(),
                         included: !presentation.hidden.unwrap_or(false),
                         width: presentation.width,
+                        member: true,
                     }
                 })
                 .collect()
         })
         .unwrap_or_default();
+
+    // The available block (§18.2): the chosen dataset's other columns,
+    // then every derived dimension, in that order — each a non-member row
+    // with nothing to write until `space` promotes it into the member
+    // block above. Skips a name already listed, whichever block it is in.
+    if let Some(dataset) = schema.dataset(&current) {
+        for column in &dataset.columns {
+            if items.iter().any(|i| i.name == column.name) {
+                continue;
+            }
+            items.push(ListItem {
+                name: column.name.clone(),
+                included: false,
+                width: None,
+                member: false,
+            });
+        }
+    }
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+    for dim in dims.all() {
+        if items.iter().any(|i| i.name == dim.name) {
+            continue;
+        }
+        items.push(ListItem {
+            name: dim.name.clone(),
+            included: false,
+            width: None,
+            member: false,
+        });
+    }
 
     vec![
         Field {
@@ -197,7 +236,13 @@ fn doc_table(draft: &Draft) -> toml_edit::Table {
         table["dataset"] = toml_edit::value(dataset);
     }
     if let Some(items) = draft.list_items("columns") {
-        let wanted: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        // Only the member block defines the view — an available row the
+        // trader has not ticked on is not one of its columns.
+        let wanted: Vec<&str> = items
+            .iter()
+            .filter(|i| i.member)
+            .map(|i| i.name.as_str())
+            .collect();
         table["columns"] = toml_edit::Item::ArrayOfTables(columns_for(&draft.source, &wanted));
     }
     table
@@ -259,7 +304,15 @@ fn columns_for(source: &toml::Table, wanted: &[&str]) -> toml_edit::ArrayOfTable
 /// `hidden` needs no such comparison: nothing but this file can set it.
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
-    let items = draft.list_items("columns").unwrap_or_default();
+    // Only the member block is presented at all — an available row the
+    // trader has not added is not part of the view, so it has no order, no
+    // hidden state and no width to write here either.
+    let items: Vec<&ListItem> = draft
+        .list_items("columns")
+        .unwrap_or_default()
+        .iter()
+        .filter(|i| i.member)
+        .collect();
     let (doc_order, doc_widths) = doc_baseline(draft);
 
     let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
@@ -309,6 +362,7 @@ fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
         .list_items("columns")
         .unwrap_or_default()
         .iter()
+        .filter(|i| i.member)
         .map(|i| i.name.as_str())
         .collect();
     let mut order = Vec::with_capacity(wanted.len());
@@ -413,10 +467,177 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 #[cfg(test)]
 mod tests {
+    use super::super::Domain;
     use super::*;
+    use geode_core::config::ConfigSources;
 
     fn value(text: &str) -> toml::Value {
         toml::Value::Table(text.parse::<toml::Table>().expect("fixture parses"))
+    }
+
+    /// A `Config` assembled from literal per-layer documents — the same
+    /// shape `objectdialog::tests::config_from` builds (this adapter's own
+    /// tests need a two-dataset fixture no existing helper here reaches).
+    fn config_from(docs: &[(Layer, &str, &str)]) -> Config {
+        let layered: Vec<LayerDoc> = docs
+            .iter()
+            .map(|(layer, name, text)| LayerDoc {
+                layer: *layer,
+                name: (*name).to_string(),
+                file: std::path::PathBuf::from(format!("<test:{}:{name}>", layer.name())),
+                table: text.parse().expect("fixture TOML parses"),
+            })
+            .collect();
+        Config::load(&ConfigSources {
+            builtin: layered,
+            desk: None,
+            user: None,
+        })
+    }
+
+    /// `tree` selects `npv` out of a `risk` dataset that also has `book`
+    /// and `delta01`, plus one derived dimension (`desk`) — the fixture
+    /// every member/available test below shares.
+    fn tree_with_two_available_columns() -> Config {
+        config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (Layer::Builtin, "dimensions", "[desk]\nfrom = \"book\"\n"),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ])
+    }
+
+    /// §18.2: the member block first, in the view's own order, then the
+    /// dataset's other columns and every derived dimension as
+    /// non-members — a new or growing view has something to tick.
+    #[test]
+    fn the_column_list_is_members_then_the_datasets_other_columns() {
+        let config = tree_with_two_available_columns();
+        let items = Domain::Views
+            .draft(&config, "tree")
+            .list_items("columns")
+            .unwrap()
+            .to_vec();
+        let shape: Vec<(&str, bool, bool)> = items
+            .iter()
+            .map(|i| (i.name.as_str(), i.member, i.included))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("npv", true, true),
+                ("book", false, false),
+                ("delta01", false, false),
+                ("desk", false, false),
+            ]
+        );
+    }
+
+    /// Hiding a member is presentation; adding an available column is
+    /// definitional — the split this whole design exists to keep.
+    #[test]
+    fn adding_an_available_column_is_a_doc_write_and_hiding_is_not() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // rows: Field(dataset)=0, Field(columns)=1, npv=2, book=3 …
+        draft.selected = 2;
+        assert!(draft.toggle_selected().changed()); // hide npv
+        assert_eq!(
+            draft
+                .writes_by_destination()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            [Destination::Presentation]
+        );
+        draft.mark_saved();
+        draft.selected = 3;
+        assert!(draft.toggle_selected().changed()); // add book
+        let dests = draft.writes_by_destination();
+        assert!(
+            dests.contains_key(&Destination::Doc),
+            "membership is definitional"
+        );
+        let items = draft.list_items("columns").unwrap();
+        assert_eq!(items[1].name, "book");
+        assert!(
+            items[1].member && items[1].included,
+            "an added column joins the member block, shown"
+        );
+        // The doc table now lists both, in source order then additions.
+        let text =
+            super::super::object_text("tree", Domain::Views.to_table(&draft, Destination::Doc));
+        assert!(
+            text.contains("name = \"npv\"") && text.contains("name = \"book\""),
+            "{text}"
+        );
+    }
+
+    /// The item promoted above (`book`) sits immediately after the member
+    /// block's last entry, so inserting at its own (post-removal) index
+    /// and inserting at the member block's end land in the same place by
+    /// coincidence. Promoting a LATER available row — `delta01`, with
+    /// `book` still sitting between it and the member block — is what
+    /// actually distinguishes the two: get it wrong, and a member ends up
+    /// painted after a non-member.
+    #[test]
+    fn adding_a_later_available_column_still_joins_the_end_of_the_member_block() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // rows: Field(dataset)=0, Field(columns)=1, npv=2, book=3, delta01=4 …
+        draft.selected = 4;
+        assert!(draft.toggle_selected().changed());
+        let items = draft.list_items("columns").unwrap();
+        assert_eq!(
+            items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
+            ["npv", "delta01", "book", "desk"],
+            "delta01 joins right after the last member, ahead of book — \
+             never behind it"
+        );
+        assert!(items[1].member && items[1].included);
+        assert!(!items[2].member, "book is still merely available");
+    }
+
+    /// `x` removes a member outright — the definitional twin of `space`'s
+    /// hide — and it lands at the end of the available block, not merely
+    /// wherever it happened to sit.
+    #[test]
+    fn x_removes_a_member_and_moves_it_to_the_available_block() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.selected = 2; // npv
+        assert!(draft.remove_selected().changed());
+        let items = draft.list_items("columns").unwrap();
+        assert!(items.iter().all(|i| !i.member));
+        assert_eq!(items.last().unwrap().name, "npv");
+        assert!(
+            draft
+                .writes_by_destination()
+                .contains_key(&Destination::Doc)
+        );
+    }
+
+    /// `shift+j`/`shift+k` never carry an item across the member/available
+    /// boundary — an available column reordered among the members would be
+    /// painted in one block while written in neither.
+    #[test]
+    fn reordering_never_crosses_the_member_boundary() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.selected = 2; // npv, the only member
+        assert!(
+            !draft.move_item(1),
+            "book is not a member; npv cannot move past it"
+        );
     }
 
     #[test]
