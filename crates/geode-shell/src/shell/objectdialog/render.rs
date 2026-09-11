@@ -85,6 +85,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
 use super::scopes;
+use super::views;
 use super::{
     Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
     Step,
@@ -567,6 +568,7 @@ fn handle_edit_key(
         }
         NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
             Some(Step::Changed) => {
+                maybe_refresh_available(shell);
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
             }
@@ -575,6 +577,7 @@ fn handle_edit_key(
         },
         NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
             Some(Step::Changed) => {
+                maybe_refresh_available(shell);
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
             }
@@ -602,17 +605,20 @@ fn handle_edit_key(
         NormalCommand::Verb('d') => arm_delete(shell),
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => arm_overwrite(shell),
-        // §18.2: take the column under the cursor out of the view. Views-
-        // only in effect, not in dispatch — `Draft::remove_selected` is
-        // `Step::Inert` wherever a list has no separate membership
-        // (Groupings' `dimensions`, where ticking already IS membership),
-        // so the notice below is what a trader sees there instead.
+        // §18.2: take the column under the cursor out of the view.
+        // Views-only by what `Draft::remove_selected` itself decides (a
+        // per-field `dest`, not a scan of the list's current contents —
+        // see its own doc), not by a check here, so its two `Refused`
+        // reasons are routed straight to the footer rather than through
+        // `refuse_step`: that helper's `d`/`r` hint is for the "must keep
+        // at least one entry" refusal `space` can also produce, and
+        // neither of `x`'s own reasons is asking for either verb.
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
             }
-            Some(Step::Refused(reason)) => refuse_step(shell, reason),
+            Some(Step::Refused(reason)) => set_notice(shell, reason),
             _ => set_notice(
                 shell,
                 "x removes a column from the view — here, space unticks".to_string(),
@@ -692,6 +698,38 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
         .object_dialog
         .as_mut()
         .and_then(|state| state.draft.as_mut())
+}
+
+/// After a `Toggle`/`ToggleBack` step that just changed a Views draft's
+/// `dataset` field, rebuild the `columns` list's available block for the
+/// newly chosen dataset (spec §18.2: "changing the dataset empties
+/// Available and repopulates it; members that the new dataset lacks stay
+/// listed... so the diagnostic can name them").
+///
+/// Checked by which row the cursor is STILL on, not by domain alone: a
+/// `Field` row's value changes in place (`Draft::step_selected` never
+/// moves the cursor off it, unlike an item row's add), so after the step
+/// the cursor is the one reliable way to ask "was that the dataset field"
+/// without threading the answer through every caller. Every other
+/// domain's fields, and every other Views field, leave `views::
+/// refresh_available` untouched — it only ever rebuilds `columns`.
+fn maybe_refresh_available(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    if state.domain != Domain::Views {
+        return;
+    }
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    let is_dataset_row = matches!(
+        draft.selected_row(),
+        Some(EditRow::Field(i)) if draft.fields.get(i).is_some_and(|f| f.key == "dataset")
+    );
+    if is_dataset_row {
+        views::refresh_available(draft, &shell.services.config);
+    }
 }
 
 /// Would `space` change anything on the row the cursor is on? A
@@ -1647,20 +1685,28 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             ],
         )
     } else {
-        (
-            vec![
-                chip("j"),
-                chip("k"),
-                sep("move ·"),
-                chip("space"),
-                chip("shift+space"),
-                sep("change ·"),
-                chip("shift+j"),
-                chip("shift+k"),
-                sep("reorder"),
-            ],
-            vec![chip("escape"), sep("back to the list")],
-        )
+        let mut motion = vec![
+            chip("j"),
+            chip("k"),
+            sep("move ·"),
+            chip("space"),
+            chip("shift+space"),
+            sep("change ·"),
+            chip("shift+j"),
+            chip("shift+k"),
+        ];
+        // `x` is Views-only (§18.2 — see `mod.rs`'s `Draft::remove_selected`
+        // doc): a hint for a verb every other domain's `x` merely refuses
+        // would teach a trader on Groupings or Scopes a key that does
+        // nothing there.
+        if state.domain == Domain::Views {
+            motion.push(sep("reorder ·"));
+            motion.push(chip("x"));
+            motion.push(sep("remove"));
+        } else {
+            motion.push(sep("reorder"));
+        }
+        (motion, vec![chip("escape"), sep("back to the list")])
     };
 
     let footer = v_flex()

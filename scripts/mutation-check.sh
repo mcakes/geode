@@ -5960,6 +5960,80 @@ run_mutation "objectdialog: reorder never crosses the member boundary" \
   geode-shell \
   reordering_never_crosses_the_member_boundary
 
+# ---- Task 4 review round 1: kind, dest-based membership, dataset ------
+# ---- switch (2026-09-10) ------------------------------------------------
+#
+# Four Important findings: an added dimension (or a schema role with no
+# honest kind) was written kind-less and silently mis-resolved as a
+# measure; the Doc-table member filter — the one line keeping an
+# available column out of views.toml — had no covering test at all;
+# `remove_selected` decided "does this list have separate membership" by
+# scanning items rather than by the field's own `dest`, so `x` went dead
+# the moment a trader finished adding every available column; and
+# changing the dataset left the available block showing the OLD
+# dataset's columns. Derived dimensions came out of the available block
+# entirely rather than being fixed forward — `views::fields`'s own doc
+# has the full reasoning (no `[[columns]]` `kind` makes one queryable).
+
+# A missing `kind` defaults to `"measure"` in `ViewSpec::from_doc`, so an
+# added dimension resolved as a measure compiles to nothing (or, worse,
+# a real measure of the same name) — silently, and only visible once the
+# blotter comes back wrong.
+run_mutation "objectdialog: a newly written column carries its real kind" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '            column["kind"] = toml_edit::value(kind.as_str());' \
+  '            let _ = kind;' \
+  geode-shell \
+  adding_an_available_column_is_a_doc_write_and_hiding_is_not
+
+# The single line keeping an available column out of `views.toml` — an
+# available row promoted to nothing would still fork the desk's view AND
+# list a column the trader never asked to add.
+run_mutation "objectdialog: the doc table lists members only" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        let wanted: Vec<&ListItem> = items.iter().filter(|i| i.member).collect();' \
+  '        let wanted: Vec<&ListItem> = items.iter().collect();' \
+  geode-shell \
+  adding_an_available_column_is_a_doc_write_and_hiding_is_not
+
+# Whether a list has separate membership is a property of its `dest`
+# (Groupings' `dimensions` is `Destination::Doc`, where ticking already IS
+# membership), never of whether every item on it happens to be ticked
+# right now — scanning items (an earlier build did) made `x` go dead on a
+# Views list the moment its available block emptied out.
+run_mutation "objectdialog: x's Doc-list refusal is decided by dest, not by scanning items" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.fields[field].dest == Destination::Doc {' \
+  '        if false {' \
+  geode-shell \
+  remove_selected_refuses_where_membership_is_inclusion
+
+# `x` on an available row must refuse — there is nothing there yet to
+# remove — and name the verb that actually adds it, not fall through to
+# `items.remove`/`items.push` and quietly reorder the row instead.
+run_mutation "objectdialog: x refuses an available row rather than reordering it" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !items[item].member {
+            return Step::Refused("not in the view — space adds it".to_string());
+        }' \
+  '        if false {
+            return Step::Refused("not in the view — space adds it".to_string());
+        }' \
+  geode-shell \
+  x_on_an_available_row_says_not_in_the_view
+
+# Changing the dataset must empty and repopulate the available block, or
+# a trader who switches datasets keeps ticking columns the new dataset
+# does not even have.
+run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    items.retain(|i| i.member);' \
+  '    if false {
+        items.retain(|i| i.member);
+    }' \
+  geode-shell \
+  refresh_available_repopulates_for_the_newly_chosen_dataset
+
 # ---- the drag grab's focus trap (2026-09-09) ---------------------------
 #
 # Two halves of the same defect: a tile mouse-down that arms a drag

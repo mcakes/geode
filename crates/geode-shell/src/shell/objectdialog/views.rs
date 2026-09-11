@@ -16,9 +16,8 @@
 use std::collections::BTreeMap;
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
-use geode_core::dimensions::DerivedDimensions;
-use geode_core::schema::SchemaSpec;
-use geode_core::view::ViewSpec;
+use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
+use geode_core::view::{ViewColumn, ViewSpec};
 
 use super::{Destination, Draft, Field, FieldKind, ListItem};
 
@@ -88,11 +87,35 @@ pub const PRESENTATION_DOC: &str = "view_presentation";
 /// Read through `load_views`, not `ViewSpec::from_doc`, so the member
 /// block shows the columns in the order and with the hidden/width state
 /// the trader actually sees. Behind the members, the list also carries
-/// every other column the chosen dataset has and every derived dimension
-/// (§18.2), each a non-member row with nothing ticked — the "available"
-/// block a new or growing view has something to add from. `Draft::source`
-/// keeps the raw pre-presentation table beside it, which is what a `Doc`
-/// write is rendered from.
+/// every other column the chosen dataset has (§18.2), each a non-member
+/// row with nothing ticked — the "available" block a new or growing view
+/// has something to add from. `Draft::source` keeps the raw
+/// pre-presentation table beside it, which is what a `Doc` write is
+/// rendered from.
+///
+/// **Every item, member or available, carries the `kind` a first-time
+/// `[[columns]]` write of it needs** ([`ListItem::kind`]): a member's own
+/// [`ViewColumn`] variant for one already in the view, the schema role for
+/// an available one ([`schema_role_kind`]). Getting this wrong is not
+/// cosmetic — `ViewSpec::from_doc` defaults a missing `kind` to
+/// `"measure"`, so an added dimension written without one is silently
+/// summed as nothing (an `Aggregate::Sum` over a schema-Key/Dimension
+/// column has no grain to aggregate at) or, worse, resolved as a real
+/// measure of the same name that happens to exist. A schema role with no
+/// honest `[[columns]]` kind — `key`, `attribute` — is therefore not
+/// offered as available at all: seeing `schema_role_kind`'s own doc.
+///
+/// **Derived dimensions (`dimensions.toml`) are deliberately NOT in the
+/// available block**, even though a config author can group or scope by
+/// one today. `ViewSpec::from_doc` accepts exactly three `kind` strings —
+/// `"dimension"`, `"measure"`, `"derived"` (a SQL expression, needing its
+/// own `sql` this dialog has no way to invent) — and none of them makes a
+/// derived dimension queryable as a plain `[[columns]]` entry: a derived
+/// dimension's value only ever exists via `compile.rs`'s own `case`
+/// expression over `view.grouping`/scope columns, never through
+/// `view.columns`. Offering `space` on a row that would silently do
+/// nothing once written is the exact defect class this whole design
+/// exists to remove, so the row is not offered rather than offered wrong.
 ///
 /// **Which destination each field carries is decided here and nowhere
 /// else.** `dataset` is `Doc`: it defines what the view selects, so
@@ -141,6 +164,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                         included: !presentation.hidden.unwrap_or(false),
                         width: presentation.width,
                         member: true,
+                        kind: Some(view_column_kind(column).to_string()),
                     }
                 })
                 .collect()
@@ -148,36 +172,11 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .unwrap_or_default();
 
     // The available block (§18.2): the chosen dataset's other columns,
-    // then every derived dimension, in that order — each a non-member row
-    // with nothing to write until `space` promotes it into the member
-    // block above. Skips a name already listed, whichever block it is in.
+    // each a non-member row with nothing to write until `space` promotes
+    // it into the member block above. No derived dimensions here — see
+    // this function's own doc for why.
     if let Some(dataset) = schema.dataset(&current) {
-        for column in &dataset.columns {
-            if items.iter().any(|i| i.name == column.name) {
-                continue;
-            }
-            items.push(ListItem {
-                name: column.name.clone(),
-                included: false,
-                width: None,
-                member: false,
-            });
-        }
-    }
-    let (dims, _) = config
-        .doc("dimensions")
-        .map(DerivedDimensions::from_doc)
-        .unwrap_or_default();
-    for dim in dims.all() {
-        if items.iter().any(|i| i.name == dim.name) {
-            continue;
-        }
-        items.push(ListItem {
-            name: dim.name.clone(),
-            included: false,
-            width: None,
-            member: false,
-        });
+        push_dataset_columns(&mut items, dataset);
     }
 
     vec![
@@ -194,6 +193,95 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             dest: Destination::Presentation,
         },
     ]
+}
+
+/// Rebuild the `columns` list's available block after the `dataset` field
+/// changes (spec §18.2): "changing the dataset empties Available and
+/// repopulates it; members that the new dataset lacks stay listed, as
+/// today, so the diagnostic can name them." Members are left exactly as
+/// they are — untouched, in place, `kind` included — because they are
+/// still the view's own columns regardless of what the new dataset has;
+/// [`validate`] is what tells the trader a member the new dataset lacks
+/// is now a problem. Only the block *behind* them is thrown away and
+/// rebuilt from scratch, from the new dataset's columns, which is what
+/// keeps the member-then-available invariant: a stale available row from
+/// the old dataset never lingers to be reordered against the new one's.
+///
+/// Called from `render::maybe_refresh_available`, after a `Toggle`/
+/// `ToggleBack` step on the `dataset` field itself — never from
+/// `Draft::step_selected`, which has no `Config` to read a schema from.
+pub fn refresh_available(draft: &mut Draft, config: &Config) {
+    let Some(current) = draft.choice("dataset").map(str::to_string) else {
+        return;
+    };
+    let Some(field) = draft.fields.iter_mut().find(|f| f.key == "columns") else {
+        return;
+    };
+    let FieldKind::OrderedList { items } = &mut field.kind else {
+        return;
+    };
+    items.retain(|i| i.member);
+    let schema = config
+        .doc("datasets")
+        .map(|doc| SchemaSpec::from_doc(doc).0)
+        .unwrap_or_default();
+    if let Some(dataset) = schema.dataset(&current) {
+        push_dataset_columns(items, dataset);
+    }
+}
+
+/// Append `dataset`'s columns that are not already on `items`, as
+/// non-member rows each carrying the `kind` a first-time write of it
+/// needs ([`schema_role_kind`]) — the available-block builder [`fields`]
+/// and [`refresh_available`] share, so a dataset switch cannot populate a
+/// different available block than opening the view fresh would have.
+fn push_dataset_columns(items: &mut Vec<ListItem>, dataset: &DatasetSpec) {
+    for column in &dataset.columns {
+        if items.iter().any(|i| i.name == column.name) {
+            continue;
+        }
+        let Some(kind) = schema_role_kind(&column.role) else {
+            continue;
+        };
+        items.push(ListItem {
+            name: column.name.clone(),
+            included: false,
+            width: None,
+            member: false,
+            kind: Some(kind.to_string()),
+        });
+    }
+}
+
+/// The `[[columns]]` `kind` string a schema role maps to, or `None` when
+/// no kind `ViewSpec::from_doc` recognises describes it honestly.
+///
+/// `ColumnRole::Key` and `ColumnRole::Attribute` have no such kind: the
+/// reader accepts only `"dimension"`, `"measure"` and `"derived"` (the
+/// last needing a `sql` expression this dialog cannot invent from a bare
+/// column name), and forcing either role into `"dimension"` or
+/// `"measure"` would mislabel it exactly the way a missing `kind` used to
+/// (silently, and only visible once the blotter comes back wrong or the
+/// column vanishes). `None` here is why such a column is not on the
+/// available block at all — see [`fields`]'s own doc.
+fn schema_role_kind(role: &ColumnRole) -> Option<&'static str> {
+    match role {
+        ColumnRole::Dimension { .. } => Some("dimension"),
+        ColumnRole::Measure { .. } => Some("measure"),
+        ColumnRole::Key | ColumnRole::Attribute { .. } => None,
+    }
+}
+
+/// The `[[columns]]` `kind` string an already-parsed view column resolves
+/// to — read off the [`ViewColumn`] variant itself, not re-derived from
+/// the schema, because a `Derived` column (a SQL expression) has no
+/// schema role to derive it from at all.
+fn view_column_kind(column: &ViewColumn) -> &'static str {
+    match column {
+        ViewColumn::Dimension { .. } => "dimension",
+        ViewColumn::Measure { .. } => "measure",
+        ViewColumn::Derived { .. } => "derived",
+    }
 }
 
 /// The draft rendered as the table one destination's file receives.
@@ -238,11 +326,7 @@ fn doc_table(draft: &Draft) -> toml_edit::Table {
     if let Some(items) = draft.list_items("columns") {
         // Only the member block defines the view — an available row the
         // trader has not ticked on is not one of its columns.
-        let wanted: Vec<&str> = items
-            .iter()
-            .filter(|i| i.member)
-            .map(|i| i.name.as_str())
-            .collect();
+        let wanted: Vec<&ListItem> = items.iter().filter(|i| i.member).collect();
         table["columns"] = toml_edit::Item::ArrayOfTables(columns_for(&draft.source, &wanted));
     }
     table
@@ -250,8 +334,12 @@ fn doc_table(draft: &Draft) -> toml_edit::Table {
 
 /// The view's columns as `views.toml` should hold them: every source
 /// column whose name the draft still lists, in **source** order, plus a
-/// minimal entry for any name the source does not have yet.
-fn columns_for(source: &toml::Table, wanted: &[&str]) -> toml_edit::ArrayOfTables {
+/// minimal entry — name and `kind` — for any name the source does not
+/// have yet, `kind` read off the item itself
+/// ([`ListItem::kind`]) rather than defaulted, so a newly promoted
+/// dimension is never silently written (and read back) as a measure.
+fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOfTables {
+    let names: Vec<&str> = wanted.iter().map(|i| i.name.as_str()).collect();
     let source_columns: Vec<&toml::Table> = source
         .get("columns")
         .and_then(|v| v.as_array())
@@ -263,21 +351,26 @@ fn columns_for(source: &toml::Table, wanted: &[&str]) -> toml_edit::ArrayOfTable
         let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        if wanted.contains(&name) {
+        if names.contains(&name) {
             seen.push(name);
             out.push(super::toml_table_to_edit(column));
         }
     }
     // A name the source never had is a column the object gained, which is
-    // the definitional half of the split. It carries only its name; a
-    // `kind` is the reader's default (`measure`), and anything richer
-    // needs a field vocabulary the ordered list does not have.
-    for name in wanted {
-        if seen.contains(name) {
+    // the definitional half of the split. It carries its name and its
+    // `kind` — never the reader's default (`measure`), which is exactly
+    // what silently mis-resolves a newly added dimension (this function's
+    // own doc). Anything richer than name and kind (a `label`, a
+    // `format`) needs a field vocabulary the ordered list does not have.
+    for item in wanted {
+        if seen.contains(&item.name.as_str()) {
             continue;
         }
         let mut column = toml_edit::Table::new();
-        column["name"] = toml_edit::value(*name);
+        column["name"] = toml_edit::value(item.name.as_str());
+        if let Some(kind) = &item.kind {
+            column["kind"] = toml_edit::value(kind.as_str());
+        }
         out.push(column);
     }
     out
@@ -358,12 +451,11 @@ fn presentation_table(draft: &Draft) -> toml_edit::Table {
 /// `views.toml`'s column list, and the trader has not reordered anything
 /// merely by doing so.
 fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
-    let wanted: Vec<&str> = draft
+    let wanted: Vec<&ListItem> = draft
         .list_items("columns")
         .unwrap_or_default()
         .iter()
         .filter(|i| i.member)
-        .map(|i| i.name.as_str())
         .collect();
     let mut order = Vec::with_capacity(wanted.len());
     let mut widths = BTreeMap::new();
@@ -373,13 +465,13 @@ fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
         };
         // The doc's own name is borrowed from the draft's list rather than
         // from the rendered table, which is a temporary.
-        let Some(name) = wanted.iter().find(|w| **w == name) else {
+        let Some(item) = wanted.iter().find(|w| w.name == name) else {
             continue;
         };
         if let Some(width) = doc_width(column) {
-            widths.insert((*name).to_string(), width);
+            widths.insert(item.name.clone(), width);
         }
-        order.push(*name);
+        order.push(item.name.as_str());
     }
     (order, widths)
 }
@@ -467,7 +559,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 }
 #[cfg(test)]
 mod tests {
-    use super::super::Domain;
+    use super::super::{Domain, Step};
     use super::*;
     use geode_core::config::ConfigSources;
 
@@ -497,7 +589,12 @@ mod tests {
 
     /// `tree` selects `npv` out of a `risk` dataset that also has `book`
     /// and `delta01`, plus one derived dimension (`desk`) — the fixture
-    /// every member/available test below shares.
+    /// every member/available test below shares. `desk` stays in the
+    /// fixture (rather than being dropped along with the rest of this
+    /// module's derived-dimension handling) precisely so
+    /// [`the_column_list_is_members_then_the_datasets_other_columns`] can
+    /// prove it is deliberately excluded, not merely absent because
+    /// nothing declared one.
     fn tree_with_two_available_columns() -> Config {
         config_from(&[
             (
@@ -517,8 +614,12 @@ mod tests {
     }
 
     /// §18.2: the member block first, in the view's own order, then the
-    /// dataset's other columns and every derived dimension as
-    /// non-members — a new or growing view has something to tick.
+    /// dataset's other columns as non-members — a new or growing view has
+    /// something to tick. Each item carries the `kind` a first-time write
+    /// would need: `npv`'s own (already a `ViewColumn::Measure` in the
+    /// view), `book`'s schema role (`dimension`), `delta01`'s (`measure`)
+    /// — and `desk`, a *derived* dimension, does not appear at all
+    /// (`fields`'s own doc has the reasoning).
     #[test]
     fn the_column_list_is_members_then_the_datasets_other_columns() {
         let config = tree_with_two_available_columns();
@@ -527,17 +628,16 @@ mod tests {
             .list_items("columns")
             .unwrap()
             .to_vec();
-        let shape: Vec<(&str, bool, bool)> = items
+        let shape: Vec<(&str, bool, bool, Option<&str>)> = items
             .iter()
-            .map(|i| (i.name.as_str(), i.member, i.included))
+            .map(|i| (i.name.as_str(), i.member, i.included, i.kind.as_deref()))
             .collect();
         assert_eq!(
             shape,
             [
-                ("npv", true, true),
-                ("book", false, false),
-                ("delta01", false, false),
-                ("desk", false, false),
+                ("npv", true, true, Some("measure")),
+                ("book", false, false, Some("dimension")),
+                ("delta01", false, false, Some("measure")),
             ]
         );
     }
@@ -580,6 +680,23 @@ mod tests {
             text.contains("name = \"npv\"") && text.contains("name = \"book\""),
             "{text}"
         );
+        // `book` is a schema `dimension`, and the newly written entry has
+        // to say so — a missing `kind` defaults to `"measure"` in
+        // `ViewSpec::from_doc`, and a dimension resolved as a measure
+        // compiles to nothing (`views::fields`'s own doc has the chain).
+        assert!(
+            text.contains("kind = \"dimension\""),
+            "the added column must carry its real kind, not the reader's \
+             measure default:\n{text}"
+        );
+        // And `delta01`, still merely available (never promoted), must
+        // not appear in `views.toml` at all — the single line this
+        // whole split exists to keep honest.
+        assert!(
+            !text.contains("delta01"),
+            "an available column reached the doc table it has no business \
+             being in:\n{text}"
+        );
     }
 
     /// The item promoted above (`book`) sits immediately after the member
@@ -599,7 +716,7 @@ mod tests {
         let items = draft.list_items("columns").unwrap();
         assert_eq!(
             items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(),
-            ["npv", "delta01", "book", "desk"],
+            ["npv", "delta01", "book"],
             "delta01 joins right after the last member, ahead of book — \
              never behind it"
         );
@@ -626,6 +743,23 @@ mod tests {
         );
     }
 
+    /// `x` on a row that is not a member yet has nothing to remove, and
+    /// says so with the verb that actually adds it — the second of
+    /// `remove_selected`'s two distinguishable refusals (the first,
+    /// `"space unticks here"`, is Groupings' own —
+    /// `remove_selected_refuses_where_membership_is_inclusion` in
+    /// `mod.rs`).
+    #[test]
+    fn x_on_an_available_row_says_not_in_the_view() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.selected = 3; // book, available
+        assert_eq!(
+            draft.remove_selected(),
+            Step::Refused("not in the view — space adds it".to_string())
+        );
+    }
+
     /// `shift+j`/`shift+k` never carry an item across the member/available
     /// boundary — an available column reordered among the members would be
     /// painted in one block while written in neither.
@@ -637,6 +771,65 @@ mod tests {
         assert!(
             !draft.move_item(1),
             "book is not a member; npv cannot move past it"
+        );
+    }
+
+    /// §18.2: "changing the dataset empties Available and repopulates it;
+    /// members that the new dataset lacks stay listed... so the
+    /// diagnostic can name them." Two datasets, neither sharing a column
+    /// name with the other, so the assertion cannot pass by an available
+    /// row surviving the switch by coincidence.
+    #[test]
+    fn refresh_available_repopulates_for_the_newly_chosen_dataset() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [other.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [other.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        assert_eq!(draft.choice("dataset"), Some("risk"));
+        let before: Vec<&str> = draft
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .filter(|i| !i.member)
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(before, ["book"], "sanity: risk's own available block");
+
+        // `options` is sorted (`other` < `risk`), and `dataset` opens on
+        // `risk` (index 1), so one forward step wraps to `other`.
+        draft.selected = 0;
+        assert!(draft.toggle_selected().changed());
+        assert_eq!(draft.choice("dataset"), Some("other"));
+
+        refresh_available(&mut draft, &config);
+        let items = draft.list_items("columns").unwrap();
+        assert!(
+            items.iter().any(|i| i.name == "npv" && i.member),
+            "a member the new dataset lacks stays listed, so the \
+             diagnostic can name it: {items:?}"
+        );
+        let available: Vec<&str> = items
+            .iter()
+            .filter(|i| !i.member)
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(
+            available,
+            ["lhu", "delta01"],
+            "the available block is emptied and repopulated from the new \
+             dataset alone — none of risk's own columns survive"
         );
     }
 

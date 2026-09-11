@@ -121,6 +121,11 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             // membership for a grouping slot, unlike Views' columns list
             // (`super::ListItem::member`'s own doc has the full story).
             member: true,
+            // No column-kind concept on this list at all — `kind` exists
+            // only for Views' `columns_for` to fill in a brand new
+            // `[[columns]]` entry, and a grouping slot's value is a bare
+            // array, never a table with a `kind` key.
+            kind: None,
         })
         .collect();
     for column in crate::shell::pickable_columns(config) {
@@ -132,6 +137,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             included: false,
             width: None,
             member: true,
+            kind: None,
         });
     }
 

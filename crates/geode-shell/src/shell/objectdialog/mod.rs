@@ -462,14 +462,24 @@ pub struct ListItem {
     pub included: bool,
     pub width: Option<f32>,
     /// In the object at all (§18.2). A view's column list holds the
-    /// view's own columns (`member: true`) followed by the dataset's
-    /// other columns and every derived dimension (`member: false`), so a
-    /// new view has something to tick. Membership is *definitional* —
-    /// `Destination::Doc`, and a fork on a desk view — where `included`
-    /// is presentation; keeping them apart is what lets hiding a desk
-    /// column never fork it. Groupings sets this `true` everywhere: there,
+    /// view's own columns (`member: true`) followed by the chosen
+    /// dataset's other columns (`member: false`), so a new view has
+    /// something to tick. Membership is *definitional* — `Destination::
+    /// Doc`, and a fork on a desk view — where `included` is
+    /// presentation; keeping them apart is what lets hiding a desk column
+    /// never fork it. Groupings sets this `true` everywhere: there,
     /// ticking IS membership.
     pub member: bool,
+    /// The `[[columns]]` `kind` a first-time write of this item needs —
+    /// `"dimension"` or `"measure"` for Views (`views::fields`'s own doc
+    /// has the schema-role mapping and why a `key`/`attribute` column
+    /// never reaches this list at all), the ViewColumn variant's own kind
+    /// for a column already in the view. `None` where a list has no
+    /// column-kind concept (Groupings' `dimensions`): read only by
+    /// `views::columns_for`, on the one path that writes a brand new
+    /// `[[columns]]` entry — a column already in `Draft::source` keeps
+    /// its own table, `kind` included, untouched by this field entirely.
+    pub kind: Option<String>,
 }
 
 /// The closed vocabulary an object's fields are built from (spec §3.1).
@@ -943,22 +953,42 @@ impl Draft {
     }
 
     /// `x`: take the item under the cursor out of the object (§18.2) —
-    /// the definitional twin of `space`'s hide. Inert where a list has
-    /// no separate membership (every item `member`, as Groupings builds
-    /// its list): there `space` already unticks, and a second verb for
-    /// the same act would be two answers to one question.
+    /// the definitional twin of `space`'s hide.
+    ///
+    /// A per-field property, not a scan of the list's current contents:
+    /// whether a list has separate membership at all is decided by its
+    /// `dest`, never by whether every item on it happens to be ticked
+    /// right now. A Views draft with every available column already
+    /// added is still a `Destination::Presentation` list — `x` still
+    /// removes there — while a Groupings `dimensions` list
+    /// (`Destination::Doc`, where ticking already IS membership) refuses
+    /// `x` regardless of how many of its rows are ticked. Scanning items
+    /// instead (an earlier build did) made `x` go dead on exactly that
+    /// first case: the moment a trader added the view's last available
+    /// column, the list looked "fully membered" and `x` started refusing
+    /// removal it had done a keystroke earlier.
+    ///
+    /// [`Step::Refused`] rather than [`Step::Inert`] for both declined
+    /// cases, so the footer says why: on a `Destination::Doc` list,
+    /// `space` is the verb that already unticks; on an available
+    /// (non-member) row of a `Destination::Presentation` list, `space` is
+    /// the verb that adds it — `x` has nothing to remove from a row that
+    /// is not there yet. Neither reason names `d`/`r` the way `space`'s
+    /// own "must keep at least one entry" refusal does, so `render`
+    /// routes these straight to the footer rather than through
+    /// `refuse_step`.
     pub fn remove_selected(&mut self) -> Step {
         let Some(EditRow::Item { field, item }) = self.selected_row() else {
             return Step::Inert;
         };
+        if self.fields[field].dest == Destination::Doc {
+            return Step::Refused("space unticks here".to_string());
+        }
         let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
             return Step::Inert;
         };
-        if items.iter().all(|i| i.member) {
-            return Step::Inert;
-        }
         if !items[item].member {
-            return Step::Inert;
+            return Step::Refused("not in the view — space adds it".to_string());
         }
         let mut entry = items.remove(item);
         entry.member = false;
@@ -2475,12 +2505,12 @@ mod tests {
 
     // ---- Task 4: the member/available split -------------------------
 
-    /// `x` is Views-only in effect: Groupings sets `member: true`
-    /// everywhere (there, ticking IS membership), so `remove_selected`
-    /// finds nothing to remove and must say so rather than silently
-    /// unticking — that is `space`'s job on this domain, not `x`'s.
+    /// `x` is Views-only by `dest`, not by scanning items: Groupings'
+    /// `dimensions` is `Destination::Doc`, where ticking already IS
+    /// membership, so `remove_selected` refuses and names the verb that
+    /// does work here — `space` — rather than silently unticking.
     #[test]
-    fn remove_selected_is_inert_where_membership_is_inclusion() {
+    fn remove_selected_refuses_where_membership_is_inclusion() {
         let config = config_from(&[
             (
                 Layer::Builtin,
@@ -2491,6 +2521,46 @@ mod tests {
         ]);
         let mut draft = Domain::Groupings.draft(&config, "3");
         draft.selected = 2;
-        assert_eq!(draft.remove_selected(), Step::Inert);
+        assert_eq!(
+            draft.remove_selected(),
+            Step::Refused("space unticks here".to_string())
+        );
+    }
+
+    /// **The regression this ruling exists to close.** A Views draft with
+    /// every available column already promoted into membership must
+    /// still let `x` remove one — the list is still `Destination::
+    /// Presentation`, the same as it was with an available row still on
+    /// it, and scanning "is every item a member right now" (an earlier
+    /// build did) would have `x` go dead the moment the trader finished
+    /// adding everything the dataset offers.
+    #[test]
+    fn remove_selected_still_works_on_a_fully_membered_views_list() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // `npv` is the dataset's only column and already a member, so the
+        // available block is empty — every item on the list is `member`.
+        assert!(
+            draft
+                .list_items("columns")
+                .unwrap()
+                .iter()
+                .all(|i| i.member),
+            "sanity: this fixture's list must be fully membered"
+        );
+        draft.selected = 2; // the one item row: npv
+        assert!(draft.remove_selected().changed());
+        assert!(!draft.list_items("columns").unwrap()[0].member);
     }
 }
