@@ -1339,7 +1339,10 @@ Per domain:
   never forks, and a desk column the trader hid still comes back when
   the desk changes it. Changing the dataset empties `Available` and
   repopulates it; members that the new dataset lacks stay listed, as
-  today, so the diagnostic can name them.
+  today, so the diagnostic can name them. `x` is a Views verb only:
+  it exists where a list's *membership* is a different thing from an
+  item's *inclusion*. In Groupings the two coincide (untick is
+  removal), so `x` there is inert with a notice naming `space`.
 - **Scopes.** `n` saves the frame's **current** scope under the new
   name — exactly what `:scope save <name>` does, through the same
   `scope_table_as_toml` rendering `o` uses, so the two doors cannot
