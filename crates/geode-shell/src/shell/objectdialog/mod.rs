@@ -626,6 +626,22 @@ pub enum EditRow {
     },
 }
 
+/// What a dragged list row carries (4c §18.9.1): the field's key, which
+/// block it came from, and the item's NAME — never an index. The keyboard
+/// stays live during a drag, so a keystroke can reorder or remove between
+/// the grab and the drop; a payload resolved by name at drop time lands on
+/// the row the trader picked up, or on nothing, never on whichever column
+/// now holds the grabbed index.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowDrag {
+    pub field: String,
+    /// `true` for an [`EditRow::Item`], `false` for an
+    /// [`EditRow::Available`] — §18.7.1's variant distinction carried onto
+    /// the wire.
+    pub own: bool,
+    pub name: String,
+}
+
 /// What a keystroke is waiting to have confirmed. Each of the three is
 /// unrecoverable in its own direction — deleting the user's copy of an
 /// object, throwing away a personal override, or forking an object out of
@@ -1156,6 +1172,138 @@ impl Draft {
                 Step::Changed
             }
         }
+    }
+
+    /// The payload a list row drags (§18.9.1); `None` for a field row,
+    /// which is neither a drag source nor a drop target.
+    pub fn row_drag(&self, row: EditRow) -> Option<RowDrag> {
+        let (field, own, item) = match row {
+            EditRow::Item { field, item } => (field, true, item),
+            EditRow::Available { field, item } => (field, false, item),
+            EditRow::Field(_) => return None,
+        };
+        let FieldKind::OrderedList { items, available } = &self.fields[field].kind else {
+            return None;
+        };
+        let list = if own {
+            items.as_slice()
+        } else {
+            available.as_deref()?
+        };
+        Some(RowDrag {
+            field: self.fields[field].key.clone(),
+            own,
+            name: list.get(item)?.name.clone(),
+        })
+    }
+
+    /// Resolve a payload back to a row by name, as the draft stands NOW.
+    /// `None` when the field is not a list, the block does not exist
+    /// (`own == false` on a catalogue-less list) or the name has left it.
+    pub fn locate(&self, drag: &RowDrag) -> Option<EditRow> {
+        let field = self.fields.iter().position(|f| f.key == drag.field)?;
+        let FieldKind::OrderedList { items, available } = &self.fields[field].kind else {
+            return None;
+        };
+        let list = if drag.own {
+            items.as_slice()
+        } else {
+            available.as_deref()?
+        };
+        let item = list.iter().position(|i| i.name == drag.name)?;
+        Some(if drag.own {
+            EditRow::Item { field, item }
+        } else {
+            EditRow::Available { field, item }
+        })
+    }
+
+    /// A drop (§18.9.3): `src` takes `dst`'s index. One method decides
+    /// every case, and it is the only place they are enumerated:
+    ///
+    /// - Item → Item: reorder (`remove(src)`, `insert(dst_index)`), so
+    ///   downward lands after the target's old position, upward before.
+    /// - Available → Item: add at index — `space`'s add, placed rather
+    ///   than appended; `included = true`.
+    /// - Item → Available: remove, the same act as `x`; the catalogue is
+    ///   unordered so the target index is ignored.
+    /// - Available → Available: `Inert` — the catalogue has no order.
+    /// - Same row, different fields, or a name that no longer resolves:
+    ///   `Inert`, nothing written.
+    ///
+    /// After a change the cursor follows the dropped item, so the next
+    /// keystroke acts on the thing the trader just placed (unlike `space`
+    /// and `x`, whose cursor rulings are about a *run* of adds/removes).
+    ///
+    /// A drop can never reach `remove_selected`'s own
+    /// `Step::Refused("space unticks here")` — that wording fires when a
+    /// trader asks to demote a row on a catalogue-less list, but there is
+    /// no available row to drop such a demotion *onto* in the first
+    /// place: `dst` claiming a catalogue that does not exist fails to
+    /// `locate` and the whole drop is `Inert` before the per-case match
+    /// below ever runs. The `(true, false)` arm's own `available.as_mut()`
+    /// guard is therefore unreachable in practice — a safety net, not a
+    /// second path to that refusal.
+    pub fn drop_row(&mut self, src: &RowDrag, dst: &RowDrag) -> Step {
+        let (Some(src_row), Some(dst_row)) = (self.locate(src), self.locate(dst)) else {
+            return Step::Inert;
+        };
+        if src_row == dst_row {
+            return Step::Inert;
+        }
+        let (field, src_own, src_ix) = match src_row {
+            EditRow::Item { field, item } => (field, true, item),
+            EditRow::Available { field, item } => (field, false, item),
+            EditRow::Field(_) => return Step::Inert,
+        };
+        let (dst_field, dst_own, dst_ix) = match dst_row {
+            EditRow::Item { field, item } => (field, true, item),
+            EditRow::Available { field, item } => (field, false, item),
+            EditRow::Field(_) => return Step::Inert,
+        };
+        if field != dst_field {
+            return Step::Inert;
+        }
+        let FieldKind::OrderedList { items, available } = &mut self.fields[field].kind else {
+            return Step::Inert;
+        };
+        let landed = match (src_own, dst_own) {
+            (true, true) => {
+                let entry = items.remove(src_ix);
+                items.insert(dst_ix, entry);
+                EditRow::Item {
+                    field,
+                    item: dst_ix,
+                }
+            }
+            (false, true) => {
+                let Some(available) = available.as_mut() else {
+                    return Step::Inert;
+                };
+                let mut entry = available.remove(src_ix);
+                entry.included = true;
+                items.insert(dst_ix, entry);
+                EditRow::Item {
+                    field,
+                    item: dst_ix,
+                }
+            }
+            (true, false) => {
+                let Some(available) = available.as_mut() else {
+                    return Step::Inert;
+                };
+                let mut entry = items.remove(src_ix);
+                entry.included = false;
+                available.push(entry);
+                EditRow::Available {
+                    field,
+                    item: available.len() - 1,
+                }
+            }
+            (false, false) => return Step::Inert,
+        };
+        self.follow(landed);
+        Step::Changed
     }
 
     /// `shift+j` / `shift+k`: move the item under the cursor past the next
@@ -3096,6 +3244,236 @@ mod tests {
             ["npv"],
             "and the removed column is what the catalogue now holds"
         );
+    }
+
+    // ---- Mouse parity Task 4 (§18.9): dropping a list row by name ----
+
+    /// A Views draft over `book`, `npv`, `delta01` — every column already
+    /// in the view, so the catalogue exists and is empty (`draft_for`'s
+    /// own fixture).
+    fn three_column_draft() -> Draft {
+        draft_for("tree")
+    }
+
+    /// A Views draft over the same dataset with only `book` and `npv` in
+    /// the view — `delta01` sits in the catalogue, ready to be dragged in.
+    fn two_column_draft_with_one_available() -> Draft {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk_snapshot.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk_snapshot\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
+                 [[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        Domain::Views.draft(&config, "tree")
+    }
+
+    /// A Groupings slot with `book`, `lhu` already chosen — no catalogue
+    /// at all (§18.7.1), the same shape
+    /// `a_groupings_list_has_no_available_block_and_x_refuses` builds.
+    fn groupings_draft() -> Draft {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::User, "groupings", "3 = [\"book\", \"lhu\"]\n"),
+        ]);
+        Domain::Groupings.draft(&config, "3")
+    }
+
+    /// A bare, unincluded item — the shape `dataset_catalogue` builds for
+    /// an available row — for tests that need a second catalogue entry.
+    fn item(name: &str) -> ListItem {
+        ListItem {
+            name: name.to_string(),
+            included: false,
+            width: None,
+            kind: None,
+        }
+    }
+
+    /// A `RowDrag` payload naming `field` by key, the way a real drag
+    /// carries the field the row it grabbed lives in — never hardcoded to
+    /// one domain's field name, since Views' list is `columns` and
+    /// Groupings' is `dimensions`.
+    fn drag(field: &str, own: bool, name: &str) -> RowDrag {
+        RowDrag {
+            field: field.to_string(),
+            own,
+            name: name.to_string(),
+        }
+    }
+
+    /// §18.9.3: "drop on a row" means take that row's index. Downward
+    /// lands after the target's old position, upward before it.
+    #[test]
+    fn a_drop_takes_the_target_rows_index() {
+        let mut draft = three_column_draft(); // book, npv, delta01 as items; catalogue empty-but-Some
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "book"),
+                &drag("columns", true, "delta01")
+            ),
+            Step::Changed
+        );
+        assert_eq!(list_names(&draft), ["npv", "delta01", "book"]);
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "book"),
+                &drag("columns", true, "npv")
+            ),
+            Step::Changed
+        );
+        assert_eq!(list_names(&draft), ["book", "npv", "delta01"]);
+    }
+
+    /// The cursor follows the dropped item, so the next keystroke acts on
+    /// the thing the trader just placed.
+    #[test]
+    fn the_cursor_follows_the_dropped_item() {
+        let mut draft = three_column_draft();
+        draft.drop_row(
+            &drag("columns", true, "book"),
+            &drag("columns", true, "delta01"),
+        );
+        assert_eq!(draft.row_label(draft.selected_row().unwrap()), "book");
+    }
+
+    /// Available → Item adds at the target's index rather than appending.
+    #[test]
+    fn dropping_an_available_row_onto_the_list_adds_it_at_that_index() {
+        let mut draft = two_column_draft_with_one_available(); // items book, npv; available delta01
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", false, "delta01"),
+                &drag("columns", true, "book")
+            ),
+            Step::Changed
+        );
+        assert_eq!(list_names(&draft), ["delta01", "book", "npv"]);
+        assert!(draft.list_items("columns").unwrap()[0].included);
+        let FieldKind::OrderedList { available, .. } = &draft.fields[1].kind else {
+            panic!()
+        };
+        assert!(available.as_ref().unwrap().is_empty());
+    }
+
+    /// Item → Available removes, exactly as `x` does, catalogue index
+    /// ignored (it has no order).
+    #[test]
+    fn dropping_an_item_onto_the_catalogue_removes_it() {
+        let mut draft = two_column_draft_with_one_available();
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "npv"),
+                &drag("columns", false, "delta01")
+            ),
+            Step::Changed
+        );
+        assert_eq!(list_names(&draft), ["book"]);
+        let FieldKind::OrderedList { available, .. } = &draft.fields[1].kind else {
+            panic!()
+        };
+        let avail: Vec<&str> = available
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(avail, ["delta01", "npv"]);
+        assert!(!available.as_ref().unwrap()[1].included);
+    }
+
+    /// Nothing to do: same row, catalogue to catalogue, a name that no
+    /// longer resolves (a keystroke removed it mid-drag), or a field that
+    /// is not a list. None of these writes.
+    #[test]
+    fn inert_drops_change_nothing() {
+        let mut draft = two_column_draft_with_one_available();
+        let before = draft.fields.clone();
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "book"),
+                &drag("columns", true, "book")
+            ),
+            Step::Inert
+        );
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "gone"),
+                &drag("columns", true, "book")
+            ),
+            Step::Inert
+        );
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", true, "book"),
+                &drag("columns", true, "gone")
+            ),
+            Step::Inert
+        );
+        assert_eq!(draft.fields, before);
+        // Two catalogue rows (add a second available item first).
+        let FieldKind::OrderedList { available, .. } = &mut draft.fields[1].kind else {
+            panic!()
+        };
+        available.as_mut().unwrap().push(item("gamma"));
+        assert_eq!(
+            draft.drop_row(
+                &drag("columns", false, "delta01"),
+                &drag("columns", false, "gamma")
+            ),
+            Step::Inert
+        );
+    }
+
+    /// A list with no catalogue (Groupings) refuses a demotion the same
+    /// way `x` does — the wording is `remove_selected`'s.
+    #[test]
+    fn a_drop_into_a_missing_catalogue_is_refused_like_x() {
+        let mut draft = groupings_draft(); // items book, lhu; available None
+        // There is no available row to target, so the refusal is reached
+        // through a payload claiming one.
+        let step = draft.drop_row(
+            &drag("dimensions", true, "book"),
+            &RowDrag {
+                field: "dimensions".into(),
+                own: false,
+                name: "lhu".into(),
+            },
+        );
+        assert!(
+            matches!(step, Step::Inert),
+            "a target that does not resolve is inert, never a phantom removal"
+        );
+    }
+
+    /// `row_drag` and `locate` are inverses over every list row, and a
+    /// field row has no payload at all.
+    #[test]
+    fn row_drag_round_trips_through_locate() {
+        let draft = two_column_draft_with_one_available();
+        for row in draft.rows() {
+            match row {
+                EditRow::Field(_) => assert_eq!(draft.row_drag(row), None),
+                EditRow::Item { .. } | EditRow::Available { .. } => {
+                    let payload = draft.row_drag(row).expect("list rows drag");
+                    assert_eq!(draft.locate(&payload), Some(row));
+                }
+            }
+        }
     }
 
     // ---- Task 6: filtering the edit stage (§18.3) --------------------

@@ -6903,6 +6903,56 @@ run_mutation "objectdialog: a click while naming only selects" \
   '    let opens = true;' \
   geode-shell clicking_a_browse_row_while_naming_only_selects
 
+# ---- Mouse parity Task 4 (§18.9): dropping a list row by name ---------
+
+# §18.9.3: a drop takes the target's index. Mutated to append, every
+# reorder lands at the end.
+run_mutation "objectdialog: a drop takes the target row's index" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                let entry = items.remove(src_ix);
+                items.insert(dst_ix, entry);' \
+  '                let entry = items.remove(src_ix);
+                items.push(entry);' \
+  geode-shell a_drop_takes_the_target_rows_index
+
+# Available → Item places rather than appends.
+run_mutation "objectdialog: an available row dropped onto the list is placed, not appended" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                entry.included = true;
+                items.insert(dst_ix, entry);' \
+  '                entry.included = true;
+                items.push(entry);' \
+  geode-shell dropping_an_available_row_onto_the_list_adds_it_at_that_index
+
+# Item → Available unticks on the way out, as `x` does.
+run_mutation "objectdialog: a row dropped into the catalogue is unticked" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                let mut entry = items.remove(src_ix);
+                entry.included = false;' \
+  '                let mut entry = items.remove(src_ix);' \
+  geode-shell dropping_an_item_onto_the_catalogue_removes_it
+
+# Same row is inert: without the guard a self-drop is a remove+insert
+# that dirties nothing but still reports Changed and queues a write.
+run_mutation "objectdialog: a drop on its own row is inert" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if src_row == dst_row {
+            return Step::Inert;
+        }' \
+  '        if src_row == dst_row && false {
+            return Step::Inert;
+        }' \
+  geode-shell inert_drops_change_nothing
+
+# The cursor follows the dropped item.
+run_mutation "objectdialog: the cursor follows a dropped item" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.follow(landed);
+        Step::Changed' \
+  '        let _ = landed;
+        Step::Changed' \
+  geode-shell the_cursor_follows_the_dropped_item
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
