@@ -389,6 +389,12 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                     state.begin_naming();
                 }
             }
+            // §18.7: a bare digit names a slot on the one domain whose
+            // objects are numbered; elsewhere it is dropped below.
+            NormalCommand::Digit(n) if state.domain == Domain::Groupings => {
+                jump_to_slot(shell, n, cx);
+                return true;
+            }
             // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
             // verbs are the edit stage's, and the browse footer
             // advertises none of them — so they are claimed and dropped
@@ -665,6 +671,33 @@ fn enter_edit_stage(
     cx.notify();
 }
 
+/// A bare `1`–`9` on the Groupings dialog (§18.7): open that slot's edit
+/// stage, from the browse list or from another slot's edit stage alike.
+/// The slot number IS the object's name (`groupings.rs`'s own doc), so
+/// the digit maps straight onto [`enter_edit_stage`] with no lookup — an
+/// unfilled slot opens exactly as `enter` on its `empty` row would.
+///
+/// The one digit that does not jump is the open slot's own: re-entering
+/// would rebuild the draft from `services.config`, which can still be a
+/// debounce window behind the last tick (`apply`'s own module doc), so
+/// the stage would visibly lose an edit that is in fact already queued.
+/// Saying "already editing" is the honest answer, and it is a notice
+/// rather than silence because a key that appears inert is the defect
+/// class this interaction model exists to remove.
+fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
+    let name = slot.to_string();
+    let already = matches!(
+        shell.object_dialog.as_ref().map(|state| &state.stage),
+        Some(Stage::Edit { object }) if *object == name
+    );
+    if already {
+        set_notice(shell, format!("already editing slot {name}"));
+        cx.notify();
+        return;
+    }
+    enter_edit_stage(shell, &name, None, cx);
+}
+
 /// The edit stage's keys, in the one order they can be read in:
 ///
 /// 1. an armed [`Confirm`] owns **every** keystroke until it is answered
@@ -929,6 +962,18 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // "nothing on this row changes with space" — two verbs
         // disagreeing about the same row in the same breath.
         NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
+        // §18.7: from one slot's edit stage a digit jumps straight to
+        // another's. On any other domain it is named like an unbound
+        // letter would be — the edit stage's rule for a key that did
+        // nothing.
+        NormalCommand::Digit(n) => {
+            let domain = shell.object_dialog.as_ref().map(|state| state.domain);
+            if domain == Some(Domain::Groupings) {
+                jump_to_slot(shell, n, cx);
+                return true;
+            }
+            set_notice(shell, format!("{n} is not a verb here"));
+        }
         // A letter this stage has no verb for. Named rather than
         // dropped: `d` and `r` have just taught the user that
         // letters act here, so a silent `z` reads as the dialog having

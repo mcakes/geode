@@ -101,6 +101,12 @@ pub enum NormalCommand {
     /// draft of Phase 4c needed when no key was free.
     MoveItem(i32),
     EditText,
+    /// A bare `1`–`9`: a jump to the object that digit names, on a
+    /// surface whose objects are numbered (the Groupings dialog's nine
+    /// slots). Never `0`, which names no slot (`ctrl+0` clears the
+    /// frame's slot rather than selecting one), and never a modified
+    /// digit — `ctrl+3` is the frame's own regroup chord.
+    Digit(u8),
     /// A bare letter the vocabulary does not claim — the surface's own
     /// verb (`s`, `d`, `r`, `n`).
     Verb(char),
@@ -142,6 +148,7 @@ pub fn normal_command(ks: &Keystroke) -> Option<NormalCommand> {
             let mut chars = key.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) if c.is_ascii_alphabetic() => Some(NormalCommand::Verb(c)),
+                (Some(c @ '1'..='9'), None) => Some(NormalCommand::Digit(c as u8 - b'0')),
                 _ => None,
             }
         }
@@ -251,6 +258,22 @@ mod tests {
         assert_eq!(normal_command(&bare("r")), Some(NormalCommand::Verb('r')));
         assert_eq!(normal_command(&bare("escape")), None);
         assert_eq!(normal_command(&ks("s", Modifiers::CTRL)), None);
+    }
+
+    /// A bare `1`–`9` is a command of its own — the Groupings dialog
+    /// jumps to that slot — where `0` is not: `ctrl+0` is
+    /// `frame::slot_clear`, there is no slot `0` to open, and a key that
+    /// maps to nothing must come back `None` so the surface can drop it
+    /// rather than dispatch on a slot that does not exist. Modified digits
+    /// are not digits either: `ctrl+3` is the frame's regroup chord and
+    /// must never be read as a jump through a dialog.
+    #[test]
+    fn bare_digits_one_to_nine_are_a_command_and_zero_is_not() {
+        assert_eq!(normal_command(&bare("1")), Some(NormalCommand::Digit(1)));
+        assert_eq!(normal_command(&bare("9")), Some(NormalCommand::Digit(9)));
+        assert_eq!(normal_command(&bare("0")), None);
+        assert_eq!(normal_command(&ks("3", Modifiers::CTRL)), None);
+        assert_eq!(normal_command(&ks("3", SHIFT)), None);
     }
 
     #[test]

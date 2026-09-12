@@ -2744,6 +2744,106 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("slots"), "{notice}");
 }
 
+// ---- Groupings: digit jump and chain entry (§18.7) -----------------------
+
+/// A bare digit in the Groupings browse list opens that slot's edit
+/// stage in one keystroke — the slots are numbered, and the number is
+/// the fastest way to name one. On every other domain the digit is
+/// claimed and dropped like any other key browse has no verb for, so a
+/// `3` typed at the Views list neither opens anything nor leaks to the
+/// shell as `ctrl+3`'s bare cousin.
+#[gpui::test]
+fn a_digit_in_browse_opens_that_slot_on_groupings_only(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()),
+        vec!["book".to_string()],
+        "the slot opened is the one the digit named"
+    );
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert_eq!(crumb, "ctrl+3");
+}
+
+/// The same digit typed at the Views list does nothing at all.
+#[gpui::test]
+fn a_digit_in_browse_is_dropped_on_a_domain_without_numbered_objects(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(shell.read_with(&cx, |s, _| s.object_dialog.is_some()), "still open");
+}
+
+/// From one slot's edit stage a digit jumps straight to another's —
+/// no `escape`, no re-selection — and the same digit as the open slot
+/// says so rather than rebuilding the stage under the trader.
+#[gpui::test]
+fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // Row 1 is selected on open.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "1".to_string()
+        }
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert!(edit_draft(&shell, &cx, |d| d.list_items("dimensions").unwrap()[0].included));
+
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("already"), "{notice}");
+}
+
 // ---- Task 6: filtering the edit stage (§18.3) -------------------------
 
 /// `/` filters the edit stage's own rows, exactly as it does in browse:
