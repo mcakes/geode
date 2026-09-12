@@ -694,7 +694,11 @@ built per cached window and re-derived only when the window, the cursor
 row or the mode changes (`BlotterDelegate::ensure_numbers`'s stamp),
 never per frame. `h`/`l` move the column, also counted; `home`/`end` and
 vim's `^`/`$` go to the first and last (the column half of the general
-navigation grammar, user ruling 2026-09-12). The cursor's *path* is remembered across requery so a
+navigation grammar, user ruling 2026-09-12). The tree column is pinned at
+the left (`ColumnFixed::Left`, user ruling 2026-09-12): the row's identity
+stays readable however far right the measures scroll, and `scroll_to_col`
+already counts from the first scrollable column, so cursor sync needs no
+adjustment. The cursor's *path* is remembered across requery so a
 new snapshot puts the cursor back on the same node, falling back to a
 clamped index when the node is gone.
 

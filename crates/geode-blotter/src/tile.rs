@@ -1532,12 +1532,23 @@ mod tests {
         cx: &mut gpui::TestAppContext,
         restored: Option<&toml::Table>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_in(cx, restored, gpui::WindowOptions::default())
+    }
+
+    /// [`open_with`] in a window of the caller's choosing — a narrow one
+    /// is the only way to make the table actually scroll horizontally in
+    /// a test, which the pinned tree column's test needs.
+    fn open_in(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+        options: gpui::WindowOptions,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(crate::init);
         let (data, requests) = DataHandle::for_tests();
         let window = cx
             .update(|cx| {
-                cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                cx.open_window(options, |window, cx| {
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
                     cx.new(|cx| {
                         let tile = cx.new(|cx| {
@@ -2428,6 +2439,66 @@ mod tests {
         let selector: &'static str =
             Box::leak(format!("blotter-cell-{row_ix}-{col_ix}").into_boxed_str());
         assert!(cx.debug_bounds(selector).is_some(), "the cell painted");
+    }
+
+    /// The tree column is pinned left (user ruling 2026-09-12): in a
+    /// window too narrow for the fixture's three columns, `$` scrolls
+    /// the table right so the last column ends flush with the viewport's
+    /// right edge (its x moves left, and column 1 is culled), while the
+    /// tree cell's painted x does not move — it is rendered in the
+    /// table's fixed region, outside the scrolled one.
+    #[gpui::test]
+    fn the_tree_column_stays_put_when_the_table_scrolls_right(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, WindowBounds, point, size};
+        let options = gpui::WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                point(px(0.), px(0.)),
+                size(px(300.), px(240.)),
+            ))),
+            ..Default::default()
+        };
+        let (h, mut cx) = open_in(cx, None, options);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let bounds_of = |cx: &mut gpui::VisualTestContext, sel: &'static str| {
+            cx.debug_bounds(sel)
+                .unwrap_or_else(|| panic!("{sel} painted"))
+        };
+        let tree_x = bounds_of(&mut cx, "blotter-cell-0-0").origin.x;
+        let last_before = bounds_of(&mut cx, "blotter-cell-0-2");
+        assert!(
+            last_before.right() > px(300.),
+            "sanity: the window is narrow enough that the last column overflows it ({:?})",
+            last_before.right()
+        );
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::last_col".into()), None, cx)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let last_after = bounds_of(&mut cx, "blotter-cell-0-2");
+        assert!(
+            last_after.origin.x < last_before.origin.x,
+            "sanity: `$` scrolled the table right ({:?} -> {:?})",
+            last_before.origin.x,
+            last_after.origin.x
+        );
+        assert!(
+            last_after.right() <= px(300.),
+            "the last column now ends inside the window ({:?})",
+            last_after.right()
+        );
+        assert_eq!(
+            bounds_of(&mut cx, "blotter-cell-0-0").origin.x,
+            tree_x,
+            "the tree cell did not move: it is pinned in the fixed region"
+        );
     }
 
     /// `[ui] line_numbers` reaches a live tile through the shell's
