@@ -308,6 +308,8 @@ fn schema_role_kind(role: &ColumnRole) -> Option<&'static str> {
         ColumnRole::Dimension { .. } => Some("dimension"),
         ColumnRole::Measure { .. } => Some("measure"),
         ColumnRole::Key | ColumnRole::Attribute { .. } => None,
+        // Document family only; a measure-family view never sees these.
+        ColumnRole::Axis | ColumnRole::Value => None,
     }
 }
 
@@ -736,7 +738,7 @@ mod tests {
         );
         assert_eq!(
             schema_role_kind(&ColumnRole::Attribute {
-                grain: geode_core::schema::Grain::Instrument
+                grain: Some(geode_core::schema::Grain::Instrument)
             }),
             None
         );

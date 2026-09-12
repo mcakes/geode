@@ -147,8 +147,16 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
 
     for c in ds.columns.iter() {
         let keep = match c.role {
-            ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
-            ColumnRole::Key | ColumnRole::Dimension { .. } => false,
+            ColumnRole::Measure { grain: g, .. } => g == grain,
+            ColumnRole::Attribute { grain: Some(g) } => g == grain,
+            // A document-level attribute (`grain: None`) carries no
+            // grain to match; `Axis`/`Value` are the document family's
+            // own row shape and never reach a grain table at all.
+            ColumnRole::Attribute { grain: None }
+            | ColumnRole::Key
+            | ColumnRole::Dimension { .. }
+            | ColumnRole::Axis
+            | ColumnRole::Value => false,
         };
         if keep {
             cols.push(format!("  \"{}\" {}", c.name, c.ty.sql()));

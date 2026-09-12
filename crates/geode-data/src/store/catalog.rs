@@ -575,7 +575,7 @@ impl<'a> Catalog<'a> {
         let attributes: Vec<&str> = ds
             .columns
             .iter()
-            .filter(|c| matches!(c.role, ColumnRole::Attribute { grain: g } if g == grain))
+            .filter(|c| matches!(c.role, ColumnRole::Attribute { grain: Some(g) } if g == grain))
             .map(|c| c.name.as_str())
             .collect();
         if attributes.is_empty() {

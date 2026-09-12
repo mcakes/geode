@@ -82,7 +82,8 @@ fn payload_columns(ds: &DatasetSpec, grain: Grain) -> Vec<&str> {
         .columns
         .iter()
         .filter(|c| match c.role {
-            ColumnRole::Measure { grain: g, .. } | ColumnRole::Attribute { grain: g } => g == grain,
+            ColumnRole::Measure { grain: g, .. } => g == grain,
+            ColumnRole::Attribute { grain: Some(g) } => g == grain,
             _ => false,
         })
         .map(|c| c.name.as_str())

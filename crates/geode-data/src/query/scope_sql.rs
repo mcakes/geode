@@ -1125,7 +1125,7 @@ grain = "position"
             textual: false,
             categorical: false,
             role: geode_core::schema::ColumnRole::Attribute {
-                grain: Grain::Instrument,
+                grain: Some(Grain::Instrument),
             },
         });
         let (dir, store) = store();

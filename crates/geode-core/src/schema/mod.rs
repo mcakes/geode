@@ -10,13 +10,50 @@ pub use grain::Grain;
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 
+/// Which of the two dataset families a dataset belongs to (market-data
+/// spec §3; roadmap ruling 7). The measure family is the grain
+/// vocabulary as it always was; the document family is keyed by a
+/// declared identity plus axes and has no grain at all. The two are
+/// side by side rather than one declared-key model because attribution
+/// rests on the grains forming a prefix chain, and nothing a document
+/// dataset does needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Family {
+    #[default]
+    Measures,
+    Document,
+}
+
+impl Family {
+    pub fn parse(s: &str) -> Option<Family> {
+        match s {
+            "measures" => Some(Family::Measures),
+            "document" => Some(Family::Document),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct DatasetSpec {
     pub name: String,
     pub columns: Vec<ColumnSpec>,
+    pub family: Family,
+    /// Document family: the identity key, in declared order. One document
+    /// per distinct key tuple; the batch a publish replaces (spec §4.1).
+    /// Empty for the measure family.
+    pub key: Vec<String>,
+    /// Document family: the row identity within a document, in declared
+    /// order — also the order a document request sorts by (spec §7).
+    /// Empty for the measure family.
+    pub axes: Vec<String>,
 }
 
 impl DatasetSpec {
+    pub fn is_document(&self) -> bool {
+        self.family == Family::Document
+    }
+
     pub fn column(&self, name: &str) -> Option<&ColumnSpec> {
         self.columns.iter().find(|c| c.name == name)
     }
@@ -130,9 +167,77 @@ impl SchemaSpec {
         let mut out = SchemaSpec::default();
         let mut diags = Vec::new();
         for (ds_name, ds_value) in &doc.value {
+            let family = match ds_value.get("family").and_then(|v| v.as_str()) {
+                None => Family::Measures,
+                Some(s) => match Family::parse(s) {
+                    Some(f) => f,
+                    None => {
+                        diags.push(Diagnostic {
+                            severity: Severity::Error,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': unknown family '{s}'; dataset dropped"
+                            ),
+                            path: Some(format!("{ds_name}.family")),
+                        });
+                        continue;
+                    }
+                },
+            };
+            let string_list =
+                |field: &str, diags: &mut Vec<Diagnostic>| -> Result<Vec<String>, ()> {
+                    match ds_value.get(field) {
+                        None => Ok(Vec::new()),
+                        Some(v) => v
+                            .as_array()
+                            .and_then(|a| {
+                                a.iter()
+                                    .map(|x| x.as_str().map(str::to_string))
+                                    .collect::<Option<Vec<_>>>()
+                            })
+                            .ok_or_else(|| {
+                                diags.push(Diagnostic {
+                                    severity: Severity::Error,
+                                    layer: None,
+                                    file: None,
+                                    message: format!(
+                                        "dataset '{ds_name}': '{field}' must be an array of \
+                                     column names; dataset dropped"
+                                    ),
+                                    path: Some(format!("{ds_name}.{field}")),
+                                })
+                            }),
+                    }
+                };
+            let (Ok(mut key), Ok(mut axes)) = (
+                string_list("key", &mut diags),
+                string_list("axes", &mut diags),
+            ) else {
+                continue;
+            };
+            if family == Family::Measures {
+                for (field, list) in [("key", &mut key), ("axes", &mut axes)] {
+                    if !list.is_empty() {
+                        diags.push(Diagnostic {
+                            severity: Severity::Warning,
+                            layer: None,
+                            file: None,
+                            message: format!(
+                                "dataset '{ds_name}': '{field}' is ignored on the measure family"
+                            ),
+                            path: Some(format!("{ds_name}.{field}")),
+                        });
+                        list.clear();
+                    }
+                }
+            }
             let mut dataset = DatasetSpec {
                 name: ds_name.clone(),
                 columns: Vec::new(),
+                family,
+                key,
+                axes,
             };
             let Some(cols) = ds_value.get("columns").and_then(|v| v.as_table()) else {
                 diags.push(note(format!("dataset '{ds_name}': no [columns] table")));
@@ -140,7 +245,7 @@ impl SchemaSpec {
                 continue;
             };
             for (col_name, col_value) in cols {
-                match parse_column(ds_name, col_name, col_value) {
+                match parse_column(ds_name, family, col_name, col_value) {
                     Ok((spec, warning)) => {
                         dataset.columns.push(spec);
                         diags.extend(warning);
@@ -320,6 +425,7 @@ fn note(message: String) -> Diagnostic {
 /// over a flag typo (the wrong severity for that mistake).
 fn parse_column(
     ds: &str,
+    family: Family,
     name: &str,
     value: &toml::Value,
 ) -> Result<(ColumnSpec, Option<Diagnostic>), Diagnostic> {
@@ -356,8 +462,13 @@ fn parse_column(
             },
         },
         "attribute" => ColumnRole::Attribute {
-            grain: grain_of(table)?,
+            grain: match family {
+                Family::Measures => Some(grain_of(table)?),
+                Family::Document => None,
+            },
         },
+        "axis" => ColumnRole::Axis,
+        "value" => ColumnRole::Value,
         "measure" => {
             let agg_str = table
                 .get("aggregate")
@@ -813,6 +924,94 @@ grain = "underlying"
         for grain in Grain::ALL {
             assert!(!ds.carries(grain, "spread_type"));
         }
+    }
+
+    const CVI: &str = r#"
+[cvi_params]
+family = "document"
+key = ["underlying_ref"]
+axes = ["term", "node"]
+
+[cvi_params.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+
+[cvi_params.columns.term]
+type = "date"
+role = "axis"
+
+[cvi_params.columns.node]
+type = "f64"
+role = "axis"
+
+[cvi_params.columns.param]
+type = "f64"
+role = "value"
+
+[cvi_params.columns.anchor_date]
+type = "date"
+role = "attribute"
+
+[cvi_params.columns.spot_ref]
+type = "f64"
+role = "attribute"
+"#;
+
+    #[test]
+    fn a_document_dataset_parses_its_family_key_and_axes() {
+        let (schema, diags) = SchemaSpec::from_doc(&doc(CVI));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("cvi_params").unwrap();
+        assert_eq!(ds.family, Family::Document);
+        assert!(ds.is_document());
+        assert_eq!(ds.key, vec!["underlying_ref".to_string()]);
+        assert_eq!(ds.axes, vec!["term".to_string(), "node".to_string()]);
+        assert_eq!(ds.column("term").unwrap().role, ColumnRole::Axis);
+        assert_eq!(ds.column("param").unwrap().role, ColumnRole::Value);
+        // A document-level attribute carries no grain.
+        assert_eq!(
+            ds.column("spot_ref").unwrap().role,
+            ColumnRole::Attribute { grain: None }
+        );
+    }
+
+    #[test]
+    fn a_dataset_without_a_family_is_the_measure_family() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(SAMPLE));
+        let ds = schema.dataset("risk_snapshot").unwrap();
+        assert_eq!(ds.family, Family::Measures);
+        assert!(!ds.is_document());
+        assert!(ds.key.is_empty() && ds.axes.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_family_is_an_error_and_the_dataset_is_dropped() {
+        let text = CVI.replace("family = \"document\"", "family = \"widget\"");
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(schema.dataset("cvi_params").is_none());
+        let d = diags
+            .iter()
+            .find(|d| d.message.contains("unknown family 'widget'"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(d.path.as_deref(), Some("cvi_params.family"));
+    }
+
+    #[test]
+    fn a_measure_attribute_still_requires_its_grain() {
+        // `Attribute { grain: None }` is the document reading only; on a
+        // measure dataset a grainless attribute is the same missing-grain
+        // error it always was.
+        let text = SAMPLE.to_string()
+            + "\n[risk_snapshot.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\n";
+        let (_, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("column 'note': missing 'grain'")),
+            "{diags:?}"
+        );
     }
 
     #[test]

@@ -84,8 +84,17 @@ pub enum ColumnRole {
     Dimension { grain: Option<Grain> },
     /// A number, aggregated at its declared grain.
     Measure { grain: Grain, aggregate: Aggregate },
-    /// A non-numeric property carried at a grain (strike, expiry).
-    Attribute { grain: Grain },
+    /// A non-numeric property. `Some(grain)` on a measure dataset: carried
+    /// at that grain. `None` on a document dataset: document-level — one
+    /// value per document, repeated on every row of it (market-data
+    /// spec §3.1). `validate_dataset` refuses each reading on the other
+    /// family, so `None` never reaches the grain tables.
+    Attribute { grain: Option<Grain> },
+    /// Document family only: identifies a row within a document, in the
+    /// dataset's declared `axes` order (market-data spec §3.1).
+    Axis,
+    /// Document family only: a numeric cell of the document.
+    Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,8 +127,14 @@ impl ColumnSpec {
     /// "declared at exactly this grain".
     pub fn grain(&self) -> Option<Grain> {
         match self.role {
-            ColumnRole::Measure { grain, .. } | ColumnRole::Attribute { grain } => Some(grain),
-            ColumnRole::Key | ColumnRole::Dimension { .. } => None,
+            ColumnRole::Measure { grain, .. } | ColumnRole::Attribute { grain: Some(grain) } => {
+                Some(grain)
+            }
+            ColumnRole::Attribute { grain: None }
+            | ColumnRole::Key
+            | ColumnRole::Dimension { .. }
+            | ColumnRole::Axis
+            | ColumnRole::Value => None,
         }
     }
 
