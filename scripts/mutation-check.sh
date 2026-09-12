@@ -6417,6 +6417,31 @@ run_mutation "objectdialog: a Key or Attribute column is offered as a dimension"
   geode-shell \
   key_and_attribute_columns_are_not_offered
 
+# ---- Dialog text sync, Task 1: the pure decision and the effective query ----
+#
+# §16.3: a capture must read raw keystrokes off the shell root. Dropping the
+# `listening` override focuses the Input mid-capture and the captured `a`
+# becomes text — the keybinding dialog's original modal defect.
+run_mutation "dialogmode: listening overrides the mode for focus" \
+  crates/geode-shell/src/dialogmode.rs \
+  '    if listening {
+        return FocusTarget::Shell;
+    }' \
+  '    if false {
+        return FocusTarget::Shell;
+    }' \
+  geode-shell \
+  focus_follows_the_mode_unless_a_capture_is_listening
+
+# §16.2: the read half of the one-way mirror. Reading self.query in the edit
+# stage paints (and, after Task 3, WRITES into the Input) the browse query.
+run_mutation "objectdialog: effective_query reads the edit stage's draft" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),' \
+  '            (Stage::Edit { .. }, Some(_draft)) => self.query.as_str(),' \
+  geode-shell \
+  the_effective_query_is_the_stages_own
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

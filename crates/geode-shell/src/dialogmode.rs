@@ -59,6 +59,32 @@ pub fn escape_step(mode: DialogMode, query_is_empty: bool, has_previous_stage: b
     }
 }
 
+/// Who holds the keyboard while a modal dialog is open (spec §16.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusTarget {
+    /// The shared filter `Input`: printable keys are text.
+    Input,
+    /// The shell root: printable keys reach the dialog's `on_key` as verbs
+    /// (normal mode) or as raw captured keystrokes (listening).
+    Shell,
+}
+
+/// The one decision `dialog::sync_dialog_text` applies. `listening` is the
+/// keybinding dialog's capture state and wins over the mode: a capture
+/// must see every keystroke raw, and a focused `Input` would eat the
+/// printable ones as text before the dialog's handler ran.
+// Not called yet — `dialog::sync_dialog_text` (Task 2) is the caller.
+#[allow(dead_code)]
+pub fn focus_target(mode: DialogMode, listening: bool) -> FocusTarget {
+    if listening {
+        return FocusTarget::Shell;
+    }
+    match mode {
+        DialogMode::Filter => FocusTarget::Input,
+        DialogMode::Normal => FocusTarget::Shell,
+    }
+}
+
 /// What a keystroke means in normal mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormalCommand {
@@ -227,5 +253,14 @@ mod tests {
         assert_eq!(normal_command(&bare("r")), Some(NormalCommand::Verb('r')));
         assert_eq!(normal_command(&bare("escape")), None);
         assert_eq!(normal_command(&ks("s", Modifiers::CTRL)), None);
+    }
+
+    #[test]
+    fn focus_follows_the_mode_unless_a_capture_is_listening() {
+        assert_eq!(focus_target(DialogMode::Filter, false), FocusTarget::Input);
+        assert_eq!(focus_target(DialogMode::Normal, false), FocusTarget::Shell);
+        // A capture reads raw keystrokes off the shell root whatever the mode says.
+        assert_eq!(focus_target(DialogMode::Filter, true), FocusTarget::Shell);
+        assert_eq!(focus_target(DialogMode::Normal, true), FocusTarget::Shell);
     }
 }

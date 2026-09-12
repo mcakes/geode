@@ -657,9 +657,9 @@ impl Confirm {
             // still there — but the write forks this one into the user
             // layer, exactly like `Fork`'s own consequence, and `r`
             // reverts it same as any other fork.
-            Confirm::Overwrite { forks: true } => format!(
-                "Replace '{name}' with the frame's current scope? 'r' reverts."
-            ),
+            Confirm::Overwrite { forks: true } => {
+                format!("Replace '{name}' with the frame's current scope? 'r' reverts.")
+            }
         }
     }
 }
@@ -1567,11 +1567,12 @@ impl ObjectDialogState {
         self.notice = None;
     }
 
-    /// Replace the query — the pure half of the `InputEvent::Change`
-    /// subscription. Resets the selection to the top match (after an
-    /// edit the old index points at an unrelated row) and drops the
-    /// notice, which named a row the re-ranked list has just moved the
-    /// selection off.
+    /// Replace the query — the **write half** of the one-way mirror
+    /// [`Self::effective_query`] reads back
+    /// (the pure half of the `InputEvent::Change` subscription). Resets
+    /// the selection to the top match (after an edit the old index
+    /// points at an unrelated row) and drops the notice, which named a
+    /// row the re-ranked list has just moved the selection off.
     ///
     /// The mirror is **one-way per stage**, never both at once: in
     /// [`Stage::Edit`] the shared `Input` is the edit stage's own filter
@@ -1597,6 +1598,19 @@ impl ObjectDialogState {
             self.selected = 0;
         }
         self.notice = None;
+    }
+
+    /// The query the open stage is filtering by — the draft's in
+    /// `Stage::Edit`, the state's own otherwise (spec §16.2). The **read
+    /// half** of [`Self::set_query`]'s one-way mirror: `dialog::
+    /// sync_dialog_text` (Task 2) writes the shared `Input` from this, so
+    /// a query left sitting in the other stage's slot can never reach
+    /// the screen.
+    pub fn effective_query(&self) -> &str {
+        match (&self.stage, self.draft.as_ref()) {
+            (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),
+            _ => self.query.as_str(),
+        }
     }
 
     /// `n`: the browse list stays, the filter row becomes the name field.
@@ -2013,6 +2027,35 @@ mod tests {
         assert_eq!(state.query, "tr");
         assert_eq!(state.selected, 0);
         assert!(state.notice.is_none());
+    }
+
+    /// `effective_query` is the read half of `set_query`'s one-way
+    /// mirror (§16.2): each stage's own keystrokes land in — and are
+    /// read back from — that stage's own slot, never the other one.
+    #[test]
+    fn the_effective_query_is_the_stages_own() {
+        let config = config_from(&[(
+            Layer::Desk,
+            "views",
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+        )]);
+        let mut state = ObjectDialogState::new(Domain::Views);
+        state.set_query("br".to_string());
+        assert_eq!(state.effective_query(), "br");
+        state.enter_edit(&config, "tree"); // pub(in objectdialog) — this test is inside the module tree
+        assert_eq!(
+            state.effective_query(),
+            "",
+            "entering the edit stage starts with no filter"
+        );
+        state.set_query("np".to_string());
+        assert_eq!(state.effective_query(), "np");
+        assert_eq!(
+            state.query, "",
+            "the browse query is untouched by an edit-stage keystroke"
+        );
+        state.leave_edit();
+        assert_eq!(state.effective_query(), "");
     }
 
     /// The filter sees the name and the summary — what the row paints —
