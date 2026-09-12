@@ -151,6 +151,8 @@ context = "blotter && mode == normal"
 "pageup" = "blotter::page_up_full"
 "home" = "blotter::first_col"
 "end" = "blotter::last_col"
+"^" = "blotter::first_col"
+"$" = "blotter::last_col"
 "z o" = "blotter::expand"
 "z c" = "blotter::collapse"
 "z a" = "blotter::toggle"
@@ -903,6 +905,34 @@ mod tests {
                 assert_eq!(action.0, "frame::slot_1");
             }
             other => panic!("expected a match, got {other:?}"),
+        }
+    }
+
+    /// `^`/`$` are vim's line-start/line-end motions, bound beside
+    /// `home`/`end` as the column-extreme pair (user ruling 2026-09-12: a
+    /// general navigation grammar, the blotter its first surface). Both
+    /// are shifted punctuation on a US layout, so they bind as the bare
+    /// character with no `shift` modifier — the same shape `:` and `[`
+    /// already rely on (see the shift+punctuation note on
+    /// `BUILTIN_KEYMAP`'s doc comment).
+    #[test]
+    fn caret_and_dollar_resolve_to_the_column_extremes_in_the_blotter() {
+        let mut reg = ActionRegistry::default();
+        register_builtin_actions(&mut reg);
+        let doc = LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap();
+        let (keymap, diags) = build_keymap(&[doc], default_mod(), &reg);
+        assert!(diags.is_empty(), "{diags:?}");
+        let stack = [
+            KeyContext::new("workspace"),
+            KeyContext::new("tile"),
+            KeyContext::new("blotter").pair("mode", "normal").counts(),
+        ];
+        for (spec, expected) in [("^", "blotter::first_col"), ("$", "blotter::last_col")] {
+            let keystroke = parse_keystroke(spec, default_mod()).unwrap();
+            match Matcher::default().press(&keymap, keystroke, &stack) {
+                MatchResult::Matched { action, .. } => assert_eq!(action.0, expected, "{spec}"),
+                other => panic!("{spec}: expected a match, got {other:?}"),
+            }
         }
     }
 

@@ -30,7 +30,13 @@
 //! their own `page_down`/`page_up` (±5) and `page_down_full`/`page_up_full`
 //! (±10) actions in `defaults::BUILTIN_KEYMAP`, with `pagedown`/`pageup`
 //! as aliases of the ±10 pair (`listfilter`'s reasoning: free keys, and
-//! what a hand reaching for "a screenful" finds first).
+//! what a hand reaching for "a screenful" finds first). The same grammar
+//! (user ruling 2026-09-12) gives a surface with *columns* `^`/`$` for
+//! the first and last column, beside `home`/`end` — the blotter's
+//! `first_col`/`last_col` today; any later columnar tile binds the same
+//! four keys to the same pair. This module has no column axis and so
+//! carries none of it; the convention lives here only so it is written
+//! down once, next to the row grammar it extends.
 //! - `g` `g` (the bare `g` key, pressed twice) — jump to the top of the
 //!   list ([`NavCommand::Top`]).
 //! - `shift+g` (vim's `G`) — jump to the bottom of the list

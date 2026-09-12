@@ -692,8 +692,9 @@ fires for a `views`/`dimensions` reload — observed with `observe_global`
 so a settings-row step repaints on that keystroke. The gutter's text is
 built per cached window and re-derived only when the window, the cursor
 row or the mode changes (`BlotterDelegate::ensure_numbers`'s stamp),
-never per frame. `h`/`l` move the column, also counted; `home`/`end` go to
-the first and last. The cursor's *path* is remembered across requery so a
+never per frame. `h`/`l` move the column, also counted; `home`/`end` and
+vim's `^`/`$` go to the first and last (the column half of the general
+navigation grammar, user ruling 2026-09-12). The cursor's *path* is remembered across requery so a
 new snapshot puts the cursor back on the same node, falling back to a
 clamped index when the node is gone.
 
