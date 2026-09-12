@@ -2478,7 +2478,7 @@ siblings already use — no default binding, §10). Every field is
 | Field | Kind | Spelling / rule |
 |---|---|---|
 | `dataset` | `Choice` | The schema's datasets, sorted; the object's own value kept as an option when the schema lacks it (Views' rule, for the same reason). |
-| `paths` | `Text` | The globs on one line separated by `;`, surrounding whitespace trimmed. Round-trips the reader's array exactly. `;` because it is illegal in a Windows path and unused in globs, where a space is legal in both. |
+| `paths` | `Text` | The globs on one line separated by `;`, surrounding whitespace trimmed. Round-trips the reader's array exactly. `;` is not reserved by either platform's filesystem (NTFS reserves only `< > : " / \ | ? *`) — the choice is unambiguous only in the common case: it is rare inside a glob and never one of glob's own metacharacters, while a space is legal in a path on both platforms and so cannot separate them. A glob that needs a literal `;` cannot be expressed in this field. |
 | `readiness` | `Choice` | `sentinel`, `stable_mtime`. |
 | `stable_polls` (`Stable polls`) | `Number` | `1..=100`; the `polls` of `readiness = { stable_mtime = N }`, seeded from the object or else the reader's default. Shown and steppable always, written only when `readiness` is `stable_mtime`. |
 | `priority` | `Choice` | `latest_risk`, `latest_other`, `backfill`. |
@@ -2865,12 +2865,53 @@ know that the design did not say.
   same badge, and a note under the header
   (`objectdialog-drift-note`) naming `r`, never `d`.
 
+**Final review fix wave (2026-09-12).** The final whole-branch review
+found two Importants and ten Minors; one fix wave took the two
+Importants plus six of the Minors (the rest, and the review's own
+CAN-WAIT triage rows, are folded into **Deferred** below). Fixed:
+`Draft::step_selected`'s `Number` arm now refuses a step on a value
+outside `[min, max]` rather than clamping it to the bound (Sources'
+`stable_mtime` reader accepts any positive integer while the dialog's
+own picker caps display at 100, so a value seeded from the file could
+sit outside the dialog's range; one `shift+space` used to silently
+write the bound — a number the trader never typed — against §19.1's
+refuse-don't-clamp ruling; this also resolves the "`polls` above 100 is
+silently clamped" item the Deferred list below used to carry).
+`ShellView::config_write_error`'s field doc now says what the field
+actually holds — a failed-and-rolled-back write OR a rejected-merge
+status, cleared only by the next flush memory accepts, not merely by
+"a later write succeeding". The plain-field label in `render.rs` no
+longer panics on a `TextEntry.row` that is not `EditRow::Field` (the
+doc on `TextEntry.row` already anticipates an item-level field, Part
+2c); it falls back to `Draft::row_label`. The `batch_pattern` reader
+diagnostic no longer double-quotes the whole underlying message, and
+the no-capture case's "(every file's batch would be its whole stem)"
+explainer lives in `check_batch_pattern` itself rather than the caller
+that wrapped it. `PATH_SEPARATOR`'s doc and this section's own `paths`
+row no longer claim `;` is illegal on Windows (NTFS reserves only
+`< > : " / \ | ? *`); both now say the true reason — rare inside a
+glob, never one of glob's own metacharacters, unlike a space, which is
+legal in a path on both platforms. `commit_edit`'s stale-removals-
+before-the-fork's-own-entry order (§19.6, above) is now commented where
+it is decided and covered by a test that seeds a stale twin for the
+object about to be forked. Four §19.7 harness entries this section's
+harness count already included by number but not by content are now
+real: `parse_text`'s duration and `batch_pattern` arms, `row_for_path`'s
+unmatched-diagnostic case (which gained the covering assertion it
+lacked), and `removal_edits`'s own overrides-entry removal. Tidied
+alongside: the `let edits = ..; let mut edits = edits;` rebinding in
+`commit_edit` is one `let mut`; `override_key` has a doc comment;
+`dialog::state_pill`'s doc names `edit_pill` as its third caller;
+`Draft::begin_text_entry`'s doc says its `Step::Changed` means "the
+field opened"; `sources::fields`' readiness match dropped its dead
+first disjunct (`v.as_str() == Some("sentinel") ||`, redundant with
+`v.is_str()`); and the duration refusal in `sources::parse_text` now
+names the field label ("Poll interval", "Pending timeout"), matching
+how the `Number` refusals name theirs.
+
 **Deferred** — each is a review Minor taken and recorded rather than
 fixed, so the next branch finds them:
 
-- `dialog::state_pill`'s doc names two callers; `edit_pill` makes three.
-- `Draft::begin_text_entry`'s own doc does not say its `Step::Changed`
-  means "the field opened" (this section does).
 - `press_verb`'s `writable()` gate has no covering test;
   `schema::validate`'s "this dataset alone" isolation has no
   second-dataset fixture and no harness entry; `schema.rs`'s test module
@@ -2878,33 +2919,27 @@ fixed, so the next branch finds them:
 - Sources' prefix-in-filter and its two-run highlight split are
   untested (no window test types a query on that list);
   `seed_dataset_under_cursor` re-derives the rows on every browse
-  keystroke rather than only on `n`; a `stable_mtime` `polls` above 100
-  is silently clamped by a `shift+space` step (the reader accepts any
-  positive value, the dialog caps at 100); `naming_dataset`'s doc says
+  keystroke rather than only on `n`; `naming_dataset`'s doc says
   "consumed by `create_from_name`" though only `cancel_naming` clears
-  it; the readiness match has a dead first disjunct
-  (`v.as_str() == Some("sentinel") || v.is_str()`); a duration refusal
-  names the raw key where `Number` refusals name the label.
+  it.
 - `Display`'s ` (at <path>)` suffix has no unit test beside
   `config/mod.rs`'s four `Display` tests; the Error and Warning glyph
   arms are identical but for the colour.
-- `ShellView::config_write_error`'s field doc still says "failed and
-  rolled back" / "cleared once a later write succeeds", which the
-  rejected-merge status contradicts; `hot_reload.rs`'s `Applied`-arm
-  comment still says `Diagnostic` has no `Display` impl; `bridge.rs`
-  states the §19.6 rationale twice; a test `.unwrap()`s
-  `config_write_error` where `.expect(..)` would name the behaviour; no
-  test covers the clearing direction (a rejected flush then an accepted
-  one).
-- `derive_rows` clones every non-user object's whole `toml::Value` per
-  render where `Option<&toml::Value>` would do; the stale-then-entry
-  insert order is load-bearing but uncommented and untested; "shadow =
-  the last non-user layer" has two implementations (`shadow_of` and
-  `derive_rows`'s accumulator) and only `shadow_of`'s has a harness
-  entry; no test asserts a `drifted` badge PRESENT or reads
-  `objectdialog-drift-note`; the drift note says "the desk's copy" while
-  `shadowed_layer` may be `builtin` (it is recorded and unused);
-  `override_key` lacks a doc comment.
+- `hot_reload.rs`'s `Applied`-arm comment still says `Diagnostic` has no
+  `Display` impl; `bridge.rs` states the §19.6 rationale twice; a test
+  `.unwrap()`s `config_write_error` where `.expect(..)` would name the
+  behaviour; no test covers the clearing direction (a rejected flush
+  then an accepted one).
+- `row_for_path` allocates a field-key `format!` per field per call
+  (twice per render); `derive_rows` clones every non-user object's whole
+  `toml::Value` per render where `Option<&toml::Value>` would do;
+  "shadow = the last non-user layer" has two implementations
+  (`shadow_of` and `derive_rows`'s accumulator) and only `shadow_of`'s
+  has a harness entry; no test asserts a `drifted` badge PRESENT or
+  reads `objectdialog-drift-note`; the drift note says "the desk's copy"
+  while `shadowed_layer` may be `builtin` (it is recorded and unused);
+  the Scopes reader scrapes its column name out of a diagnostic
+  message rather than carrying it structurally.
 
 **Display checks are pending on the user's screen**, as §18.6's are: no
 sandbox in this branch painted a window. Unverified pixel-for-pixel: the
@@ -2915,11 +2950,12 @@ the browse row and the edit header, and the drift note under the header.
 Everything else in this section is verified against window-test
 assertions, unit tests, the harness, and the code directly.
 
-**Harness.** 644 entries (619 at the branch point, 25 added here, none
-removed, plus six pre-existing entries re-anchored where these tasks
-moved their source lines — `--anchors-only` caught every one of those
-before commit, as it is meant to). `--anchors-only` reports 0 stale,
-0 ambiguous.
+**Harness.** 650 entries (619 at the branch point, 25 added over the
+seven tasks, 6 more added by the final review's fix wave above, none
+removed, plus several pre-existing entries re-anchored where these
+tasks — and the fix wave — moved their source lines; `--anchors-only`
+caught every one of those before commit, as it is meant to).
+`--anchors-only` reports 0 stale, 0 ambiguous.
 
 ## 20. Part 2c — direction only (2026-09-12)
 

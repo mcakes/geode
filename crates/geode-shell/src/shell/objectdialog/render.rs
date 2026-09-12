@@ -2996,10 +2996,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         let label = if entry.completions {
             format!("slot {} · chain", draft.name)
         } else {
-            let EditRow::Field(index) = entry.row else {
-                unreachable!("a plain text field only ever opens on a Field row")
-            };
-            format!("{} · {}", draft.name, draft.fields[index].label)
+            // `TextEntry.row`'s own doc anticipates an item-level field
+            // (a column's width, Part 2c) as one more `EditRow` arm, not
+            // a second mechanism — no adapter opens one today, but the
+            // render thread must not assume that stays true. `Field`
+            // still gets its field label; any other row falls back to
+            // `Draft::row_label` rather than panicking.
+            match entry.row {
+                EditRow::Field(index) => {
+                    format!("{} · {}", draft.name, draft.fields[index].label)
+                }
+                other => format!("{} · {}", draft.name, draft.row_label(other)),
+            }
         };
         dialog::name_row(&shell.dialog_input, &label, cx)
     } else {

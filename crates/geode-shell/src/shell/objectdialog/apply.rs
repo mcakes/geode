@@ -473,15 +473,22 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     if let Some(notice) = blocking_diagnostic(shell) {
         return Some(notice);
     }
-    let edits = edits_for(shell);
+    let mut edits = edits_for(shell);
     if edits.is_empty() {
         return None;
     }
-    let mut edits = edits;
     // §19.6: a Doc write onto an object the user layer does not own is a
     // fork; record what it shadows, in THIS batch, so the entry cannot
     // land without the fork nor before it. Stale entries ride along as
     // removals — the one moment the sidecar is being written anyway.
+    //
+    // The stale removals are inserted BEFORE the fork's own entry below,
+    // and that order is load-bearing: at fork time the user layer does
+    // not yet hold the object, so `stale_override_keys` can list the
+    // very key being written here as stale. Both inserts share one
+    // `BTreeMap` key, so whichever runs second wins — the fresh `Some`
+    // entry below must be that one, not the stale `None` clearing it
+    // right back out.
     let domain = shell.object_dialog.as_ref().map(|s| s.domain);
     if let Some(domain) = domain
         && would_fork(shell, domain)

@@ -815,7 +815,8 @@ pub(crate) fn edit_pill(cx: &App) -> AnyElement {
     state_pill("edit", true, cx)
 }
 
-/// The one pill both [`mode_pill`] and [`chain_pill`] paint: `typing`
+/// The one pill [`mode_pill`], [`chain_pill`] and [`edit_pill`] all
+/// paint: `typing`
 /// picks the `primary` pair (a focused text field owns the keys) over the
 /// muted resting pair. The label rides in the selector so a test can
 /// assert which state painted.

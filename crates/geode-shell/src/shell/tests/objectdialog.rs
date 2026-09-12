@@ -696,6 +696,74 @@ fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestApp
     let _ = shell;
 }
 
+/// §19.6, MINOR 10: `commit_edit`'s fork block inserts the stale
+/// removals into the batch BEFORE its own fresh entry, and that order is
+/// load-bearing. At fork time the user layer does not yet own the
+/// object, so `stale_override_keys` reports the very key this fork is
+/// about to write as stale — the ordinary case, not a rare collision.
+/// Both inserts share one `BTreeMap` key, so whichever runs second wins;
+/// this pins the fresh `Some` entry as the one that must.
+#[gpui::test]
+fn the_forks_own_entry_wins_over_its_stale_twin(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"book\"\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    // A pre-existing entry for the exact object about to be forked,
+    // describing an earlier (now-defunct) shadow — this IS the key
+    // `stale_override_keys` names stale, since the user layer's own
+    // `views` doc does not hold `tree` yet.
+    std::fs::write(
+        dir.path().join("overrides.toml"),
+        "[\"views.tree\"]\nshadowed_layer = \"builtin\"\n\
+         shadowed_text = \"dataset = \\\"stale\\\"\"\n",
+    )
+    .unwrap();
+    let mut services = test_services();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space"); // dataset: risk → vol
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter"); // fork
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(
+        overrides.contains("[\"views.tree\"]"),
+        "the fork's own entry must survive being listed alongside its \
+         own stale twin: {overrides}"
+    );
+    assert!(
+        overrides.contains("dataset = \"risk\""),
+        "the surviving entry must be the fresh shadow (risk), not the \
+         stale text it replaced: {overrides}"
+    );
+    assert!(
+        !overrides.contains("\"stale\""),
+        "the old shadowed text must be gone: {overrides}"
+    );
+    let _ = shell;
+}
+
 /// **A draft whose own reader rejects it must not reach the batch.**
 ///
 /// Spec §7.1's no-carry-forward rule means `reload::decide` rejects any

@@ -7673,6 +7673,93 @@ run_mutation "objectdialog: shadow_of skips the user layer" \
   geode-shell \
   drifted_needs_an_override_entry_and_a_changed_shadow
 
+# ---- Final review's fix wave (2026-09-12, §19.8) -----------------------
+
+# The final whole-branch review's IMPORTANT 1: a `Number` outside its own
+# [min, max] (Sources' `stable_mtime` reader accepts any positive integer;
+# the dialog's own picker caps display at 100) used to be CLAMPED to the
+# bound by one `shift+space` — a value the trader never typed. Removing
+# the guard restores exactly that defect.
+run_mutation "objectdialog: a step on an out-of-range number is refused not clamped" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                        if *value < *min || *value > *max {' \
+  '                        if false {' \
+  geode-shell \
+  a_number_outside_its_range_is_refused_not_clamped_by_a_step
+
+# §19.7: `parse_text`'s duration arm never got a harness entry of its own.
+run_mutation "sources: parse_text refuses a bad duration" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '                Err(format!("{label}: a number and a unit, like 45s, 5m or 2h"))' \
+  '                let _ = label;
+                Ok(text.to_string())' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.7: nor did the `batch_pattern` arm beside it.
+run_mutation "sources: parse_text refuses a bad batch pattern" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '"batch_pattern" => check_batch_pattern(text).map(|()| text.to_string()),' \
+  '"batch_pattern" => Ok(text.to_string()),' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.5, §19.7: a diagnostic path whose prefix names this object but
+# whose field key matches nothing must stay on the header, not land on
+# whichever field happens to be first — the one branch of `row_for_path`
+# no existing assertion reached (the review's MINOR 11c; the covering
+# assertion was added in the same commit as this entry).
+run_mutation "objectdialog: an unmatched diagnostic stays on the header" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                _ => Some(EditRow::Field(i)),
+            }
+        })
+    }' \
+  '                _ => Some(EditRow::Field(i)),
+            }
+        })
+        .or(Some(EditRow::Field(0)))
+    }' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.6, §19.7: `d`/`r`'s own overrides-entry removal (`render::
+# removal_edits`), distinct from the fork's own insert above.
+run_mutation "objectdialog: revert removes the overrides entry" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  '        if false && super::has_override_entry(&shell.services.config, domain.doc(), &name) {' \
+  geode-shell \
+  a_fork_records_an_override_entry_and_revert_removes_it
+
+# §19.6, MINOR 10: the stale removals are inserted BEFORE the fork's own
+# entry, and that order is load-bearing — at fork time the user layer
+# does not yet own the object, so `stale_override_keys` names the very
+# key this fork is about to write as stale, and both inserts share one
+# `BTreeMap` key. Swapping the order makes the stale `None` win instead
+# of the fresh `Some`, which this entry's fixture (a stale twin already
+# on disk for the object about to be forked) makes visible.
+run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        let key = super::override_key(domain.doc(), &draft.name);
+        for stale in super::stale_override_keys(&shell.services.config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }
+        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );' \
+  '        let key = super::override_key(domain.doc(), &draft.name);
+        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );
+        for stale in super::stale_override_keys(&shell.services.config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }' \
+  geode-shell \
+  the_forks_own_entry_wins_over_its_stale_twin
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

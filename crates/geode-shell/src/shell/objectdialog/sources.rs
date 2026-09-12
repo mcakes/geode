@@ -27,8 +27,13 @@ use geode_core::source_config::{
 use std::time::Duration;
 
 pub const DOC: &str = "sources";
-/// Between globs in the `paths` text: illegal in a Windows path and
-/// unused in globs, where a space is legal in both (§19.3).
+/// Between globs in the `paths` text (§19.3). `;` is not reserved by
+/// either platform's filesystem — NTFS's own reserved set is `< > : " /
+/// \ | ? *` — the choice is unambiguous only in the common case: it is
+/// rare inside a glob and never one of glob's own metacharacters, while
+/// a space is legal in a path on both platforms and so cannot separate
+/// them. A glob that needs a literal `;` cannot be expressed in this
+/// field.
 pub const PATH_SEPARATOR: char = ';';
 
 const READINESS: [&str; 2] = ["sentinel", "stable_mtime"];
@@ -129,7 +134,12 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .unwrap_or_default();
 
     let (readiness, polls) = match table.and_then(|t| t.get("readiness")) {
-        Some(v) if v.as_str() == Some("sentinel") || v.is_str() => ("sentinel", 3),
+        // Any string reads as `sentinel` (the reader itself only ever
+        // writes the literal `"sentinel"`, but a hand-edited file could
+        // hold something else, and there is no third string form to
+        // distinguish it from) — a bare `as_str() == Some("sentinel")`
+        // check bought nothing `is_str()` alone doesn't already cover.
+        Some(v) if v.is_str() => ("sentinel", 3),
         Some(v) => match v
             .as_table()
             .and_then(|t| t.get("stable_mtime"))
@@ -232,7 +242,19 @@ pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
     match key {
         "poll_interval" | "pending_timeout" => match parse_duration(text) {
             Some(_) => Ok(text.to_string()),
-            None => Err(format!("{key}: a number and a unit, like 45s, 5m or 2h")),
+            None => {
+                // Named like the `Number` refusals name their field's
+                // label, not the raw config key — `parse_text` only has
+                // the key, so the two Sources duration fields are
+                // spelled out here rather than threading a label
+                // through the `Domain::parse_text` signature for one
+                // caller.
+                let label = match key {
+                    "poll_interval" => "Poll interval",
+                    _ => "Pending timeout",
+                };
+                Err(format!("{label}: a number and a unit, like 45s, 5m or 2h"))
+            }
         },
         "batch_pattern" if text.is_empty() => Ok(String::new()),
         "batch_pattern" => check_batch_pattern(text).map(|()| text.to_string()),

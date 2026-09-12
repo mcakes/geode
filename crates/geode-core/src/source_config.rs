@@ -113,7 +113,11 @@ pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
     match regex::Regex::new(pattern) {
         Err(e) => Err(format!("batch_pattern does not compile: {e}")),
         Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Ok(()),
-        Ok(_) => Err("batch_pattern needs a named `batch` capture, like (?P<batch>.+)".to_string()),
+        Ok(_) => Err(
+            "batch_pattern needs a named `batch` capture, like (?P<batch>.+) \
+                      (every file's batch would be its whole stem)"
+                .to_string(),
+        ),
     }
 }
 
@@ -265,7 +269,7 @@ impl SourceSpec {
                             Severity::Warning,
                             name,
                             Some("batch_pattern"),
-                            format!("'{e}'; ignoring it"),
+                            format!("{e}; ignoring it"),
                         ));
                         None
                     }

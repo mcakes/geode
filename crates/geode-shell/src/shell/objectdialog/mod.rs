@@ -404,6 +404,8 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
 /// atomic doc's reader treats an unknown key as a diagnostic.
 pub const OVERRIDES_DOC: &str = "overrides";
 
+/// The sidecar's own key for `object` in `doc` — `"<doc>.<object>"`, the
+/// join every reader and writer of `OVERRIDES_DOC` uses to name an entry.
 pub fn override_key(doc: &str, object: &str) -> String {
     format!("{doc}.{object}")
 }
@@ -1337,6 +1339,12 @@ impl Draft {
     /// a moment ago, so `row`'s position there can differ from
     /// `self.selected`'s old value — that is exactly what leaves the
     /// edited row unhighlighted if this is skipped.
+    ///
+    /// The `Step::Changed` this returns means only that the field
+    /// OPENED, never that a value changed — nothing routes it into
+    /// [`Self::revalidate`] or `apply::commit_or_confirm`, which read a
+    /// step from a tick or a text commit, not from opening the field
+    /// that will produce one.
     pub fn begin_text_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
@@ -1464,45 +1472,63 @@ impl Draft {
             return Step::Inert;
         };
         match row {
-            EditRow::Field(i) => match &mut self.fields[i].kind {
-                // A bool has only two values, so either direction is the
-                // same flip.
-                FieldKind::Bool(b) => {
-                    *b = !*b;
-                    Step::Changed
-                }
-                // Steps and wraps in both directions, which is what
-                // makes the option just behind the current one reachable
-                // in one key rather than the long way round —
-                // `settings_view::step`'s own forward behaviour, mirrored
-                // for `shift+space`.
-                FieldKind::Choice { options, selected } => {
-                    if options.len() < 2 {
-                        return Step::Inert;
+            EditRow::Field(i) => {
+                let label = self.fields[i].label.clone();
+                match &mut self.fields[i].kind {
+                    // A bool has only two values, so either direction is the
+                    // same flip.
+                    FieldKind::Bool(b) => {
+                        *b = !*b;
+                        Step::Changed
                     }
-                    *selected = match direction {
-                        StepDirection::Forward => (*selected + 1) % options.len(),
-                        StepDirection::Backward => (*selected + options.len() - 1) % options.len(),
-                    };
-                    Step::Changed
-                }
-                FieldKind::Number { value, min, max } => {
-                    match direction {
-                        StepDirection::Forward if *value >= *max => return Step::Inert,
-                        StepDirection::Backward if *value <= *min => return Step::Inert,
-                        StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
-                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                    // Steps and wraps in both directions, which is what
+                    // makes the option just behind the current one reachable
+                    // in one key rather than the long way round —
+                    // `settings_view::step`'s own forward behaviour, mirrored
+                    // for `shift+space`.
+                    FieldKind::Choice { options, selected } => {
+                        if options.len() < 2 {
+                            return Step::Inert;
+                        }
+                        *selected = match direction {
+                            StepDirection::Forward => (*selected + 1) % options.len(),
+                            StepDirection::Backward => {
+                                (*selected + options.len() - 1) % options.len()
+                            }
+                        };
+                        Step::Changed
                     }
-                    Step::Changed
+                    FieldKind::Number { value, min, max } => {
+                        // A value outside [min, max] can arise entirely
+                        // outside this dialog's own bounds — Sources' reader
+                        // accepts any positive `stable_mtime` while the
+                        // dialog's picker caps display at 100 — and clamping
+                        // it here would write a number the trader never
+                        // typed. Refuse the step instead (§19.1's
+                        // refuse-don't-clamp ruling); `i` still reaches a
+                        // value in range.
+                        if *value < *min || *value > *max {
+                            return Step::Refused(format!(
+                                "{label} is {value}, outside {min}–{max} — type a value with i"
+                            ));
+                        }
+                        match direction {
+                            StepDirection::Forward if *value >= *max => return Step::Inert,
+                            StepDirection::Backward if *value <= *min => return Step::Inert,
+                            StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
+                            StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                        }
+                        Step::Changed
+                    }
+                    // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
+                    // needs a per-option row, neither of which Views has.
+                    // The `OrderedList` header row itself has no value —
+                    // its items, on the rows below, do.
+                    FieldKind::Text(_)
+                    | FieldKind::MultiChoice { .. }
+                    | FieldKind::OrderedList { .. } => Step::Inert,
                 }
-                // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
-                // needs a per-option row, neither of which Views has.
-                // The `OrderedList` header row itself has no value —
-                // its items, on the rows below, do.
-                FieldKind::Text(_)
-                | FieldKind::MultiChoice { .. }
-                | FieldKind::OrderedList { .. } => Step::Inert,
-            },
+            }
             EditRow::Available { field, item } => {
                 let FieldKind::OrderedList { items, available } = &mut self.fields[field].kind
                 else {
@@ -3202,6 +3228,40 @@ mod tests {
         );
     }
 
+    /// A value the dialog's own bounds never produced — Sources' reader
+    /// accepts any positive `stable_mtime` while the dialog caps display
+    /// at 100 — must be refused, not clamped: a clamp would write a
+    /// number (the bound) the trader never typed (§19.1's
+    /// refuse-don't-clamp ruling).
+    #[test]
+    fn a_number_outside_its_range_is_refused_not_clamped_by_a_step() {
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 500,
+            min: 1,
+            max: 100,
+        });
+        assert!(matches!(draft.toggle_selected(), Step::Refused(_)));
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 500,
+                min: 1,
+                max: 100
+            },
+            "forward must not clamp the value"
+        );
+        assert!(matches!(draft.toggle_selected_back(), Step::Refused(_)));
+        assert_eq!(
+            draft.fields[0].kind,
+            FieldKind::Number {
+                value: 500,
+                min: 1,
+                max: 100
+            },
+            "backward must not clamp the value either"
+        );
+    }
+
     /// `Choice` wraps forward; it must wrap backward symmetrically, or the
     /// last option is three keystrokes away and the first is unreachable
     /// from it.
@@ -4551,6 +4611,12 @@ mod tests {
         );
         assert_eq!(draft.row_for_path("views", "views.other.dataset"), None);
         assert_eq!(draft.row_for_path("views", "sources.tree.dataset"), None);
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.nonexistent"),
+            None,
+            "a field key nothing on this object has stays on the header, \
+             not on whichever field happens to be first"
+        );
     }
 
     /// §19.5, review round 1's Important-2 finding: a reader's diagnostic
