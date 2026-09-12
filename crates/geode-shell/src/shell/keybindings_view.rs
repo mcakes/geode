@@ -92,9 +92,14 @@
 //! capture could never read a plain `j`. That blur is the same switch
 //! normal mode holds open permanently; cancelling or committing hands
 //! focus back **to whichever surface the current mode owns** (the filter
-//! in `Filter`, the shell root in `Normal`) — hardcoding the filter here
-//! would silently focus it under a dialog still claiming to be in normal
-//! mode, and the next `d` would type a `d` instead of unbinding. While
+//! in `Filter`, the shell root in `Normal`). No site in this module
+//! performs either move: setting `listening` is the whole transition, and
+//! [`dialog::sync_dialog_text`] reconciles gpui to it (spec §16.1) from
+//! `dialogmode::focus_target`'s one decision, which reads `listening`
+//! ahead of the mode. That is why the surface a capture returns to can no
+//! longer be a hardcoded guess — a hardcoded filter would silently focus
+//! it under a dialog still claiming to be in normal mode, and the next
+//! `d` would type a `d` instead of unbinding. While
 //! listening — and, for the same reason, throughout normal mode — the
 //! filter row renders the query as static muted text rather than a live
 //! caret (see [`dialog::filter_row`]): a caret there would be a lie
@@ -150,8 +155,8 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable as _, FontWeight, HighlightStyle,
-    Hsla, MouseButton, StyledText, Window, div, px,
+    AnyElement, App, Context, Entity, FontWeight, HighlightStyle, Hsla, MouseButton, StyledText,
+    Window, div, px,
 };
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
@@ -318,9 +323,11 @@ pub struct KeybindingsState {
     /// the keystroke sequence captured so far, appended to by
     /// [`press_while_listening`] on every keystroke except a bare
     /// `enter`/`escape`. `None` in ordinary list-navigation mode. While
-    /// this is `Some`, `ShellView::dialog_input` is deliberately blurred
-    /// so raw keystrokes reach this dialog instead of the filter (see
-    /// the module doc's "Rebind capture" note).
+    /// this is `Some`, `ShellView::dialog_input` is blurred — not by any
+    /// site here, but because `dialogmode::focus_target` reads this ahead
+    /// of the mode and [`dialog::sync_dialog_text`] applies it — so raw
+    /// keystrokes reach this dialog instead of the filter (see the module
+    /// doc's "Rebind capture" note).
     pub listening: Option<Vec<Keystroke>>,
     /// The filter query, mirrored here from `ShellView::dialog_input` by
     /// the `InputEvent::Change` subscription in `ShellView::new`. The
@@ -332,12 +339,13 @@ pub struct KeybindingsState {
     /// Which mode this dialog is in
     /// (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`).
     /// `Normal` on open: bare letters are verbs, and `dialog_input` is
-    /// blurred to `shell.focus_handle` so they reach [`handle_key`] —
+    /// blurred in favour of the shell root so they reach [`handle_key`] —
     /// the same switch rebind capture has always performed, held open
-    /// rather than momentary. Every focus decision in this module (open,
-    /// capture cancel/commit, a selecting click) reads this rather than
-    /// assuming the filter, so the focused surface and the painted mode
-    /// can never disagree.
+    /// rather than momentary. This field is the whole truth about the
+    /// focused surface: nothing in this module moves focus itself, and
+    /// [`dialog::sync_dialog_text`] reconciles gpui to this after every
+    /// transition (spec §16.1), so the focused surface and the painted
+    /// mode cannot disagree.
     pub mode: DialogMode,
     /// A one-line report about the keystroke *just* pressed, painted in
     /// the footer above the hint row and cleared by the next normal-mode
@@ -545,12 +553,16 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Keyboard shortcuts",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        // `false`: this dialog opens in normal mode, so the filter must
-        // NOT own focus — a focused `Input` would eat every bare letter
-        // as text before [`handle_key`] could read it as a verb. The
-        // shared field is still emptied on open (`open_shell_dialog_
-        // with_key` does that unconditionally), so the first `/` session
-        // starts from the same blank slate `state.query` does.
+        // `false`: `focus_filter` is for a dialog with no mode, and this
+        // one has one. Its initial focus comes from `open_shell_dialog_
+        // with_key`'s own `dialog::sync_dialog_text` call instead (spec
+        // §16.1) — which is why `view.keybindings` is set *above*, before
+        // the door runs: the sync reads the `DialogMode::Normal` this
+        // dialog opens in and parks the keys on the shell root, so a bare
+        // letter reaches [`handle_key`] as a verb rather than being eaten
+        // as text by a focused `Input`. The shared field is still emptied
+        // on open (the door does that unconditionally), so the first `/`
+        // session starts from the same blank slate `state.query` does.
         false,
     );
     // §18.1: the mode pill now lives in the modal's own title row rather
@@ -608,9 +620,10 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
 /// 3. in [`DialogMode::Filter`] the pre-modal behaviour is unchanged,
 ///    with one addition: `escape` leaves filter mode (keeping the query)
 ///    instead of closing the dialog;
-/// 4. bare `enter` starts listening on the selected row and blurs the
-///    filter input, so the capture sees raw keystrokes (see the module
-///    doc's "Rebind capture") — reached as
+/// 4. bare `enter` starts listening on the selected row, which blurs the
+///    filter input — through [`dialog::sync_dialog_text`] on this
+///    handler's return, not here — so the capture sees raw keystrokes
+///    (see the module doc's "Rebind capture"). Reached as
 ///    [`NormalCommand::Commit`] in normal mode and directly in filter
 ///    mode;
 /// 5. [`listfilter::nav_command`] motions move the selection within the
@@ -638,15 +651,20 @@ pub(crate) fn key_chip(ks: &Keystroke, fg: Hsla, bg: Hsla) -> AnyElement {
 /// A commit that exactly re-captures the row's already-effective binding
 /// ([`is_same_key_recapture`]) skips [`spawn_rebind`] entirely — nothing
 /// would change on disk, so there's nothing to write.
+///
+/// Every arm here is a **pure mutation** of `KeybindingsState` (spec
+/// §16.1): none touches gpui focus or the shared `Input`'s text, which is
+/// why `window` is unused. `ShellView::handle_key_down` calls
+/// [`dialog::sync_dialog_text`] the moment this returns, claimed or not,
+/// and that is the one place either is moved.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
     let user_dir = shell.user_dir.clone();
-    let input = shell.dialog_input.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
     };
@@ -675,29 +693,18 @@ fn handle_key(
 
     if let Some(pending) = state.listening.as_mut() {
         let outcome = press_while_listening(pending, ks);
-        // Read before the arms below borrow `state` again — and read at
-        // all rather than assumed: capture is momentary, so ending it
-        // must return focus to whichever surface the *underlying* mode
-        // owns (see the module doc's "Rebind capture").
-        let back_to_filter = state.mode == DialogMode::Filter;
+        // Both ending arms are pure: clearing `listening` is the whole
+        // transition, and `dialog::sync_dialog_text` hands focus back to
+        // whichever surface the *underlying* mode owns (see the module
+        // doc's "Rebind capture") on this handler's return.
         match outcome {
             CaptureOutcome::Continue => {}
             CaptureOutcome::Cancel => {
                 state.listening = None;
-                if back_to_filter {
-                    input.read(cx).focus_handle(cx).focus(window, cx);
-                } else {
-                    shell.focus_handle.focus(window, cx);
-                }
             }
             CaptureOutcome::Commit(keystrokes) => {
                 state.listening = None;
                 let selected = state.selected;
-                if back_to_filter {
-                    input.read(cx).focus_handle(cx).focus(window, cx);
-                } else {
-                    shell.focus_handle.focus(window, cx);
-                }
                 if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row))
                     && !is_same_key_recapture(row, &keystrokes)
                 {
@@ -742,10 +749,9 @@ fn handle_key(
                     // cannot cover this path: `set_value` deliberately
                     // emits no `InputEvent::Change`.
                     shell.keybindings_scroll.scroll_to_item(0);
-                    // The `Input` owns the text; clearing only the
-                    // mirrored copy would leave the old query waiting in
-                    // the field for the next `/`.
-                    input.update(cx, |i, cx| i.set_value("", window, cx));
+                    // The `Input` is emptied by `dialog::sync_dialog_text`
+                    // on this handler's return — the mirrored copy is the
+                    // only thing this rung touches (spec §16.1).
                     cx.notify();
                     return true;
                 }
@@ -765,13 +771,14 @@ fn handle_key(
                 shell.keybindings_scroll.scroll_to_item(selected);
             }
             NormalCommand::EnterFilter => {
+                // The one switch, thrown the other way — a pure mutation:
+                // `dialog::sync_dialog_text` gives the filter focus on
+                // this handler's return, and printable keys become text
+                // again.
                 state.mode = DialogMode::Filter;
-                // The one switch, thrown the other way: the filter takes
-                // focus and printable keys become text again.
-                input.read(cx).focus_handle(cx).focus(window, cx);
             }
             NormalCommand::Commit => {
-                begin_capture(state, visible.len(), &shell.focus_handle, window, cx);
+                begin_capture(state, visible.len());
             }
             // The two write verbs (spec §8): `d` silences the selected
             // row's effective binding, `r` removes the user's override
@@ -801,18 +808,19 @@ fn handle_key(
         // The ladder's first rung ([`EscapeStep::LeaveFilter`]), which
         // must be claimed (`true`) — falling through would close the
         // whole dialog on the escape that was only meant to leave the
-        // search. The query stays applied; blurring is what makes the
-        // letters verbs again. Modifier-agnostic for the reason given at
-        // the normal-mode guard above: a `shift+escape` that skipped
-        // straight to the close rung would lose the user's filter.
+        // search. The query stays applied; the blur
+        // `dialog::sync_dialog_text` performs on this handler's return is
+        // what makes the letters verbs again. Modifier-agnostic for the
+        // reason given at the normal-mode guard above: a `shift+escape`
+        // that skipped straight to the close rung would lose the user's
+        // filter.
         state.mode = DialogMode::Normal;
-        shell.focus_handle.focus(window, cx);
         cx.notify();
         return true;
     }
 
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        begin_capture(state, visible.len(), &shell.focus_handle, window, cx);
+        begin_capture(state, visible.len());
         cx.notify();
         return true;
     }
@@ -853,13 +861,13 @@ fn handle_key(
 /// `enter` shares, and the one place the capture's focus contract is
 /// stated.
 ///
-/// Hands focus to the shell root so the capture sees raw keystrokes —
-/// with the filter focused, a bare letter would be consumed as text by
+/// Setting `listening` is the whole transition: `dialogmode::focus_target`
+/// reads it and hands the keys to the shell root whatever the mode says,
+/// so [`dialog::sync_dialog_text`] performs the blur on the handler's
+/// return. That is what lets the capture see raw keystrokes — with the
+/// filter focused, a bare letter would be consumed as text by
 /// gpui-component's `Input` before ever reaching [`handle_key`] (see the
-/// module doc's "Rebind capture"). It does that even from normal mode,
-/// where the field is already blurred: the contract is "the shell root
-/// owns the keys while capturing", asserted at every entrance rather than
-/// inferred from wherever focus happened to be.
+/// module doc's "Rebind capture").
 ///
 /// A no-op on an empty list — `enter` must not start listening on a row
 /// that is not there (the "no matches" line is not a row).
@@ -867,21 +875,14 @@ fn handle_key(
 /// Extracted rather than inlined twice because Task 4 edits the
 /// normal-mode `match` this is called from: two copies of a body that
 /// must stay identical would be a drift risk at exactly the wrong
-/// moment. Takes `state` and the focus handle separately rather than
-/// `&mut ShellView`, because every caller is already holding a `&mut`
-/// borrow of `shell.keybindings` when it gets here.
-fn begin_capture(
-    state: &mut KeybindingsState,
-    visible_len: usize,
-    shell_focus: &FocusHandle,
-    window: &mut Window,
-    cx: &mut App,
-) {
+/// moment. Takes `state` rather than `&mut ShellView`, because every
+/// caller is already holding a `&mut` borrow of `shell.keybindings` when
+/// it gets here.
+fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
     if visible_len == 0 {
         return;
     }
     state.listening = Some(Vec::new());
-    shell_focus.focus(window, cx);
 }
 
 /// Selection/listening logic for a real mouse click on the row for
@@ -889,13 +890,16 @@ fn begin_capture(
 /// list against freshly derived rows — rows are never cached, see the
 /// module doc). The gpui-facing wrapper around the pure
 /// [`click_selects_or_listens`], and it moves focus the same way
-/// [`handle_key`] does: a click that starts listening blurs the filter so
-/// the capture sees raw keystrokes, and one that only selects hands focus
-/// back to whichever surface the current mode owns — the filter in
-/// [`DialogMode::Filter`] so typing keeps filtering, the shell root in
-/// [`DialogMode::Normal`] so the letters stay verbs. Focusing the filter
-/// unconditionally here (as this did before the dialog went modal) would
-/// let a mouse click silently defeat normal mode.
+/// [`handle_key`] does — through [`dialog::sync_dialog_text`], the third
+/// of that function's three seams (spec §16.1), which a click needs
+/// because it never passes through the key path at all. A click that
+/// starts listening therefore blurs the filter so the capture sees raw
+/// keystrokes, and one that only selects hands focus back to whichever
+/// surface the current mode owns — the filter in [`DialogMode::Filter`]
+/// so typing keeps filtering, the shell root in [`DialogMode::Normal`] so
+/// the letters stay verbs. Focusing the filter unconditionally here (as
+/// this did before the dialog went modal) would let a mouse click
+/// silently defeat normal mode.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &ActionId,
@@ -903,7 +907,6 @@ fn on_row_clicked(
     cx: &mut Context<ShellView>,
 ) {
     let rows = derive_rows(&shell.services.registry, &shell.services.keymap);
-    let input = shell.dialog_input.clone();
     let Some(state) = shell.keybindings.as_mut() else {
         return;
     };
@@ -919,15 +922,9 @@ fn on_row_clicked(
         return;
     };
     click_selects_or_listens(state, ix);
-    let listening = state.listening.is_some();
-    let filter_mode = state.mode == DialogMode::Filter;
     let selected = state.selected;
     shell.keybindings_scroll.scroll_to_item(selected);
-    if listening || !filter_mode {
-        shell.focus_handle.focus(window, cx);
-    } else {
-        input.read(cx).focus_handle(cx).focus(window, cx);
-    }
+    dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
 

@@ -6442,6 +6442,32 @@ run_mutation "objectdialog: effective_query reads the edit stage's draft" \
   geode-shell \
   the_effective_query_is_the_stages_own
 
+# ---- Dialog text sync, Task 2: the reconcile itself ----
+#
+# §16.1, focus rule: the sync is the only thing that moves focus now — no
+# site in `keybindings_view` or `objectdialog::render`'s key path touches a
+# focus handle. Focusing the shell root in filter mode leaves every typed
+# character falling on the floor, and only a test that asserts on the
+# FOCUSED SURFACE between transitions can see it (a query assertion cannot:
+# the mirror is still whatever the Input last emitted).
+run_mutation "dialog: the sync focuses the Input in filter mode" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        FocusTarget::Input => input.read(cx).focus_handle(cx).focus(window, cx),' \
+  '        FocusTarget::Input => shell.focus_handle.focus(window, cx),' \
+  geode-shell \
+  focus_and_text_follow_the_pure_state_through_every_transition
+
+# §16.1, text rule: the Input is written from the effective query. Dropping
+# the write leaves a cleared query still painted in the field — the exact
+# "every clear had to be written twice, and one cut forgot one" defect the
+# amendment exists to remove. Every `state.query` assertion stays green.
+run_mutation "dialog: the sync writes the Input from the query" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        input.update(cx, |i, cx| i.set_value(query, window, cx));' \
+  '        let _ = query;' \
+  geode-shell \
+  focus_and_text_follow_the_pure_state_through_every_transition
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -1603,9 +1603,8 @@ impl ObjectDialogState {
     /// The query the open stage is filtering by — the draft's in
     /// `Stage::Edit`, the state's own otherwise (spec §16.2). The **read
     /// half** of [`Self::set_query`]'s one-way mirror: `dialog::
-    /// sync_dialog_text` (Task 2) writes the shared `Input` from this, so
-    /// a query left sitting in the other stage's slot can never reach
-    /// the screen.
+    /// sync_dialog_text` writes the shared `Input` from this, so a query
+    /// left sitting in the other stage's slot can never reach the screen.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
             (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),

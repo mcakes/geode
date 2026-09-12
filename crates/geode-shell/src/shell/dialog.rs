@@ -67,7 +67,7 @@ use gpui_component::scroll::ScrollableElement as _;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, box_shadow, h_flex, v_flex};
 
 use super::ShellView;
-use crate::dialogmode::DialogMode;
+use crate::dialogmode::{self, DialogMode, FocusTarget};
 use crate::keymap::Keystroke;
 
 /// A modal's content builder, called as `build(shell, window, cx)` — see
@@ -401,15 +401,18 @@ pub fn open_shell_dialog<F>(
 /// would otherwise be ranked against the *previous* dialog's leftover
 /// text the moment anything focused the field.
 ///
-/// `focus_filter` additionally focuses it — a *filter-first* dialog passes
-/// `true` (the first character typed must reach the filter, not fall on
-/// the floor), and `open_shell_dialog` passes `false`, as does the
-/// keybinding dialog since it went modal (`crate::dialogmode`): it opens
-/// in normal mode, where bare letters are verbs and the filter must not
-/// own them until `/` says so. A modal that passes `true` must actually
-/// render that input — [`filter_row`] — since gpui dispatches keys down
-/// the *rendered* focus path and would otherwise route them to the window
-/// root, past `ShellView`'s own key listener.
+/// `focus_filter` additionally focuses it, **for a dialog without a mode**
+/// — a *filter-first* dialog passes `true` (the first character typed must
+/// reach the filter, not fall on the floor), and `open_shell_dialog`
+/// passes `false`. A modal dialog's initial focus comes from
+/// [`sync_dialog_text`] instead, which this function calls unconditionally
+/// at the end (spec §16.1): the keybinding dialog and the object dialog
+/// both open in normal mode, where bare letters are verbs and the filter
+/// must not own them until `/` says so, and they pass `false` for the
+/// mode-less half of this parameter's job. A dialog that passes `true`
+/// must actually render that input — [`filter_row`] — since gpui
+/// dispatches keys down the *rendered* focus path and would otherwise
+/// route them to the window root, past `ShellView`'s own key listener.
 pub fn open_shell_dialog_with_key<F>(
     view: &mut ShellView,
     window: &mut Window,
@@ -465,8 +468,51 @@ pub fn open_shell_dialog_with_key<F>(
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
+    // The third of [`sync_dialog_text`]'s three seams (spec §16.1): a
+    // no-op for the mode-less dialogs the `focus_filter` branch above
+    // just served, and the *initial* focus for a modal one — both
+    // `keybindings_view::open` and `objectdialog::open` set their state
+    // before calling this door, so the sync sees the mode they open in.
+    sync_dialog_text(view, window, cx);
 
     cx.notify();
+}
+
+/// Make gpui agree with the open modal dialog's pure state (spec §16.1):
+/// focus goes where [`crate::dialogmode::focus_target`] says, and the
+/// shared `Input` holds the dialog's effective query.
+///
+/// Called at three seams and nowhere else — the tail of the modal branch
+/// in `ShellView::handle_key_down`, the tail of each row-click handler,
+/// and [`open_shell_dialog_with_key`] — so a transition site is a pure
+/// mutation and cannot forget the gpui half. A no-op when no modal
+/// dialog with a mode is open; the filter-only dialogs (settings, picker,
+/// as-of) keep their own open-time focus (§16.4).
+///
+/// The text write is guarded by a compare because `InputState::set_value`
+/// emits no `InputEvent::Change`: writing unconditionally would be
+/// harmless for the mirror but would move the caret on every keystroke.
+/// Focusing an already-focused handle is idempotent.
+pub(crate) fn sync_dialog_text(
+    shell: &mut ShellView,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    let (mode, listening, query) = if let Some(state) = shell.keybindings.as_ref() {
+        (state.mode, state.listening.is_some(), state.query.as_str())
+    } else if let Some(state) = shell.object_dialog.as_ref() {
+        (state.mode, false, state.effective_query())
+    } else {
+        return;
+    };
+    let input = shell.dialog_input.clone();
+    if input.read(cx).value().as_ref() != query {
+        input.update(cx, |i, cx| i.set_value(query, window, cx));
+    }
+    match dialogmode::focus_target(mode, listening) {
+        FocusTarget::Input => input.read(cx).focus_handle(cx).focus(window, cx),
+        FocusTarget::Shell => shell.focus_handle.focus(window, cx),
+    }
 }
 
 /// The drop shadow every floating overlay panel in this shell wears —

@@ -1605,3 +1605,56 @@ fn tab_in_normal_mode_leaves_focus_on_the_shell_root(cx: &mut gpui::TestAppConte
          reclaimed with it"
     );
 }
+
+/// §16.1: the sync, not the transition site, owns focus and text. Enter
+/// filter mode, type, leave it, clear the query, start a capture, cancel
+/// it — and after every step the focused surface and the Input's text
+/// are what the pure state says, with no site in `keybindings_view`
+/// touching either directly (Task 2 deletes them all; this test is what
+/// proves the sync reproduces them).
+#[gpui::test]
+fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "opens in normal mode: shell root holds the keys"
+    );
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    cx.simulate_input("pal");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape"); // leave filter, keep the query
+    cx.run_until_parked();
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+    let text = shell.read_with(&cx, |shell, cx| {
+        shell.dialog_input.read(cx).value().to_string()
+    });
+    assert_eq!(
+        text, "pal",
+        "leaving filter mode keeps the query in the field"
+    );
+    cx.simulate_keystrokes("escape"); // clear the query
+    cx.run_until_parked();
+    let text = shell.read_with(&cx, |shell, cx| {
+        shell.dialog_input.read(cx).value().to_string()
+    });
+    assert_eq!(
+        text, "",
+        "clearing the query empties the field through the sync"
+    );
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("pal");
+    cx.simulate_keystrokes("enter"); // begin a capture from filter mode
+    cx.run_until_parked();
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "listening: the shell root reads raw keys"
+    );
+    cx.simulate_keystrokes("escape"); // cancel the capture
+    cx.run_until_parked();
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "back to the mode underneath: filter"
+    );
+}

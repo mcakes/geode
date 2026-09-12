@@ -73,8 +73,6 @@ pub enum FocusTarget {
 /// keybinding dialog's capture state and wins over the mode: a capture
 /// must see every keystroke raw, and a focused `Input` would eat the
 /// printable ones as text before the dialog's handler ran.
-// Not called yet — `dialog::sync_dialog_text` (Task 2) is the caller.
-#[allow(dead_code)]
 pub fn focus_target(mode: DialogMode, listening: bool) -> FocusTarget {
     if listening {
         return FocusTarget::Shell;
