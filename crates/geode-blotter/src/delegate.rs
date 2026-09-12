@@ -14,6 +14,7 @@ use geode_core::attribution::Attribution;
 use geode_core::snapshot::Snapshot;
 use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
+use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
 use gpui::prelude::*;
 use gpui::{App, Context, Div, IntoElement, SharedString, Stateful, TextAlign, Window, div, px};
 use gpui_component::ActiveTheme as _;
@@ -23,6 +24,12 @@ use std::sync::Arc;
 
 const INDENT: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
+/// One digit cell of the line-number gutter, in px: the mono face's
+/// advance at the default UI size, rounded up so a gutter never wraps.
+/// Same absolute-px school as `INDENT` above.
+const GUTTER_DIGIT_PX: f32 = 8.0;
+/// The gap between the gutter's last digit and the tree indent.
+const GUTTER_GAP_PX: f32 = 6.0;
 
 pub struct BlotterDelegate {
     pub snapshot: Option<Arc<Snapshot>>,
@@ -62,6 +69,19 @@ pub struct BlotterDelegate {
     /// painting the tree column never calls `path_of` (an allocating
     /// ancestor walk) per cell. Empty until the first `refill_window`.
     glyphs: Vec<&'static str>,
+    /// `[ui] line_numbers` (user ruling 2026-09-11), mirrored from the
+    /// `linenumbers::UiSettings` global by the tile (`BlotterTile::
+    /// on_ui_settings`) — the delegate has no `App` of its own in the
+    /// paths that need it (`column`, `fill_window`).
+    pub line_numbers: LineNumbers,
+    /// The gutter text for each *shown* row in `numbers_stamp`'s range,
+    /// aligned index-for-index like `glyphs` — rebuilt by
+    /// `ensure_numbers` only when the window, the cursor row or the mode
+    /// changed since the last build (`numbers_stamp`), so painting the
+    /// gutter never formats a number per frame: a scroll or a cursor
+    /// move costs one small `String` per visible row, once.
+    numbers: Vec<SharedString>,
+    numbers_stamp: Option<(Range<usize>, usize, LineNumbers)>,
 }
 
 impl Default for BlotterDelegate {
@@ -88,7 +108,65 @@ impl BlotterDelegate {
             semi_joined: Vec::new(),
             requested_window: 0..0,
             glyphs: Vec::new(),
+            line_numbers: LineNumbers::Off,
+            numbers: Vec::new(),
+            numbers_stamp: None,
         }
+    }
+
+    /// The gutter's width in px for the current mode and row count —
+    /// `0` when off. Read by `column` (the tree column widens by it, so
+    /// the tree text keeps its own room) and by `render_td` (the gutter
+    /// element's own width). Depends on `shown.len()`'s digit count, so
+    /// a table growing past a power of ten widens on its next
+    /// `TableState::refresh`, which every reflatten already triggers.
+    pub fn gutter_px(&self) -> f32 {
+        match self.line_numbers {
+            LineNumbers::Off => 0.0,
+            _ => gutter_digits(self.shown.len()) as f32 * GUTTER_DIGIT_PX + GUTTER_GAP_PX,
+        }
+    }
+
+    /// Rebuild `numbers` for the cache's current window if anything it
+    /// depends on changed — see the field's doc for why this is stamped
+    /// rather than rebuilt per call.
+    fn ensure_numbers(&mut self) {
+        let window = self.cache.window();
+        let mode = self.line_numbers;
+        let cursor = self.cursor.row;
+        // Only `rel` reads the cursor, so only `rel` stamps it: an `on`
+        // gutter must not rebuild identical strings on every `j`/`k`
+        // (review Minor 1).
+        let stamped_cursor = match mode {
+            LineNumbers::Relative => cursor,
+            _ => usize::MAX,
+        };
+        let stamp = (window.clone(), stamped_cursor, mode);
+        if self.numbers_stamp.as_ref() == Some(&stamp) {
+            return;
+        }
+        self.numbers.clear();
+        self.numbers.extend(window.map(|row| {
+            gutter_number(mode, row, cursor)
+                .map(|n| SharedString::from(n.to_string()))
+                .unwrap_or_default()
+        }));
+        self.numbers_stamp = Some(stamp);
+    }
+
+    /// The gutter text `render_td` paints for a shown row — `None` when
+    /// the gutter is off or the row is outside the cached window.
+    /// Test-only: production code goes through `render_td`.
+    #[cfg(test)]
+    pub(crate) fn gutter_text(&mut self, row_ix: usize) -> Option<SharedString> {
+        if self.line_numbers == LineNumbers::Off {
+            return None;
+        }
+        self.ensure_numbers();
+        row_ix
+            .checked_sub(self.cache.window().start)
+            .and_then(|i| self.numbers.get(i))
+            .cloned()
     }
 
     pub fn cursor_path(&self) -> Option<Path> {
@@ -477,7 +555,14 @@ impl TableDelegate for BlotterDelegate {
             } else {
                 sort
             },
-            width: px(c.width),
+            // The tree column carries the line-number gutter (below),
+            // so it widens by the gutter's width rather than giving up
+            // its own text room to it.
+            width: px(if c.kind == ColumnKind::Tree {
+                c.width + self.gutter_px()
+            } else {
+                c.width
+            }),
             movable: c.kind != ColumnKind::Tree,
             ..Column::default()
         }
@@ -602,7 +687,47 @@ impl TableDelegate for BlotterDelegate {
                 .and_then(|i| self.glyphs.get(i))
                 .copied()
                 .unwrap_or("·");
-            el = el.pl(px(depth as f32 * INDENT)).child(
+            let indent = px(depth as f32 * INDENT);
+            // The line-number gutter (`[ui] line_numbers`, user ruling
+            // 2026-09-11) sits at the cell's leading edge, before the
+            // indent, right-aligned in a slot sized to the row total's
+            // digit count — a *gutter*, not a column: `h`/`l`, sort,
+            // yank and the column plan never see it. The cursor row's
+            // number is painted in the full foreground (in `rel` mode
+            // it is the row's absolute number, the hybrid), every other
+            // row's in the muted one. Its text comes from `numbers`,
+            // rebuilt only when `ensure_numbers`'s stamp changes.
+            if self.line_numbers != LineNumbers::Off {
+                let (fg, muted) = (theme.foreground, theme.muted_foreground);
+                // The off branch's `pl(indent)` replaces the root's
+                // `px_1` left padding (a depth-0 row sits flush); the
+                // gutter must start flush too, or the tree text loses
+                // that padding's worth of the room `column()` widened
+                // by (review Minor 2).
+                el = el.pl(px(0.));
+                self.ensure_numbers();
+                let text = row_ix
+                    .checked_sub(self.cache.window().start)
+                    .and_then(|i| self.numbers.get(i))
+                    .cloned()
+                    .unwrap_or_default();
+                let on_cursor_row = self.cursor.row == row_ix;
+                el = el.child(
+                    div()
+                        .flex()
+                        .flex_shrink_0()
+                        .justify_end()
+                        .w(px(self.gutter_px()))
+                        .pr(px(GUTTER_GAP_PX))
+                        .mr(indent)
+                        .text_color(if on_cursor_row { fg } else { muted })
+                        .debug_selector(|| format!("blotter-gutter-{row_ix}"))
+                        .child(text),
+                );
+            } else {
+                el = el.pl(indent);
+            }
+            el = el.child(
                 div()
                     .w(px(14.))
                     .text_color(theme.muted_foreground)
@@ -773,6 +898,53 @@ mod tests {
             "row 5 must be cached again without a visible_rows_changed"
         );
         assert!(d.cache.get(9, 0).is_some());
+    }
+
+    /// `[ui] line_numbers`: off paints nothing and costs no width; `on`
+    /// is the 1-based shown index; `rel` is the distance from the cursor
+    /// with the cursor row showing its own absolute number (the hybrid,
+    /// by ruling), and a cursor move re-derives it without a refill.
+    #[test]
+    fn the_gutter_follows_the_mode_and_the_cursor() {
+        let mut d = BlotterDelegate::new();
+        d.apply_snapshot(snapshot(), &view(), &grouping());
+        d.refill_window(0..3);
+        assert_eq!(d.shown, vec![0, 1, 2], "sanity: three shown rows");
+
+        assert_eq!(d.gutter_text(0), None, "off paints nothing");
+        assert_eq!(d.gutter_px(), 0.0, "off costs no width");
+
+        d.line_numbers = LineNumbers::On;
+        let texts = |d: &mut BlotterDelegate| -> Vec<String> {
+            (0..3)
+                .map(|r| d.gutter_text(r).unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(texts(&mut d), vec!["1", "2", "3"]);
+        assert_eq!(
+            d.gutter_px(),
+            2.0 * GUTTER_DIGIT_PX + GUTTER_GAP_PX,
+            "two digit cells for three rows (the floor), plus the gap"
+        );
+
+        d.line_numbers = LineNumbers::Relative;
+        d.cursor.row = 1;
+        assert_eq!(
+            texts(&mut d),
+            vec!["1", "2", "1"],
+            "cursor row shows its absolute number"
+        );
+        d.cursor.row = 2;
+        assert_eq!(
+            texts(&mut d),
+            vec!["2", "1", "3"],
+            "a cursor move re-derives the offsets"
+        );
+        assert_eq!(
+            d.gutter_text(3),
+            None,
+            "a row outside the cached window has no gutter text"
+        );
     }
 
     #[test]

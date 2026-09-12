@@ -431,6 +431,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Decrease font size",
         "Appearance",
     );
+    // `[ui] line_numbers` off → on → rel (user ruling 2026-09-11);
+    // palette-only, like the settings row it duplicates.
+    action(
+        reg,
+        "ui::line_numbers_cycle",
+        "Cycle line numbers (off / on / relative)",
+        "Appearance",
+    );
     // The keybinding dialog (Part B). Palette-only by design: no key
     // binding of its own in BUILTIN_KEYMAP — bootstrapping a dialog whose
     // whole purpose is showing/editing keybindings out of a keybinding
