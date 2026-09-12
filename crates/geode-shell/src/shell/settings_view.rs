@@ -35,19 +35,21 @@
 //! `theme.rs`'s "No light/dark mode".) Each row
 //! is one enumerated setting — an ordered list of value labels plus the
 //! index of the currently-active one — and editing is *stepping*:
-//! `tab`/`shift+tab` step the selected row's value forward/back (wrapping
-//! at both ends, [`step`]), and a click on the already-selected row
-//! cycles forward too (the mirror of keybindings' click-to-listen). A
+//! `space`/`shift+space` in normal mode and `tab`/`shift+tab` in either
+//! mode step the selected row's value forward/back (wrapping at both
+//! ends, [`step`]), and a click on the already-selected row cycles
+//! forward too. A
 //! step applies IMMEDIATELY through the same apply-then-persist seams the
 //! old dialog's controls used
 //! ([`set_theme`]/[`set_font_size`]/[`set_find_style`]'s
 //! shared `*_on` cores) — theme stepping is a live preview, and
 //! persistence stays on the existing background paths
 //! (`ShellView::persist_theme` and friends; no I/O lands on the render
-//! thread here). `enter` is deliberately inert and reserved (a step
-//! already applies the instant it happens, so there is nothing for enter
-//! to confirm) — see the "Filter" section below for why `tab` rather than
-//! the retired `h`/`l`/arrow keys is what reaches this dialog at all.
+//! thread here). `enter` is deliberately inert and reserved in both modes
+//! (a step already applies the instant it happens, so there is nothing
+//! for enter to confirm) — see [`route`] for the whole vocabulary and
+//! [`handle_key`] for why `enter` and `tab` are *claimed* rather than
+//! left to the filter.
 //!
 //! The old dialog's read-only content — the "Mod key: …" line and the
 //! "saved to your app.toml" caption — survives as muted inert footer
@@ -65,37 +67,45 @@
 //! and must not reenter the entity via `Entity::update`) can apply the
 //! identical path.
 //!
-//! ## Filter
+//! ## Modes and the filter
 //!
 //! `docs/superpowers/specs/2026-09-01-dialog-filter-input-design.md`
 //! replaced this dialog's vim motions and `/` find (both styles) with a
-//! focused fuzzy filter: opening the dialog focuses
-//! `ShellView::dialog_input`, so the first character typed narrows the
-//! list ([`visible_rows`] over [`searchable_text`]) rather than falling
-//! on the floor, and what this dialog itself still claims is
-//! the short vocabulary a focused `Input` leaves free
-//! ([`crate::listfilter::nav_command`]: `up`/`down`/`ctrl+p`/`ctrl+n` ∓1,
-//! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10), plus
-//! `tab`/`shift+tab` for stepping — reaching this dialog at all needs
-//! more than the `Input`'s own gating (see [`handle_key`]'s doc comment
-//! and `dialog::init_reclaimed_keybindings`). The `[ui] find_style`
-//! setting and its
-//! row are untouched by this — `FindStyle` still exists, is still
-//! rendered and still steppable like any other row (spec §8) — this
-//! dialog (and the keybinding dialog) simply stop *reading* it to steer
-//! their own navigation.
-//!
-//! **This dialog is still filter-first; the keybinding dialog no longer
-//! is.** The dialog interaction model
+//! focused fuzzy filter over [`visible_rows`] / [`searchable_text`], and
+//! the dialog interaction model
 //! (`docs/superpowers/specs/2026-09-08-geode-dialog-interaction-model-design.md`,
-//! `crate::dialogmode`) gave that dialog a normal mode where bare letters
-//! are verbs and `/` enters filter mode, so it now opens with
-//! `dialog_input` BLURRED (`open_shell_dialog_with_key`'s `focus_filter:
-//! false`). Settings kept the filter-first shape — it has no verbs to
-//! collide with — so it still passes `focus_filter: true` and its filter
-//! still holds focus for the life of the dialog. Two dialogs, one shared
-//! `dialog_input`, two different opening states: do not read either
-//! one's behaviour off the other.
+//! `crate::dialogmode`; §18 is this dialog's own amendment) then gave it
+//! the keybinding dialog's two modes. It opens in [`DialogMode::Normal`]
+//! with `ShellView::dialog_input` BLURRED (`open_shell_dialog_with_key`'s
+//! `focus_filter: false`; the door's own `dialog::sync_dialog_text` call
+//! parks the keys on the shell root), where `j`/`k` move, `space`/
+//! `shift+space` step, `/` enters [`DialogMode::Filter`] — exactly the
+//! always-focused filter the dialog had before, where printable keys
+//! type and the short vocabulary a focused `Input` leaves free
+//! ([`crate::listfilter::nav_command`]: `up`/`down`/`ctrl+p`/`ctrl+n` ∓1,
+//! `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`/`pageup`/`pagedown` ±10, plus
+//! `tab`/`shift+tab` for stepping) is what reaches the dialog — and
+//! `escape` walks [`dialogmode::escape_step`]'s ladder (filter → normal
+//! keeping the query → clear the query → close). [`route`] is the whole
+//! table, pure; [`handle_key`] applies it. Spec §3 originally listed this
+//! dialog as filter-only ("if settings ever grows a reset-to-default, it
+//! becomes modal by this same rule"); the user ruling of 2026-09-12 made
+//! it modal without waiting for a verb, so that a hand which learned the
+//! keybinding and config dialogs finds the same shape here rather than
+//! typing a `j` into the filter (the spec's own risk 2).
+//!
+//! The pure state (`mode`, `query`) is the truth about focus and the
+//! field's text, and [`dialog::sync_dialog_text`] is the only thing that
+//! moves either (spec §16.1) — it reads this dialog's state alongside the
+//! keybinding and object dialogs'. A transition site here is a pure
+//! mutation of [`SettingsState`] and must never call `focus` or
+//! `set_value` itself; the seams that reach the sync are the key-path
+//! tail in `ShellView::handle_key_down`, the open door, [`on_row_clicked`]
+//! and the frozen filter row's own click (`dialog::enter_filter_by_mouse`,
+//! §17.1 rule 1). The `[ui] find_style` setting and its row are untouched
+//! by any of this — `FindStyle` still exists, is still rendered and still
+//! steppable like any other row — this dialog (and the keybinding dialog)
+//! simply stop *reading* it to steer their own navigation.
 
 use std::rc::Rc;
 
@@ -103,6 +113,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
+use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::fontsize::FontSize;
 use crate::keymap::Keystroke;
 use crate::keymap::Modifiers;
@@ -113,6 +124,7 @@ use crate::shell::dialog;
 use crate::tileadd::AddDirection;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
+use crate::vimnav::NavCommand;
 
 use super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
@@ -262,19 +274,41 @@ pub fn step(len: usize, current: usize, dir: StepDirection) -> usize {
 }
 
 /// Persistent state for one open settings dialog session — the exact
-/// shape of `KeybindingsState` minus the rebind-capture field (there is
-/// nothing to "listen" for here; editing is stepping, which is
-/// instantaneous). Fresh on every open ([`open`]), holds no gpui types
-/// (the scroll handle lives on `ShellView::settings_scroll`, the same
-/// split every other dialog uses), so every transition is unit-testable
-/// without a window.
-#[derive(Debug, Default)]
+/// shape of `KeybindingsState` minus the rebind-capture field and the
+/// notice (there is nothing to "listen" for here; editing is stepping,
+/// which is instantaneous, and no verb ever declines to act). Fresh on
+/// every open ([`open`]), holds no gpui types (the scroll handle lives on
+/// `ShellView::settings_scroll`, the same split every other dialog
+/// uses), so every transition is unit-testable without a window.
+#[derive(Debug)]
 pub struct SettingsState {
     /// Index into the **filtered** row list ([`visible_rows`]), not the
     /// full one — the same convention `KeybindingsState::selected` uses.
     pub selected: usize,
-    /// The filter query, mirrored from `ShellView::dialog_input`.
+    /// The filter query, mirrored from `ShellView::dialog_input`. It
+    /// survives leaving filter mode — the first rung of the escape
+    /// ladder keeps the list narrowed (`EscapeStep::LeaveFilter`).
     pub query: String,
+    /// Which mode this dialog is in (`crate::dialogmode`, spec §2). The
+    /// pure truth about who owns the keyboard: `dialog::sync_dialog_text`
+    /// reconciles gpui to this after every transition, so a transition
+    /// site only ever writes this field.
+    pub mode: DialogMode,
+}
+
+/// Hand-written rather than derived so the opening mode is one explicit,
+/// greppable line — the same reasoning `KeybindingsState`'s own `Default`
+/// gives: `DialogMode` has no `Default` of its own on purpose, and
+/// deriving one there would quietly make "normal" every surface's answer
+/// instead of this dialog's own stated choice.
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            selected: 0,
+            query: String::new(),
+            mode: DialogMode::Normal,
+        }
+    }
 }
 
 impl SettingsState {
@@ -340,6 +374,103 @@ pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> b
     } else {
         state.selected = clicked_ix;
         false
+    }
+}
+
+/// What one keystroke does to this dialog — decided by [`route`] from
+/// the mode, the query and the keystroke alone, so the whole key
+/// vocabulary is a pure table a unit test can walk without a window.
+/// [`handle_key`] only applies the answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Move the selection within the filtered list.
+    Nav(NavCommand),
+    /// Step the selected row's value, applied immediately.
+    Step(StepDirection),
+    /// `/` in normal mode: hand the keys to the filter.
+    EnterFilter,
+    /// The escape ladder's first rung: back to normal mode, query kept.
+    LeaveFilter,
+    /// The ladder's second rung: clear the applied query.
+    ClearQuery,
+    /// Claimed and dropped — `enter` in either mode (inert and reserved,
+    /// see [`handle_key`]), and every key normal mode does not name.
+    Drop,
+    /// Not this dialog's to claim: a printable key on its way to the
+    /// focused filter, or the ladder's last rung, which the shell's own
+    /// modal branch turns into a close.
+    PassThrough,
+}
+
+/// `tab` (forward) / `shift+tab` (back) — the stepping keys this dialog
+/// has always had, live in both modes: a focused single-line `Input`
+/// leaves them free (with `dialog::init_reclaimed_keybindings`'s help),
+/// and normal mode adds `space`/`shift+space` beside them rather than
+/// retiring them.
+fn tab_step(ks: &Keystroke) -> Option<StepDirection> {
+    const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+    match (ks.mods, ks.key.as_str()) {
+        (Modifiers::NONE, "tab") => Some(StepDirection::Right),
+        (SHIFT, "tab") => Some(StepDirection::Left),
+        _ => None,
+    }
+}
+
+/// Map a keystroke to its [`KeyAction`] (interaction-model spec §2/§4/§5,
+/// as this dialog wears it):
+///
+/// 1. `escape` walks [`dialogmode::escape_step`]'s ladder in both modes
+///    (`has_previous_stage: false` — one flat list). Modifiers are
+///    ignored, for the reason the keybinding dialog records: the shell's
+///    own close never looked at them, and a bare-only guard would turn
+///    `shift+escape` into a key normal mode claims and drops;
+/// 2. `tab`/`shift+tab` step in both modes ([`tab_step`]);
+/// 3. [`listfilter::nav_command`]'s motions move in both modes;
+/// 4. bare `enter` is claimed and dropped in both modes — inert and
+///    reserved, since a step applies the instant it happens and there is
+///    nothing for `enter` to confirm (see [`handle_key`] for why claiming
+///    it, rather than ignoring it, is what makes it inert);
+/// 5. in [`DialogMode::Filter`], everything else passes through to the
+///    focused `Input` as text;
+/// 6. in [`DialogMode::Normal`], [`dialogmode::normal_command`] decides:
+///    `/` enters filter mode, `space`/`shift+space` (`Toggle`/
+///    `ToggleBack`, the keys Phase 4c's `Choice` rows step with) step
+///    the value, `j`/`k`/`g`/`shift+g` move, and anything else — `enter`'s
+///    `Commit`, `i`, the item movers, a stray letter — is claimed and
+///    dropped, because normal mode's contract is that an unclaimed key
+///    does nothing rather than reaching the shell underneath.
+pub fn route(mode: DialogMode, query_is_empty: bool, ks: &Keystroke) -> KeyAction {
+    if ks.key == "escape" {
+        return match dialogmode::escape_step(mode, query_is_empty, false) {
+            EscapeStep::LeaveFilter => KeyAction::LeaveFilter,
+            EscapeStep::ClearQuery => KeyAction::ClearQuery,
+            // `PreviousStage` is unreachable with no nested stage; folded
+            // in with `Close` rather than special-cased away, because the
+            // ladder is the one every modal surface walks.
+            EscapeStep::PreviousStage | EscapeStep::Close => KeyAction::PassThrough,
+        };
+    }
+    if let Some(dir) = tab_step(ks) {
+        return KeyAction::Step(dir);
+    }
+    if let Some(cmd) = listfilter::nav_command(ks) {
+        return KeyAction::Nav(cmd);
+    }
+    if ks.mods == Modifiers::NONE && ks.key == "enter" {
+        return KeyAction::Drop;
+    }
+    match mode {
+        DialogMode::Filter => KeyAction::PassThrough,
+        DialogMode::Normal => match dialogmode::normal_command(ks) {
+            Some(NormalCommand::Nav(nav)) => KeyAction::Nav(nav),
+            Some(NormalCommand::EnterFilter) => KeyAction::EnterFilter,
+            Some(NormalCommand::Toggle) => KeyAction::Step(StepDirection::Right),
+            Some(NormalCommand::ToggleBack) => KeyAction::Step(StepDirection::Left),
+            _ => KeyAction::Drop,
+        },
     }
 }
 
@@ -523,12 +654,15 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
 /// close/reopen — the same contract as the palette and the keybinding
 /// dialog. Goes through [`dialog::open_shell_dialog_with_key`] (the one
 /// standard door, with the Part B key seam): this dialog needs first
-/// refusal on every keystroke for the filter-nav vocabulary
-/// ([`listfilter::nav_command`]) and `tab`/`shift+tab` value stepping.
+/// refusal on every keystroke for the whole vocabulary [`route`] names.
 pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.modal.is_some() {
         return;
     }
+    // Set *before* the door runs: its `dialog::sync_dialog_text` call
+    // reads the `DialogMode::Normal` this dialog opens in and parks the
+    // keys on the shell root, so a bare letter reaches [`handle_key`] as
+    // a verb rather than being eaten as text by a focused `Input`.
     view.settings = Some(SettingsState::new());
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
@@ -538,37 +672,46 @@ pub fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellVie
         "Settings",
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        true,
+        // `false`: `focus_filter` is for a dialog with no mode, and this
+        // one has one now — its initial focus comes from the door's own
+        // sync (spec §16.1), exactly as the keybinding dialog's does.
+        false,
     );
+    // §18.1: the mode pill lives in the modal's own title row
+    // (`dialog::render_modal`'s `title_extra` slot).
+    dialog::set_title_extra(view, |shell, cx| {
+        shell
+            .settings
+            .as_ref()
+            .map(|s| dialog::mode_pill(s.mode, cx))
+            .unwrap_or_else(|| div().into_any_element())
+    });
 }
 
-/// The [`dialog::ModalKeyHandler`] for this dialog, mirroring
-/// `keybindings_view::handle_key` with value stepping in place of rebind
-/// capture:
+/// The [`dialog::ModalKeyHandler`] for this dialog: [`route`] decides,
+/// this applies. The vocabulary is documented on [`route`]; what belongs
+/// here is the gpui half of two of its answers.
 ///
-/// 1. [`listfilter::nav_command`] motions move the selection within the
-///    *filtered* list;
-/// 2. `tab` / `shift+tab` step the selected row's value forward / back,
-///    wrapping, applied immediately through [`apply_setting`]. `left`/
-///    `right`, the old stepping keys, are swallowed unconditionally by a
-///    focused single-line `Input` and can never reach this handler again.
-///    `tab` itself clears the `Input`'s own gating for the same reason
-///    (single-line, spec §2b) but is NOT enough on its own — gpui-
-///    component's `Root` also binds it unconditionally to its own
-///    focus-cycling, above `ShellView` in the dispatch tree, and that
-///    would swallow it too were it not for `dialog::
-///    init_reclaimed_keybindings`'s scoped `NoAction` reclaim (spec
-///    §2b2), which the modal panel's `"GeodeModal"` key context makes
-///    possible;
-/// 3. bare `enter` is claimed and dropped — returns `true` without acting.
-///    It is deliberately inert and reserved: settings apply the instant
-///    they are stepped, so there is nothing to confirm. Claiming it (not
-///    just ignoring it) is required, not cosmetic: with a focused `Input`,
-///    an unclaimed key continues to the window's text-input phase (spec
-///    §3) rather than simply vanishing, and `enter` reaching the input
-///    fires an `InputEvent::Change` that would reset `selected` back to
-///    the top match even though the text itself is unchanged;
-/// 4. everything else, bare `escape` included, returns `false`.
+/// **Why `enter` is claimed rather than ignored** ([`KeyAction::Drop`]):
+/// with a focused `Input` (filter mode), an unclaimed key continues to
+/// the window's text-input phase (spec §3) rather than simply vanishing,
+/// and `enter` reaching the input fires an `InputEvent::Change` that
+/// resets `selected` back to the top match even though the text itself
+/// is unchanged. The same holds for `tab`: `InputState::normalize_input`
+/// strips only `\n`/`\r`, so an unclaimed `tab` would land in the query
+/// as a literal tab character and collapse the list to "no matches".
+/// `tab` reaching this handler at all in filter mode needs more than the
+/// `Input`'s own gating — gpui-component's `Root` binds it to its own
+/// focus-cycling above `ShellView` in the dispatch tree, which
+/// `dialog::init_reclaimed_keybindings`'s scoped `NoAction` reclaim is
+/// what defeats.
+///
+/// Every arm here is a **pure mutation** of [`SettingsState`] (spec
+/// §16.1): none touches gpui focus or the shared `Input`'s text, which is
+/// why `window` is unused. `ShellView::handle_key_down` calls
+/// [`dialog::sync_dialog_text`] the moment this returns, claimed or not,
+/// and that is the one place either is moved — a mode flip here is the
+/// whole transition.
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -581,42 +724,42 @@ fn handle_key(
     };
     let visible = visible_rows(state, &rows);
 
-    if let Some(cmd) = listfilter::nav_command(ks) {
-        state.selected = vimnav::apply(state.selected, visible.len(), cmd);
-        let selected = state.selected;
-        shell.settings_scroll.scroll_to_item(selected);
-        cx.notify();
-        return true;
-    }
-
-    // Bare `enter` is reserved and deliberately inert (see this
-    // function's own doc comment, item 3) — claimed and dropped rather
-    // than left unhandled, because leaving it unhandled would NOT make it
-    // inert: an unclaimed key continues past this handler to the filter's
-    // own text-input phase, where `enter` fires an `InputEvent::Change`
-    // that resets `selected` back to the top match.
-    if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        return true;
-    }
-
-    let dir = match (ks.mods, ks.key.as_str()) {
-        (Modifiers::NONE, "tab") => StepDirection::Right,
-        (m, "tab")
-            if m == (Modifiers {
-                shift: true,
-                ..Modifiers::NONE
-            }) =>
-        {
-            StepDirection::Left
+    match route(state.mode, state.query.is_empty(), ks) {
+        KeyAction::Nav(cmd) => {
+            state.selected = vimnav::apply(state.selected, visible.len(), cmd);
+            let selected = state.selected;
+            shell.settings_scroll.scroll_to_item(selected);
         }
-        _ => return false,
-    };
-    let selected = state.selected;
-    let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) else {
-        return false;
-    };
-    let (id, new_ix) = (row.id, step(row.values.len(), row.current, dir));
-    apply_setting(shell, id, new_ix, cx);
+        KeyAction::Step(dir) => {
+            let selected = state.selected;
+            // An empty filtered list has nothing to step: still claimed,
+            // so the keystroke does not fall through to the `Input` (see
+            // the doc comment above on `tab`).
+            if let Some(row) = visible.get(selected).and_then(|m| rows.get(m.row)) {
+                let (id, new_ix) = (row.id, step(row.values.len(), row.current, dir));
+                apply_setting(shell, id, new_ix, cx);
+            }
+        }
+        KeyAction::EnterFilter => {
+            state.mode = DialogMode::Filter;
+        }
+        KeyAction::LeaveFilter => {
+            // The query stays applied — leaving a search leaves you on
+            // the match rather than undoing it (`EscapeStep::LeaveFilter`).
+            state.mode = DialogMode::Normal;
+        }
+        KeyAction::ClearQuery => {
+            state.query.clear();
+            state.selected = 0;
+            // The viewport has to follow: clearing a filter re-expands
+            // the list under a scroll offset still parked where the
+            // *filtered* list left it. The `Input` is emptied by the sync
+            // on this handler's return, not here (spec §16.1).
+            shell.settings_scroll.scroll_to_item(0);
+        }
+        KeyAction::Drop => return true,
+        KeyAction::PassThrough => return false,
+    }
     cx.notify();
     true
 }
@@ -626,8 +769,22 @@ fn handle_key(
 /// against freshly derived rows — same identity-not-position keying as
 /// keybindings' `on_row_clicked`). The gpui-facing wrapper around the
 /// pure [`click_selects_or_steps`]: a `true` (already-selected row)
-/// cycles that row's value forward.
-fn on_row_clicked(shell: &mut ShellView, clicked: SettingId, cx: &mut Context<ShellView>) {
+/// cycles that row's value forward. Ends in [`dialog::sync_dialog_text`],
+/// the row-click seam of that function's seam classes (spec §16.1/§17.1
+/// rule 3): a click never passes through the key path, so this is its
+/// transition's only tail. On this dialog the sync is rule-3 uniformity
+/// rather than a load-bearing move — [`click_selects_or_steps`] changes
+/// neither mode nor query, and a mouse-down on a plain row moves gpui
+/// focus nowhere, so there is nothing for the sync to correct today. It
+/// is here so that a future click that DOES change the mode (a
+/// mouse-parity verb, say) cannot forget the gpui half, and so a reader
+/// auditing the seam classes finds every row click ending the same way.
+fn on_row_clicked(
+    shell: &mut ShellView,
+    clicked: SettingId,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     let rows = rows_for(shell);
     let Some(state) = shell.settings.as_mut() else {
         return;
@@ -643,12 +800,13 @@ fn on_row_clicked(shell: &mut ShellView, clicked: SettingId, cx: &mut Context<Sh
         let new_ix = step(row.values.len(), row.current, StepDirection::Right);
         apply_setting(shell, row.id, new_ix, cx);
     }
+    dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
 
 /// The [`dialog::ShellModal::build`] closure body: the shared filter row
-/// (`dialog::filter_row`, never frozen — this dialog has no listening
-/// state to freeze it for) over a scrollable row list (title + muted
+/// (`dialog::filter_row`, frozen throughout normal mode — see the
+/// `frozen_query` note at the end of this function) over a scrollable row list (title + muted
 /// category on the left, with fuzzy-match highlighting; the current value
 /// label on the right in the mono data face) plus a footer hint. `entity`
 /// is the `Entity<ShellView>` every row's click handler captures to reach
@@ -731,9 +889,9 @@ fn build(
             .child(label)
             .child(value_el)
             .debug_selector(move || format!("settings-row-{row_ix}"))
-            .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 entity_for_row.update(cx, |shell, cx| {
-                    on_row_clicked(shell, id, cx);
+                    on_row_clicked(shell, id, window, cx);
                 });
             });
 
@@ -763,28 +921,70 @@ fn build(
     };
     let sep = |text: &'static str| div().child(text).into_any_element();
 
+    // The hint row states the CURRENT mode's vocabulary, not the union of
+    // both (the keybinding dialog's rule): a footer listing keys that
+    // are inert right now is exactly the lie the mode pill exists to
+    // prevent. `tab`/`shift+tab` step in both modes but are shown only
+    // in filter mode, where they are the only stepping keys; normal mode
+    // shows `space`, the shared vocabulary's step.
+    let (motion, action): (Vec<AnyElement>, Vec<AnyElement>) = match state.mode {
+        DialogMode::Normal => (
+            vec![
+                chip("j"),
+                chip("k"),
+                sep("move ·"),
+                chip("ctrl+d"),
+                chip("ctrl+u"),
+                sep("±5 ·"),
+                chip("ctrl+f"),
+                chip("ctrl+b"),
+                sep("±10"),
+            ],
+            vec![
+                chip("space"),
+                sep("next value ·"),
+                chip("shift+space"),
+                sep("previous value ·"),
+                chip("/"),
+                sep("filter ·"),
+                chip("escape"),
+                // Honest about which rung the next escape takes: with a
+                // query still applied it clears the query, and only then
+                // closes.
+                sep(if state.query.is_empty() {
+                    "close"
+                } else {
+                    "clear the filter"
+                }),
+            ],
+        ),
+        DialogMode::Filter => (
+            vec![
+                sep("type to filter ·"),
+                chip("up"),
+                chip("down"),
+                sep("move ·"),
+                chip("ctrl+d"),
+                chip("ctrl+u"),
+                sep("±5 ·"),
+                chip("ctrl+f"),
+                chip("ctrl+b"),
+                sep("±10"),
+            ],
+            vec![
+                chip("tab"),
+                sep("next value ·"),
+                chip("shift+tab"),
+                sep("previous value ·"),
+                chip("escape"),
+                sep("back to normal"),
+            ],
+        ),
+    };
     let hint_line: AnyElement = v_flex()
         .gap_0p5()
-        .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-            sep("type to filter ·"),
-            chip("up"),
-            chip("down"),
-            sep("move ·"),
-            chip("ctrl+d"),
-            chip("ctrl+u"),
-            sep("±5 ·"),
-            chip("ctrl+f"),
-            chip("ctrl+b"),
-            sep("±10"),
-        ]))
-        .child(h_flex().gap_1().items_center().flex_wrap().children(vec![
-            chip("tab"),
-            sep("next value ·"),
-            chip("shift+tab"),
-            sep("previous value ·"),
-            chip("escape"),
-            sep("close"),
-        ]))
+        .child(h_flex().gap_1().items_center().flex_wrap().children(motion))
+        .child(h_flex().gap_1().items_center().flex_wrap().children(action))
         .into_any_element();
 
     let footer = v_flex()
@@ -818,9 +1018,22 @@ fn build(
                 .child("saved to your app.toml"),
         );
 
+    // The filter row is frozen throughout normal mode — a caret in a
+    // field that is not receiving the keys is the most misleading thing
+    // a modal surface can show. `slash_filters` is always true here:
+    // unlike the keybinding dialog, this one has no capture state in
+    // which `/` means something else, so the `press / to filter`
+    // placeholder is never a lie. The frozen row is also the mouse form
+    // of `/` (§17.1 rule 1), which is what `entity` is for.
+    let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
+        query: state.query.as_str(),
+        slash_filters: true,
+        entity: entity.clone(),
+    });
+
     v_flex()
         .gap_2()
-        .child(dialog::filter_row(&shell.dialog_input, None, cx))
+        .child(dialog::filter_row(&shell.dialog_input, frozen_query, cx))
         .child(list)
         .child(footer)
         .into_any_element()
@@ -1064,6 +1277,144 @@ mod tests {
         assert_eq!(
             state.selected, 1,
             "a cycle click leaves the selection where it was"
+        );
+    }
+
+    // -- the mode and the key table (crate::dialogmode, spec §18) --------
+
+    fn ks(key: &str, mods: Modifiers) -> Keystroke {
+        Keystroke {
+            mods,
+            key: key.to_string(),
+        }
+    }
+    fn bare(key: &str) -> Keystroke {
+        ks(key, Modifiers::NONE)
+    }
+    const SHIFT: Modifiers = Modifiers {
+        shift: true,
+        ..Modifiers::NONE
+    };
+
+    /// The one line the whole model turns on: a fresh session is in
+    /// normal mode, so the door's sync parks the keys on the shell root.
+    #[test]
+    fn a_fresh_session_opens_in_normal_mode() {
+        assert_eq!(SettingsState::new().mode, DialogMode::Normal);
+    }
+
+    #[test]
+    fn setting_a_query_never_moves_the_mode() {
+        let mut state = SettingsState::new();
+        state.mode = DialogMode::Filter;
+        state.set_query("f".to_string());
+        assert_eq!(state.mode, DialogMode::Filter);
+    }
+
+    /// Normal mode: the shared vocabulary's step keys step, `/` enters
+    /// filter mode, `j`/`k` move, and an unclaimed key is dropped rather
+    /// than passed to the shell underneath.
+    #[test]
+    fn normal_mode_routes_the_shared_vocabulary() {
+        use KeyAction::*;
+        let n = DialogMode::Normal;
+        assert_eq!(route(n, true, &bare("space")), Step(StepDirection::Right));
+        assert_eq!(
+            route(n, true, &ks("space", SHIFT)),
+            Step(StepDirection::Left)
+        );
+        assert_eq!(route(n, true, &bare("/")), EnterFilter);
+        assert_eq!(route(n, true, &bare("j")), Nav(NavCommand::Move(1)));
+        assert_eq!(route(n, true, &bare("k")), Nav(NavCommand::Move(-1)));
+        assert_eq!(route(n, true, &bare("g")), Nav(NavCommand::Top));
+        assert_eq!(route(n, true, &ks("g", SHIFT)), Nav(NavCommand::Bottom));
+        assert_eq!(
+            route(n, true, &bare("s")),
+            Drop,
+            "a stray letter does nothing"
+        );
+        assert_eq!(
+            route(n, true, &bare("i")),
+            Drop,
+            "nothing here to edit as text"
+        );
+        assert_eq!(route(n, true, &bare("enter")), Drop, "inert and reserved");
+        assert_eq!(
+            route(n, true, &ks("v", Modifiers::CTRL)),
+            Drop,
+            "a chord normal mode does not name is dropped like any other \
+             unclaimed key (the modal branch would stop it regardless)"
+        );
+    }
+
+    /// Filter mode: printable keys — `space` and `/` included — are text
+    /// on their way to the focused `Input`, so they pass through. This
+    /// is the spec's own risk 3: a `space` that stepped regardless of
+    /// mode would change a setting under a trader typing a query.
+    #[test]
+    fn filter_mode_passes_printable_keys_to_the_input() {
+        use KeyAction::*;
+        let f = DialogMode::Filter;
+        assert_eq!(route(f, false, &bare("space")), PassThrough);
+        assert_eq!(route(f, false, &ks("space", SHIFT)), PassThrough);
+        assert_eq!(route(f, false, &bare("/")), PassThrough);
+        assert_eq!(
+            route(f, false, &bare("j")),
+            PassThrough,
+            "j types, never moves"
+        );
+        assert_eq!(
+            route(f, false, &bare("enter")),
+            Drop,
+            "still claimed — see handle_key"
+        );
+    }
+
+    /// The keys both modes share: `tab`/`shift+tab` step and the
+    /// filter-safe motions move, whichever mode is current.
+    #[test]
+    fn tab_and_the_arrows_work_in_both_modes() {
+        use KeyAction::*;
+        for mode in [DialogMode::Normal, DialogMode::Filter] {
+            assert_eq!(route(mode, true, &bare("tab")), Step(StepDirection::Right));
+            assert_eq!(
+                route(mode, true, &ks("tab", SHIFT)),
+                Step(StepDirection::Left)
+            );
+            assert_eq!(route(mode, true, &bare("down")), Nav(NavCommand::Move(1)));
+            assert_eq!(
+                route(mode, true, &ks("d", Modifiers::CTRL)),
+                Nav(NavCommand::Move(5))
+            );
+        }
+    }
+
+    /// The ladder of spec §5, one rung per escape: filter → normal
+    /// keeping the query → clear the query → close (a pass-through the
+    /// shell's modal branch turns into a close). Modifiers are ignored.
+    #[test]
+    fn escape_walks_the_ladder() {
+        use KeyAction::*;
+        assert_eq!(
+            route(DialogMode::Filter, false, &bare("escape")),
+            LeaveFilter
+        );
+        assert_eq!(
+            route(DialogMode::Filter, true, &bare("escape")),
+            LeaveFilter
+        );
+        assert_eq!(
+            route(DialogMode::Normal, false, &bare("escape")),
+            ClearQuery
+        );
+        assert_eq!(
+            route(DialogMode::Normal, true, &bare("escape")),
+            PassThrough
+        );
+        assert_eq!(
+            route(DialogMode::Normal, true, &ks("escape", SHIFT)),
+            PassThrough,
+            "a modified escape walks the same ladder as a bare one"
         );
     }
 

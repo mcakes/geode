@@ -566,9 +566,9 @@ impl ShellView {
         // (below) has had first refusal, which is how a dialog swallows an
         // Escape as "cancel" without closing: today that is only the
         // keybinding dialog's rebind capture (`keybindings_view`'s
-        // `listening` branch) — the settings dialog claims no keys of its
-        // own on Escape, so it always falls through to this branch's
-        // close.
+        // `listening` branch) and every modal dialog's escape ladder
+        // (`dialogmode::escape_step`), whose last rung is the one
+        // `escape` that reaches this branch's close.
         if self.modal.is_some() || window.has_active_dialog(cx) {
             if self.modal.is_some() {
                 // Offer the modal's own key handler (if any) first
@@ -609,7 +609,8 @@ impl ShellView {
                     // (`Window::dispatch_keystroke`: it runs only when the
                     // key event still `propagate`s after every listener),
                     // and the dialogs' shared filter field is focused
-                    // whenever a list dialog is open — so without this,
+                    // whenever a list dialog is in filter mode (or is one
+                    // of the filter-only dialogs) — so without this,
                     // `enter` (`key_char = "\n"`) would land in the filter
                     // right after the dialog acted on it, and the
                     // resulting `InputEvent::Change` would reset the very

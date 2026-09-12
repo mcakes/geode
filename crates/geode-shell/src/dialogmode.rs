@@ -5,8 +5,9 @@
 //! focused and bare letters are verbs; `/` enters [`DialogMode::Filter`],
 //! which is exactly the always-focused filter that ships today. A surface
 //! that has no verbs to reach outside its filter is *filter-only* and
-//! never uses this module at all — the palette, settings, the dimension
-//! picker and the as-of selector are unchanged (spec §3).
+//! never uses this module at all — the palette, the dimension picker and
+//! the as-of selector are unchanged (spec §3; settings was filter-only
+//! too until §18 made it modal on 2026-09-12).
 //!
 //! No `gpui` here, in the mould of [`crate::vimnav`] and
 //! [`crate::listfilter`]: feed it shell-native [`Keystroke`]s and

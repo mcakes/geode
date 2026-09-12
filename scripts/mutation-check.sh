@@ -7346,6 +7346,83 @@ run_mutation "palette: a row click dispatches the clicked row" \
   '                        view.sync_palette_scroll();
                         cx.notify();' \
   geode-shell click_on_a_result_row_dispatches_it_like_enter
+# ---- Settings dialog goes modal (interaction-model spec §18, 2026-09-12) --
+#
+# The same four silent failures spec §12 lists for the keybinding dialog,
+# now on the settings surface. Each keeps every filter-mode test green —
+# the whole pre-modal suite still passes with the dialog opening
+# filter-first, since every one of those tests now presses `/` first or
+# uses keys both modes share.
+
+# The opening mode is one line. Only a test asserting a bare letter did
+# NOT reach the filter can see it.
+run_mutation "settings: the dialog opens in filter mode" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            mode: DialogMode::Normal,' \
+  '            mode: DialogMode::Filter,' \
+  geode-shell \
+  the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type
+
+# `EscapeStep::LeaveFilter` keeps the query APPLIED. A dialog that
+# cleared it on the way out still walks the same number of rungs.
+run_mutation "settings: leaving filter mode clears the query" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            state.mode = DialogMode::Normal;' \
+  '            state.mode = DialogMode::Normal;
+            state.query.clear();' \
+  geode-shell \
+  settings_escape_walks_the_ladder_one_rung_at_a_time
+
+# The ladder's second rung skipped: escape with a query applied closes
+# the dialog and loses the filter with it.
+run_mutation "settings: escape skips the clear-query rung" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '            EscapeStep::ClearQuery => KeyAction::ClearQuery,' \
+  '            EscapeStep::ClearQuery => KeyAction::PassThrough,' \
+  geode-shell \
+  settings_escape_walks_the_ladder_one_rung_at_a_time
+
+# Spec §11 risk 3: `space` stepping in FILTER mode changes a setting under
+# a trader typing a two-word query. Every normal-mode step test passes.
+run_mutation "settings: space steps in filter mode too" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '        DialogMode::Filter => KeyAction::PassThrough,' \
+  '        DialogMode::Filter if ks.key != "space" => KeyAction::PassThrough,
+        DialogMode::Filter => KeyAction::Step(StepDirection::Right),' \
+  geode-shell \
+  space_types_in_settings_filter_mode_rather_than_stepping
+
+# `space` as text is `PassThrough`; a handler that swallowed every
+# unclaimed filter-mode key would keep the value unchanged (the only
+# thing the step test checks) while typing nothing — the list would
+# never narrow past the first word.
+run_mutation "settings: filter mode drops printable keys instead of passing them" \
+  crates/geode-shell/src/shell/settings_view.rs \
+  '        DialogMode::Filter => KeyAction::PassThrough,' \
+  '        DialogMode::Filter => KeyAction::Drop,' \
+  geode-shell \
+  space_types_in_settings_filter_mode_rather_than_stepping
+
+# The sync's settings arm: without it `/` flips the mode and nothing
+# moves focus, so typing falls on the floor under a pill reading
+# `filter`. The open test cannot see this — the door passes
+# `focus_filter: false`, so a sync that ignores settings leaves the
+# field blurred exactly as normal mode would.
+run_mutation "dialog: sync_dialog_text ignores the settings dialog" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    } else if let Some(state) = shell.settings.as_ref() {' \
+  '    } else if let Some(state) = shell.settings.as_ref().filter(|_| false) {' \
+  geode-shell \
+  slash_enters_settings_filter_mode_and_typing_narrows
+
+# §17.1 rule 1 on this surface: the frozen row's click must reach the
+# settings state, or the row paints as typeable and does nothing.
+run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    } else if let Some(state) = shell.settings.as_mut() {' \
+  '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
+  geode-shell \
+  clicking_the_settings_frozen_filter_row_enters_filter_mode
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
