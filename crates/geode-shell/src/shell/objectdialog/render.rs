@@ -571,15 +571,18 @@ fn derive_rows(shell: &ShellView) -> Vec<ObjectRow> {
         .unwrap_or_default()
 }
 
-/// Selection logic for a real mouse click on the row for `clicked`
-/// (resolved back to a position in the *filtered* list against freshly
-/// derived rows). It moves focus the same way [`handle_key`] does — to
-/// whichever surface the current mode owns — through
-/// [`dialog::sync_dialog_text`] (spec §16.1), which a mouse handler
-/// needs of its own because a click never passes through the key path at
-/// all. Focusing the filter unconditionally here
-/// would let a mouse click silently defeat normal mode, and the next
-/// keystroke would type instead of act.
+/// A real mouse click on the row for `clicked` (resolved back to a
+/// position in the *filtered* list against freshly derived rows): §17.1
+/// rule 2 makes it do what `enter` on that row would — select it and
+/// open [`enter_edit_stage`] — except in [`Stage::Naming`], where `enter`
+/// creates instead of opens and a click must therefore only select, or a
+/// stray click while typing a name would silently discard it. Either way
+/// it moves focus the same way [`handle_key`] does — to whichever
+/// surface the current mode owns — through [`dialog::sync_dialog_text`]
+/// (spec §16.1), which a mouse handler needs of its own because a click
+/// never passes through the key path at all. Focusing the filter
+/// unconditionally here would let a mouse click silently defeat normal
+/// mode, and the next keystroke would type instead of act.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &str,
@@ -599,7 +602,16 @@ fn on_row_clicked(
         return;
     };
     state.selected = ix;
+    // §17.1 rule 2: a click does what `enter` would — open the row —
+    // except while naming, where `enter` creates and a click must not
+    // discard the typed name. Same door as `open_selected`, and by
+    // name rather than index for the same reason the selector is.
+    let opens = state.stage != Stage::Naming;
+    let name = clicked.to_string();
     shell.object_dialog_scroll.scroll_to_item(ix);
+    if opens {
+        enter_edit_stage(shell, &name, None, cx);
+    }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }

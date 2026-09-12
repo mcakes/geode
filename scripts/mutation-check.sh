@@ -6882,6 +6882,27 @@ run_mutation "objectdialog: the chain-field landing ignores the domain" \
   geode-shell \
   a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not
 
+# ---- Mouse parity (spec §17.1 rule 2): a browse row click opens --------
+
+# §17.1 rule 2 on browse: a click opens. Mutated to select-only, the
+# stage stays Browse under the click.
+run_mutation "objectdialog: a browse row click opens the edit stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if opens {
+        enter_edit_stage(shell, &name, None, cx);
+    }' \
+  '    if opens && false {
+        enter_edit_stage(shell, &name, None, cx);
+    }' \
+  geode-shell clicking_a_browse_row_opens_its_edit_stage
+
+# The naming exception: a stray click must not discard the typed name.
+run_mutation "objectdialog: a click while naming only selects" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let opens = state.stage != Stage::Naming;' \
+  '    let opens = true;' \
+  geode-shell clicking_a_browse_row_while_naming_only_selects
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

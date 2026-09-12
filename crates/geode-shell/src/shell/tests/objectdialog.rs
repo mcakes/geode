@@ -3847,3 +3847,89 @@ fn clicking_the_edit_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestApp
     cx.run_until_parked();
     assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "n");
 }
+
+/// §17.1 rule 2 on browse: one click opens the row's edit stage through
+/// the one door (`enter_edit_stage`), exactly as `enter` does.
+#[gpui::test]
+fn clicking_a_browse_row_opens_its_edit_stage(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    let row = cx
+        .debug_bounds("objectdialog-row-wide")
+        .expect("the wide view paints a browse row");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "wide".to_string()
+        },
+        "the click opened wide"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+}
+
+/// On Groupings the door lands in the chain field (§18.8), because the
+/// door decides, not the click.
+#[gpui::test]
+fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book", "lhu"]),
+        dir.path(),
+        "config::groupings",
+    );
+    let row = cx
+        .debug_bounds("objectdialog-row-3")
+        .expect("slot 3 paints");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+}
+
+/// While the naming row is open a click only selects: a typed name must
+/// not be discarded by a stray click, and `enter` there creates.
+///
+/// The typed name is `wide` itself, not an unrelated word: the browse
+/// list underneath is deliberately still ranked by the naming text
+/// (CLAUDE.md's Phase 4c Part 2a paragraph — "so a near-collision stays
+/// visible before `enter` refuses it"), so a name with no fuzzy match to
+/// any row — `mine` against this fixture's `tree`/`wide` — would leave
+/// no row to click at all and the test would be exercising the ranking
+/// rule instead of the click rule this task is about.
+#[gpui::test]
+fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    cx.simulate_input("wide");
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("objectdialog-row-wide")
+        .expect("a name that collides with an existing row keeps that row visible");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.query.clone()),
+        "wide",
+        "the typed name survived"
+    );
+}
