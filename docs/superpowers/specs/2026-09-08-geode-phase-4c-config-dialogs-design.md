@@ -1694,8 +1694,9 @@ are checked on a display against the artifact, not by test.
   that preceded it rather than off the end. The arithmetic is honest
   under a filter because the added item moves *earlier* in row order
   with its label unchanged: the rows ahead of the next visible one are
-  the same set, merely reordered. `x` is unchanged and still follows the
-  demoted item to the end of the available block; `shift+space` shares
+  the same set, merely reordered. (`x` was ruled on separately later the
+  same day — the next bullet — and no longer follows the demoted item;
+  this sentence originally said it did.) `shift+space` shares
   the add branch and so behaves the same. Two harness entries guard the
   `+ 1` and the clamp; the scroll-into-view tests for `space` and
   `shift+space` now put the cursor on the viewport's last row and assert
