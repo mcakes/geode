@@ -25,9 +25,13 @@
 //!
 //! Five rows, derived FRESH from `ShellView` state on every render and
 //! every keystroke ([`derive_rows`] via [`rows_for`] — same no-caching
-//! contract as `keybindings_view::derive_rows`): Theme, Dark mode, and
-//! Font size under **Appearance**, Find style under **Keyboard**, Add
-//! tile under **Tiling**. Each row
+//! contract as `keybindings_view::derive_rows`): Theme, Font size and
+//! Line numbers under **Appearance**, Find style under **Keyboard**, Add
+//! tile under **Tiling**. (A Dark mode row used to sit beside Theme; it
+//! was retired 2026-09-12 because every bundled theme name already
+//! carries its mode — `Molokai Dark`, `Gruvbox Light` — so the row only
+//! ever restated the Theme row's own value. `mod+shift+t` and `[theme]
+//! mode` are untouched.) Each row
 //! is one enumerated setting — an ordered list of value labels plus the
 //! index of the currently-active one — and editing is *stepping*:
 //! `tab`/`shift+tab` step the selected row's value forward/back (wrapping
@@ -35,7 +39,7 @@
 //! cycles forward too (the mirror of keybindings' click-to-listen). A
 //! step applies IMMEDIATELY through the same apply-then-persist seams the
 //! old dialog's controls used
-//! ([`set_theme`]/[`set_dark_mode`]/[`set_font_size`]/[`set_find_style`]'s
+//! ([`set_theme`]/[`set_font_size`]/[`set_find_style`]'s
 //! shared `*_on` cores) — theme stepping is a live preview, and
 //! persistence stays on the existing background paths
 //! (`ShellView::persist_theme` and friends; no I/O lands on the render
@@ -50,8 +54,8 @@
 //!
 //! ## What deliberately did NOT change
 //!
-//! The four setter helpers ([`set_theme`], [`set_dark_mode`],
-//! [`set_font_size`], [`set_find_style`]) keep their exact
+//! The four setter helpers ([`set_theme`], [`set_font_size`],
+//! [`set_find_style`], [`set_add_direction`]) keep their exact
 //! `Entity<ShellView>`-taking signatures and semantics — they are the
 //! seam `shell::mod`'s tests drive directly, and nothing about *applying*
 //! a setting changed, only the control surface in front of it. Each now
@@ -105,7 +109,6 @@ use crate::linenumbers::LineNumbers;
 use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
-use crate::theme::Mode;
 use crate::tileadd::AddDirection;
 use crate::vimfind::FindStyle;
 use crate::vimnav;
@@ -123,7 +126,6 @@ use super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingId {
     Theme,
-    DarkMode,
     FontSize,
     FindStyle,
     LineNumbers,
@@ -145,10 +147,10 @@ pub struct SettingRow {
 
 /// Build the dialog's four rows from plain inputs (no gpui, no
 /// `ShellView` — [`rows_for`] is the thin shell-reading wrapper), in the
-/// dialog's fixed display order: the Appearance rows first (Theme, Dark
-/// mode, Font size), then Keyboard (Find style). A boolean setting is a
-/// two-value enum (`off`/`on`) so stepping and cycling need no special
-/// case — wrapping a two-element list IS a toggle.
+/// dialog's fixed display order: the Appearance rows first (Theme, Font
+/// size), then Keyboard (Find style), then Line numbers and Add tile in
+/// the order they were added. A two-value setting (Find style) needs no
+/// special case — wrapping a two-element list IS a toggle.
 ///
 /// An `active_theme` not present in `theme_names` (impossible via the UI —
 /// `ThemeService::apply` only ever activates a bundled name — but cheap to
@@ -157,7 +159,6 @@ pub struct SettingRow {
 pub fn derive_rows(
     theme_names: &[String],
     active_theme: &str,
-    dark: bool,
     font_size: FontSize,
     find_style: FindStyle,
     line_numbers: LineNumbers,
@@ -173,13 +174,6 @@ pub fn derive_rows(
                 .position(|n| n == active_theme)
                 .unwrap_or(0),
             values: theme_names.to_vec(),
-        },
-        SettingRow {
-            id: SettingId::DarkMode,
-            title: "Dark mode",
-            category: "Appearance",
-            values: vec!["off".to_string(), "on".to_string()],
-            current: usize::from(dark),
         },
         SettingRow {
             id: SettingId::FontSize,
@@ -370,7 +364,6 @@ fn apply_setting(
                 set_theme_on(shell, &name.clone(), cx);
             }
         }
-        SettingId::DarkMode => set_dark_mode_on(shell, value_ix == 1, cx),
         SettingId::FontSize => {
             if let Some(&size) = FontSize::ALL.get(value_ix) {
                 set_font_size_on(shell, size, cx);
@@ -403,14 +396,6 @@ fn apply_setting(
 fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
     let mode = shell.services.theme.active_mode();
     shell.services.theme.apply(name, mode, cx);
-    shell.persist_theme(cx);
-    cx.notify();
-}
-
-/// [`set_theme_on`]'s sibling for the dark-mode row/switch value.
-fn set_dark_mode_on(shell: &mut ShellView, dark: bool, cx: &mut Context<ShellView>) {
-    let mode = if dark { Mode::Dark } else { Mode::Light };
-    shell.services.theme.set_mode(mode, cx);
     shell.persist_theme(cx);
     cx.notify();
 }
@@ -460,13 +445,6 @@ fn set_add_direction_on(shell: &mut ShellView, d: AddDirection, cx: &mut Context
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn set_theme(view: &Entity<ShellView>, name: &str, cx: &mut App) {
     view.update(cx, |shell, cx| set_theme_on(shell, name, cx));
-}
-
-/// Apply the mode a dark-mode value implies — same survival story as
-/// [`set_theme`].
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn set_dark_mode(view: &Entity<ShellView>, checked: bool, cx: &mut App) {
-    view.update(cx, |shell, cx| set_dark_mode_on(shell, checked, cx));
 }
 
 /// Set the UI font size and persist it (`[ui] font_size`) — same survival
@@ -529,7 +507,6 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
     derive_rows(
         &shell.services.theme.names(),
         shell.services.theme.active_name(),
-        shell.services.theme.active_mode().is_dark(),
         shell.font_size,
         shell.find_style,
         shell.line_numbers,
@@ -859,7 +836,6 @@ mod tests {
         derive_rows(
             &names(&["Default Light", "Gruvbox Dark"]),
             "Gruvbox Dark",
-            true,
             FontSize::Medium,
             FindStyle::Vim,
             LineNumbers::Off,
@@ -878,7 +854,6 @@ mod tests {
             identity,
             vec![
                 (SettingId::Theme, "Theme", "Appearance"),
-                (SettingId::DarkMode, "Dark mode", "Appearance"),
                 (SettingId::FontSize, "Font size", "Appearance"),
                 (SettingId::FindStyle, "Find style", "Keyboard"),
                 (SettingId::LineNumbers, "Line numbers", "Appearance"),
@@ -892,33 +867,39 @@ mod tests {
         let rows = rows();
         assert_eq!(rows[0].values, names(&["Default Light", "Gruvbox Dark"]));
         assert_eq!(rows[0].current, 1, "the active theme is current");
-        assert_eq!(rows[1].values, names(&["off", "on"]));
-        assert_eq!(rows[1].current, 1, "dark = true reads as 'on'");
-        assert_eq!(rows[2].values, names(&["Small", "Medium", "Large"]));
-        assert_eq!(rows[2].current, 1, "FontSize::Medium is ALL[1]");
-        assert_eq!(rows[3].values, names(&["Vim", "Fzf"]));
-        assert_eq!(rows[3].current, 0, "FindStyle::Vim is ALL[0]");
-        assert_eq!(rows[4].values, names(&["Off", "On", "Relative"]));
-        assert_eq!(rows[4].current, 0, "LineNumbers::Off is ALL[0]");
-        assert_eq!(rows[5].values, vec!["Horizontal", "Vertical", "Auto"]);
-        assert_eq!(rows[5].current, 2, "AddDirection::Auto is ALL[2]");
+        assert_eq!(rows[1].values, names(&["Small", "Medium", "Large"]));
+        assert_eq!(rows[1].current, 1, "FontSize::Medium is ALL[1]");
+        assert_eq!(rows[2].values, names(&["Vim", "Fzf"]));
+        assert_eq!(rows[2].current, 0, "FindStyle::Vim is ALL[0]");
+        assert_eq!(rows[3].values, names(&["Off", "On", "Relative"]));
+        assert_eq!(rows[3].current, 0, "LineNumbers::Off is ALL[0]");
+        assert_eq!(rows[4].values, vec!["Horizontal", "Vertical", "Auto"]);
+        assert_eq!(rows[4].current, 2, "AddDirection::Auto is ALL[2]");
     }
 
     #[test]
-    fn a_light_mode_shell_reads_dark_mode_off() {
+    fn every_row_reads_its_own_current_value() {
         let rows = derive_rows(
             &names(&["A"]),
             "A",
-            false,
             FontSize::Small,
             FindStyle::Fzf,
             LineNumbers::Relative,
             AddDirection::Auto,
         );
-        assert_eq!(rows[1].current, 0, "dark = false reads as 'off'");
-        assert_eq!(rows[4].current, 2, "LineNumbers::Relative is ALL[2]");
-        assert_eq!(rows[2].current, 0);
-        assert_eq!(rows[3].current, 1);
+        assert_eq!(rows[1].current, 0, "FontSize::Small is ALL[0]");
+        assert_eq!(rows[2].current, 1, "FindStyle::Fzf is ALL[1]");
+        assert_eq!(rows[3].current, 2, "LineNumbers::Relative is ALL[2]");
+    }
+
+    #[test]
+    fn there_is_no_dark_mode_row() {
+        // Retired 2026-09-12: every theme name already carries its mode.
+        let rows = rows();
+        assert!(rows.iter().all(|r| r.title != "Dark mode"));
+        let mut state = SettingsState::new();
+        state.set_query("dark".to_string());
+        assert!(visible_rows(&state, &rows).is_empty());
     }
 
     #[test]
@@ -926,7 +907,6 @@ mod tests {
         let rows = derive_rows(
             &names(&["A", "B"]),
             "no-such-theme",
-            false,
             FontSize::Medium,
             FindStyle::Vim,
             LineNumbers::Off,
@@ -943,14 +923,13 @@ mod tests {
         let rows = derive_rows(
             &names(&["A"]),
             "A",
-            false,
             FontSize::Small,
             FindStyle::Vim,
             LineNumbers::Off,
             AddDirection::Vertical,
         );
-        assert_eq!(rows.len(), 6);
-        let row = &rows[5];
+        assert_eq!(rows.len(), 5);
+        let row = &rows[4];
         assert_eq!(row.id, SettingId::AddDirection);
         assert_eq!(row.title, "Add tile");
         assert_eq!(row.category, "Tiling");
@@ -994,7 +973,7 @@ mod tests {
     fn searchable_text_is_title_and_category_never_the_values() {
         let rows = rows();
         assert_eq!(searchable_text(&rows[0]), "Theme Appearance");
-        assert_eq!(searchable_text(&rows[3]), "Find style Keyboard");
+        assert_eq!(searchable_text(&rows[2]), "Find style Keyboard");
         assert!(
             !searchable_text(&rows[0]).contains("Gruvbox"),
             "value labels must not participate — matching would depend on \
@@ -1031,7 +1010,7 @@ mod tests {
     fn setting_a_query_resets_the_selection_to_the_top_match() {
         let mut state = SettingsState::new();
         state.selected = 2;
-        state.set_query("dark".to_string());
+        state.set_query("font".to_string());
         assert_eq!(state.selected, 0);
     }
 

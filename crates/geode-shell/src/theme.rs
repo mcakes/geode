@@ -388,9 +388,10 @@ impl ThemeService {
     }
 
     /// Set the active family's mode directly (rather than flipping it —
-    /// see [`toggle_mode`](Self::toggle_mode)). Used by the settings
-    /// dialog's dark-mode switch (`settings_view::set_dark_mode`). A no-op
-    /// when already at `mode`. Falls back to [`DEFAULT_FAMILY`] at `mode`
+    /// see [`toggle_mode`](Self::toggle_mode)), the door `toggle_mode`
+    /// itself lands on once it has decided the target. (The settings
+    /// dialog's own dark-mode row, this method's other caller, was
+    /// retired 2026-09-12.) A no-op when already at `mode`. Falls back to [`DEFAULT_FAMILY`] at `mode`
     /// when the active family doesn't ship it, same fallback `toggle_mode`
     /// uses.
     pub fn set_mode(&mut self, mode: Mode, cx: &mut App) {

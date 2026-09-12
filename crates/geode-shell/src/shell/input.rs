@@ -325,7 +325,7 @@ impl ShellView {
     /// The apply-then-persist seam every UI theme-change path calls right
     /// after applying a change live through `ThemeService` (`theme::
     /// toggle_mode` above, `dispatch_palette_item`'s `Theme` branch below,
-    /// and `settings_view::set_theme`/`set_dark_mode`) — one place that
+    /// and `settings_view::set_theme`) — one place that
     /// knows how to turn "the active theme just changed" into a write of
     /// `<user_dir>/app.toml`'s `[theme]` table (`theme::
     /// persist_to_user_config`), so a theme choice survives a restart via
