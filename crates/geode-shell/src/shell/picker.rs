@@ -1250,4 +1250,53 @@ grain = "underlying"
         assert_eq!(p[6].role, "derived");
         assert!(!names.contains(&"position_ref"), "keys are not categorical");
     }
+
+    /// The grouping vocabulary is the compiler's, not the picker's: every
+    /// declared column some declared grain `carries` — a grain's key
+    /// columns and every carried dimension, categorical or not — plus every
+    /// derived dimension. A categorical *attribute* (`expiry`) is pickable
+    /// but no grain carries it as a dimension, so grouping by it would
+    /// fail to compile and it is not offered; a key column is the reverse.
+    #[test]
+    fn groupable_columns_are_every_carried_dimension_key_included_plus_derived() {
+        let datasets = format!(
+            "{CARRIED_DEMO}\n[risk_snapshot.columns.strike]\ntype = \"f64\"\nrole = \"dimension\"\ngrain = \"instrument\"\n"
+        );
+        let config = config_from(&[
+            ("datasets", &datasets),
+            (
+                "dimensions",
+                "desk = { from = \"book\", values = { BK000 = \"Flow\" } }",
+            ),
+        ]);
+        let g = super::super::groupable_columns(&config);
+        let names: Vec<(&str, &str)> = g.iter().map(|c| (c.column.as_str(), c.role)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("book", "dimension"),
+                ("lhu", "dimension"),
+                ("position_ref", "key"),
+                ("counterparty", "dimension"),
+                ("instrument_ref", "key"),
+                ("underlying_ref", "dimension"),
+                ("currency", "dimension"),
+                ("strike", "dimension"),
+                ("desk", "derived"),
+            ]
+        );
+        assert_eq!(g[2].datasets, vec!["risk_snapshot"]);
+    }
+
+    /// A dataset with no declared grain (no measure or attribute) has no
+    /// table the compiler could scan, so it contributes nothing — the same
+    /// `finest_carrying` rule that would refuse the query.
+    #[test]
+    fn a_dataset_declaring_no_grain_contributes_no_groupable_columns() {
+        let config = config_from(&[(
+            "datasets",
+            "[bare.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        )]);
+        assert!(super::super::groupable_columns(&config).is_empty());
+    }
 }

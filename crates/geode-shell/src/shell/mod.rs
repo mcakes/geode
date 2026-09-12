@@ -303,6 +303,65 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
     out
 }
 
+/// Every column a grouping slot may name, in schema order — the query
+/// compiler's own vocabulary (`carries_all` in `geode-data`'s `compile`),
+/// not the picker's: for each dataset, every declared column some
+/// *declared* grain (`DatasetSpec::grains()`, the grains a measure or
+/// attribute gives a table to) `carries` as a dimension — a grain's key
+/// columns (`position_ref`, `instrument_ref`) and every carried
+/// dimension, categorical or not (a numeric strike included) — then every
+/// derived dimension, role `"derived"`. `role` is `"key"` for a
+/// `ColumnRole::Key` column and `"dimension"` otherwise. First-seen
+/// order across datasets, exactly as [`pickable_columns`].
+///
+/// This is deliberately neither a superset nor a subset of the picker's
+/// list: a categorical attribute is pickable (its ENUM dictionary is
+/// something to browse) but no grain carries it as a dimension, so a
+/// slot naming it would fail to compile; a key column is the reverse,
+/// groupable but with no dictionary to pick from. The Groupings dialog
+/// (`objectdialog::groupings::fields`) reads this one.
+pub fn groupable_columns(config: &Config) -> Vec<Pickable> {
+    let (schema, _) = config
+        .doc("datasets")
+        .map(SchemaSpec::from_doc)
+        .unwrap_or_default();
+    let (dims, _) = config
+        .doc("dimensions")
+        .map(DerivedDimensions::from_doc)
+        .unwrap_or_default();
+
+    let mut out: Vec<Pickable> = Vec::new();
+    for dataset in &schema.datasets {
+        let grains = dataset.grains();
+        for column in &dataset.columns {
+            if !grains.iter().any(|g| dataset.carries(*g, &column.name)) {
+                continue;
+            }
+            if let Some(p) = out.iter_mut().find(|p| p.column == column.name) {
+                p.datasets.push(dataset.name.clone());
+                continue;
+            }
+            let role = match column.role {
+                ColumnRole::Key => "key",
+                _ => "dimension",
+            };
+            out.push(Pickable {
+                column: column.name.clone(),
+                role,
+                datasets: vec![dataset.name.clone()],
+            });
+        }
+    }
+    for dim in dims.all() {
+        out.push(Pickable {
+            column: dim.name.clone(),
+            role: "derived",
+            datasets: Vec::new(),
+        });
+    }
+    out
+}
+
 /// Every saved scope, keyed by name (spec §3.9/§3.11) — `defaults::
 /// register_scope_actions`'s `scope::<name>` companion to
 /// [`pickable_columns`]'s own `register_pick_actions`, and read the same
