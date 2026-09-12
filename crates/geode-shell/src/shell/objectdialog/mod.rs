@@ -657,9 +657,9 @@ impl Confirm {
             // still there — but the write forks this one into the user
             // layer, exactly like `Fork`'s own consequence, and `r`
             // reverts it same as any other fork.
-            Confirm::Overwrite { forks: true } => format!(
-                "Replace '{name}' with the frame's current scope? 'r' reverts."
-            ),
+            Confirm::Overwrite { forks: true } => {
+                format!("Replace '{name}' with the frame's current scope? 'r' reverts.")
+            }
         }
     }
 }
@@ -2709,21 +2709,24 @@ mod tests {
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
-        // The fork prompt has to name the consequence that lands weeks
-        // later, not the act: "copy this" sounds free, and the cost is
-        // that the desk's next column never arrives.
+        // The fork prompt names the object and the act; it deliberately
+        // does not spell out "it stops following the desk" (user ruling
+        // 2026-09-11: that clause read as a warning about the act rather
+        // than a description of it).
         let fork = Confirm::Fork.prompt("tree");
         assert!(fork.contains("tree"), "{fork}");
-        assert!(fork.contains("desk"), "{fork}");
+        assert!(fork.starts_with("Copy"), "{fork}");
+        assert!(!fork.contains("desk"), "{fork}");
     }
 
     /// `Confirm::Overwrite`'s two prompts must each be true of the case
     /// they describe (Part 2a Task 5 review round 1, the Major): a
     /// user-owned scope really does lose its previous contents, but a
     /// desk/builtin-owned one does not — the desk's copy is still there,
-    /// `r`-revertible — so it must disclose the fork instead, the same
-    /// way `Confirm::Fork`'s own prompt names "the desk" rather than
-    /// merely "are you sure".
+    /// `r`-revertible — so it must say so instead of claiming a loss.
+    /// Neither prompt spells out "it stops following the desk" any more
+    /// (user ruling 2026-09-11); the forked case discloses its
+    /// reversibility through `'r' reverts` alone.
     #[test]
     fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
         let owned = Confirm::Overwrite { forks: false }.prompt("mine");
@@ -2737,8 +2740,8 @@ mod tests {
         let forked = Confirm::Overwrite { forks: true }.prompt("mine");
         assert!(forked.contains("mine"), "{forked}");
         assert!(
-            forked.contains("desk"),
-            "a desk-owned scope's prompt must disclose the fork: {forked}"
+            !forked.contains("desk"),
+            "the 'stops following the desk' clause was retired: {forked}"
         );
         assert!(
             forked.contains("reverts"),
