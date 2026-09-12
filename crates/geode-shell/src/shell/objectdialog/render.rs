@@ -123,8 +123,8 @@ use super::apply;
 use super::scopes;
 use super::views;
 use super::{
-    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, Stage,
-    Step,
+    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, RowDrag,
+    Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
@@ -2374,6 +2374,61 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     on_edit_row_clicked(shell, clicked, window, cx);
                 });
             });
+        // §18.9.1: a list row is both a drag source and a drop target;
+        // a field row (`Dataset`, `Slot`, Scopes' two `Text` rows) is
+        // neither — which is `Draft::row_drag` returning `None`, not a
+        // second rule stated here — and in the chain field (§18.8) the
+        // rows are completions, so they carry no drag either, the same
+        // withdrawal the tick and the action bar make there.
+        //
+        // The branch is built into an `AnyElement` on both sides because
+        // `.id()` turns the `Div` into a `Stateful<Div>`: the two arms
+        // have different types and only the erased form can be one
+        // value. (`list.child(..)` below already takes an `AnyElement`,
+        // so nothing downstream notices.)
+        let row_el = match (!draft.chain_entry)
+            .then(|| draft.row_drag(edit_row))
+            .flatten()
+        {
+            Some(payload) => {
+                let entity_for_drop = entity.clone();
+                // `target` is THIS row — the drop's destination. The
+                // payload that arrives at `on_drop` is the dragged row's
+                // own, built by whichever row started the gesture.
+                let target = payload.clone();
+                let ghost_name = gpui::SharedString::from(payload.name.clone());
+                row_el
+                    // `own` is part of the id because the same name can
+                    // appear in both blocks across a drag's lifetime (a
+                    // demoted column keeps its name), and two siblings
+                    // sharing an id would share gpui's per-element state.
+                    .id(gpui::SharedString::from(format!(
+                        "objectdialog-drag-{}-{}",
+                        payload.own, payload.name
+                    )))
+                    .cursor_grab()
+                    .on_drag(payload, move |_drag, _offset, _window, cx| {
+                        cx.new(|_| DragGhost {
+                            name: ghost_name.clone(),
+                        })
+                    })
+                    // Only this dialog's own payload: a tile drag or any
+                    // other dragged value passing over the modal must not
+                    // land on a column list.
+                    .can_drop(|value, _window, _cx| value.downcast_ref::<RowDrag>().is_some())
+                    .drag_over::<RowDrag>(move |style, _drag, _window, cx| {
+                        style.border_t_2().border_color(cx.theme().primary)
+                    })
+                    .on_drop(move |dropped: &RowDrag, window, cx| {
+                        let dropped = dropped.clone();
+                        entity_for_drop.update(cx, |shell, cx| {
+                            on_row_dropped(shell, &dropped, &target, window, cx);
+                        });
+                    })
+                    .into_any_element()
+            }
+            None => row_el.into_any_element(),
+        };
         // The header rides on the first item's own element so the list's
         // child count still equals its row count (`visible.len()`) —
         // `scroll_to_item` indexes children by that count, and a header
@@ -2381,7 +2436,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // make every following index off by one.
         list = list.child(match section_header {
             Some(header) => v_flex().child(header).child(row_el).into_any_element(),
-            None => row_el.into_any_element(),
+            None => row_el,
         });
     }
 
@@ -2869,6 +2924,104 @@ fn on_tick_clicked(
         }
         Step::Refused(reason) => refuse_step(shell, reason),
         Step::Inert => set_notice(shell, "nothing on this row changes with a tick".to_string()),
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// The ghost gpui paints under the cursor during a row drag (§18.9.1):
+/// the dragged name in the row's own type, on the popover surface so it
+/// reads as lifted off the list rather than as one more row of it.
+///
+/// An entity of its own because that is the shape `on_drag`'s
+/// constructor has to return; it holds the name alone, since a drag is
+/// over in a second and nothing about the row that started it can change
+/// underneath a ghost that is already painted.
+struct DragGhost {
+    name: gpui::SharedString,
+}
+
+impl gpui::Render for DragGhost {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        div()
+            .px_2()
+            .py_1()
+            .rounded(px(4.))
+            .bg(theme.popover)
+            .text_color(theme.popover_foreground)
+            .border_1()
+            .border_color(theme.border)
+            .shadow_md()
+            .child(self.name.clone())
+    }
+}
+
+/// §18.9.3: a row was dropped on another. Both ends are resolved by NAME
+/// through [`Draft::drop_row`] — the keyboard stays live during a drag,
+/// so between the grab and the drop a keystroke can have reordered or
+/// removed either row — and on a change the draft's own cursor follows
+/// the dropped item, so this then revalidates, scrolls to it and commits
+/// through the same `commit_or_confirm` a keystroke takes: a desk-owned
+/// view still asks before a `Doc` write forks it, and the write joins
+/// the same batch behind the same debounce.
+///
+/// Inert drops say nothing, with two exceptions — the pair a trader
+/// could otherwise read as the app having failed: a
+/// catalogue-to-catalogue drop (there is no order there to change) and a
+/// payload whose name has left the list mid-drag. `resolves` is read
+/// BEFORE the drop, because `drop_row` mutates the very lists the answer
+/// depends on.
+///
+/// A [`Step::Refused`] takes `set_notice` rather than [`refuse_step`]:
+/// that hint names `r`/`d` because the refusal it exists for is
+/// unticking a slot's last dimension, and the nearest refusal a drop
+/// could ever carry is `remove_selected`'s "space unticks here", which
+/// those verbs are no answer to. (`drop_row` reaches neither today — its
+/// own doc says why — so this arm is a safety net, not a path.)
+///
+/// **Claimed and dropped while a confirm is armed**, the identical guard
+/// [`on_tick_clicked`] carries and for the identical reason: the row
+/// list keeps painting underneath the confirm row, so a drop there would
+/// otherwise clobber an armed Delete/Revert/Overwrite with a fresh
+/// `Confirm::Fork` or commit an unrelated write while the question on
+/// screen is still unanswered. It returns before touching the draft at
+/// all — not even the cursor moves.
+///
+/// `pub(in crate::shell)` so the window tests can drive it directly:
+/// gpui's drag machinery does not run under `TestAppContext`, so this is
+/// the lowest rung the gesture can be tested on (§18.9.5).
+pub(in crate::shell) fn on_row_dropped(
+    shell: &mut ShellView,
+    src: &RowDrag,
+    dst: &RowDrag,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
+    if draft.confirm.is_some() {
+        return;
+    }
+    let resolves = draft.locate(src).is_some() && draft.locate(dst).is_some();
+    match draft.drop_row(src, dst) {
+        Step::Changed => {
+            revalidate(shell);
+            scroll_to_cursor(shell);
+            commit_or_confirm(shell, cx);
+        }
+        Step::Refused(reason) => set_notice(shell, reason),
+        Step::Inert if !src.own && !dst.own => {
+            set_notice(shell, "the catalogue has no order".to_string());
+        }
+        Step::Inert if !resolves => set_notice(shell, "that row is gone".to_string()),
+        Step::Inert => {}
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();

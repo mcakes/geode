@@ -4072,3 +4072,142 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
         "no write reaches disk from a tick click claimed by an armed confirm"
     );
 }
+
+/// §18.9.3 at the shell level: the drop handler reorders, parks the
+/// cursor on the dropped item and queues the presentation write.
+///
+/// This is the lowest rung the gesture can be tested on, and §18.9.5
+/// says why: gpui's own drag machinery does not run under
+/// `TestAppContext`. A `simulate_mouse_down` on a row followed by a move
+/// well past `DRAG_THRESHOLD` never leaves `App::has_active_drag` set —
+/// verified here on 2026-09-12, with and without an intervening
+/// `window.draw`, and with a hover move before the press — so a test of
+/// the full `on_drag` → `on_drop` path would assert nothing about this
+/// dialog and everything about the harness. The wiring above this call
+/// (`row_drag` into `on_drag`, `can_drop`, `drag_over`, `on_drop`) is a
+/// display-check item alongside §18.6's; everything below it is tested
+/// here and in `Draft::drop_row`'s own tests.
+#[gpui::test]
+fn the_drop_handler_reorders_and_writes(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    // The cursor is parked on the TARGET, not the dragged row (`j`
+    // moves it off `book` and onto `npv`), which is what makes this
+    // test able to see §18.9.1's rule at all: a handler that read the
+    // source off the cursor instead of the payload would drop `npv`
+    // onto itself and leave the list exactly as it found it.
+    cx.simulate_keystrokes("j");
+    cx.run_until_parked();
+    let (src, dst) = edit_draft(&shell, &cx, |d| {
+        let rows = d.rows();
+        let book = rows
+            .iter()
+            .copied()
+            .find(|r| d.row_label(*r) == "book")
+            .unwrap();
+        let npv = rows
+            .iter()
+            .copied()
+            .find(|r| d.row_label(*r) == "npv")
+            .unwrap();
+        assert_eq!(d.row_label(d.selected_row().unwrap()), "npv");
+        (d.row_drag(book).unwrap(), d.row_drag(npv).unwrap())
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &src, &dst, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["npv", "book"]);
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.row_label(d.selected_row().unwrap())),
+        "book"
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    let text =
+        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
+    assert!(text.contains("order = [\"npv\", \"book\"]"), "{text}");
+}
+
+/// §17.1 rule 3 / §18.9.3: a drop is claimed and dropped while a confirm
+/// is armed, exactly as `on_tick_clicked` is and as a bare letter is on
+/// the key path. The same fixture reasoning as
+/// `a_tick_click_does_nothing_while_a_confirm_is_armed`: only a
+/// user-layer object can arm `Confirm::Delete`, so `tree` (desk-owned)
+/// cannot be used here.
+#[gpui::test]
+fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Delete),
+        "d arms delete on an object the user layer itself defines"
+    );
+
+    let (src, dst) = edit_draft(&shell, &cx, |d| {
+        let rows = d.rows();
+        let book = rows
+            .iter()
+            .copied()
+            .find(|r| d.row_label(*r) == "book")
+            .unwrap();
+        let npv = rows
+            .iter()
+            .copied()
+            .find(|r| d.row_label(*r) == "npv")
+            .unwrap();
+        (d.row_drag(book).unwrap(), d.row_drag(npv).unwrap())
+    });
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &src, &dst, window, cx);
+        });
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Delete),
+        "the armed delete must not be clobbered by a drop behind it"
+    );
+    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(
+        names,
+        ["book", "npv"],
+        "the list must be untouched — the drop did nothing at all"
+    );
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert!(
+        !dir.path().join("view_presentation.toml").exists(),
+        "no write reaches disk from a drop claimed by an armed confirm"
+    );
+}

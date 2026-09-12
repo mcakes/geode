@@ -6982,11 +6982,39 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    if draft.confirm.is_some() {
         return;
-    }' \
+    }
+    if position >= draft.visible_rows().len() {' \
   '    if false && draft.confirm.is_some() {
         return;
-    }' \
+    }
+    if position >= draft.visible_rows().len() {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
+
+# ---- Mouse parity Task 6 (§18.9.1, §18.9.3): dragging a row --------------
+
+# §18.9.1: the payload is by NAME. Mutated to ignore the source and act
+# on the cursor's row, a drop moves whichever row is selected — which in
+# the test is the TARGET, so the list comes back untouched.
+run_mutation "objectdialog: a drop resolves its source by name, not the cursor" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    match draft.drop_row(src, dst) {' \
+  '    match draft.drop_row(&draft.row_drag(draft.selected_row().unwrap_or(EditRow::Field(0))).unwrap_or_else(|| src.clone()), dst) {' \
+  geode-shell the_drop_handler_reorders_and_writes
+
+# The same guard Task 5 put on the tick, on the other handler that
+# reaches the row list: a drop must not act behind an armed confirm.
+# Mutated away, it clobbers the pending Delete and writes.
+run_mutation "objectdialog: a drop is claimed and dropped while a confirm is armed" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if draft.confirm.is_some() {
+        return;
+    }
+    let resolves' \
+  '    if false && draft.confirm.is_some() {
+        return;
+    }
+    let resolves' \
+  geode-shell a_row_drop_does_nothing_while_a_confirm_is_armed
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
