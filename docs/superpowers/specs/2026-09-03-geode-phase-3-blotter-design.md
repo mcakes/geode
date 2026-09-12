@@ -668,10 +668,31 @@ request time, which over-fetches only for expanded nodes hidden under a
 collapsed ancestor — bounded and harmless.
 
 **Cursor.** `(visible_row, column)`. Row motion is `vimnav::apply` over
-the flattened length: `j`/`k`, `gg`/`G`, `ctrl+d`/`ctrl+u` as the
+the flattened length: `j`/`k`, `gg`/`G`, `ctrl+d`/`ctrl+u` (±5),
+`ctrl+f`/`ctrl+b` and their `pagedown`/`pageup` aliases (±10) as the
 existing vocabulary defines, each multiplied by the engine's count
 prefix (§3.3): `5j` moves five, `12G` goes to row 12, `3ctrl+d` pages
-three times. `h`/`l` move the column, also counted; `home`/`end` go to
+three times. The two step sizes are `vimnav`'s own fixed offsets, the
+same ones every dialog list moves by — a general navigation convention
+(user ruling 2026-09-11), not a per-surface choice.
+
+**Line numbers.** `[ui] line_numbers = "off" | "on" | "rel"` (default
+`off`; a settings row, the palette's `ui::line_numbers_cycle`, hot
+reload — user ruling 2026-09-11) paints a gutter at the leading edge of
+the tree cell, before the indent: `on` is the 1-based visible-row index,
+the very index `12G` jumps to; `rel` is the distance from the cursor row,
+with the cursor row itself showing its absolute number (vim's `number
+relativenumber` hybrid, by ruling), so `NG` and `Nj`/`Nk` both read
+straight off the gutter. It is a gutter, not a column: `h`/`l`, sort,
+yank and the plan never see it, and the tree column widens by its width.
+The setting is shell-owned and reaches the tile as the
+`geode_shell::linenumbers::UiSettings` gpui global — the module contract
+gives a tile no path to `ShellView`, and the `ConfigReloaded` route only
+fires for a `views`/`dimensions` reload — observed with `observe_global`
+so a settings-row step repaints on that keystroke. The gutter's text is
+built per cached window and re-derived only when the window, the cursor
+row or the mode changes (`BlotterDelegate::ensure_numbers`'s stamp),
+never per frame. `h`/`l` move the column, also counted; `home`/`end` go to
 the first and last. The cursor's *path* is remembered across requery so a
 new snapshot puts the cursor back on the same node, falling back to a
 clamped index when the node is gone.

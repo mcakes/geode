@@ -15,6 +15,7 @@ pub mod fontsize;
 pub mod frame;
 pub mod keymap;
 pub mod keymap_edit;
+pub mod linenumbers;
 pub mod listfilter;
 pub mod log_persist;
 pub mod module;

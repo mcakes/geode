@@ -1457,17 +1457,91 @@ fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
         AddDirection::Auto,
         "sanity: Auto is the default"
     );
-    cx.simulate_keystrokes("down down down down");
+    cx.simulate_keystrokes("down down down down down");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
-        4,
-        "sanity: four downs land on the fifth row"
+        5,
+        "sanity: five downs land on the sixth row"
     );
     cx.simulate_keystrokes("tab");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.add_direction),
         AddDirection::Horizontal,
         "tab on the Add tile row should wrap Auto -> Horizontal"
+    );
+}
+
+/// `[ui] line_numbers` (user ruling 2026-09-11): the settings row steps
+/// off → on → rel, and every step is published as the `UiSettings`
+/// global — the only door a module has to the value — so a blotter tile
+/// observing it repaints on the very keystroke, not on some later
+/// config reload.
+#[gpui::test]
+fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAppContext) {
+    use crate::linenumbers::{LineNumbers, UiSettings};
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
+        LineNumbers::Off,
+        "sanity: the global is seeded Off at startup"
+    );
+    cx.simulate_keystrokes("down down down down");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
+        4,
+        "sanity: four downs land on the Line numbers row"
+    );
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.line_numbers),
+        LineNumbers::On
+    );
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
+        LineNumbers::On,
+        "the step reached the global"
+    );
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
+        LineNumbers::Relative
+    );
+    cx.simulate_keystrokes("tab");
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
+        LineNumbers::Off,
+        "the row wraps"
+    );
+}
+
+/// The palette action is the same setter as the row: one dispatch
+/// steps once and publishes the global.
+#[gpui::test]
+fn the_line_numbers_cycle_action_steps_the_setting_once(cx: &mut gpui::TestAppContext) {
+    use crate::linenumbers::{LineNumbers, UiSettings};
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+    let cycle = |cx: &mut gpui::VisualTestContext| {
+        cx.update(|window, cx| {
+            shell.update(cx, |s, cx| {
+                s.dispatch(
+                    &ActionId("ui::line_numbers_cycle".to_string()),
+                    None,
+                    window,
+                    cx,
+                );
+            });
+        });
+    };
+    cycle(&mut cx);
+    assert_eq!(
+        cx.update(|_, cx| cx.global::<UiSettings>().line_numbers),
+        LineNumbers::On
+    );
+    cycle(&mut cx);
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.line_numbers),
+        LineNumbers::Relative
     );
 }
 

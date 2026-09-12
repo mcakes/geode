@@ -3055,27 +3055,104 @@ fn assert_row_in_view(cx: &mut gpui::VisualTestContext, selector: &'static str, 
     );
 }
 
-/// `space` promotes the row under the cursor into the member block, at
-/// its *end* — which on a list long enough to scroll is a different
-/// screenful from the one the trader was looking at. `shift+j` already
-/// scrolled the cursor back into view after a move; these three verbs
-/// move it just as far and did not, so the cursor silently left the
-/// viewport and the next `j` appeared to jump.
+/// The name of the list item the edit-stage cursor is on, or `None` on a
+/// field row.
+fn cursor_item_name(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    edit_draft(shell, cx, |draft| match draft.selected_row()? {
+        objectdialog::EditRow::Item { field, item } => draft
+            .list_items(&draft.fields[field].key)
+            .map(|items| items[item].name.clone()),
+        objectdialog::EditRow::Field(_) => None,
+    })
+}
+
+/// `space` promotes the row under the cursor into the member block and
+/// leaves the cursor on the NEXT available row (user ruling 2026-09-11:
+/// a trader adding several columns wants it there, not on the column
+/// that just left). With the cursor on the last row the viewport shows,
+/// that next row is one row past the viewport's bottom — `shift+j`
+/// already scrolled the cursor back into view after a move, and this
+/// verb moves it too, so without the scroll the cursor silently left
+/// the viewport and the next `j` appeared to jump.
 #[gpui::test]
-fn space_scrolls_the_promoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+fn space_scrolls_the_next_row_into_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_shell, mut cx) =
+    let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, long_desk_view_services(40), dir.path(), "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    // To the bottom of the list, on `m39` — the last available column,
-    // whose promotion lands it just under `npv` at the top, a whole
-    // screenful above.
-    cx.simulate_keystrokes("shift-g");
-    cx.run_until_parked();
+    let last = cursor_to_last_visible_available_row(&shell, &mut cx);
+    let next = format!("m{}", last + 1);
+    let next_selector = item_selector(last + 1);
+    assert!(
+        !row_in_view(&mut cx, next_selector),
+        "sanity: {next} starts just below the viewport"
+    );
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    assert_row_in_view(&mut cx, "objectdialog-item-m39", "space");
+    assert_eq!(
+        cursor_item_name(&shell, &cx).as_deref(),
+        Some(next.as_str()),
+        "the cursor moved on to the next available column, not with m{last}"
+    );
+    assert!(
+        row_in_view(&mut cx, next_selector),
+        "after space the cursor row {next} was not scrolled into view"
+    );
+}
+
+/// The debug selector of available column `m{i}`, leaked to the
+/// `&'static str` `debug_bounds` insists on.
+fn item_selector(i: usize) -> &'static str {
+    Box::leak(format!("objectdialog-item-m{i}").into_boxed_str())
+}
+
+/// Is `selector`'s row wholly inside the edit list's viewport? The
+/// predicate behind [`assert_row_in_view`], for a test that has to
+/// *find* the viewport's last row before it can assert on the next one.
+fn row_in_view(cx: &mut gpui::VisualTestContext, selector: &'static str) -> bool {
+    let list = cx
+        .debug_bounds("objectdialog-fields")
+        .expect("the fields list should paint");
+    let Some(row) = cx.debug_bounds(selector) else {
+        return false;
+    };
+    row.origin.y + gpui::px(1.0) >= list.origin.y
+        && row.origin.y + row.size.height <= list.origin.y + list.size.height + gpui::px(1.0)
+}
+
+/// Walk the cursor from the top of a fresh `long_desk_view_services(40)`
+/// edit stage down to `m{n}`, the LAST available column the unscrolled
+/// viewport shows in full, and return `n`. Read off the painted layout
+/// rather than hardcoded, because how many one-line rows fit under the
+/// `VISIBLE_ROWS * ROW_HEIGHT` cap (a two-line estimate) is a layout
+/// fact this test has no business restating — an earlier draft assumed
+/// ten and left the harness's scroll entries surviving, since the next
+/// row was already on screen.
+fn cursor_to_last_visible_available_row(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+) -> usize {
+    // `debug_bounds` wants a `&'static str`; a leaked selector per probed
+    // row is the price, and a test's to pay.
+    let last = (0..40)
+        .take_while(|i| row_in_view(cx, item_selector(*i)))
+        .last()
+        .expect("at least m0 is in view at the top");
+    assert!(
+        last < 39,
+        "the fixture must be taller than the viewport for the test to mean anything"
+    );
+    // rows: Dataset=0, Columns=1, book=2, npv=3, m0=4 … so `m{last}` is
+    // `last + 4` presses of `j` from the top.
+    let presses = vec!["j"; last + 4].join(" ");
+    cx.simulate_keystrokes(&presses);
+    cx.run_until_parked();
+    assert_eq!(
+        cursor_item_name(shell, cx).as_deref(),
+        Some(format!("m{last}").as_str())
+    );
+    last
 }
 
 /// `shift+space` steps the same row the same way (both directions share
@@ -3083,25 +3160,58 @@ fn space_scrolls_the_promoted_row_back_into_view(cx: &mut gpui::TestAppContext) 
 /// own), so it has to scroll for the same reason — asserted separately
 /// because the two arms are separate call sites in `handle_key`.
 #[gpui::test]
-fn shift_space_scrolls_the_promoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+fn shift_space_scrolls_the_next_row_into_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_shell, mut cx) =
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, long_desk_view_services(40), dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let last = cursor_to_last_visible_available_row(&shell, &mut cx);
+    let next = format!("m{}", last + 1);
+    let next_selector = item_selector(last + 1);
+    assert!(!row_in_view(&mut cx, next_selector));
+    cx.simulate_keystrokes("shift-space");
+    cx.run_until_parked();
+    assert_eq!(
+        cursor_item_name(&shell, &cx).as_deref(),
+        Some(next.as_str())
+    );
+    assert!(
+        row_in_view(&mut cx, next_selector),
+        "after shift+space the cursor row {next} was not scrolled into view"
+    );
+}
+
+/// Adding the LAST available row has no next row to move on to, so the
+/// cursor stays at the same visible index — now the row before it, `m38`
+/// — rather than following `m39` up to the member block a screenful
+/// above or running off the end of the list.
+#[gpui::test]
+fn space_on_the_last_available_row_keeps_the_cursor_at_the_bottom(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, long_desk_view_services(40), dir.path(), "config::views");
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     cx.simulate_keystrokes("shift-g");
     cx.run_until_parked();
-    cx.simulate_keystrokes("shift-space");
+    cx.simulate_keystrokes("space");
     cx.run_until_parked();
-    assert_row_in_view(&mut cx, "objectdialog-item-m39", "shift+space");
+    assert_eq!(cursor_item_name(&shell, &cx).as_deref(), Some("m38"));
+    assert_row_in_view(&mut cx, "objectdialog-item-m38", "space");
 }
 
-/// And `x` the other way: a member demoted to the *end* of the
-/// available block, from the top of a list too long to show both.
+/// And `x` the other way round: the demoted row travels to the *end* of
+/// the available block, a screenful below, but the cursor does not go
+/// with it (user ruling 2026-09-11) — it stays at the top, on the row
+/// that was next, which was on screen before the keystroke and still is.
+/// That is also why the `x` arm no longer calls `scroll_to_cursor`: with
+/// the cursor holding its own visible index there is nothing to scroll
+/// to, and a call no test could see would be a harness lie.
 #[gpui::test]
-fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+fn x_leaves_the_cursor_on_the_next_row_still_in_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_shell, mut cx) = dialog_test_shell_in_dir(
+    let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
         services_with_a_long_desk_view(),
         dir.path(),
@@ -3112,9 +3222,19 @@ fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
     // Past `Dataset` and `Columns` onto `book`, the view's first member.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
+    assert_eq!(cursor_item_name(&shell, &cx).as_deref(), Some("book"));
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
-    assert_row_in_view(&mut cx, "objectdialog-item-book", "x");
+    assert_eq!(
+        cursor_item_name(&shell, &cx).as_deref(),
+        Some("npv"),
+        "the cursor stayed on the next member, not with book at the bottom"
+    );
+    assert_row_in_view(&mut cx, "objectdialog-item-npv", "x");
+    assert!(
+        !row_in_view(&mut cx, "objectdialog-item-book"),
+        "sanity: book really did travel off the bottom of the viewport"
+    );
 }
 
 // ---------------------------------------------------------------------

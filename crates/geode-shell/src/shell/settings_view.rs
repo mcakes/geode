@@ -101,6 +101,7 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 use crate::fontsize::FontSize;
 use crate::keymap::Keystroke;
 use crate::keymap::Modifiers;
+use crate::linenumbers::LineNumbers;
 use crate::listfilter::{self, Ranked};
 use crate::shell::ShellView;
 use crate::shell::dialog;
@@ -125,6 +126,7 @@ pub enum SettingId {
     DarkMode,
     FontSize,
     FindStyle,
+    LineNumbers,
     AddDirection,
 }
 
@@ -158,6 +160,7 @@ pub fn derive_rows(
     dark: bool,
     font_size: FontSize,
     find_style: FindStyle,
+    line_numbers: LineNumbers,
     add_direction: AddDirection,
 ) -> Vec<SettingRow> {
     vec![
@@ -203,6 +206,19 @@ pub fn derive_rows(
                 .iter()
                 .position(|&s| s == find_style)
                 .expect("find_style is always one of FindStyle::ALL"),
+        },
+        SettingRow {
+            id: SettingId::LineNumbers,
+            title: "Line numbers",
+            category: "Appearance",
+            values: LineNumbers::ALL
+                .iter()
+                .map(|m| m.label().to_string())
+                .collect(),
+            current: LineNumbers::ALL
+                .iter()
+                .position(|&m| m == line_numbers)
+                .expect("line_numbers is always one of LineNumbers::ALL"),
         },
         SettingRow {
             id: SettingId::AddDirection,
@@ -365,6 +381,11 @@ fn apply_setting(
                 set_find_style_on(shell, style, cx);
             }
         }
+        SettingId::LineNumbers => {
+            if let Some(&m) = LineNumbers::ALL.get(value_ix) {
+                shell.set_line_numbers(m, cx);
+            }
+        }
         SettingId::AddDirection => {
             if let Some(&d) = AddDirection::ALL.get(value_ix) {
                 set_add_direction_on(shell, d, cx);
@@ -511,6 +532,7 @@ fn rows_for(shell: &ShellView) -> Vec<SettingRow> {
         shell.services.theme.active_mode().is_dark(),
         shell.font_size,
         shell.find_style,
+        shell.line_numbers,
         shell.add_direction,
     )
 }
@@ -840,6 +862,7 @@ mod tests {
             true,
             FontSize::Medium,
             FindStyle::Vim,
+            LineNumbers::Off,
             AddDirection::Auto,
         )
     }
@@ -858,6 +881,7 @@ mod tests {
                 (SettingId::DarkMode, "Dark mode", "Appearance"),
                 (SettingId::FontSize, "Font size", "Appearance"),
                 (SettingId::FindStyle, "Find style", "Keyboard"),
+                (SettingId::LineNumbers, "Line numbers", "Appearance"),
                 (SettingId::AddDirection, "Add tile", "Tiling"),
             ]
         );
@@ -874,8 +898,10 @@ mod tests {
         assert_eq!(rows[2].current, 1, "FontSize::Medium is ALL[1]");
         assert_eq!(rows[3].values, names(&["Vim", "Fzf"]));
         assert_eq!(rows[3].current, 0, "FindStyle::Vim is ALL[0]");
-        assert_eq!(rows[4].values, vec!["Horizontal", "Vertical", "Auto"]);
-        assert_eq!(rows[4].current, 2, "AddDirection::Auto is ALL[2]");
+        assert_eq!(rows[4].values, names(&["Off", "On", "Relative"]));
+        assert_eq!(rows[4].current, 0, "LineNumbers::Off is ALL[0]");
+        assert_eq!(rows[5].values, vec!["Horizontal", "Vertical", "Auto"]);
+        assert_eq!(rows[5].current, 2, "AddDirection::Auto is ALL[2]");
     }
 
     #[test]
@@ -886,9 +912,11 @@ mod tests {
             false,
             FontSize::Small,
             FindStyle::Fzf,
+            LineNumbers::Relative,
             AddDirection::Auto,
         );
         assert_eq!(rows[1].current, 0, "dark = false reads as 'off'");
+        assert_eq!(rows[4].current, 2, "LineNumbers::Relative is ALL[2]");
         assert_eq!(rows[2].current, 0);
         assert_eq!(rows[3].current, 1);
     }
@@ -901,6 +929,7 @@ mod tests {
             false,
             FontSize::Medium,
             FindStyle::Vim,
+            LineNumbers::Off,
             AddDirection::Auto,
         );
         assert_eq!(
@@ -910,17 +939,18 @@ mod tests {
     }
 
     #[test]
-    fn the_fifth_row_is_the_add_direction_in_the_tiling_category() {
+    fn the_last_row_is_the_add_direction_in_the_tiling_category() {
         let rows = derive_rows(
             &names(&["A"]),
             "A",
             false,
             FontSize::Small,
             FindStyle::Vim,
+            LineNumbers::Off,
             AddDirection::Vertical,
         );
-        assert_eq!(rows.len(), 5);
-        let row = &rows[4];
+        assert_eq!(rows.len(), 6);
+        let row = &rows[5];
         assert_eq!(row.id, SettingId::AddDirection);
         assert_eq!(row.title, "Add tile");
         assert_eq!(row.category, "Tiling");

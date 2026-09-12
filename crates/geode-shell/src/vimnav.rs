@@ -22,6 +22,15 @@
 //!   choice.
 //! - `ctrl+f` / `ctrl+b` — move by a fixed ±10. Likewise **not** vim's
 //!   full-page scroll; same reasoning as `ctrl+d`/`ctrl+u`.
+//!
+//! These two step sizes are a **general navigation convention**, not a
+//! dialog-only one (user ruling 2026-09-11): every list surface that
+//! offers `ctrl+d`/`ctrl+u` also offers `ctrl+f`/`ctrl+b` at ±10 — the
+//! dialogs through this module, the blotter and diagnostics tiles through
+//! their own `page_down`/`page_up` (±5) and `page_down_full`/`page_up_full`
+//! (±10) actions in `defaults::BUILTIN_KEYMAP`, with `pagedown`/`pageup`
+//! as aliases of the ±10 pair (`listfilter`'s reasoning: free keys, and
+//! what a hand reaching for "a screenful" finds first).
 //! - `g` `g` (the bare `g` key, pressed twice) — jump to the top of the
 //!   list ([`NavCommand::Top`]).
 //! - `shift+g` (vim's `G`) — jump to the bottom of the list

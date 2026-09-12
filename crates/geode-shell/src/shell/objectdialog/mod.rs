@@ -856,10 +856,13 @@ impl Draft {
     /// replacement for the arithmetic `self.selected = self.selected -
     /// item + end` used to do when `selected` indexed the unfiltered
     /// [`Draft::rows`] directly. Leaves `selected` where it is if `row`
-    /// is no longer visible under the current query, which none of this
-    /// task's callers can actually produce (moving or (un)membering an
-    /// item never changes its own label), but is the honest fallback for
-    /// a future one that might.
+    /// is no longer visible under the current query, which none of its
+    /// callers can actually produce (moving an item never changes its
+    /// own label), but is the honest fallback for a future
+    /// one that might. Neither an *add* nor a *removal* calls this — the
+    /// cursor stays behind on the row that was next rather than following
+    /// the item across the member boundary (`step_selected`'s and
+    /// `remove_selected`'s own comments have the ruling).
     fn follow(&mut self, row: EditRow) {
         let rows = self.rows();
         if let Some(position) = self
@@ -1033,8 +1036,21 @@ impl Draft {
                     entry.member = true;
                     entry.included = true;
                     items.insert(end, entry);
-                    // The cursor follows the item to its new row.
-                    self.follow(EditRow::Item { field, item: end });
+                    // The cursor does NOT follow the item into the member
+                    // block: a trader adding several columns wants it on
+                    // the next available row, where their eye already is
+                    // (user ruling 2026-09-11). The added item moved
+                    // *earlier* in row order and its label is unchanged,
+                    // so the rows ahead of the next visible one are the
+                    // same set, merely reordered — its visible index is
+                    // the old cursor plus one. When the added item was the
+                    // block's last row there is no next, and the same
+                    // index now holds the row that preceded it (the
+                    // previous available column, or the last member when
+                    // there is none left), which is where the cursor
+                    // stays rather than running off the end.
+                    let last = self.visible_rows().len().saturating_sub(1);
+                    self.selected = (self.selected + 1).min(last);
                     return Step::Changed;
                 }
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
@@ -1140,7 +1156,26 @@ impl Draft {
         entry.included = false;
         items.push(entry);
         let last = items.len() - 1;
-        self.follow(EditRow::Item { field, item: last });
+        // The cursor does NOT follow the item to the end of the available
+        // block, for the same reason `space`'s add leaves it behind (user
+        // ruling 2026-09-11): a trader removing several columns wants it
+        // on the row that was next. The removed item moved *later* in row
+        // order with its label unchanged, so the visible rows ahead of the
+        // next one lost exactly one — the next row now sits at the old
+        // index and `selected` is already right. The one exception is a
+        // removal with nothing visible after it: the item lands at the
+        // end, which is where it already was, so the old index would
+        // still be on it — step back to the previous row instead, the
+        // way `dd` on a buffer's last line does.
+        let moved = EditRow::Item { field, item: last };
+        let rows = self.rows();
+        let under_cursor = self
+            .visible_rows()
+            .get(self.selected)
+            .and_then(|m| rows.get(m.row).copied());
+        if under_cursor == Some(moved) {
+            self.selected = self.selected.saturating_sub(1);
+        }
         Step::Changed
     }
 
@@ -2774,19 +2809,24 @@ mod tests {
     fn a_confirm_names_the_object_and_the_consequence() {
         assert!(Confirm::Delete.prompt("tree").contains("tree"));
         assert!(Confirm::Revert.prompt("tree").contains("tree"));
+        // The fork prompt names the object and the act; it deliberately
+        // does not spell out "it stops following the desk" (user ruling
+        // 2026-09-11: that clause read as a warning about the act rather
+        // than a description of it).
         let fork = Confirm::Fork.prompt("tree");
         assert!(fork.contains("tree"), "{fork}");
-        assert!(fork.contains("Copy"), "{fork}");
-        assert!(!fork.contains("stops following"), "ruling 9916049: {fork}");
+        assert!(fork.starts_with("Copy"), "{fork}");
+        assert!(!fork.contains("desk"), "{fork}");
     }
 
     /// `Confirm::Overwrite`'s two prompts must each be true of the case
     /// they describe (Part 2a Task 5 review round 1, the Major): a
     /// user-owned scope really does lose its previous contents, but a
     /// desk/builtin-owned one does not — the desk's copy is still there,
-    /// `r`-revertible — so that prompt says `r` reverts and never claims a
-    /// loss. The "stops following the desk" disclosure the prompt once
-    /// carried was removed by user ruling 9916049 (2026-09-11).
+    /// `r`-revertible — so it must say so instead of claiming a loss.
+    /// Neither prompt spells out "it stops following the desk" any more
+    /// (user ruling 2026-09-11); the forked case discloses its
+    /// reversibility through `'r' reverts` alone.
     #[test]
     fn overwrite_prompts_tell_the_truth_about_what_it_costs() {
         let owned = Confirm::Overwrite { forks: false }.prompt("mine");
@@ -2794,14 +2834,18 @@ mod tests {
         assert!(owned.contains("lost"), "{owned}");
         assert!(
             !owned.contains("reverts"),
-            "a user-owned scope has no desk copy for r to restore: {owned}"
+            "a user-owned scope's prompt must not claim a fork: {owned}"
         );
 
         let forked = Confirm::Overwrite { forks: true }.prompt("mine");
         assert!(forked.contains("mine"), "{forked}");
         assert!(
+            !forked.contains("desk"),
+            "the 'stops following the desk' clause was retired: {forked}"
+        );
+        assert!(
             forked.contains("reverts"),
-            "it must say r reverts: {forked}"
+            "a desk-owned scope's prompt must say r reverts: {forked}"
         );
         assert!(
             !forked.contains("lost"),

@@ -4902,6 +4902,72 @@ run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count mul
             "page_up" => self.move_cursor(-5, cx),' \
   geode-diagnostics a_count_prefix_multiplies_page_down
 
+run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            "page_down_full" => self.move_cursor(10 * n, cx),
+            "page_up_full" => self.move_cursor(-10 * n, cx),' \
+  '            "page_down_full" => self.move_cursor(5 * n, cx),
+            "page_up_full" => self.move_cursor(-5 * n, cx),' \
+  geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
+
+run_mutation "blotter: ctrl+b moves back ten, not forward" \
+  crates/geode-blotter/src/tile.rs \
+  '                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(-10),' \
+  '                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(10),' \
+  geode-blotter motions_expansion_and_yank
+
+run_mutation "line numbers: the relative cursor row shows its absolute number, not 0" \
+  crates/geode-shell/src/linenumbers.rs \
+  '        LineNumbers::Relative if row == cursor => Some(row + 1),' \
+  '        LineNumbers::Relative if row == cursor => Some(0),' \
+  geode-shell relative_shows_the_absolute_number_on_the_cursor_row
+
+run_mutation "line numbers: relative is a distance, not a signed offset" \
+  crates/geode-shell/src/linenumbers.rs \
+  '        LineNumbers::Relative => Some(row.abs_diff(cursor)),' \
+  '        LineNumbers::Relative => Some(row.saturating_sub(cursor)),' \
+  geode-shell relative_is_the_distance_from_the_cursor_in_both_directions
+
+run_mutation "blotter gutter: a rel cursor move re-derives the numbers (stamp carries the cursor)" \
+  crates/geode-blotter/src/delegate.rs \
+  '            LineNumbers::Relative => cursor,
+            _ => usize::MAX,' \
+  '            LineNumbers::Relative => usize::MAX,
+            _ => usize::MAX,' \
+  geode-blotter the_gutter_follows_the_mode_and_the_cursor
+
+run_mutation "blotter gutter: the stamp compares, not merely exists" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if self.numbers_stamp.as_ref() == Some(&stamp) {' \
+  '        if self.numbers_stamp.is_some() {' \
+  geode-blotter the_gutter_follows_the_mode_and_the_cursor
+
+run_mutation "blotter gutter: the tree column widens by the gutter" \
+  crates/geode-blotter/src/delegate.rs \
+  '            width: px(if c.kind == ColumnKind::Tree {
+                c.width + self.gutter_px()
+            } else {
+                c.width
+            }),' \
+  '            width: px(c.width),' \
+  geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
+
+run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
+  crates/geode-blotter/src/tile.rs \
+  '        if changed {
+            self.table.update(cx, |t, cx| {
+                t.refresh(cx);
+                cx.notify();
+            });
+            cx.notify();
+        }' \
+  '        if changed {
+            cx.notify();
+        }' \
+  geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
+
 run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
   crates/geode-diagnostics/src/tile.rs \
   '            self.diagnostics.update(cx, |d, cx| {
@@ -5956,6 +6022,29 @@ run_mutation "objectdialog: an added item moves into the member block" \
   geode-shell \
   adding_a_later_available_column_still_joins_the_end_of_the_member_block
 
+# User ruling 2026-09-11: after `space` adds a column the cursor moves on
+# to the NEXT available row (the old visible index plus one — the added
+# item moved earlier in row order, so the rows ahead of the next one are
+# the same set), not with the added item into the member block. Dropping
+# the `+ 1` leaves it on whatever row now holds the old index — the
+# added item's former neighbour above — which is the wrong row.
+run_mutation "objectdialog: an add leaves the cursor on the row above the next one" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    self.selected = (self.selected + 1).min(last);' \
+  '                    self.selected = self.selected.min(last);' \
+  geode-shell \
+  adding_a_column_leaves_the_cursor_on_the_next_available_row
+
+# And the clamp: adding the block's last row has no next row, so without
+# it the cursor indexes one past the visible list and `selected_row`
+# answers `None` — every verb goes inert until the trader presses `k`.
+run_mutation "objectdialog: an add of the last row runs the cursor off the end" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    self.selected = (self.selected + 1).min(last);' \
+  '                    self.selected = self.selected + 1;' \
+  geode-shell \
+  adding_the_last_available_column_leaves_the_cursor_on_the_row_before
+
 # Reordering across the boundary would put an available column among the
 # members without changing its flag — painted in one block, written in none.
 # Task 6 (§18.3) rewrote `move_item` to walk to the next VISIBLE
@@ -6398,7 +6487,7 @@ run_mutation "objectdialog: space moves the cursor off screen and leaves it ther
                 maybe_refresh_available(shell);
                 revalidate(shell);' \
   geode-shell \
-  space_scrolls_the_promoted_row_back_into_view
+  space_scrolls_the_next_row_into_view
 
 # The same for `shift+space`: one `step_selected` underneath, two arms
 # above it, so a fix applied to one and not the other is exactly the
@@ -6415,19 +6504,39 @@ run_mutation "objectdialog: shift+space moves the cursor off screen and leaves i
                 maybe_refresh_available(shell);
                 revalidate(shell);' \
   geode-shell \
-  shift_space_scrolls_the_promoted_row_back_into_view
+  shift_space_scrolls_the_next_row_into_view
 
 # And `x`, which moves the cursor the other way — to the end of the
 # available block, off the BOTTOM of the viewport.
-run_mutation "objectdialog: x moves the cursor off screen and leaves it there" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            Some(Step::Changed) => {
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '            Some(Step::Changed) => {
-                revalidate(shell);' \
+# `x` no longer scrolls (user ruling 2026-09-11: the cursor stays at its
+# own visible index — the row that was next — rather than following the
+# demoted item to the end of the available block, so the `x` arm's old
+# `scroll_to_cursor` call went with the old behaviour; an entry over a
+# call no test could see would be a harness lie). Two entries over the
+# rule itself instead. Inverting the "landed back on the removed item"
+# check makes the ORDINARY removal step back one row (the previous
+# member instead of the next) and the last-row removal stay on the
+# removed item.
+run_mutation "objectdialog: x steps back on every removal but the last" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if under_cursor == Some(moved) {' \
+  '        if under_cursor != Some(moved) {' \
   geode-shell \
-  x_scrolls_the_demoted_row_back_into_view
+  x_leaves_the_cursor_on_the_next_row
+
+# And the fallback itself: without the step back, removing the list's
+# last row leaves the cursor on the row it just removed, so the next
+# `space` quietly puts it back.
+run_mutation "objectdialog: x on the last row leaves the cursor on the removed item" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            self.selected = self.selected.saturating_sub(1);
+        }
+        Step::Changed' \
+  '            self.selected = self.selected;
+        }
+        Step::Changed' \
+  geode-shell \
+  x_on_the_last_row_steps_the_cursor_back_to_the_previous_row
 
 # A `Key` or `Attribute` column has no honest `[[columns]]` kind, so it
 # is not offered in the available block at all. Forcing either into

@@ -21,6 +21,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, FindStyle};
@@ -52,6 +53,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::bottom", "Cursor to bottom"),
     ("blotter::page_down", "Half page down"),
     ("blotter::page_up", "Half page up"),
+    ("blotter::page_down_full", "Page down"),
+    ("blotter::page_up_full", "Page up"),
     ("blotter::first_col", "First column"),
     ("blotter::last_col", "Last column"),
     ("blotter::expand", "Expand node"),
@@ -212,8 +215,17 @@ impl BlotterTile {
             })
             .unwrap_or_default();
 
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global (see `geode_shell::linenumbers`'s module doc for why a
+        // global and not the `ConfigReloaded` route `find_style` rides):
+        // read once here, then on every publish through `observe_global`.
+        let line_numbers = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
-            TableState::new(BlotterDelegate::new(), window, cx)
+            let mut delegate = BlotterDelegate::new();
+            delegate.line_numbers = line_numbers;
+            TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
                 .cell_selectable(false)
@@ -233,6 +245,8 @@ impl BlotterTile {
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
+            .detach();
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
 
         BlotterTile {
@@ -551,6 +565,28 @@ impl BlotterTile {
         self.table.update(cx, |t, _| f(t.delegate_mut()))
     }
 
+    /// The shell republished `UiSettings`: mirror `line_numbers` into
+    /// the delegate and, if it changed, refresh the table's column
+    /// groups (the tree column's width includes the gutter — `TableState`
+    /// caches `column()`'s answer until `refresh`) and repaint.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
+        let changed = self.with_delegate(cx, |d| {
+            let changed = d.line_numbers != mode;
+            d.line_numbers = mode;
+            changed
+        });
+        if changed {
+            self.table.update(cx, |t, cx| {
+                t.refresh(cx);
+                cx.notify();
+            });
+            cx.notify();
+        }
+    }
+
     fn sync_cursor(&self, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
             let (row, col) = (t.delegate().cursor.row, t.delegate().cursor.col);
@@ -571,14 +607,22 @@ impl BlotterTile {
         };
         let grouping_len = self.last_grouping.len();
         match name {
-            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" => {
+            // The step sizes are `vimnav`'s own convention, shared with
+            // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
+            // (and `pagedown`/`pageup`) ±10 — fixed offsets, not vim's
+            // viewport-relative scroll, since the count prefix already
+            // multiplies them.
+            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" | "page_down_full"
+            | "page_up_full" => {
                 let cmd = match name {
                     "down" => NavCommand::Move(1),
                     "up" => NavCommand::Move(-1),
                     "top" => NavCommand::Top,
                     "bottom" => NavCommand::Bottom,
                     "page_down" => NavCommand::Move(5),
-                    _ => NavCommand::Move(-5),
+                    "page_up" => NavCommand::Move(-5),
+                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(-10),
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
@@ -1872,6 +1916,18 @@ mod tests {
             2
         );
         act(&mut cx, "blotter::up", None);
+        // `ctrl+f`/`ctrl+b`: the ±10 step every dialog list has. Ten
+        // outruns this snapshot, so it clamps to the last row, and
+        // `ctrl+b` from there lands on row 0 — not on row -8.
+        let row = |cx: &mut gpui::VisualTestContext| {
+            h.tile
+                .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
+        };
+        assert!(act(&mut cx, "blotter::page_down_full", None));
+        assert_eq!(row(&mut cx), 2, "ctrl+f clamps to the last row");
+        assert!(act(&mut cx, "blotter::page_up_full", None));
+        assert_eq!(row(&mut cx), 0, "ctrl+b clamps to the first row");
+        act(&mut cx, "blotter::down", Some(1));
         act(&mut cx, "blotter::expand", None);
         let rows = h
             .tile
@@ -2372,6 +2428,108 @@ mod tests {
         let selector: &'static str =
             Box::leak(format!("blotter-cell-{row_ix}-{col_ix}").into_boxed_str());
         assert!(cx.debug_bounds(selector).is_some(), "the cell painted");
+    }
+
+    /// `[ui] line_numbers` reaches a live tile through the shell's
+    /// `UiSettings` global (user ruling 2026-09-11): with the setting
+    /// off no gutter element paints; publishing `rel` paints one per row
+    /// on the next draw without any requery, numbered from the cursor
+    /// with the cursor row showing its absolute number; and a cursor
+    /// move re-derives the offsets.
+    #[gpui::test]
+    fn the_line_numbers_global_paints_a_gutter_on_the_next_draw(cx: &mut gpui::TestAppContext) {
+        use geode_shell::linenumbers::{LineNumbers, UiSettings};
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_none(),
+            "no gutter while the setting is off (the default with no global set)"
+        );
+        // The *painted* tree cell's width — what `TableState`'s cached
+        // column groups actually laid out — not `delegate().column()`'s
+        // answer, which a test could read without any refresh having
+        // happened.
+        let painted_tree_width = |cx: &mut gpui::VisualTestContext| -> f32 {
+            f32::from(
+                cx.debug_bounds("blotter-cell-0-0")
+                    .expect("row 0's tree cell painted")
+                    .size
+                    .width,
+            )
+        };
+        let base_width = painted_tree_width(&mut cx);
+
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Relative,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a presentation setting never requeries"
+        );
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_some(),
+            "the gutter painted once the global was published"
+        );
+        let gutter = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().gutter_px());
+        assert!(gutter > 0.0, "sanity: a live gutter has width");
+        assert!(
+            (painted_tree_width(&mut cx) - (base_width + gutter)).abs() < 0.5,
+            "the painted tree cell widened by the gutter ({base_width} + {gutter}); \
+             `on_ui_settings` must `refresh` the table, since `TableState` caches \
+             `column()`'s width until told otherwise"
+        );
+        let texts = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            h.tile.update(cx, |t, cx| {
+                t.table().update(cx, |t, _| {
+                    let d = t.delegate_mut();
+                    (0..3)
+                        .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
+                        .collect()
+                })
+            })
+        };
+        assert_eq!(
+            texts(&mut cx),
+            vec!["1", "1", "2"],
+            "cursor on row 0: its absolute number, then distances"
+        );
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), Some(2), cx)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(texts(&mut cx), vec!["2", "1", "3"], "cursor on row 2");
+
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Off,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_none(),
+            "off again on the next draw"
+        );
+        assert!(
+            (painted_tree_width(&mut cx) - base_width).abs() < 0.5,
+            "and the tree cell gave the width back"
+        );
     }
 
     /// I4, test 3 — the C1 regression. With more rows than the test

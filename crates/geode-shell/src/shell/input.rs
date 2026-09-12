@@ -167,6 +167,10 @@ impl ShellView {
         } else if action.0 == "fontsize::decrease" {
             self.font_size = self.font_size.smaller();
             self.persist_font_size(cx);
+        } else if action.0 == "ui::line_numbers_cycle" {
+            // off → on → rel → off (user ruling 2026-09-11); the settings
+            // row steps the same value, through the same setter.
+            self.set_line_numbers(self.line_numbers.next(), cx);
         } else if action.0 == "perf::toggle_overlay" {
             // Spec §7.4's debug readout toggle. Display-only — the
             // histogram records regardless (see `render`'s top) — so the
@@ -422,6 +426,39 @@ impl ShellView {
                 if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
                     // MIN-2 — see `persist_font_size`'s comment just above.
                     tracing::warn!(target: "geode::config", "find style not saved: {e}");
+                }
+            })
+            .detach();
+    }
+
+    /// Set `[ui] line_numbers`, publish it to every module through the
+    /// `linenumbers::UiSettings` global (which fires their
+    /// `observe_global` subscriptions), persist it and repaint. The one
+    /// setter both the settings row and `ui::line_numbers_cycle` go
+    /// through; a hot reload writes the field and the global itself,
+    /// since it must not persist what it just read.
+    pub(crate) fn set_line_numbers(
+        &mut self,
+        mode: crate::linenumbers::LineNumbers,
+        cx: &mut Context<Self>,
+    ) {
+        self.line_numbers = mode;
+        cx.set_global(crate::linenumbers::UiSettings { line_numbers: mode });
+        self.persist_line_numbers(cx);
+        cx.notify();
+    }
+
+    /// Persist `[ui] line_numbers`, off the UI thread — the exact
+    /// contract of [`Self::persist_find_style`] above.
+    pub(super) fn persist_line_numbers(&self, cx: &mut Context<Self>) {
+        let Some(dir) = self.user_dir.clone() else {
+            return;
+        };
+        let mode = self.line_numbers;
+        cx.background_executor()
+            .spawn(async move {
+                if let Err(e) = crate::linenumbers::persist_to_user_config(&dir, mode) {
+                    tracing::warn!(target: "geode::config", "line numbers not saved: {e}");
                 }
             })
             .detach();

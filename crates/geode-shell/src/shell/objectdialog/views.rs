@@ -797,6 +797,101 @@ mod tests {
         assert!(!items[2].member, "book is still merely available");
     }
 
+    /// The name of the list item under the cursor, for the three tests
+    /// below — `None` on a field row or past the end.
+    fn cursor_item(draft: &Draft) -> Option<String> {
+        match draft.selected_row()? {
+            EditRow::Item { field, item } => match &draft.fields[field].kind {
+                FieldKind::OrderedList { items } => Some(items[item].name.clone()),
+                _ => None,
+            },
+            EditRow::Field(_) => None,
+        }
+    }
+
+    /// A trader adding several columns wants the cursor where their eye
+    /// is: on the next available row, not on the column that just left
+    /// for the member block (user ruling 2026-09-11). The added item
+    /// moves *earlier* in row order, so the set of rows ahead of the next
+    /// one is unchanged and its visible index is the old cursor plus one.
+    #[test]
+    fn adding_a_column_leaves_the_cursor_on_the_next_available_row() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // rows: Field(dataset)=0, Field(columns)=1, npv=2, book=3, delta01=4
+        draft.selected = 3;
+        assert!(draft.toggle_selected().changed()); // add book
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("delta01"),
+            "the cursor moved on to the next available column"
+        );
+        assert_eq!(draft.selected, 4, "one visible row further down");
+    }
+
+    /// Adding the block's LAST available column has no next row to move
+    /// on to, so the cursor stays at the same visible index — which is
+    /// now the row that preceded it — rather than running off the end.
+    #[test]
+    fn adding_the_last_available_column_leaves_the_cursor_on_the_row_before() {
+        let config = tree_with_two_available_columns();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.selected = 4; // delta01, the last row
+        assert!(draft.toggle_selected().changed());
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("book"),
+            "book, still available, is now the last row and the cursor is on it"
+        );
+        assert_eq!(draft.selected, 4);
+    }
+
+    /// Under a filter, "the next row" means the next VISIBLE one, the
+    /// same reading `shift+j` gives it: `bb` sits between `aa` and `ab`
+    /// in row order but the query hides it, so the cursor steps to `ab`.
+    #[test]
+    fn adding_a_column_under_a_filter_moves_the_cursor_to_the_next_visible_row() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.aa]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.bb]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.ab]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.instrument_id]\ntype = \"utf8\"\nrole = \"key\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.query = "a".to_string();
+        let rows = draft.rows();
+        let visible: Vec<String> = draft
+            .visible_rows()
+            .iter()
+            .filter_map(|m| rows.get(m.row))
+            .map(|r| draft.row_label(*r))
+            .collect();
+        assert!(
+            !visible.iter().any(|l| l == "bb"),
+            "sanity: the query must hide bb: {visible:?}"
+        );
+        draft.selected = visible
+            .iter()
+            .position(|l| l == "aa")
+            .unwrap_or_else(|| panic!("aa should be visible: {visible:?}"));
+        assert!(draft.toggle_selected().changed()); // add aa
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("ab"),
+            "the cursor skipped the hidden bb for the next visible row"
+        );
+    }
+
     /// `x` removes a member outright — the definitional twin of `space`'s
     /// hide — and it lands at the end of the available block, not merely
     /// wherever it happened to sit.
@@ -813,6 +908,127 @@ mod tests {
             draft
                 .writes_by_destination()
                 .contains_key(&Destination::Doc)
+        );
+    }
+
+    /// A view with two members (`npv`, `book`) and one available column
+    /// (`delta01`), for the cursor tests below.
+    fn tree_with_two_members() -> Config {
+        config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.instrument_id]\ntype = \"utf8\"\nrole = \"key\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+            ),
+        ])
+    }
+
+    /// Like `space`'s add, `x` leaves the cursor where the trader's eye
+    /// is — on the row that was next — rather than following the removed
+    /// column to the end of the available block (user ruling 2026-09-11).
+    /// The removed item moves *later* in row order, so the rows ahead of
+    /// the next one lose exactly one and the next one now sits at the old
+    /// visible index.
+    #[test]
+    fn x_leaves_the_cursor_on_the_next_row() {
+        let config = tree_with_two_members();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // rows: Field(dataset)=0, Field(columns)=1, npv=2, book=3, delta01=4
+        draft.selected = 2; // npv
+        assert!(draft.remove_selected().changed());
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("book"),
+            "the cursor stayed on the next member, not with npv at the bottom"
+        );
+        assert_eq!(draft.selected, 2, "the same visible index");
+    }
+
+    /// Removing the list's LAST row leaves nothing next, and the same
+    /// visible index would hold the removed item itself (it moved to the
+    /// end, which is where it already was), so the cursor steps back to
+    /// the previous row instead — `dd` on the last line in vim.
+    #[test]
+    fn x_on_the_last_row_steps_the_cursor_back_to_the_previous_row() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+                 [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.instrument_id]\ntype = \"utf8\"\nrole = \"key\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        // rows: Field(dataset)=0, Field(columns)=1, npv=2, book=3 — and
+        // nothing available, so book is the last row of the whole list.
+        draft.selected = 3; // book
+        assert!(draft.remove_selected().changed());
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("npv"),
+            "nothing followed book, so the cursor stepped back to npv"
+        );
+        assert_eq!(draft.selected, 2);
+    }
+
+    /// Under a filter "the next row" is the next VISIBLE one: `bb` sits
+    /// between `aa` and `ab` in row order but the query hides it.
+    #[test]
+    fn x_under_a_filter_leaves_the_cursor_on_the_next_visible_row() {
+        let config = config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.aa]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.bb]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.ab]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.instrument_id]\ntype = \"utf8\"\nrole = \"key\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"aa\"\n\
+                 [[tree.columns]]\nname = \"bb\"\n[[tree.columns]]\nname = \"ab\"\n",
+            ),
+        ]);
+        let mut draft = Domain::Views.draft(&config, "tree");
+        draft.query = "a".to_string();
+        let rows = draft.rows();
+        let visible: Vec<String> = draft
+            .visible_rows()
+            .iter()
+            .filter_map(|m| rows.get(m.row))
+            .map(|r| draft.row_label(*r))
+            .collect();
+        assert!(
+            !visible.iter().any(|l| l == "bb"),
+            "sanity: the query must hide bb: {visible:?}"
+        );
+        draft.selected = visible
+            .iter()
+            .position(|l| l == "aa")
+            .unwrap_or_else(|| panic!("aa should be visible: {visible:?}"));
+        assert!(draft.remove_selected().changed()); // remove aa
+        assert_eq!(
+            cursor_item(&draft).as_deref(),
+            Some("ab"),
+            "the cursor skipped the hidden bb for the next visible row"
         );
     }
 

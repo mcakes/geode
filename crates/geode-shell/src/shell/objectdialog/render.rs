@@ -896,10 +896,14 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // `refuse_step`: that helper's `d`/`r` hint is for the "must keep
         // at least one entry" refusal `space` can also produce, and
         // neither of `x`'s own reasons is asking for either verb.
+        // No `scroll_to_cursor` here, unlike the `space` arms: a removal
+        // leaves the cursor at its own visible index (or one above it),
+        // which was on screen before the keystroke and so still is — the
+        // demoted row is the one that travels, and the cursor no longer
+        // travels with it (`Draft::remove_selected`'s own comment).
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
-                scroll_to_cursor(shell);
                 commit_or_confirm(shell, cx);
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
