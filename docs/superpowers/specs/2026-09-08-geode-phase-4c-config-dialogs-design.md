@@ -1733,10 +1733,13 @@ were all that shape.
 ### 18.7.1 The model
 
 ```rust
-FieldKind::OrderedList { items: Vec<ListItem>, available: Vec<ListItem> }
+FieldKind::OrderedList { items: Vec<ListItem>, available: Option<Vec<ListItem>> }
 // ListItem { name, included, width, kind } — no `member`
 EditRow::{ Field(usize), Item { field, item }, Available { field, item } }
 ```
+
+*(As built: `available` is `Option<Vec<ListItem>>`, not the bare `Vec`
+above — §18.7.5 explains why.)*
 
 `items` is the object's own ordered list — a view's columns, a slot's
 dimension chain — and the only list that is ordered, written, counted
@@ -1783,3 +1786,90 @@ onto the structural line that now carries each behaviour, still caught
 by their named tests; an entry whose behaviour is now unrepresentable
 (the boundary crossing) is retired with a note rather than kept on a
 line that can no longer lie.
+
+### 18.7.5 As built
+
+Implemented 2026-09-12, commit `60760eb`.
+
+- **`available` shipped `Option<Vec<ListItem>>`, not the bare `Vec` of
+  §18.7.1** — a controller ruling made ahead of implementation, corrected
+  in place there. `None` is "no catalogue exists" (Groupings, where
+  ticking already is membership); `Some(vec)` — possibly empty — is "a
+  catalogue exists" (Views, whose dataset may simply have nothing left to
+  offer once every column is on the view). `x`'s per-domain refusal keys
+  on the block's existence, checked with `available.as_mut()` inside an
+  `else`-refuse, never on `available.is_empty()`: reading emptiness as
+  "no catalogue" is the exact regression an earlier, flag-shaped build of
+  this feature had — a fully-membered Views list went permanently deaf to
+  `x` the moment its available block ran dry, with no verb left to demote
+  anything back off the view. The `Option` is what makes "exists" and
+  "empty" two different states a match arm can tell apart.
+- **`Draft::available_items(&self, key) -> Option<&[ListItem]>`** mirrors
+  `list_items` and reads straight through to the field's `available`
+  without flattening `None` into an empty slice — flattening it would
+  have thrown away the same distinction the `Option` exists to carry.
+  Every call site is inside a `#[cfg(test)]` module (`mod.rs`, `views.rs`,
+  and the one window-test helper below); the method has no production
+  caller. That is not an oversight to close — an available entry cannot
+  reach the write side by construction (`doc_table`, `doc_baseline` and
+  `presentation_table` all read `items` alone), so the only remaining use
+  for reading the catalogue back out is a test asserting on it.
+- **`move_item` and `remove_selected` name the declined case as its own
+  match arm** rather than falling through a wildcard:
+  `EditRow::Available { .. } | EditRow::Field(_) => return None` in
+  `move_item`, `Some(EditRow::Available { .. }) => return
+  Step::Refused(…)` in `remove_selected`. Either could have been folded
+  into a trailing `_ =>`; both were written out so the declined case is a
+  line a harness entry can anchor on and a reader can see, not a
+  side-effect of a catch-all.
+- **Row order held the old flat list's index scheme exactly**, so every
+  window test kept working unmodified. `rows()` still emits `Field`, then
+  every own item, then every catalogue item, in that order — the same
+  sequence the old member-first flat list produced — so a test's
+  hardcoded `draft.selected = N` and every `j`-count in
+  `crates/geode-shell/src/shell/tests/objectdialog.rs` still lands on the
+  row it always did. All 62 tests in that file pass with their bodies,
+  keystroke sequences, selectors and assertions untouched; the one
+  exception is `cursor_item_name`, a shared *helper* (not a test) whose
+  `match` over `EditRow` stopped compiling the moment the third variant
+  existed and gained an `EditRow::Available` arm reading
+  `available_items` — an exhaustiveness fix forced by the compiler, not a
+  change to what any test expects.
+- **Harness**, on top of Step 1's already-recorded run (56/56 `caught`,
+  0 `SURVIVED`, 483 skipped, `--changed=main` on HEAD `60760eb`): nine
+  entries were re-anchored off the retired `member` flag onto the
+  structural line that now carries each behaviour — `membership compares
+  the object's own names only`, `an added item joins the end of the
+  object's own list`, `an add leaves the cursor on the row above the next
+  one`, `an add of the last row runs the cursor off the end`, `the doc
+  table lists the view's own columns only`, `x removes from a list that
+  has no catalogue at all`, `x refuses an available row rather than
+  removing by its index`, `refresh_available empties the old dataset's
+  rows`, and `a new view starts on the first real dataset` (anchor
+  unchanged; only its named test was renamed). `reorder never crosses the
+  member boundary` is retired with a comment in the script: the boundary
+  was a rule one list's own ordering had to maintain, and there is no
+  boundary left to cross once the catalogue is a separate vector
+  `move_item` cannot reach — an entry over it would have nothing to
+  break. Two entries replace it: `an available row is not reorderable`
+  (the other half of the same rule — an available row's index misread as
+  a position in `items` — deliberately fixtured on a list with two own
+  columns and one catalogue row so the misread index names a column that
+  really can move, rather than running off the end for the wrong reason)
+  and `an empty catalogue reads as no catalogue` (mutating
+  `available.as_mut()` to `.filter(|a| !a.is_empty())` — the entry that
+  guards the controller's ruling above, the precise regression path back
+  to the flag build's defect).
+- **Deferred, not fixed:** `views::refresh_available`'s doc comment
+  overstated its own fallback — it claimed a row that resolved before the
+  rebuild but is gone after falls back to the same index clamp used when
+  the cursor could not be resolved at all. It does not: that case takes
+  `Draft::follow`, which is a no-op on a miss rather than a clamp, leaving
+  `selected` exactly where it was. The clamp only ever runs for the
+  narrower case — `cursor` already `None` before the rebuild — and that
+  distinction is unreachable through `refresh_available`'s one caller
+  today (`render::maybe_refresh_available`'s `is_dataset_row` guard means
+  `cursor` is always resolvable), so nothing observable changes. The doc
+  comment (`views.rs`, the paragraph immediately above the function) is
+  corrected to say exactly that rather than promise a clamp that does not
+  run; no behaviour changed.

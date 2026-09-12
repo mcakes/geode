@@ -227,10 +227,18 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
 /// correct primitive regardless — indexing is what this whole task's
 /// other two fixes replaced everywhere else a cursor had to survive a
 /// list changing under it, and this call site should not be the one
-/// spot still reasoning about a raw index. If the row the cursor was on
-/// is somehow gone (not reachable through today's one caller, but not
-/// this function's job to assume), it falls back to the same clamp as
-/// before rather than leaving `selected` out of bounds.
+/// spot still reasoning about a raw index.
+///
+/// The `None` arm below is narrower than it might look: it only fires
+/// when `cursor` (`draft.selected_row()`, read *before* the rebuild)
+/// could not resolve to a row at all, and clamps `selected` to the
+/// rebuilt list's last visible row. A row that *did* resolve but is gone
+/// *after* the rebuild takes the `Some` arm instead and calls
+/// `draft.follow`, which is not a clamp — a miss there leaves `selected`
+/// exactly where it was, potentially out of bounds against the shrunk
+/// list. That path is unreachable through today's one caller (the same
+/// identity argument above), but it is not this function's job to
+/// assume so, and no clamp runs there if it ever isn't.
 pub fn refresh_available(draft: &mut Draft, config: &Config) {
     let Some(current) = draft.choice("dataset").map(str::to_string) else {
         return;
