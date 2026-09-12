@@ -649,6 +649,11 @@ pub struct ShellView {
     /// `[tiles] add` (spec 2026-09-08 add-tile §5): resolved at startup,
     /// re-derived on hot reload, stepped by the settings row.
     pub(super) add_direction: crate::tileadd::AddDirection,
+    /// `[ui] line_numbers` (user ruling 2026-09-11): same lifecycle as
+    /// `add_direction`, and additionally published as the
+    /// `linenumbers::UiSettings` global on every change so a module
+    /// (the blotter) can read and observe it — see that module's doc.
+    pub(super) line_numbers: crate::linenumbers::LineNumbers,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` (Phase 4 §3.10) — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
@@ -1183,6 +1188,8 @@ impl ShellView {
         let font_size = FontSize::from_config(&services.config);
         let find_style = FindStyle::from_config(&services.config);
         let add_direction = crate::tileadd::AddDirection::from_config(&services.config);
+        let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
+        cx.set_global(crate::linenumbers::UiSettings { line_numbers });
 
         // The shared frame (§4): built from whatever `[groupings]`/
         // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
@@ -1342,6 +1349,7 @@ impl ShellView {
             pending_tiles: BTreeMap::new(),
             unplaced_records: crate::session::TileRecords::new(),
             add_direction,
+            line_numbers,
             last_flip_versions,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),

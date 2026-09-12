@@ -4918,6 +4918,48 @@ run_mutation "blotter: ctrl+b moves back ten, not forward" \
                     _ => NavCommand::Move(10),' \
   geode-blotter motions_expansion_and_yank
 
+run_mutation "line numbers: the relative cursor row shows its absolute number, not 0" \
+  crates/geode-shell/src/linenumbers.rs \
+  '        LineNumbers::Relative if row == cursor => Some(row + 1),' \
+  '        LineNumbers::Relative if row == cursor => Some(0),' \
+  geode-shell relative_shows_the_absolute_number_on_the_cursor_row
+
+run_mutation "line numbers: relative is a distance, not a signed offset" \
+  crates/geode-shell/src/linenumbers.rs \
+  '        LineNumbers::Relative => Some(row.abs_diff(cursor)),' \
+  '        LineNumbers::Relative => Some(row.saturating_sub(cursor)),' \
+  geode-shell relative_is_the_distance_from_the_cursor_in_both_directions
+
+run_mutation "blotter gutter: a cursor move re-derives the numbers (stamp compares the cursor)" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if self.numbers_stamp.as_ref() == Some(&stamp) {' \
+  '        if self.numbers_stamp.is_some() {' \
+  geode-blotter the_gutter_follows_the_mode_and_the_cursor
+
+run_mutation "blotter gutter: the tree column widens by the gutter" \
+  crates/geode-blotter/src/delegate.rs \
+  '            width: px(if c.kind == ColumnKind::Tree {
+                c.width + self.gutter_px()
+            } else {
+                c.width
+            }),' \
+  '            width: px(c.width),' \
+  geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
+
+run_mutation "blotter gutter: a changed setting refreshes the table's column groups" \
+  crates/geode-blotter/src/tile.rs \
+  '        if changed {
+            self.table.update(cx, |t, cx| {
+                t.refresh(cx);
+                cx.notify();
+            });
+            cx.notify();
+        }' \
+  '        if changed {
+            cx.notify();
+        }' \
+  geode-blotter the_line_numbers_global_paints_a_gutter_on_the_next_draw
+
 run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
   crates/geode-diagnostics/src/tile.rs \
   '            self.diagnostics.update(cx, |d, cx| {

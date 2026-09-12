@@ -322,6 +322,11 @@ impl ShellView {
             self.font_size = FontSize::from_config(&self.services.config);
             self.find_style = FindStyle::from_config(&self.services.config);
             self.add_direction = crate::tileadd::AddDirection::from_config(&self.services.config);
+            let line_numbers = crate::linenumbers::LineNumbers::from_config(&self.services.config);
+            if line_numbers != self.line_numbers {
+                self.line_numbers = line_numbers;
+                cx.set_global(crate::linenumbers::UiSettings { line_numbers });
+            }
 
             if pickable_changed {
                 self.pickable = pickable_columns(&self.services.config);

@@ -21,6 +21,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::frame::{Frame, FrameVersions};
 use geode_shell::keymap::KeyContext;
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::FindEvent;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, FindStyle};
@@ -214,8 +215,17 @@ impl BlotterTile {
             })
             .unwrap_or_default();
 
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global (see `geode_shell::linenumbers`'s module doc for why a
+        // global and not the `ConfigReloaded` route `find_style` rides):
+        // read once here, then on every publish through `observe_global`.
+        let line_numbers = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
         let table = cx.new(|cx| {
-            TableState::new(BlotterDelegate::new(), window, cx)
+            let mut delegate = BlotterDelegate::new();
+            delegate.line_numbers = line_numbers;
+            TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
                 .cell_selectable(false)
@@ -235,6 +245,8 @@ impl BlotterTile {
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
+            .detach();
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
             .detach();
 
         BlotterTile {
@@ -551,6 +563,28 @@ impl BlotterTile {
         f: impl FnOnce(&mut BlotterDelegate) -> R,
     ) -> R {
         self.table.update(cx, |t, _| f(t.delegate_mut()))
+    }
+
+    /// The shell republished `UiSettings`: mirror `line_numbers` into
+    /// the delegate and, if it changed, refresh the table's column
+    /// groups (the tree column's width includes the gutter — `TableState`
+    /// caches `column()`'s answer until `refresh`) and repaint.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = cx
+            .try_global::<UiSettings>()
+            .map_or(LineNumbers::Off, |s| s.line_numbers);
+        let changed = self.with_delegate(cx, |d| {
+            let changed = d.line_numbers != mode;
+            d.line_numbers = mode;
+            changed
+        });
+        if changed {
+            self.table.update(cx, |t, cx| {
+                t.refresh(cx);
+                cx.notify();
+            });
+            cx.notify();
+        }
     }
 
     fn sync_cursor(&self, cx: &mut Context<Self>) {
@@ -2394,6 +2428,102 @@ mod tests {
         let selector: &'static str =
             Box::leak(format!("blotter-cell-{row_ix}-{col_ix}").into_boxed_str());
         assert!(cx.debug_bounds(selector).is_some(), "the cell painted");
+    }
+
+    /// `[ui] line_numbers` reaches a live tile through the shell's
+    /// `UiSettings` global (user ruling 2026-09-11): with the setting
+    /// off no gutter element paints; publishing `rel` paints one per row
+    /// on the next draw without any requery, numbered from the cursor
+    /// with the cursor row showing its absolute number; and a cursor
+    /// move re-derives the offsets.
+    #[gpui::test]
+    fn the_line_numbers_global_paints_a_gutter_on_the_next_draw(cx: &mut gpui::TestAppContext) {
+        use geode_shell::linenumbers::{LineNumbers, UiSettings};
+        use gpui_component::table::TableDelegate as _;
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_none(),
+            "no gutter while the setting is off (the default with no global set)"
+        );
+
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Relative,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            h.requests.try_recv().is_err(),
+            "a presentation setting never requeries"
+        );
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_some(),
+            "the gutter painted once the global was published"
+        );
+        let tree_width = |cx: &mut gpui::VisualTestContext| -> f32 {
+            h.tile.read_with(cx, |t, cx| {
+                let table = t.table().read(cx);
+                f32::from(table.delegate().column(0, cx).width)
+            })
+        };
+        let gutter = h
+            .tile
+            .read_with(&cx, |t, cx| t.table().read(cx).delegate().gutter_px());
+        assert!(gutter > 0.0, "sanity: a live gutter has width");
+        assert_eq!(
+            tree_width(&mut cx),
+            crate::core::plan::TREE_WIDTH + gutter,
+            "the tree column widened by the gutter (a refresh re-read `column`)"
+        );
+        let texts = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
+            h.tile.update(cx, |t, cx| {
+                t.table().update(cx, |t, _| {
+                    let d = t.delegate_mut();
+                    (0..3)
+                        .map(|r| d.gutter_text(r).map(|s| s.to_string()).unwrap_or_default())
+                        .collect()
+                })
+            })
+        };
+        assert_eq!(
+            texts(&mut cx),
+            vec!["1", "1", "2"],
+            "cursor on row 0: its absolute number, then distances"
+        );
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), Some(2), cx)
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(texts(&mut cx), vec!["2", "1", "3"], "cursor on row 2");
+
+        cx.update(|_, cx| {
+            cx.set_global(UiSettings {
+                line_numbers: LineNumbers::Off,
+            })
+        });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert!(
+            cx.debug_bounds("blotter-gutter-0").is_none(),
+            "off again on the next draw"
+        );
+        assert_eq!(
+            tree_width(&mut cx),
+            crate::core::plan::TREE_WIDTH,
+            "and the tree column gave the width back"
+        );
     }
 
     /// I4, test 3 — the C1 regression. With more rows than the test
