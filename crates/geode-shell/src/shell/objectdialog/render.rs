@@ -210,7 +210,16 @@ pub fn open(
                     .debug_selector(|| "objectdialog-crumb".to_string())
                     .child(crumb_text(shell)),
             )
-            .children(state.map(|s| dialog::mode_pill(s.mode, cx)))
+            // §18.7: the chain field is open in `Filter` (that is what
+            // gives it the keys), but "filter" is the wrong word for a
+            // field whose text is the value — the pill says `chain`.
+            .children(state.map(|s| {
+                if s.draft.as_ref().is_some_and(|d| d.chain_entry) {
+                    dialog::chain_pill(cx)
+                } else {
+                    dialog::mode_pill(s.mode, cx)
+                }
+            }))
             .into_any_element()
     });
 }
@@ -763,6 +772,20 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         return true;
     }
 
+    // ---- Chain field (§18.7) -------------------------------------------
+    //
+    // Checked before filter mode, which it shares a focused `Input` with:
+    // the field is open only in `Filter` (that is what gives it the keys),
+    // and every key filter mode would claim means something else here.
+    let chain_entry = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.chain_entry);
+    if chain_entry {
+        return handle_chain_key(shell, ks, cx);
+    }
+
     // ---- Filter mode (§18.3) ------------------------------------------
     //
     // The one switch, exactly as browse's own: while the shared `Input`
@@ -961,6 +984,24 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // Scopes row: pressing `space` right after would immediately say
         // "nothing on this row changes with space" — two verbs
         // disagreeing about the same row in the same breath.
+        // §18.7: `i` opens the chain field on Groupings — the one domain
+        // whose whole object is a single typed line. `begin_chain_entry`
+        // seeds `query`; `Filter` is what hands the shared `Input` the
+        // keys, through `dialog::sync_dialog_text` on this handler's
+        // return, which also writes the seed into the field.
+        NormalCommand::EditText
+            if shell
+                .object_dialog
+                .as_ref()
+                .is_some_and(|state| state.domain == Domain::Groupings) =>
+        {
+            if let Some(state) = shell.object_dialog.as_mut()
+                && let Some(draft) = state.draft.as_mut()
+            {
+                draft.begin_chain_entry();
+                state.mode = DialogMode::Filter;
+            }
+        }
         NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
         // §18.7: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
@@ -1005,6 +1046,76 @@ fn edit_commit_notice(shell: &mut ShellView) {
         "this row is read-only — nothing here has a verb"
     };
     set_notice(shell, notice.to_string());
+}
+
+/// The chain field's keys (§18.7), while it is open: `escape` closes it
+/// with nothing applied; `tab` completes the highlighted candidate;
+/// `enter` applies the typed chain — [`Draft::apply_chain`] refuses with
+/// the field left open, or closes it — and a `Step::Changed` then rides
+/// exactly the path a tick does, [`revalidate`] and [`commit_or_confirm`],
+/// so a desk slot still asks before forking; navigation moves the
+/// highlight through [`listfilter::nav_command`] against the completion
+/// list; everything else is the focused `Input`'s to type (`false`).
+///
+/// Closing the field — cancel, apply, or an inert apply — is a pure
+/// mutation of `chain_entry`, `query` and the mode; `dialog::
+/// sync_dialog_text` empties and blurs the shared `Input` from those on
+/// this handler's return (spec §16.1), the same way every other
+/// transition in this dialog is settled.
+fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+    if ks.key == "escape" {
+        if let Some(state) = shell.object_dialog.as_mut()
+            && let Some(draft) = state.draft.as_mut()
+        {
+            draft.cancel_chain_entry();
+            state.mode = DialogMode::Normal;
+        }
+        cx.notify();
+        return true;
+    }
+    let bare = ks.mods == Modifiers::NONE;
+    if bare && ks.key == "enter" {
+        let step = draft_mut(shell).map(Draft::apply_chain);
+        match step {
+            Some(Step::Changed) => {
+                if let Some(state) = shell.object_dialog.as_mut() {
+                    state.mode = DialogMode::Normal;
+                }
+                revalidate(shell);
+                commit_or_confirm(shell, cx);
+            }
+            Some(Step::Inert) => {
+                if let Some(state) = shell.object_dialog.as_mut() {
+                    state.mode = DialogMode::Normal;
+                }
+            }
+            Some(Step::Refused(reason)) => set_notice(shell, reason),
+            None => {}
+        }
+        cx.notify();
+        return true;
+    }
+    if ks.key == "tab" {
+        if bare && draft_mut(shell).is_some_and(Draft::complete_chain) {
+            shell.object_dialog_scroll.scroll_to_item(0);
+        } else if bare {
+            set_notice(shell, "nothing to complete here".to_string());
+        }
+        cx.notify();
+        return true;
+    }
+    if let Some(cmd) = listfilter::nav_command(ks) {
+        let selected = draft_mut(shell).map(|draft| {
+            draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), cmd);
+            draft.selected
+        });
+        if let Some(selected) = selected {
+            shell.object_dialog_scroll.scroll_to_item(selected);
+        }
+        cx.notify();
+        return true;
+    }
+    false
 }
 
 /// A step the draft declined ([`Step::Refused`]), said with the verb that
@@ -1842,6 +1953,14 @@ fn build(
                         action.push(chip("n"));
                         action.push(sep("new ·"));
                     }
+                    // §18.7: a digit opens that slot — Groupings only,
+                    // the one domain whose objects are numbered.
+                    if state.domain == Domain::Groupings {
+                        action.push(chip("1"));
+                        action.push(sep("–"));
+                        action.push(chip("9"));
+                        action.push(sep("open slot ·"));
+                    }
                     action.push(chip("/"));
                     action.push(sep("filter ·"));
                     action.push(chip("escape"));
@@ -2227,6 +2346,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 sep("leave it alone"),
             ],
         )
+    } else if draft.chain_entry {
+        // §18.7: the chain field's own vocabulary — never filter mode's,
+        // even though the `Input` is focused the same way, because
+        // `enter` and `tab` mean different things here.
+        (
+            vec![
+                sep("type a chain · book / lhu ·"),
+                chip("tab"),
+                sep("complete ·"),
+                chip("up"),
+                chip("down"),
+                sep("move"),
+            ],
+            vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
+        )
     } else if state.mode == DialogMode::Filter {
         // §18.3: the same filter-mode hints browse paints, since the
         // vocabulary — type to narrow, the shared nav keys, `escape` back
@@ -2268,7 +2402,19 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         } else {
             motion.push(sep("reorder"));
         }
-        let action = vec![
+        let mut action = Vec::new();
+        // §18.7: Groupings' two extra verbs, advertised only where they
+        // work — the same rule that keeps `n` off Groupings' browse
+        // footer and `x` off every non-Views edit footer.
+        if state.domain == Domain::Groupings {
+            action.push(chip("i"));
+            action.push(sep("type a chain ·"));
+            action.push(chip("1"));
+            action.push(sep("–"));
+            action.push(chip("9"));
+            action.push(sep("jump to slot ·"));
+        }
+        action.extend([
             chip("/"),
             sep("filter ·"),
             chip("escape"),
@@ -2280,7 +2426,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             } else {
                 "clear the filter"
             }),
-        ];
+        ]);
         (motion, action)
     };
 
@@ -2314,7 +2460,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         query: draft.query.as_str(),
         slash_filters: true,
     });
-    let filter = dialog::filter_row(&shell.dialog_input, frozen_query, cx);
+    // §18.7: while the chain field is open it takes the filter row's
+    // place — the same shared `Input`, labelled for what its text now
+    // is, exactly as browse's naming stage swaps in `name_row`.
+    let filter = if draft.chain_entry {
+        dialog::name_row(
+            &shell.dialog_input,
+            &format!("slot {} · chain", draft.name),
+            cx,
+        )
+    } else {
+        dialog::filter_row(&shell.dialog_input, frozen_query, cx)
+    };
 
     v_flex()
         .gap_2()

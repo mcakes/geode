@@ -737,10 +737,33 @@ pub fn name_row(input: &Entity<InputState>, label: &str, cx: &App) -> AnyElement
 /// showing the same label in both modes is exactly the failure a
 /// non-zero-bounds assertion cannot see.
 pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
+    match mode {
+        DialogMode::Normal => state_pill("normal", false, cx),
+        DialogMode::Filter => state_pill("filter", true, cx),
+    }
+}
+
+/// The pill the object dialog wears while its chain field is open
+/// (Phase 4c §18.7). The field runs in `DialogMode::Filter` — that is
+/// what hands the shared `Input` the keys — but its text is a *value*
+/// being typed, not a query narrowing a list, and a pill reading
+/// `filter` over it would say the wrong thing about what `enter` does.
+/// Painted in the "you are typing into something" colours, since that
+/// half of `filter`'s claim is still true.
+pub(crate) fn chain_pill(cx: &App) -> AnyElement {
+    state_pill("chain", true, cx)
+}
+
+/// The one pill both [`mode_pill`] and [`chain_pill`] paint: `typing`
+/// picks the `primary` pair (a focused text field owns the keys) over the
+/// muted resting pair. The label rides in the selector so a test can
+/// assert which state painted.
+fn state_pill(label: &'static str, typing: bool, cx: &App) -> AnyElement {
     let theme = cx.theme();
-    let (label, fg, bg) = match mode {
-        DialogMode::Normal => ("normal", theme.muted_foreground, theme.muted),
-        DialogMode::Filter => ("filter", theme.primary_foreground, theme.primary),
+    let (fg, bg) = if typing {
+        (theme.primary_foreground, theme.primary)
+    } else {
+        (theme.muted_foreground, theme.muted)
     };
     div()
         .font_family(crate::fonts::MONO)

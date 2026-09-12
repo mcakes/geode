@@ -288,7 +288,9 @@ impl Draft {
             return Step::Inert;
         };
         if let Some(unknown) = names.iter().find(|n| !items.iter().any(|i| &i.name == *n)) {
-            return Step::Refused(format!("'{unknown}' is not a dimension any dataset carries"));
+            return Step::Refused(format!(
+                "'{unknown}' is not a dimension any dataset carries"
+            ));
         }
         let before: Vec<String> = items
             .iter()
@@ -616,7 +618,13 @@ mod tests {
     /// one separator, and a leading or trailing one names no segment.
     #[test]
     fn parse_chain_accepts_slash_and_space_separators() {
-        for text in ["book / lhu", "book lhu", "book/lhu", "  book  /  lhu  ", "book // lhu"] {
+        for text in [
+            "book / lhu",
+            "book lhu",
+            "book/lhu",
+            "  book  /  lhu  ",
+            "book // lhu",
+        ] {
             assert_eq!(parse_chain(text), vec!["book", "lhu"], "{text:?}");
         }
         assert_eq!(parse_chain(""), Vec::<String>::new());
@@ -728,7 +736,10 @@ mod tests {
         let Step::Refused(reason) = draft.apply_chain() else {
             panic!("a duplicate must be refused");
         };
-        assert!(reason.contains("book") && reason.contains("twice"), "{reason}");
+        assert!(
+            reason.contains("book") && reason.contains("twice"),
+            "{reason}"
+        );
         assert!(draft.chain_entry);
     }
 
@@ -770,7 +781,11 @@ mod tests {
         draft.cancel_chain_entry();
         assert!(!draft.chain_entry);
         assert_eq!(draft.query, "");
-        assert_eq!(candidate_names(&draft).len(), 5, "Slot, Dimensions and three items");
+        assert_eq!(
+            candidate_names(&draft).len(),
+            5,
+            "Slot, Dimensions and three items"
+        );
         assert!(!draft.is_dirty());
     }
 
