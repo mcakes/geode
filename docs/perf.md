@@ -56,7 +56,14 @@ These rows read `—` until a module records its first requery (Plan 3c).
   keymap, palette `fuzzy_match` + full filter pass at 66/500/2000 items,
   and the session TOML round-trip for a 9-workspace layout. Runs in
   ~25s; criterion writes comparisons against the previous local run to
-  `target/criterion/`.
+  `target/criterion/`. The matcher became an optimal alignment on
+  2026-09-12 (greedy-leftmost painted `T[i]li[ng]` for `ling`), which
+  costs about 3× per match — `fuzzy_match_one` 140 ns → 420 ns, the
+  2000-item filter pass 180 µs → 360 µs, the 66-item pass (the real
+  palette's size) 5.9 µs → 11.5 µs — all per keystroke, not per frame,
+  and well inside the 8 ms pure-UI budget. The two `n × m` tables are
+  allocated per call; a reusable scratch buffer is the first thing to
+  reach for if a much larger list ever makes this visible.
 - `cargo bench -p geode-demo-data` — the synthetic data generator
   (100k/1M rows), established in phase 0.
 - `cargo bench --workspace --no-run` — CI compiles every bench on both
