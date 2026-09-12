@@ -3900,23 +3900,30 @@ fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppConte
 /// While the naming row is open a click only selects: a typed name must
 /// not be discarded by a stray click, and `enter` there creates.
 ///
-/// The typed name is `wide` itself, not an unrelated word: the browse
+/// The typed text is `wd`, not `mine` and not `wide` itself. The browse
 /// list underneath is deliberately still ranked by the naming text
 /// (CLAUDE.md's Phase 4c Part 2a paragraph — "so a near-collision stays
-/// visible before `enter` refuses it"), so a name with no fuzzy match to
-/// any row — `mine` against this fixture's `tree`/`wide` — would leave
-/// no row to click at all and the test would be exercising the ranking
-/// rule instead of the click rule this task is about.
+/// visible before `enter` refuses it"), and the ranker is a *subsequence*
+/// matcher, so `mine` — no fuzzy match against this fixture's `tree` or
+/// `wide` — would leave no row to click at all, exercising the ranking
+/// rule instead of the click rule this test is about. But `wide` itself
+/// would be just as wrong the other way: it is indistinguishable from
+/// `clicked`, so a slip that let the non-opening branch write
+/// `state.query = name.clone()` instead of leaving it untouched would
+/// still read back `wide` and this test would not catch it. `wd` is a
+/// genuine subsequence of `wide` (keeping the row visible) while
+/// differing from it, so only "the click left the typed text alone"
+/// makes the assertion below pass.
 #[gpui::test]
 fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_views_dialog(cx);
     cx.simulate_keystrokes("n");
     cx.run_until_parked();
-    cx.simulate_input("wide");
+    cx.simulate_input("wd");
     cx.run_until_parked();
     let row = cx
         .debug_bounds("objectdialog-row-wide")
-        .expect("a name that collides with an existing row keeps that row visible");
+        .expect("a subsequence of an existing row's name keeps that row visible");
     cx.simulate_mouse_down(
         gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(4.0)),
         MouseButton::Left,
@@ -3929,7 +3936,7 @@ fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext
     );
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.query.clone()),
-        "wide",
-        "the typed name survived"
+        "wd",
+        "the typed name survived, unreplaced by the row it selected"
     );
 }
