@@ -70,6 +70,25 @@ impl SortOrder {
             }
         }
     }
+
+    /// What a header click does to a column whose current order is
+    /// `current`: one cycle through every order the column can show,
+    /// desc first because that is where gpui-component's own click cycle
+    /// started before this crate took it over (user ruling 2026-09-12:
+    /// clicking through the header reaches the absolute orders too). A
+    /// measure walks cleared → desc → asc → abs desc → abs asc → cleared;
+    /// a column with no magnitude skips the absolute pair. A click on a
+    /// column that is not the sorted one starts at desc.
+    pub fn click_cycle(current: Option<SortOrder>, measure: bool) -> Option<SortOrder> {
+        match current {
+            Some(SortOrder::Desc) => Some(SortOrder::Asc),
+            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),
+            Some(SortOrder::Asc) => None,
+            Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),
+            Some(SortOrder::AbsAsc) => None,
+            None => Some(SortOrder::Desc),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,6 +525,38 @@ mod tests {
         assert_eq!(s(Some(AbsAsc)), Some(Asc));
         assert_eq!(big_s(Some(Asc)), Some(AbsDesc));
         assert_eq!(big_s(Some(Desc)), Some(AbsDesc));
+    }
+
+    #[test]
+    fn a_header_click_walks_every_order_a_measure_can_show_desc_first() {
+        use SortOrder::*;
+        let mut current = None;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            current = SortOrder::click_cycle(current, true);
+            seen.push(current);
+        }
+        assert_eq!(
+            seen,
+            vec![Some(Desc), Some(Asc), Some(AbsDesc), Some(AbsAsc), None]
+        );
+    }
+
+    #[test]
+    fn a_header_click_on_a_text_column_skips_the_absolute_pair() {
+        use SortOrder::*;
+        let mut current = None;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            current = SortOrder::click_cycle(current, false);
+            seen.push(current);
+        }
+        assert_eq!(seen, vec![Some(Desc), Some(Asc), None]);
+        // A text column can never hold an absolute order (`on_column`),
+        // but were one there, a click still ends the cycle rather than
+        // looping inside the pair.
+        assert_eq!(SortOrder::click_cycle(Some(AbsDesc), false), Some(AbsAsc));
+        assert_eq!(SortOrder::click_cycle(Some(AbsAsc), false), None);
     }
 
     #[test]

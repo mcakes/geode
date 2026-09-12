@@ -2403,6 +2403,27 @@ run_mutation "sort cycle: s from an absolute order restarts at asc, not desc" \
   geode-blotter \
   the_key_cycles_walk_their_own_orders_and_restart_from_the_others
 
+run_mutation "click cycle: a measure's click goes on from asc to abs desc, not to cleared" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
+  '            Some(SortOrder::Asc) if measure => None,' \
+  geode-blotter \
+  a_header_click_walks_every_order_a_measure_can_show_desc_first
+
+run_mutation "click cycle: a text column's click clears after asc instead of entering the absolute pair" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
+  '            Some(SortOrder::Asc) => Some(SortOrder::AbsDesc),' \
+  geode-blotter \
+  a_header_click_on_a_text_column_skips_the_absolute_pair
+
+run_mutation "delegate: a header click steps the blotter's own cycle, not the component's proposal" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let next = SortOrder::click_cycle(current, self.is_measure(col_ix));' \
+  '        let next = SortOrder::cycle(current, false, self.is_measure(col_ix));' \
+  geode-blotter \
+  a_header_click_cycles_through_the_absolute_orders_too
+
 run_mutation "sort order: abs asked of a text column is its signed direction" \
   crates/geode-blotter/src/core/flatten.rs \
   '            (SortOrder::AbsDesc, false) => SortOrder::Desc,' \

@@ -2203,6 +2203,65 @@ mod tests {
         assert_eq!(sort(&mut cx), None);
     }
 
+    /// A header click reaches every order a measure can show, desc first
+    /// (user ruling 2026-09-12), whatever three-state value gpui-component
+    /// proposes; the header label follows; and the tree column stays
+    /// unsortable. Drives the delegate hook the component's click handler
+    /// calls, with a deliberately wrong proposal each time.
+    #[gpui::test]
+    fn a_header_click_cycles_through_the_absolute_orders_too(cx: &mut gpui::TestAppContext) {
+        use gpui_component::table::{ColumnSort, TableDelegate as _};
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let click = |cx: &mut gpui::VisualTestContext, col: usize| {
+            let table = h.tile.read_with(cx, |t, _| t.table().clone());
+            cx.update(|window, cx| {
+                table.update(cx, |t, cx| {
+                    t.delegate_mut()
+                        .perform_sort(col, ColumnSort::Ascending, window, cx)
+                })
+            });
+            cx.run_until_parked();
+        };
+        let sort = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table()
+                    .read(cx)
+                    .delegate()
+                    .sort
+                    .map(|s| (s.column, s.order))
+            })
+        };
+        let header = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table().read(cx).delegate().column(1, cx).name.to_string()
+            })
+        };
+        click(&mut cx, 1);
+        assert_eq!(
+            sort(&mut cx),
+            Some((1, SortOrder::Desc)),
+            "first click: desc"
+        );
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(header(&mut cx), "delta01");
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(header(&mut cx), "delta01 |x|");
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), None);
+        assert_eq!(header(&mut cx), "delta01");
+        // Another column's click starts its own cycle at desc.
+        click(&mut cx, 1);
+        click(&mut cx, 2);
+        assert_eq!(sort(&mut cx), Some((2, SortOrder::Desc)));
+    }
+
     /// `:filter` narrows through `tile_scope`, composed into the query's
     /// scope by `effective_scope`'s tile argument — never by
     /// post-filtering rows — so it must reach only the tile that set it.

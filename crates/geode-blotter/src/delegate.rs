@@ -615,24 +615,26 @@ impl TableDelegate for BlotterDelegate {
     fn perform_sort(
         &mut self,
         col_ix: usize,
-        sort: ColumnSort,
-        _window: &mut Window,
+        _sort: ColumnSort,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        // A header click is gpui-component's own asc/desc/clear cycle; it
-        // never reaches an absolute order (`S` and `:sort … abs` do).
-        self.sort = match sort {
-            ColumnSort::Default => None,
-            ColumnSort::Ascending => Some(SortSpec {
-                column: col_ix,
-                order: SortOrder::Asc,
-            }),
-            ColumnSort::Descending => Some(SortSpec {
-                column: col_ix,
-                order: SortOrder::Desc,
-            }),
-        };
+        // gpui-component proposes the next of ITS three states, computed
+        // from the arrow it cached for this column; the blotter has five
+        // (spec §6.3), so the proposal is ignored and the click steps the
+        // delegate's own cycle from the delegate's own state. The
+        // component's cache (`col_groups`: the arrow, and the header name
+        // the drag preview shows) is now stale, and only `refresh`
+        // re-reads `column()` — deferred, because `TableState` is the
+        // entity currently on the stack.
+        let current = self.sort.filter(|s| s.column == col_ix).map(|s| s.order);
+        let next = SortOrder::click_cycle(current, self.is_measure(col_ix));
+        self.sort = next.map(|order| SortSpec {
+            column: col_ix,
+            order,
+        });
         self.reflatten();
+        cx.defer_in(window, |table, _, cx| table.refresh(cx));
         cx.notify();
     }
 
