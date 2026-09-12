@@ -742,6 +742,16 @@ pub struct Draft {
     /// replaces the action bar while armed, so the row list above it never
     /// changes length.
     pub confirm: Option<Confirm>,
+    /// The chain field is open (§18.7, Groupings only — `i` in the edit
+    /// stage). While it is, `query` holds the chain being typed rather
+    /// than a filter — the shared `Input` mirrors into it exactly as a
+    /// filter does, so there is no second text buffer — and
+    /// [`Draft::visible_rows`] is the completion list
+    /// ([`groupings::chain_candidates`]) rather than the filtered rows.
+    /// A flag on the draft beside `confirm` rather than a `Stage` of its
+    /// own, because the stage is what the escape ladder and the browse
+    /// cursor restore key on, and both must still read `Edit` here.
+    pub chain_entry: bool,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -835,6 +845,12 @@ impl Draft {
     /// `sort_by_key` afterwards restores row order among the survivors,
     /// discarding nothing but the score-derived ordering.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
+        // §18.7: with the chain field open, `query` is the chain being
+        // typed and the rows are its completions — see
+        // [`Draft::chain_entry`].
+        if self.chain_entry {
+            return groupings::chain_candidates(self);
+        }
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
         let mut ranked = crate::listfilter::rank(&labels, &self.query);
         ranked.sort_by_key(|m| m.row);
@@ -1251,6 +1267,7 @@ impl Draft {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
+            chain_entry: false,
         }
     }
 }
@@ -1318,6 +1335,7 @@ impl Domain {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
+            chain_entry: false,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -2251,6 +2269,7 @@ mod tests {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
+            chain_entry: false,
         }
     }
 
