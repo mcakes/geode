@@ -479,8 +479,15 @@ impl Render for ShellView {
                 } else {
                     cx.theme().border
                 })
+                // Border + padding is a constant 2px in both states: gpui
+                // sizes a box border-box, so a ring that simply grew from
+                // 1px to 2px on focus handed the occupant a content box
+                // 1px smaller on every side, and every row jogged a pixel
+                // whenever focus moved (`moving_focus_does_not_shift_tile_
+                // content`). The unfocused tile pads the missing pixel
+                // instead, in its own background.
                 .when(is_focused, |el| el.border_2())
-                .when(!is_focused, |el| el.border_1())
+                .when(!is_focused, |el| el.border_1().p(px(1.0)))
                 .overflow_hidden()
                 .map(|el| match view {
                     Some(view) => el.child(view),

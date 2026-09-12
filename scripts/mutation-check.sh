@@ -2080,6 +2080,13 @@ run_mutation "commandline: a second tab refreshes the accepted word range instea
   geode-shell \
   a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
 
+run_mutation "tile chrome: the unfocused tile pads the pixel its thinner ring gives up, so focus never shifts content" \
+  crates/geode-shell/src/shell/render.rs \
+  '                .when(!is_focused, |el| el.border_1().p(px(1.0)))' \
+  '                .when(!is_focused, |el| el.border_1())' \
+  geode-shell \
+  moving_focus_does_not_shift_tile_content
+
 run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
   crates/geode-shell/src/shell/render.rs \
   '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
