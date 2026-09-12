@@ -5972,6 +5972,29 @@ run_mutation "objectdialog: an added item moves into the member block" \
   geode-shell \
   adding_a_later_available_column_still_joins_the_end_of_the_member_block
 
+# User ruling 2026-09-11: after `space` adds a column the cursor moves on
+# to the NEXT available row (the old visible index plus one — the added
+# item moved earlier in row order, so the rows ahead of the next one are
+# the same set), not with the added item into the member block. Dropping
+# the `+ 1` leaves it on whatever row now holds the old index — the
+# added item's former neighbour above — which is the wrong row.
+run_mutation "objectdialog: an add leaves the cursor on the row above the next one" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    self.selected = (self.selected + 1).min(last);' \
+  '                    self.selected = self.selected.min(last);' \
+  geode-shell \
+  adding_a_column_leaves_the_cursor_on_the_next_available_row
+
+# And the clamp: adding the block's last row has no next row, so without
+# it the cursor indexes one past the visible list and `selected_row`
+# answers `None` — every verb goes inert until the trader presses `k`.
+run_mutation "objectdialog: an add of the last row runs the cursor off the end" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    self.selected = (self.selected + 1).min(last);' \
+  '                    self.selected = self.selected + 1;' \
+  geode-shell \
+  adding_the_last_available_column_leaves_the_cursor_on_the_row_before
+
 # Reordering across the boundary would put an available column among the
 # members without changing its flag — painted in one block, written in none.
 # Task 6 (§18.3) rewrote `move_item` to walk to the next VISIBLE
@@ -6389,7 +6412,7 @@ run_mutation "objectdialog: space moves the cursor off screen and leaves it ther
                 maybe_refresh_available(shell);
                 revalidate(shell);' \
   geode-shell \
-  space_scrolls_the_promoted_row_back_into_view
+  space_scrolls_the_next_row_into_view
 
 # The same for `shift+space`: one `step_selected` underneath, two arms
 # above it, so a fix applied to one and not the other is exactly the
@@ -6406,7 +6429,7 @@ run_mutation "objectdialog: shift+space moves the cursor off screen and leaves i
                 maybe_refresh_available(shell);
                 revalidate(shell);' \
   geode-shell \
-  shift_space_scrolls_the_promoted_row_back_into_view
+  shift_space_scrolls_the_next_row_into_view
 
 # And `x`, which moves the cursor the other way — to the end of the
 # available block, off the BOTTOM of the viewport.

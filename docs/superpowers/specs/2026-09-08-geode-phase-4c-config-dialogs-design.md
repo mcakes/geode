@@ -1679,3 +1679,20 @@ are checked on a display against the artifact, not by test.
   the order is a value `shift+j`/`shift+k` edit, and a section header
   marks where its block BEGINS, so a score sort would put rows under
   the wrong header rather than merely lose a cue.
+
+- **After `space` adds a column, the cursor moves on, not with it (user
+  ruling 2026-09-11).** The add branch of `Draft::step_selected` used to
+  `follow` the promoted item to its new row at the end of the member
+  block, so a trader adding several columns was carried out of the
+  available block on every keystroke. It now leaves the cursor at its
+  old visible index plus one — the row that was next — clamped to the
+  last visible row, so adding the block's last column lands on the row
+  that preceded it rather than off the end. The arithmetic is honest
+  under a filter because the added item moves *earlier* in row order
+  with its label unchanged: the rows ahead of the next visible one are
+  the same set, merely reordered. `x` is unchanged and still follows the
+  demoted item to the end of the available block; `shift+space` shares
+  the add branch and so behaves the same. Two harness entries guard the
+  `+ 1` and the clamp; the scroll-into-view tests for `space` and
+  `shift+space` now put the cursor on the viewport's last row and assert
+  the *next* row is scrolled in.

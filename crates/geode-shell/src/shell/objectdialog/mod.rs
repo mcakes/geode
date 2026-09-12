@@ -856,10 +856,13 @@ impl Draft {
     /// replacement for the arithmetic `self.selected = self.selected -
     /// item + end` used to do when `selected` indexed the unfiltered
     /// [`Draft::rows`] directly. Leaves `selected` where it is if `row`
-    /// is no longer visible under the current query, which none of this
-    /// task's callers can actually produce (moving or (un)membering an
-    /// item never changes its own label), but is the honest fallback for
-    /// a future one that might.
+    /// is no longer visible under the current query, which none of its
+    /// callers can actually produce (moving or unmembering an item never
+    /// changes its own label), but is the honest fallback for a future
+    /// one that might. An *add* deliberately does not call this — the
+    /// cursor stays behind on the next available row rather than
+    /// following the item into the member block (`step_selected`'s own
+    /// comment has the ruling).
     fn follow(&mut self, row: EditRow) {
         let rows = self.rows();
         if let Some(position) = self
@@ -1033,8 +1036,21 @@ impl Draft {
                     entry.member = true;
                     entry.included = true;
                     items.insert(end, entry);
-                    // The cursor follows the item to its new row.
-                    self.follow(EditRow::Item { field, item: end });
+                    // The cursor does NOT follow the item into the member
+                    // block: a trader adding several columns wants it on
+                    // the next available row, where their eye already is
+                    // (user ruling 2026-09-11). The added item moved
+                    // *earlier* in row order and its label is unchanged,
+                    // so the rows ahead of the next visible one are the
+                    // same set, merely reordered — its visible index is
+                    // the old cursor plus one. When the added item was the
+                    // block's last row there is no next, and the same
+                    // index now holds the row that preceded it (the
+                    // previous available column, or the last member when
+                    // there is none left), which is where the cursor
+                    // stays rather than running off the end.
+                    let last = self.visible_rows().len().saturating_sub(1);
+                    self.selected = (self.selected + 1).min(last);
                     return Step::Changed;
                 }
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
@@ -2733,7 +2749,7 @@ mod tests {
         assert!(owned.contains("mine"), "{owned}");
         assert!(owned.contains("lost"), "{owned}");
         assert!(
-            !owned.contains("desk"),
+            !owned.contains("reverts"),
             "a user-owned scope's prompt must not claim a fork: {owned}"
         );
 
@@ -2745,7 +2761,7 @@ mod tests {
         );
         assert!(
             forked.contains("reverts"),
-            "it must say r reverts: {forked}"
+            "a desk-owned scope's prompt must say r reverts: {forked}"
         );
         assert!(
             !forked.contains("lost"),
