@@ -6319,6 +6319,21 @@ run_mutation "objectdialog: section headers do not add list children" \
   geode-shell \
   the_cursor_stays_in_view_past_a_section_header_on_a_long_list
 
+# The edit list used to size itself by summing a fixed
+# `FIELD_ROW_HEIGHT` per visible row, capped at `VISIBLE_ROWS *
+# ROW_HEIGHT` — but since §18.1 folded a section header into a block's
+# first item, the sum undercounted by one header's height per painted
+# block whenever the list was short enough not to hit the cap, and
+# clipped the last row. Reverting to that fixed-height form (with
+# `FIELD_ROW_HEIGHT` reintroduced inline, since the constant itself is
+# gone) reproduces the clipping on a filtered single-row list.
+run_mutation "objectdialog: the edit list sizes itself instead of the header it folds in" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .max_h(px(VISIBLE_ROWS as f32 * ROW_HEIGHT))' \
+  '        .h(px((visible.len().max(1) as f32 * 28.0).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)))' \
+  geode-shell \
+  a_filtered_single_row_is_not_clipped_by_the_lists_height
+
 # ---- The final whole-branch review's fix wave (§18.6) ------------------
 
 # §18.3 made the edit stage reachable in filter mode, which its click

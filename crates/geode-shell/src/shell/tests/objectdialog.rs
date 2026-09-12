@@ -3116,3 +3116,64 @@ fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
     cx.run_until_parked();
     assert_row_in_view(&mut cx, "objectdialog-item-book", "x");
 }
+
+// ---------------------------------------------------------------------
+// Height bug: the edit list's fixed height did not count the section
+// headers folded into each block's first item, so a list short enough
+// not to hit the `VISIBLE_ROWS` cap painted too short a container and
+// clipped its last row.
+// ---------------------------------------------------------------------
+
+/// A filtered edit stage down to one available row — the reported
+/// screenshot's own case (Views, filter `ex`, one row: `expiry`). Here:
+/// `tree`'s edit stage, filtered to `delta`, leaves `delta01` as the
+/// only visible row, under one "available" section header. The
+/// container has to be tall enough for header-plus-row, not just one
+/// `FIELD_ROW_HEIGHT`.
+#[gpui::test]
+fn a_filtered_single_row_is_not_clipped_by_the_lists_height(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+
+    cx.simulate_input("delta");
+    cx.run_until_parked();
+
+    assert!(
+        cx.debug_bounds("objectdialog-section-available-columns")
+            .is_some(),
+        "the available section header should still paint"
+    );
+    assert_row_in_view(&mut cx, "objectdialog-item-delta01", "filtering to one row");
+}
+
+/// The unfiltered short-list case: a Groupings slot with three
+/// dimensions (`book`, `lhu`, `position_ref`) is well under the
+/// `VISIBLE_ROWS` cap, so the container's height comes entirely from the
+/// estimate rather than the cap — and the estimate did not count the
+/// one "dimensions" section header folded into the first item, so the
+/// last member (`position_ref`) painted clipped.
+#[gpui::test]
+fn an_unfiltered_short_list_is_not_clipped_by_the_lists_height(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book", "lhu", "position_ref"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // Row 1 is selected on open; navigate down to slot 3, then open it.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    assert_row_in_view(
+        &mut cx,
+        "objectdialog-item-position_ref",
+        "opening a short, unfiltered list",
+    );
+}

@@ -115,14 +115,26 @@ use super::super::ShellView;
 use super::super::dialog;
 use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
-/// Row height estimate for sizing the scrollable viewport (two lines:
-/// name plus muted summary) — the same non-load-bearing estimate
-/// `keybindings_view::ROW_HEIGHT` is, since scroll-follow goes through
-/// `ScrollHandle::scroll_to_item`, which measures real layout.
+/// Row height estimate (two lines: name plus muted summary) for the
+/// browse list's viewport — non-load-bearing for scroll-FOLLOW, since
+/// that goes through `ScrollHandle::scroll_to_item`, which measures real
+/// layout, the same as `keybindings_view::ROW_HEIGHT`. It IS load-bearing
+/// for the browse list's own `.h(..)`, which still sums
+/// `visible.len() * ROW_HEIGHT` to size the container exactly — safe
+/// there only because a browse row is never folded together with a
+/// section header the way an edit-stage item row is (see below).
+///
+/// The edit stage's list learned that the hard way: it used to size
+/// itself the same summing way with a one-line `FIELD_ROW_HEIGHT`
+/// estimate (28px), but since spec §18.1 a block's first item row has a
+/// section header folded into its own element, so the sum silently
+/// undercounted by one header's height per painted block and clipped
+/// the last row whenever the list was short enough not to hit the cap
+/// below. The edit list now sizes itself to its real content
+/// (`max_h` instead of a computed `h`), so `ROW_HEIGHT` there is only
+/// the cap's unit — see `build_edit` — and no longer needs to be an
+/// exact per-row estimate at all.
 const ROW_HEIGHT: f32 = 44.0;
-/// The same estimate for the edit stage's rows, which are one line rather
-/// than two — a field's label and its value sit side by side.
-const FIELD_ROW_HEIGHT: f32 = 28.0;
 /// Rows visible before the list scrolls — see `palette::VISIBLE_ROWS`.
 const VISIBLE_ROWS: usize = 10;
 /// Target dialog content width in pixels — the keybinding dialog's, so
@@ -1938,9 +1950,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let mut list = v_flex()
         .id("objectdialog-fields")
         .w(px(WIDTH))
-        .h(px(
-            (visible.len().max(1) as f32 * FIELD_ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
-        ))
+        .max_h(px(VISIBLE_ROWS as f32 * ROW_HEIGHT))
         .overflow_y_scroll()
         .track_scroll(&shell.object_dialog_scroll)
         .debug_selector(|| "objectdialog-fields".to_string());
