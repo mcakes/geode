@@ -1109,7 +1109,7 @@ fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppCo
     // An older flush completing successfully, exactly as it would if this
     // keystroke had landed while that flush's write was in flight.
     shell.update(&mut cx, |shell, cx| {
-        objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), cx);
+        objectdialog::apply::finish_flush(shell, seq.wrapping_sub(1), Ok(()), None, cx);
     });
     assert!(
         shell.read_with(&cx, |shell, _| shell.pending_config_write.is_some()),
@@ -4915,5 +4915,58 @@ fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppC
         cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
             .is_none(),
         "npv must never be flagged for a diagnostic that names delta"
+    );
+}
+
+/// §19.6: a flush whose in-memory merge is refused still writes the file
+/// (disk stays the arbiter), and the status line says both halves.
+#[gpui::test]
+fn a_flush_the_merge_rejects_says_saved_but_rejected(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // `keymap.mod = "ctrl"` is refused with an ERROR diagnostic at every
+    // reload (Phase 4a Task 4b), so any batch applied over this user
+    // layer is rejected while its own object is fine.
+    std::fs::write(
+        dir.path().join("app.toml"),
+        "config_version = 1\n[keymap]\nmod = \"ctrl\"\n",
+    )
+    .unwrap();
+    // `dialog_test_shell_in_dir` hands `user_dir` to `ShellView::new` as
+    // the WRITE directory only; `services.config` is whatever was built,
+    // so the user layer has to be loaded into it here.
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[wide]\ndataset = \"risk\"\n[[wide.columns]]\nname = \"npv\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            builtin,
+        ],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("j enter"); // wide
+    cx.run_until_parked();
+    // Past the `Dataset` field row and the `Columns` field's own header
+    // row (`open_tree_edit_stage`'s own comment names the same two rows
+    // for the same reason), onto the `Columns` list's first — here only
+    // — item: `npv`.
+    cx.simulate_keystrokes("j j space"); // hide npv: a presentation write
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let status = shell
+        .read_with(&cx, |s, _| s.config_write_error.clone())
+        .unwrap();
+    assert!(
+        status.starts_with(objectdialog::apply::REJECTED_STATUS),
+        "{status}"
+    );
+    assert!(
+        dir.path().join("view_presentation.toml").exists(),
+        "the file was written regardless"
     );
 }

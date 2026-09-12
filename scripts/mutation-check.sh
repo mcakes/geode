@@ -7603,6 +7603,30 @@ run_mutation "objectdialog: flagged_rows promotes to the worse severity" \
   geode-shell \
   flagged_rows_promotes_a_warning_to_error_on_the_same_row
 
+# §19.6: the rejected event carries ERROR diagnostics only.
+run_mutation "hot_reload: ReloadRejected carries only the errors" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '.filter(|d| d.severity == Severity::Error)' \
+  '.filter(|_| true)' \
+  geode-shell \
+  a_rejected_reload_emits_reload_rejected_with_the_errors
+
+# §19.6: a rejected merge is painted, not cleared, by the flush that hit it.
+run_mutation "objectdialog: a rejected in-memory apply paints the status line" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        crate::reload::ReloadOutcome::KeptLastGood { errors } => Some(errors.len()),' \
+  '        crate::reload::ReloadOutcome::KeptLastGood { errors } => { let _ = errors; None }' \
+  geode-shell \
+  a_flush_the_merge_rejects_says_saved_but_rejected
+
+# §19.6: the reload path reports presentation diagnostics instead of dropping them.
+run_mutation "bridge: reload reports presentation diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '                if !presentation_diags.is_empty() {' \
+  '                if false && !presentation_diags.is_empty() {' \
+  geode-app \
+  a_reload_reports_a_stale_presentation_name
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

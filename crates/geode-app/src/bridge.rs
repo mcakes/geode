@@ -289,6 +289,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     cx.subscribe(&shell, {
         let handle = handle.clone();
         let factory = factory.clone();
+        let diagnostics = diagnostics.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
                 let config = shell.read(cx).config();
@@ -299,8 +300,28 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // `views` doc directly would silently drop the trader's
                 // `view_presentation.toml` the first time anything
                 // reloaded, which is precisely what the Views dialog's
-                // write relies on picking up (spec §5.6, §7.1).
-                let (views, _) = load_views(config);
+                // write relies on picking up (spec §5.6, §7.1). Its
+                // diagnostics are no longer discarded either (§19.6,
+                // below) — a stale `view_presentation.toml` name used to
+                // warn once at startup (`data_setup`) and go silent on
+                // every reload after.
+                let (views, presentation_diags) = load_views(config);
+                // §19.6: the reload path used to discard these, so a
+                // `view_presentation.toml` entry naming a view that no
+                // longer exists warned once at startup and was silent
+                // through every reload after — the trader renames a view
+                // and their column order quietly stops applying. Reported
+                // the way `data_setup`'s are at startup, and noted in the
+                // entity through the data-batch door (append + dedupe),
+                // never `note_config`, whose replace semantics belong to
+                // `apply_reload` alone (Phase 4b MAJ-5). Logged and
+                // queued here, before `config` (borrowed from `cx`
+                // through `shell.read`) is used again below — the actual
+                // `diagnostics.update` call, which needs `cx` mutably,
+                // waits until `config`'s last use, further down.
+                for d in &presentation_diags {
+                    tracing::warn!(target: "geode::query", "{d}");
+                }
                 let (dims, _) = config
                     .doc("dimensions")
                     .map(DerivedDimensions::from_doc)
@@ -331,6 +352,17 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 factory.set_dims(dims.clone());
                 handle.replace_views(views, dims);
+                // §19.6: `config`'s last use was just above — free to
+                // borrow `cx` mutably now.
+                if !presentation_diags.is_empty() {
+                    diagnostics.update(cx, |dg, cx| {
+                        let before = dg.version();
+                        dg.note_data_diagnostics(presentation_diags, SystemTime::now());
+                        if dg.version() != before {
+                            cx.notify();
+                        }
+                    });
+                }
             }
             // The dimension pickers (Phase 4a §3.3/§3.4): `geode-shell`
             // cannot depend on `geode-data` (CLAUDE.md), so a picker's
@@ -357,6 +389,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
             }
             ShellEvent::RestartRequired(_) => {}
+            // §19.6: the shell already logged each diagnostic
+            // (`geode::config` error) and noted them in the entity
+            // (`apply_reload`'s own `note_config` call, which runs
+            // regardless of the outcome) — there is nothing left for the
+            // bridge to forward.
+            ShellEvent::ReloadRejected(_) => {}
         }
     })
     .detach();
@@ -850,6 +888,66 @@ role = "key"
                 "the data service is busy or gone — try again".to_string()
             )),
             "a refused request must error the picker, not leave it loading forever"
+        );
+    }
+
+    /// §19.6: a reload no longer drops `load_views`'s presentation
+    /// diagnostics — a stale `view_presentation.toml` name reaches the
+    /// diagnostics entity on every reload, not only at startup.
+    #[gpui::test]
+    fn a_reload_reports_a_stale_presentation_name(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "views",
+                    "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("view_presentation", "[gone]\nhidden = [\"npv\"]\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let (handle, _rx) = DataHandle::for_tests();
+        let factory = Rc::new(BlotterFactory::new(
+            handle.clone(),
+            Vec::new(),
+            SchemaSpec::default(),
+            DerivedDimensions::default(),
+            FindStyle::default(),
+            Duration::from_secs(900),
+        ));
+        let (_tx, rx) = async_channel::bounded::<DataEvent>(EVENT_BOUND);
+        let bridge = Bridge {
+            handle,
+            factory,
+            events: rx,
+            dropped: Arc::new(AtomicU64::new(0)),
+            sources: Vec::new(),
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let reported = diagnostics.read_with(&vcx, |d, _| {
+            d.data_diagnostics
+                .iter()
+                .any(|(_, d)| d.message.contains("no view of that name"))
+        });
+        assert!(
+            reported,
+            "the reload path must report the stale presentation name"
         );
     }
 

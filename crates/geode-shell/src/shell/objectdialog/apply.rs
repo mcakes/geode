@@ -135,6 +135,15 @@ use crate::shell::ShellView;
 /// here.
 pub(crate) const WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// The status line for a flush whose in-memory merge was refused (§19.6):
+/// the file half of a flush (`run_writes`) and the memory half
+/// (`apply_in_memory` → `apply_reload`) are independent outcomes, and
+/// `reload::decide` rejecting the merge says nothing about whether the
+/// write itself succeeded — disk stays the arbiter (this module's own
+/// header), so the write still happens and the status line has to say
+/// both halves rather than picking one.
+pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge";
+
 /// One config document's user-layer copy of one object, as an edit leaves
 /// it: `Some(value)` to set it, `None` to remove it entirely.
 ///
@@ -739,7 +748,8 @@ fn schedule_flush(
 
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
-        let Ok(Some((user_dir, edits))) = this.update(cx, |shell, cx| promote(shell, seq, cx))
+        let Ok(Some((user_dir, edits, rejected))) =
+            this.update(cx, |shell, cx| promote(shell, seq, cx))
         else {
             return;
         };
@@ -747,14 +757,18 @@ fn schedule_flush(
             .background_executor()
             .spawn(async move { run_writes(&user_dir, edits) })
             .await;
-        this.update(cx, |shell, cx| finish_flush(shell, seq, outcome, cx))
-            .ok();
+        this.update(cx, |shell, cx| {
+            finish_flush(shell, seq, outcome, rejected, cx)
+        })
+        .ok();
     })
     .detach();
 }
 
 /// The debounce window has closed: apply the accumulated batch to memory
-/// through the one applier, and hand back the writes the file half owes.
+/// through the one applier, and hand back the writes the file half owes
+/// plus, when the merge itself was refused, how many errors it carried
+/// (§19.6).
 ///
 /// `None` when a later keystroke has taken the batch over — that
 /// keystroke's own timer carries everything, including this one's edits,
@@ -764,12 +778,23 @@ fn schedule_flush(
 /// The batch stays on `ShellView` rather than being taken here, for two
 /// reasons: a failure still needs its `revert` documents to restore from,
 /// and an edit arriving during the write has to have somewhere to land.
+///
+/// The third element of the returned tuple is read right after
+/// `apply_in_memory` returns: that call runs `apply_reload`, which just
+/// set `self.last_reload` to whatever `reload::decide` answered for the
+/// merged config, so this is the first and only moment `promote` can
+/// learn whether the write about to happen is going to a config that
+/// memory actually took.
 #[allow(clippy::type_complexity)]
 fn promote(
     shell: &mut ShellView,
     seq: u64,
     cx: &mut Context<ShellView>,
-) -> Option<(PathBuf, BTreeMap<(&'static str, String), ObjectEdit>)> {
+) -> Option<(
+    PathBuf,
+    BTreeMap<(&'static str, String), ObjectEdit>,
+    Option<usize>,
+)> {
     let pending = shell.pending_config_write.as_ref()?;
     if pending.seq != seq {
         return None;
@@ -777,7 +802,11 @@ fn promote(
     let user_dir = pending.user_dir.clone();
     let edits = pending.edits.clone();
     apply_in_memory(shell, &user_dir, &edits, cx);
-    Some((user_dir, edits))
+    let rejected = match &shell.last_reload {
+        crate::reload::ReloadOutcome::KeptLastGood { errors } => Some(errors.len()),
+        _ => None,
+    };
+    Some((user_dir, edits, rejected))
 }
 
 /// The write is done, one way or the other.
@@ -790,6 +819,16 @@ fn promote(
 /// memory to the older on-disk state and the change disappears with
 /// nothing on screen having said so. Only the flush that still owns the
 /// batch may clear it; a superseded one leaves it for its successor.
+///
+/// `rejected` (§19.6) is `promote`'s own reading of `shell.last_reload`
+/// right after it applied the merge — `Some(n)` when `reload::decide`
+/// kept last-good over `n` errors, `None` when the merge was applied (or
+/// when a superseded `promote` never ran at all, in which case this
+/// whole function is never reached for that flush). It says nothing
+/// about whether the FILE write below succeeded: the two are independent
+/// outcomes of the same flush, and a `Some` here only ever changes the
+/// success arm's own status line, never which branch of the `match` on
+/// `outcome` runs.
 ///
 /// `pub(crate)` for one reason, stated so it is not mistaken for a leak:
 /// the race the sequence check guards cannot be **scheduled** in a gpui
@@ -804,6 +843,7 @@ pub(crate) fn finish_flush(
     shell: &mut ShellView,
     seq: u64,
     outcome: Result<(), String>,
+    rejected: Option<usize>,
     cx: &mut Context<ShellView>,
 ) {
     match outcome {
@@ -816,10 +856,26 @@ pub(crate) fn finish_flush(
             {
                 shell.pending_config_write = None;
             }
-            // A write that succeeds clears whatever the last failure left
-            // on the status bar — the config on disk is current again.
-            if shell.config_write_error.take().is_some() {
-                cx.notify();
+            // §19.6: the file is on disk either way; what differs is
+            // whether memory took it. A rejected merge is said in the
+            // same status slot a failed write uses, and cleared by the
+            // next flush memory accepts.
+            match rejected {
+                Some(n) => {
+                    shell.config_write_error = Some(format!(
+                        "{REJECTED_STATUS}: {n} error(s) — keeping last good"
+                    ));
+                    cx.notify();
+                }
+                None => {
+                    // A write that succeeds AND lands in memory clears
+                    // whatever the last failure (or rejection) left on
+                    // the status bar — the config on disk is current
+                    // again, and memory agrees with it.
+                    if shell.config_write_error.take().is_some() {
+                        cx.notify();
+                    }
+                }
             }
         }
     }

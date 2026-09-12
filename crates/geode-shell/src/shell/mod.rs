@@ -213,6 +213,13 @@ pub enum ShellEvent {
     /// `DataEvent::Distinct`, which the bridge routes to
     /// [`ShellView::deliver_distinct`].
     DistinctRequested(geode_core::query::DistinctParams),
+    /// The last reload was refused — `reload::decide` kept the previous
+    /// config because the new one carried these error diagnostics (§19.6).
+    /// Distinct from `RestartRequired`: nothing here is live, the file is
+    /// on disk exactly as written, and a dialog that just wrote it needs
+    /// to say so. Carries the diagnostics, not the count, so a consumer
+    /// can name the file.
+    ReloadRejected(Vec<geode_core::config::Diagnostic>),
 }
 
 impl EventEmitter<ShellEvent> for ShellView {}

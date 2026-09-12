@@ -14,7 +14,7 @@ use crate::fontsize::FontSize;
 use crate::keymap::build_keymap;
 use crate::reload;
 use crate::vimfind::FindStyle;
-use geode_core::config::Config;
+use geode_core::config::{Config, Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
@@ -202,6 +202,26 @@ impl ShellView {
                 cx.notify();
             }
         });
+        // §19.6: computed here, before `new_config` moves into
+        // `self.services.config` inside the `Applied` arm below — a
+        // rejected outcome never reaches that arm, but the diagnostics
+        // still live on `new_config` and this is the last point both are
+        // in hand together. Only `Severity::Error` ones: those are
+        // exactly what made `decide` keep last-good, so this is the
+        // subset a dialog or the bridge needs to say "your write was
+        // refused, and here is why" — a warning here would be describing
+        // an applied reload, which this branch, by construction, never is.
+        let rejected: Vec<Diagnostic> =
+            if matches!(outcome, reload::ReloadOutcome::KeptLastGood { .. }) {
+                new_config
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == Severity::Error)
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            };
         if let reload::ReloadOutcome::Applied { warnings } = &outcome {
             // Fix wave, Fix 4: `decide` folds warning-severity diagnostics
             // (config + keymap-build) into `Applied { warnings }` rather
@@ -464,6 +484,18 @@ impl ShellView {
         }
 
         self.last_reload = outcome;
+        // §19.6: logged before the emit, at the same target and level
+        // `Applied`'s own warnings use above, so a rejected reload's
+        // reason ends up in the log the same way an applied one's does —
+        // the emit alone would leave nothing behind for a trader who
+        // isn't watching whatever consumes `ShellEvent::ReloadRejected`
+        // at that moment.
+        if !rejected.is_empty() {
+            for d in &rejected {
+                tracing::error!(target: "geode::config", "{d}");
+            }
+            cx.emit(ShellEvent::ReloadRejected(rejected));
+        }
         cx.notify();
     }
 }
