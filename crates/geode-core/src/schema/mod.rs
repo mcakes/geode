@@ -355,7 +355,12 @@ fn parse_column(
         other => return Err(bad(format!("unknown role '{other}'"))),
     };
 
-    let categorical_default = matches!(role, ColumnRole::Dimension { .. });
+    // Only a string column can be an ENUM, so the dimension default is
+    // gated on the type too: a numeric dimension (a strike a desk groups
+    // by) is silently uncategorical, where an explicit `categorical =
+    // true` on the same column is an opt-in worth a diagnostic.
+    let categorical_default =
+        matches!(role, ColumnRole::Dimension { .. }) && ty == ColumnType::Utf8;
     let mut warning = None;
     let categorical = match table.get("categorical").and_then(|v| v.as_bool()) {
         None => categorical_default,
@@ -670,6 +675,25 @@ grain = "underlying"
             ds.carries(Grain::Position, "trade_ref"),
             "still a dimension"
         );
+    }
+
+    /// A numeric dimension (a strike a desk groups by) defaults to NOT
+    /// categorical, silently: only a string column can be an ENUM, and a
+    /// default is not an opt-in, so there is nothing to warn about.
+    #[test]
+    fn a_non_string_dimension_defaults_to_uncategorical_without_a_diagnostic() {
+        let text = format!(
+            "{CARRIED}\n[risk.columns.strike]\ntype = \"f64\"\nrole = \"dimension\"\ngrain = \"instrument\"\n"
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("risk").unwrap();
+        assert!(!ds.column("strike").unwrap().categorical);
+        assert!(
+            ds.carries(Grain::Instrument, "strike"),
+            "still a carried dimension"
+        );
+        assert!(!ds.categorical_columns().contains(&"strike"));
     }
 
     #[test]
