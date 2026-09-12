@@ -2306,7 +2306,7 @@ tick's hit area.
   payload before the predicate runs — so it could instead refuse a
   cross-field payload and leave `drag_over` painting no border on a
   row the drop would refuse anyway;
-- `crates/geode-shell/src/shell/objectdialog/render.rs` is now 3,100
+- `crates/geode-shell/src/shell/objectdialog/render.rs` is now about 3,100
   lines; a future element-wiring addition should split the edit-stage
   row builder into its own module (`objectdialog/editrow.rs`) rather
   than growing `build_edit` again;
