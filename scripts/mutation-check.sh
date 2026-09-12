@@ -5973,7 +5973,7 @@ run_mutation "objectdialog: a new view starts on the first real dataset" \
   '        None => options.first().cloned().unwrap_or_default(),' \
   '        None => String::new(),' \
   geode-shell \
-  a_new_view_draft_picks_the_first_real_dataset_and_no_member_columns
+  a_new_view_draft_picks_the_first_real_dataset_and_no_columns_of_its_own
 
 # Create flushes at zero debounce like a removal, not 250 ms like an edit.
 # The anchor is longer than just the `queue_batch` tail: `commit_removal`
@@ -6000,27 +6000,41 @@ run_mutation "objectdialog: create does not wait for the edit debounce" \
 # ---- Phase 4c part 2 refinement, Task 4: Views' two-section column ----
 # ---- list — members and available --------------------------------------
 
-# Membership is definitional: comparing ALL names (members and available
-# alike) would call an add "no membership change" and route it to the
-# overlay, silently never writing views.toml.
-run_mutation "objectdialog: membership compares member names only" \
+# Membership is definitional: taking the catalogue's names in too would
+# call an add "no membership change" — every add promotes a name already
+# painted — and route it to the overlay, silently never writing views.toml.
+# §18.7 re-anchored this from the old `member` filter onto the arm that now
+# carries the behaviour: which LIST is read.
+run_mutation "objectdialog: membership compares the object's own names only" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                .filter(|i| i.member)' \
-  '                .filter(|_i| true)' \
+  '        FieldKind::OrderedList { items, .. } => Some(
+            items
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<BTreeSet<_>>(),
+        ),' \
+  '        FieldKind::OrderedList { items, available } => Some(
+            items
+                .iter()
+                .chain(available.iter().flatten())
+                .map(|i| i.name.clone())
+                .collect::<BTreeSet<_>>(),
+        ),' \
   geode-shell \
   adding_an_available_column_is_a_doc_write_and_hiding_is_not
 
-# An added column must join the member BLOCK, or `rows()` paints it under
-# the Available header while the doc write lists it as a member. Covered
-# by promoting a LATER available row, not the first one: for the first
-# available item, its own post-removal index and the member block's end
-# are numerically the same, so that case cannot tell the two anchors apart.
-run_mutation "objectdialog: an added item moves into the member block" \
+# An added column joins the END of the object's own list — the order of
+# that list is the view's own column order, and a column arriving at its
+# front is a reorder the trader never asked for. Covered by promoting a
+# LATER catalogue row, not the first one: for the catalogue's first row,
+# its own index and the end of a one-column list are numerically the same,
+# so that case cannot tell the two apart.
+run_mutation "objectdialog: an added item joins the end of the object's own list" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                    items.insert(end, entry);' \
-  '                    items.insert(item, entry);' \
+  '                items.push(entry);' \
+  '                items.insert(0, entry);' \
   geode-shell \
-  adding_a_later_available_column_still_joins_the_end_of_the_member_block
+  adding_a_later_available_column_still_joins_the_end_of_the_views_own_list
 
 # User ruling 2026-09-11: after `space` adds a column the cursor moves on
 # to the NEXT available row (the old visible index plus one — the added
@@ -6030,8 +6044,8 @@ run_mutation "objectdialog: an added item moves into the member block" \
 # added item's former neighbour above — which is the wrong row.
 run_mutation "objectdialog: an add leaves the cursor on the row above the next one" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                    self.selected = (self.selected + 1).min(last);' \
-  '                    self.selected = self.selected.min(last);' \
+  '                self.selected = (self.selected + 1).min(last);' \
+  '                self.selected = self.selected.min(last);' \
   geode-shell \
   adding_a_column_leaves_the_cursor_on_the_next_available_row
 
@@ -6040,24 +6054,35 @@ run_mutation "objectdialog: an add leaves the cursor on the row above the next o
 # answers `None` — every verb goes inert until the trader presses `k`.
 run_mutation "objectdialog: an add of the last row runs the cursor off the end" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                    self.selected = (self.selected + 1).min(last);' \
-  '                    self.selected = self.selected + 1;' \
+  '                self.selected = (self.selected + 1).min(last);' \
+  '                self.selected = self.selected + 1;' \
   geode-shell \
   adding_the_last_available_column_leaves_the_cursor_on_the_row_before
 
-# Reordering across the boundary would put an available column among the
-# members without changing its flag — painted in one block, written in none.
-# Task 6 (§18.3) rewrote `move_item` to walk to the next VISIBLE
-# neighbour rather than swap with the literal next one, so the boundary
-# check moved from a `swap`-adjacent comparison to this loop's own — the
-# anchor follows it there. `false` disables only the member/available
-# comparison, leaving the array-bounds half of the condition live.
-run_mutation "objectdialog: reorder never crosses the member boundary" \
+# RETIRED by §18.7 (2026-09-12): "objectdialog: reorder never crosses the
+# member boundary". The boundary was a rule the ordering of ONE list had
+# to maintain, and the entry mutated the comparison that enforced it.
+# There is no boundary now — `move_item` walks `items`, and the catalogue
+# is a different vector it cannot reach — so the behaviour the entry
+# guarded is not representable and an entry over it would have nothing to
+# break. What CAN still go wrong is the other side of the same rule: an
+# available row's index read as a position in the object's own list. That
+# is the entry below, on the arm that declines it.
+#
+# The mutation hands `move_item` an available row's index as if it were an
+# item's. The named test's fixture is what makes that visible: two columns
+# of the view's own, one catalogue row at index 0 — so the misread index
+# names `npv`, which really can move, and the reorder happens instead of
+# being declined. With a one-column view the same misread would run off
+# the end and answer `None` for the wrong reason, and the entry would read
+# "caught" while defending nothing.
+run_mutation "objectdialog: an available row is not reorderable" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            if next >= items.len() || items[next].member != block {' \
-  '            if next >= items.len() || false {' \
+  '            EditRow::Available { .. } | EditRow::Field(_) => return None,' \
+  '            EditRow::Available { field, item } => (field, item),
+            EditRow::Field(_) => return None,' \
   geode-shell \
-  reordering_never_crosses_the_member_boundary
+  an_available_row_cannot_be_reordered
 
 # ---- Task 4 review round 1: kind, dest-based membership, dataset ------
 # ---- switch (2026-09-10) ------------------------------------------------
@@ -6088,36 +6113,54 @@ run_mutation "objectdialog: a newly written column carries its real kind" \
 # The single line keeping an available column out of `views.toml` — an
 # available row promoted to nothing would still fork the desk's view AND
 # list a column the trader never asked to add.
-run_mutation "objectdialog: the doc table lists members only" \
+run_mutation "objectdialog: the doc table lists the view's own columns only" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        let wanted: Vec<&ListItem> = items.iter().filter(|i| i.member).collect();' \
   '        let wanted: Vec<&ListItem> = items.iter().collect();' \
+  '        let wanted: Vec<&ListItem> = items
+            .iter()
+            .chain(draft.available_items("columns").unwrap_or_default())
+            .collect();' \
   geode-shell \
   adding_an_available_column_is_a_doc_write_and_hiding_is_not
 
-# Whether a list has separate membership is a property of its `dest`
-# (Groupings' `dimensions` is `Destination::Doc`, where ticking already IS
-# membership), never of whether every item on it happens to be ticked
-# right now — scanning items (an earlier build did) made `x` go dead on a
-# Views list the moment its available block emptied out.
-run_mutation "objectdialog: x's Doc-list refusal is decided by dest, not by scanning items" \
+# Whether a list has a separate membership is whether it HAS a catalogue
+# (§18.7.2): Groupings' `dimensions` has none — ticking already IS
+# membership there — so `x` must refuse and name `space`. Losing the
+# refusal makes `x` silently untick a dimension instead.
+run_mutation "objectdialog: x removes from a list that has no catalogue at all" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if self.fields[field].dest == Destination::Doc {' \
-  '        if false {' \
+  '        let Some(available) = available.as_mut() else {
+            return Step::Refused("space unticks here".to_string());
+        };' \
+  '        let available = available.get_or_insert_with(Vec::new);' \
   geode-shell \
-  remove_selected_refuses_where_membership_is_inclusion
+  a_groupings_list_has_no_available_block_and_x_refuses
+
+# And the other half of the same line, which is the regression the
+# `Option` exists for: an EMPTY catalogue is not the absence of one. Read
+# as "no catalogue", `x` goes dead on a Views list the moment the trader
+# adds the last column the dataset offers — the exact failure the
+# `member`-scanning build had, reachable again through emptiness.
+run_mutation "objectdialog: an empty catalogue reads as no catalogue" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let Some(available) = available.as_mut() else {
+            return Step::Refused("space unticks here".to_string());
+        };' \
+  '        let Some(available) = available.as_mut().filter(|a| !a.is_empty()) else {
+            return Step::Refused("space unticks here".to_string());
+        };' \
+  geode-shell \
+  remove_selected_still_works_when_the_catalogue_is_empty
 
 # `x` on an available row must refuse — there is nothing there yet to
 # remove — and name the verb that actually adds it, not fall through to
 # `items.remove`/`items.push` and quietly reorder the row instead.
-run_mutation "objectdialog: x refuses an available row rather than reordering it" \
+run_mutation "objectdialog: x refuses an available row rather than removing by its index" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if !items[item].member {
-            return Step::Refused("not in the view — space adds it".to_string());
-        }' \
-  '        if false {
-            return Step::Refused("not in the view — space adds it".to_string());
-        }' \
+  '            Some(EditRow::Available { .. }) => {
+                return Step::Refused("not in the view — space adds it".to_string());
+            }' \
+  '            Some(EditRow::Available { field, item }) => (field, item),' \
   geode-shell \
   x_on_an_available_row_says_not_in_the_view
 
@@ -6126,10 +6169,8 @@ run_mutation "objectdialog: x refuses an available row rather than reordering it
 # does not even have.
 run_mutation "objectdialog: refresh_available empties the old dataset's rows" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    items.retain(|i| i.member);' \
-  '    if false {
-        items.retain(|i| i.member);
-    }' \
+  '    *available = Some(rebuilt);' \
+  '    available.get_or_insert_with(Vec::new).extend(rebuilt);' \
   geode-shell \
   refresh_available_repopulates_for_the_newly_chosen_dataset
 

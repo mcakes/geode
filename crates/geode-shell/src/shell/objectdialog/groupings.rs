@@ -38,13 +38,19 @@
 //!
 //! ## Ticking and reordering is the whole edit
 //!
-//! Unlike Views' `columns`, whose `OrderedList` only ever lists the
-//! view's own current members, `dimensions` here lists **every** column
-//! [`crate::shell::pickable_columns`] would (the same vocabulary
-//! `mod+p`'s dimension picker offers): the slot's own chain, in chain
-//! order, ticked; every other pickable column after, unticked, in schema
-//! order. Ticking one on adds it to the chain; `shift+j`/`shift+k`
-//! reorder whichever items are ticked.
+//! Unlike Views' `columns`, whose `OrderedList` keeps the columns the
+//! view has and the ones it may gain in two lists, `dimensions` here is
+//! ONE list of **every** column [`crate::shell::pickable_columns`] would
+//! offer (the same vocabulary `mod+p`'s dimension picker has): the slot's
+//! own chain, in chain order, ticked; every other pickable column after,
+//! unticked, in schema order. Ticking one on adds it to the chain;
+//! `shift+j`/`shift+k` reorder whichever items are ticked.
+//!
+//! So this domain's list has NO available catalogue at all — `available:
+//! None` (spec §18.7.1) rather than an empty one, which is a different
+//! statement and one `x` reads: there is nowhere here to promote a row
+//! from, so `x` refuses and names `space`, the verb that does the work
+//! (`super::Draft::remove_selected`'s own doc has the distinction).
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
@@ -108,19 +114,15 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         .unwrap_or_default();
 
     // The slot's own chain first, in chain order, ticked; then every
-    // other pickable column, in schema order, unticked — the same
-    // "already-a-member first, the rest of the catalogue after" shape
-    // `views::columns_for` builds for its own ordered list.
+    // other pickable column, in schema order, unticked — all of them the
+    // object's OWN items, because ticking is the whole of membership
+    // here (this module's own doc comment).
     let mut items: Vec<ListItem> = current
         .iter()
         .map(|name| ListItem {
             name: name.clone(),
             included: true,
             width: None,
-            // Every item here IS a member — ticking is the whole of
-            // membership for a grouping slot, unlike Views' columns list
-            // (`super::ListItem::member`'s own doc has the full story).
-            member: true,
             // No column-kind concept on this list at all — `kind` exists
             // only for Views' `columns_for` to fill in a brand new
             // `[[columns]]` entry, and a grouping slot's value is a bare
@@ -136,7 +138,6 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             name: column.column,
             included: false,
             width: None,
-            member: true,
             kind: None,
         });
     }
@@ -151,7 +152,11 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         Field {
             key: "dimensions".to_string(),
             label: "Dimensions".to_string(),
-            kind: FieldKind::OrderedList { items },
+            kind: FieldKind::OrderedList {
+                items,
+                // No catalogue, not an empty one — see this module's doc.
+                available: None,
+            },
             dest: Destination::Doc,
         },
     ]
@@ -273,12 +278,17 @@ mod tests {
         let fields = fields(&config, Some("3"));
         assert_eq!(fields[0].key, "slot");
         assert_eq!(fields[0].kind, FieldKind::Text("3".to_string()));
-        let FieldKind::OrderedList { items } = &fields[1].kind else {
+        let FieldKind::OrderedList { items, available } = &fields[1].kind else {
             panic!(
                 "dimensions must be an ordered list, got {:?}",
                 fields[1].kind
             );
         };
+        assert!(
+            available.is_none(),
+            "ticking IS membership here, so there is no catalogue to \
+             promote out of (§18.7.1), got {available:?}"
+        );
         assert_eq!(
             items
                 .iter()
@@ -297,7 +307,7 @@ mod tests {
         let config = config_with_slot("3 = [\"lhu\"]\n");
         for object in [None, Some("9")] {
             let fields = fields(&config, object);
-            let FieldKind::OrderedList { items } = &fields[1].kind else {
+            let FieldKind::OrderedList { items, .. } = &fields[1].kind else {
                 panic!("dimensions must be an ordered list");
             };
             assert!(

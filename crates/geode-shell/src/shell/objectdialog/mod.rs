@@ -504,6 +504,13 @@ impl Destination {
 /// ordered lists in the config model and both fit it, while arbitrary
 /// sub-fields would make the edit stage recursive for no reader.
 ///
+/// **Membership is not a field here** (§18.7): which of a field's two
+/// lists an item sits in IS its membership, so the same `ListItem` shape
+/// describes one of the object's own entries and one of the catalogue
+/// entries it may gain. Where the two differ is what
+/// [`FieldKind::OrderedList`] documents, and nothing has to keep a flag
+/// and a position agreeing with each other.
+///
 /// `width` is `Option<f32>` and not the spec sketch's `u32` because
 /// `ColumnPresentation::width` — the thing it round-trips through — is
 /// `Option<f32>`. `None` means "no width declared", which is not the
@@ -517,15 +524,6 @@ pub struct ListItem {
     /// compiler still selects it and unhiding costs nothing.
     pub included: bool,
     pub width: Option<f32>,
-    /// In the object at all (§18.2). A view's column list holds the
-    /// view's own columns (`member: true`) followed by the chosen
-    /// dataset's other columns (`member: false`), so a new view has
-    /// something to tick. Membership is *definitional* — `Destination::
-    /// Doc`, and a fork on a desk view — where `included` is
-    /// presentation; keeping them apart is what lets hiding a desk column
-    /// never fork it. Groupings sets this `true` everywhere: there,
-    /// ticking IS membership.
-    pub member: bool,
     /// The `[[columns]]` `kind` a first-time write of this item needs —
     /// `"dimension"` or `"measure"` for Views (`views::fields`'s own doc
     /// has the schema-role mapping and why a `key`/`attribute` column
@@ -567,8 +565,28 @@ pub enum FieldKind {
         options: Vec<String>,
         ticked: BTreeSet<String>,
     },
+    /// The object's own ordered list, and — for a list a trader can add
+    /// to — the catalogue of what may join it (spec §18.7). `items` is
+    /// the only list that is ordered, written, counted or reorderable.
+    ///
+    /// `available` is `None` where ticking IS membership and there is no
+    /// catalogue to promote out of (Groupings' `dimensions`, whose
+    /// unticked rows are already in `items`), and `Some` — possibly
+    /// EMPTY — where one exists (Views' `columns`, whose catalogue empties
+    /// out once the trader has added every column the dataset offers).
+    /// The distinction is load-bearing rather than tidy: `x` demotes into
+    /// a catalogue that exists and refuses where none does, so reading
+    /// "is this list catalogue-less" off `available.is_empty()` would make
+    /// `x` go dead on a fully-added Views list — the exact regression
+    /// `remove_selected`'s own doc records. `available` is unordered by
+    /// construction: nothing writes it and nothing reads its order.
+    ///
+    /// Two lists rather than one list and a flag, so the
+    /// members-before-available rule four mutators used to maintain by
+    /// hand is not a rule at all.
     OrderedList {
         items: Vec<ListItem>,
+        available: Option<Vec<ListItem>>,
     },
 }
 
@@ -593,7 +611,19 @@ pub struct Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditRow {
     Field(usize),
-    Item { field: usize, item: usize },
+    /// One of the object's own list entries — `field`'s `items`.
+    Item {
+        field: usize,
+        item: usize,
+    },
+    /// One row of a list's `available` catalogue. A variant of its own so
+    /// a consumer cannot treat an available row as one of the object's
+    /// own by omission — every match on [`EditRow`] has to say what
+    /// `space`, `x`, a click or a label means here.
+    Available {
+        field: usize,
+        item: usize,
+    },
 }
 
 /// What a keystroke is waiting to have confirmed. Each of the three is
@@ -783,14 +813,18 @@ impl Step {
 
 impl Draft {
     /// The rows the edit stage paints, in order: every field, each
-    /// ordered list's items directly under it.
+    /// ordered list's own items directly under it, then that list's
+    /// available catalogue (§18.7.1).
     pub fn rows(&self) -> Vec<EditRow> {
         let mut out = Vec::new();
         for (i, field) in self.fields.iter().enumerate() {
             out.push(EditRow::Field(i));
-            if let FieldKind::OrderedList { items } = &field.kind {
+            if let FieldKind::OrderedList { items, available } = &field.kind {
                 for item in 0..items.len() {
                     out.push(EditRow::Item { field: i, item });
+                }
+                for item in 0..available.as_ref().map_or(0, Vec::len) {
+                    out.push(EditRow::Available { field: i, item });
                 }
             }
         }
@@ -798,7 +832,8 @@ impl Draft {
     }
 
     /// What the filter ranks a row by: exactly the text the row paints as
-    /// its label — a field's label, an item's name — and nothing more
+    /// its label — a field's label, the name of one of the object's own
+    /// items, the name of an available one — and nothing more
     /// (the browse list's own rule, for the same reason: matching text
     /// the user cannot see breaks the agreement between what ranked and
     /// what is highlighted).
@@ -806,7 +841,17 @@ impl Draft {
         match row {
             EditRow::Field(i) => self.fields[i].label.clone(),
             EditRow::Item { field, item } => match &self.fields[field].kind {
-                FieldKind::OrderedList { items } => items[item].name.clone(),
+                FieldKind::OrderedList { items, .. } => items[item].name.clone(),
+                _ => String::new(),
+            },
+            // An available row's label is its name too — the same text,
+            // said by a different row, because it is the same column
+            // seen from the other side of the verb that moves it.
+            EditRow::Available { field, item } => match &self.fields[field].kind {
+                FieldKind::OrderedList {
+                    available: Some(available),
+                    ..
+                } => available[item].name.clone(),
                 _ => String::new(),
             },
         }
@@ -823,8 +868,9 @@ impl Draft {
     /// view's column order, a grouping slot's chain order — and
     /// reordering it out from under a filter would be actively
     /// misleading rather than merely surprising. Two reasons, both still
-    /// standing after §18.1 gave each block a header and each member row
-    /// a grip. First, the order is a value the trader is editing and
+    /// standing after §18.1 gave each block a header and each row of the
+    /// object's own list a grip. First, the order is a value the trader
+    /// is editing and
     /// `shift+j`/`shift+k` are how they edit it: neither can mean
     /// anything coherent against a list whose painted order `shift+j`
     /// does not control. Second, a section header marks where its block
@@ -861,7 +907,7 @@ impl Draft {
     /// own label), but is the honest fallback for a future
     /// one that might. Neither an *add* nor a *removal* calls this — the
     /// cursor stays behind on the row that was next rather than following
-    /// the item across the member boundary (`step_selected`'s and
+    /// the item from one list into the other (`step_selected`'s and
     /// `remove_selected`'s own comments have the ruling).
     fn follow(&mut self, row: EditRow) {
         let rows = self.rows();
@@ -909,13 +955,31 @@ impl Draft {
         self.source = self.baseline_source.clone();
     }
 
-    /// The items of the ordered-list field named `key`.
+    /// The object's own items of the ordered-list field named `key` —
+    /// what is written, counted and reorderable.
     pub fn list_items(&self, key: &str) -> Option<&[ListItem]> {
         self.fields
             .iter()
             .find(|f| f.key == key)
             .and_then(|f| match &f.kind {
-                FieldKind::OrderedList { items } => Some(items.as_slice()),
+                FieldKind::OrderedList { items, .. } => Some(items.as_slice()),
+                _ => None,
+            })
+    }
+
+    /// The catalogue of what may JOIN the ordered-list field named `key`
+    /// — `None` where no catalogue exists at all (Groupings' `dimensions`,
+    /// where ticking is membership; a key naming no ordered list), and
+    /// `Some`, possibly empty, where one does. The two answers are
+    /// different facts and callers act on them differently
+    /// ([`FieldKind::OrderedList`]'s own doc), so this deliberately does
+    /// not flatten them into one empty slice.
+    pub fn available_items(&self, key: &str) -> Option<&[ListItem]> {
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .and_then(|f| match &f.kind {
+                FieldKind::OrderedList { available, .. } => available.as_deref(),
                 _ => None,
             })
     }
@@ -1020,39 +1084,48 @@ impl Draft {
                 | FieldKind::MultiChoice { .. }
                 | FieldKind::OrderedList { .. } => Step::Inert,
             },
+            EditRow::Available { field, item } => {
+                let FieldKind::OrderedList { items, available } = &mut self.fields[field].kind
+                else {
+                    return Step::Inert;
+                };
+                let Some(available) = available.as_mut() else {
+                    return Step::Inert;
+                };
+                if item >= available.len() {
+                    return Step::Inert;
+                }
+                // Adding: out of the catalogue, onto the END of the
+                // object's own list, shown.
+                let mut entry = available.remove(item);
+                entry.included = true;
+                items.push(entry);
+                // The cursor does NOT follow the item into the object's
+                // own list: a trader adding several columns wants it on
+                // the next available row, where their eye already is
+                // (user ruling 2026-09-11). The added item moved
+                // *earlier* in row order and its label is unchanged,
+                // so the rows ahead of the next visible one are the
+                // same set, merely reordered — its visible index is
+                // the old cursor plus one. When the added item was the
+                // catalogue's last row there is no next, and the same
+                // index now holds the row that preceded it (the
+                // previous available column, or the object's own last
+                // item when there is none left), which is where the
+                // cursor stays rather than running off the end.
+                let last = self.visible_rows().len().saturating_sub(1);
+                self.selected = (self.selected + 1).min(last);
+                Step::Changed
+            }
             EditRow::Item { field, item } => {
                 // Read off the field before the list is borrowed mutably:
                 // the destination is what decides whether emptying this
                 // list is representable at all (see this function's doc).
                 let dest = self.fields[field].dest;
                 let label = self.fields[field].label.clone();
-                let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
+                let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
                     return Step::Inert;
                 };
-                if !items[item].member {
-                    // Adding: into the member block, at its end, shown.
-                    let end = items.iter().position(|i| !i.member).unwrap_or(items.len());
-                    let mut entry = items.remove(item);
-                    entry.member = true;
-                    entry.included = true;
-                    items.insert(end, entry);
-                    // The cursor does NOT follow the item into the member
-                    // block: a trader adding several columns wants it on
-                    // the next available row, where their eye already is
-                    // (user ruling 2026-09-11). The added item moved
-                    // *earlier* in row order and its label is unchanged,
-                    // so the rows ahead of the next visible one are the
-                    // same set, merely reordered — its visible index is
-                    // the old cursor plus one. When the added item was the
-                    // block's last row there is no next, and the same
-                    // index now holds the row that preceded it (the
-                    // previous available column, or the last member when
-                    // there is none left), which is where the cursor
-                    // stays rather than running off the end.
-                    let last = self.visible_rows().len().saturating_sub(1);
-                    self.selected = (self.selected + 1).min(last);
-                    return Step::Changed;
-                }
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
@@ -1070,16 +1143,25 @@ impl Draft {
     }
 
     /// `shift+j` / `shift+k`: move the item under the cursor past the next
-    /// VISIBLE item in that direction within its own list and member
-    /// block (§18.3) — under a filter that is what reordering means, and
-    /// the count of hidden rows jumped over is returned so the notice can
-    /// say so. `None` at either end of the block, on a row that is not a
-    /// list item, or when the move would cross the member/available
-    /// boundary — an available column reordered among the members would
-    /// be painted in one block while still being written in neither.
+    /// VISIBLE item in that direction within the object's own list
+    /// (§18.3) — under a filter that is what reordering means, and the
+    /// count of hidden rows jumped over is returned so the notice can say
+    /// so. `None` at either end of that list, and on a row that is not
+    /// one of its items.
+    ///
+    /// An [`EditRow::Available`] row is one of those: the catalogue is
+    /// unordered by construction (§18.7.2), so there is no order there to
+    /// change and a "move" would be painted and never written. It is
+    /// declined here rather than represented — which is also why the
+    /// object's own last item has nowhere further down to go, even with a
+    /// catalogue painted below it.
     pub fn move_item(&mut self, delta: i32) -> Option<usize> {
-        let EditRow::Item { field, item } = self.selected_row()? else {
-            return None;
+        let (field, item) = match self.selected_row()? {
+            EditRow::Item { field, item } => (field, item),
+            // Said, rather than left to a wildcard: an available row's
+            // index means a position in the CATALOGUE, so reading it as
+            // one in `items` would reorder a different column entirely.
+            EditRow::Available { .. } | EditRow::Field(_) => return None,
         };
         let visible: BTreeSet<usize> = self.visible_rows().iter().map(|m| m.row).collect();
         let rows = self.rows();
@@ -1087,15 +1169,14 @@ impl Draft {
             rows.iter()
                 .position(|r| *r == EditRow::Item { field, item: i })
         };
-        let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
+        let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
             return None;
         };
-        let block = items[item].member;
         let mut target = item;
         let mut skipped = 0usize;
         loop {
             let next = target.checked_add_signed(delta as isize)?;
-            if next >= items.len() || items[next].member != block {
+            if next >= items.len() {
                 return None;
             }
             target = next;
@@ -1116,58 +1197,58 @@ impl Draft {
     /// `x`: take the item under the cursor out of the object (§18.2) —
     /// the definitional twin of `space`'s hide.
     ///
-    /// A per-field property, not a scan of the list's current contents:
-    /// whether a list has separate membership at all is decided by its
-    /// `dest`, never by whether every item on it happens to be ticked
-    /// right now. A Views draft with every available column already
-    /// added is still a `Destination::Presentation` list — `x` still
-    /// removes there — while a Groupings `dimensions` list
-    /// (`Destination::Doc`, where ticking already IS membership) refuses
-    /// `x` regardless of how many of its rows are ticked. Scanning items
-    /// instead (an earlier build did) made `x` go dead on exactly that
-    /// first case: the moment a trader added the view's last available
-    /// column, the list looked "fully membered" and `x` started refusing
-    /// removal it had done a keystroke earlier.
+    /// Whether a list has a separate membership at all is whether it HAS
+    /// a catalogue (§18.7.2), never whether that catalogue happens to be
+    /// empty right now, and never a `dest`. A Views draft with every
+    /// available column already added still has one — an empty one — so
+    /// `x` still removes there; a Groupings `dimensions` list has none at
+    /// all (ticking IS membership) and refuses. Deciding by emptiness
+    /// (which is what scanning one flat list's flags amounted to, in the
+    /// build before this one) made `x` go dead on that first case: the moment a
+    /// trader added the view's last available column, the list looked
+    /// catalogue-less and `x` started refusing a removal it had done a
+    /// keystroke earlier.
     ///
     /// [`Step::Refused`] rather than [`Step::Inert`] for both declined
-    /// cases, so the footer says why: on a `Destination::Doc` list,
-    /// `space` is the verb that already unticks; on an available
-    /// (non-member) row of a `Destination::Presentation` list, `space` is
-    /// the verb that adds it — `x` has nothing to remove from a row that
-    /// is not there yet. Neither reason names `d`/`r` the way `space`'s
-    /// own "must keep at least one entry" refusal does, so `render`
-    /// routes these straight to the footer rather than through
-    /// `refuse_step`.
+    /// cases, so the footer says why: on a catalogue-less list, `space` is
+    /// the verb that already unticks; on an available row, `space` is the
+    /// verb that adds it — `x` has nothing to remove from a row that is
+    /// not there yet. Neither reason names `d`/`r` the way `space`'s own
+    /// "must keep at least one entry" refusal does, so `render` routes
+    /// these straight to the footer rather than through `refuse_step`.
     pub fn remove_selected(&mut self) -> Step {
-        let Some(EditRow::Item { field, item }) = self.selected_row() else {
+        let (field, item) = match self.selected_row() {
+            Some(EditRow::Item { field, item }) => (field, item),
+            Some(EditRow::Available { .. }) => {
+                return Step::Refused("not in the view — space adds it".to_string());
+            }
+            _ => return Step::Inert,
+        };
+        let FieldKind::OrderedList { items, available } = &mut self.fields[field].kind else {
             return Step::Inert;
         };
-        if self.fields[field].dest == Destination::Doc {
+        let Some(available) = available.as_mut() else {
             return Step::Refused("space unticks here".to_string());
-        }
-        let FieldKind::OrderedList { items } = &mut self.fields[field].kind else {
-            return Step::Inert;
         };
-        if !items[item].member {
-            return Step::Refused("not in the view — space adds it".to_string());
+        if item >= items.len() {
+            return Step::Inert;
         }
         let mut entry = items.remove(item);
-        entry.member = false;
         entry.included = false;
-        items.push(entry);
-        let last = items.len() - 1;
-        // The cursor does NOT follow the item to the end of the available
-        // block, for the same reason `space`'s add leaves it behind (user
-        // ruling 2026-09-11): a trader removing several columns wants it
-        // on the row that was next. The removed item moved *later* in row
-        // order with its label unchanged, so the visible rows ahead of the
-        // next one lost exactly one — the next row now sits at the old
-        // index and `selected` is already right. The one exception is a
-        // removal with nothing visible after it: the item lands at the
-        // end, which is where it already was, so the old index would
-        // still be on it — step back to the previous row instead, the
-        // way `dd` on a buffer's last line does.
-        let moved = EditRow::Item { field, item: last };
+        available.push(entry);
+        let last = available.len() - 1;
+        // The cursor does NOT follow the item to the end of the
+        // catalogue, for the same reason `space`'s add leaves it behind
+        // (user ruling 2026-09-11): a trader removing several columns
+        // wants it on the row that was next. The removed item moved
+        // *later* in row order with its label unchanged, so the visible
+        // rows ahead of the next one lost exactly one — the next row now
+        // sits at the old index and `selected` is already right. The one
+        // exception is a removal with nothing visible after it: the item
+        // lands at the end, which is where it already was, so the old
+        // index would still be on it — step back to the previous row
+        // instead, the way `dd` on a buffer's last line does.
+        let moved = EditRow::Available { field, item: last };
         let rows = self.rows();
         let under_cursor = self
             .visible_rows()
@@ -1187,8 +1268,9 @@ impl Draft {
     /// presentation-only edit out of `views.toml` entirely.
     ///
     /// An ordered list contributes to its own destination **and** to
-    /// [`Destination::Doc`] when its item *names* change, because an
-    /// object's member set is definitional however the list is presented:
+    /// [`Destination::Doc`] when its item *names* change, because which
+    /// entries an object HAS is definitional however the list is
+    /// presented:
     /// adding a column the view did not have changes the view, not its
     /// presentation (spec §8.1). Reordering, hiding and resizing never
     /// reach that branch, which is the split this whole design exists for.
@@ -1255,21 +1337,22 @@ impl Draft {
     }
 }
 
-/// Did an ordered list's membership — the set of MEMBER item names,
-/// ignoring order and ignoring every non-member (available) item — change
-/// between `before` and `field`? See [`Draft::writes_by_destination`].
+/// Did an ordered list's membership — the set of the object's OWN item
+/// names, ignoring order and ignoring the available catalogue entirely —
+/// change between `before` and `field`? See
+/// [`Draft::writes_by_destination`].
 ///
-/// Comparing every item's name, member or not, would call an add "no
-/// membership change" the moment the added name already sat on the list
-/// as an available row — which is every add there is, since `space` only
-/// ever promotes a row already painted — and route it to the overlay
+/// The catalogue is not part of the comparison because it is not part of
+/// the object: taking `available`'s names in too would call an add "no
+/// membership change" the moment the added name already sat in the
+/// catalogue — which is every add there is, since `space` only ever
+/// promotes a row already painted — and route it to the overlay
 /// destination alone, silently never writing the definitional file.
 fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
     let names = |f: &Field| match &f.kind {
-        FieldKind::OrderedList { items } => Some(
+        FieldKind::OrderedList { items, .. } => Some(
             items
                 .iter()
-                .filter(|i| i.member)
                 .map(|i| i.name.clone())
                 .collect::<BTreeSet<_>>(),
         ),
@@ -2016,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_view_draft_picks_the_first_real_dataset_and_no_member_columns() {
+    fn a_new_view_draft_picks_the_first_real_dataset_and_no_columns_of_its_own() {
         let config = config_from(&[(
             Layer::Builtin,
             "datasets",
@@ -2030,14 +2113,15 @@ mod tests {
             Some("risk"),
             "not the empty placeholder"
         );
-        // No columns are the view's OWN yet — `npv` is only on the list as
-        // an available (non-member) row for `space` to add (§18.2).
+        // No columns are the view's OWN yet — `npv` is only in the
+        // available catalogue, for `space` to add (§18.2).
+        assert!(draft.list_items("columns").unwrap().is_empty());
         assert!(
             draft
-                .list_items("columns")
+                .available_items("columns")
                 .unwrap()
                 .iter()
-                .all(|i| !i.member && !i.included)
+                .all(|i| !i.included)
         );
         assert!(
             draft
@@ -2422,7 +2506,7 @@ mod tests {
     #[test]
     fn the_presentation_table_holds_order_hidden_and_width() {
         let mut draft = draft_for("tree");
-        if let Some(FieldKind::OrderedList { items }) = draft
+        if let Some(FieldKind::OrderedList { items, .. }) = draft
             .fields
             .iter_mut()
             .find(|f| f.key == "columns")
@@ -2567,7 +2651,7 @@ mod tests {
         );
 
         let mut dropped = draft_for("tree");
-        if let Some(FieldKind::OrderedList { items }) = dropped
+        if let Some(FieldKind::OrderedList { items, .. }) = dropped
             .fields
             .iter_mut()
             .find(|f| f.key == "columns")
@@ -2589,29 +2673,34 @@ mod tests {
 
     /// `fields` takes `Option<&str>` because spec §4 has it serve the
     /// create path too, and a name nothing defines has to come back as an
-    /// object with no MEMBERS rather than a panic — a `Choice` with no
-    /// dataset selected and a column list with nothing ticked. It is not
-    /// an EMPTY list any more (§18.2): with no view to read, `current`
-    /// falls back to the schema's first dataset (alphabetically, `other`,
-    /// which has one column, `book`), and that column is on the list as
-    /// an available, non-member row for `space` to add.
+    /// object with no items of its OWN rather than a panic — a
+    /// `Choice` with no dataset selected and an empty column list. Its
+    /// catalogue is not empty though (§18.2): with no view to read,
+    /// `current` falls back to the schema's first dataset
+    /// (alphabetically, `other`, which has one column, `book`), and that
+    /// column is in the catalogue for `space` to add.
     #[test]
     fn an_object_that_does_not_exist_has_empty_fields_rather_than_panicking() {
         let config = demo_config();
         for object in [None, Some("nonesuch")] {
             let fields = Domain::Views.fields(&config, object);
             assert_eq!(fields.len(), 2, "{object:?}");
-            let FieldKind::OrderedList { items } = &fields[1].kind else {
+            let FieldKind::OrderedList { items, available } = &fields[1].kind else {
                 panic!("{object:?} columns field must be an ordered list");
             };
+            assert!(
+                items.is_empty(),
+                "{object:?} should have no columns of its own yet, got {items:?}"
+            );
             assert_eq!(
-                items
+                available
+                    .as_deref()
+                    .unwrap_or_default()
                     .iter()
-                    .map(|i| (i.name.as_str(), i.member))
+                    .map(|i| i.name.as_str())
                     .collect::<Vec<_>>(),
-                [("book", false)],
-                "{object:?} should have no columns of its own yet, only the \
-                 dataset's available ones, got {items:?}"
+                ["book"],
+                "only the dataset's available ones, got {available:?}"
             );
             // The destinations do not depend on the object, which is what
             // lets the create path reuse them unchanged.
@@ -2869,14 +2958,16 @@ mod tests {
         assert_eq!(names, vec!["alpha".to_string(), "zebra".to_string()]);
     }
 
-    // ---- Task 4: the member/available split -------------------------
+    // ---- Task 4, as §18.7 left it: the object's own list and the
+    // ---- catalogue behind it -----------------------------------------
 
-    /// `x` is Views-only by `dest`, not by scanning items: Groupings'
-    /// `dimensions` is `Destination::Doc`, where ticking already IS
-    /// membership, so `remove_selected` refuses and names the verb that
-    /// does work here — `space` — rather than silently unticking.
+    /// A Groupings list has no available catalogue at ALL (§18.7.1) —
+    /// ticking IS membership there — so `remove_selected` refuses and
+    /// names the verb that does work here (`space`) rather than silently
+    /// unticking. Decided by the catalogue's absence, never by a `dest`
+    /// and never by whether some catalogue happens to be empty right now.
     #[test]
-    fn remove_selected_refuses_where_membership_is_inclusion() {
+    fn a_groupings_list_has_no_available_block_and_x_refuses() {
         let config = config_from(&[
             (
                 Layer::Builtin,
@@ -2886,6 +2977,10 @@ mod tests {
             (Layer::User, "groupings", "3 = [\"book\"]\n"),
         ]);
         let mut draft = Domain::Groupings.draft(&config, "3");
+        assert!(
+            draft.available_items("dimensions").is_none(),
+            "no catalogue exists here, which is not the same as an empty one"
+        );
         draft.selected = 2;
         assert_eq!(
             draft.remove_selected(),
@@ -2893,15 +2988,15 @@ mod tests {
         );
     }
 
-    /// **The regression this ruling exists to close.** A Views draft with
-    /// every available column already promoted into membership must
-    /// still let `x` remove one — the list is still `Destination::
-    /// Presentation`, the same as it was with an available row still on
-    /// it, and scanning "is every item a member right now" (an earlier
-    /// build did) would have `x` go dead the moment the trader finished
-    /// adding everything the dataset offers.
+    /// **The regression this ruling exists to close.** A Views draft
+    /// whose catalogue is EMPTY — every column the dataset offers already
+    /// added — must still let `x` remove one: a catalogue that exists and
+    /// holds nothing is not the same as no catalogue at all (§18.7.2).
+    /// Deciding by emptiness (as `dest`-scanning and item-scanning builds
+    /// before it both did, each in its own way) has `x` go dead the moment
+    /// the trader finishes adding everything the dataset offers.
     #[test]
-    fn remove_selected_still_works_on_a_fully_membered_views_list() {
+    fn remove_selected_still_works_when_the_catalogue_is_empty() {
         let config = config_from(&[
             (
                 Layer::Builtin,
@@ -2915,19 +3010,27 @@ mod tests {
             ),
         ]);
         let mut draft = Domain::Views.draft(&config, "tree");
-        // `npv` is the dataset's only column and already a member, so the
-        // available block is empty — every item on the list is `member`.
+        // `npv` is the dataset's only column and the view already has it,
+        // so the catalogue exists and is empty.
         assert!(
             draft
-                .list_items("columns")
-                .unwrap()
-                .iter()
-                .all(|i| i.member),
-            "sanity: this fixture's list must be fully membered"
+                .available_items("columns")
+                .is_some_and(<[_]>::is_empty),
+            "sanity: this fixture's catalogue must exist and be empty"
         );
         draft.selected = 2; // the one item row: npv
         assert!(draft.remove_selected().changed());
-        assert!(!draft.list_items("columns").unwrap()[0].member);
+        assert!(draft.list_items("columns").unwrap().is_empty());
+        assert_eq!(
+            draft
+                .available_items("columns")
+                .unwrap()
+                .iter()
+                .map(|i| i.name.as_str())
+                .collect::<Vec<_>>(),
+            ["npv"],
+            "and the removed column is what the catalogue now holds"
+        );
     }
 
     // ---- Task 6: filtering the edit stage (§18.3) --------------------

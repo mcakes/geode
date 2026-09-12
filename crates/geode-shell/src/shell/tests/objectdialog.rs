@@ -3055,12 +3055,16 @@ fn assert_row_in_view(cx: &mut gpui::VisualTestContext, selector: &'static str, 
     );
 }
 
-/// The name of the list item the edit-stage cursor is on, or `None` on a
-/// field row.
+/// The name of the list item the edit-stage cursor is on — from either
+/// list, the object's own or its available catalogue (§18.7.1) — or
+/// `None` on a field row.
 fn cursor_item_name(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
     edit_draft(shell, cx, |draft| match draft.selected_row()? {
         objectdialog::EditRow::Item { field, item } => draft
             .list_items(&draft.fields[field].key)
+            .map(|items| items[item].name.clone()),
+        objectdialog::EditRow::Available { field, item } => draft
+            .available_items(&draft.fields[field].key)
             .map(|items| items[item].name.clone()),
         objectdialog::EditRow::Field(_) => None,
     })

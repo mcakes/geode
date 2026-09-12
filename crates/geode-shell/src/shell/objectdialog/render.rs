@@ -66,7 +66,7 @@
 //! filter would have (moving an item past a neighbour the filter is
 //! hiding) by not treating it as ambiguous at all: [`super::Draft::
 //! move_item`] walks the *unfiltered* list for the next VISIBLE neighbour
-//! in the item's own member block, so a filtered reorder still moves
+//! in the object's own list, so a filtered reorder still moves
 //! something and reports how many hidden rows it jumped. Entering the
 //! stage still drops the BROWSE query (`enter_edit`/`enter_edit_with`
 //! clear both `state.query` and the freshly-built draft's own, separate
@@ -996,8 +996,8 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
 }
 
 /// After a `Toggle`/`ToggleBack` step that just changed a Views draft's
-/// `dataset` field, rebuild the `columns` list's available block for the
-/// newly chosen dataset (spec §18.2: "changing the dataset empties
+/// `dataset` field, rebuild the `columns` field's available catalogue for
+/// the newly chosen dataset (spec §18.2: "changing the dataset empties
 /// Available and repopulates it; members that the new dataset lacks stay
 /// listed... so the diagnostic can name them").
 ///
@@ -1040,7 +1040,9 @@ fn selected_field_is_steppable(draft: &Draft) -> bool {
             draft.fields[i].kind,
             FieldKind::Text(_) | FieldKind::MultiChoice { .. } | FieldKind::OrderedList { .. }
         ),
-        Some(EditRow::Item { .. }) => true,
+        // Both list rows have a verb under `space`: an item's own
+        // inclusion toggles, an available row is added (§18.7.2).
+        Some(EditRow::Item { .. } | EditRow::Available { .. }) => true,
         None => false,
     }
 }
@@ -1133,10 +1135,11 @@ fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 ///
 /// Every verb that moves the row the cursor is on has to call this, not
 /// just the ones that look like motions: `space`/`shift+space` promote a
-/// row to the end of the member block and `x` demotes one to the end of
-/// the available block, both of which are routinely a screenful away on
-/// a list with more rows than the panel can show — and a cursor left off
-/// screen makes the next `j` look like a jump. `shift+j`'s arm was the
+/// row to the end of the object's own list and `x` demotes one to the
+/// end of the available catalogue, both of which are routinely a
+/// screenful away on a list with more rows than the panel can show — and
+/// a cursor left off screen makes the next `j` look like a jump.
+/// `shift+j`'s arm was the
 /// only one that did call it, inline; all four go through here now, so
 /// the next verb that moves a row has one obvious thing to call rather
 /// than a snippet to copy from whichever arm happens to have it.
@@ -1975,8 +1978,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .track_scroll(&shell.object_dialog_scroll)
         .debug_selector(|| "objectdialog-fields".to_string());
 
-    // The last item row's `(field, member)` — the boundary a section
-    // header marks. `None` so the very first item row always opens one.
+    // The last list row's `(field, is_own_item)` — the boundary a section
+    // header marks. `None` so the very first list row always opens one.
     let mut last_item_section: Option<(usize, bool)> = None;
 
     for (position, m) in visible.iter().enumerate() {
@@ -1995,8 +1998,8 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         if is_selected {
             element = element.bg(theme.selection).text_color(theme.primary);
         }
-        // Set only for an item row that opens a new member/available
-        // block — see this loop's own comment on `last_item_section`.
+        // Set only for a list row that opens a new block — see this
+        // loop's own comment on `last_item_section`.
         let mut section_header: Option<AnyElement> = None;
         let (selector, label, value) = match edit_row {
             EditRow::Field(index) => {
@@ -2027,17 +2030,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         .into_any_element(),
                 )
             }
-            EditRow::Item { field, item } => {
-                let FieldKind::OrderedList { items } = &draft.fields[field].kind else {
+            // The object's own items and its available catalogue paint
+            // the same row shape, so they share one arm — but which list
+            // the row came from is read off the VARIANT and named here
+            // (`own`), never inferred from the entry itself: an available
+            // row is a different thing to `space`, to `x` and to the grip,
+            // and §18.7.1's whole point is that no consumer gets to treat
+            // one as the other by omission.
+            EditRow::Item { field, item } | EditRow::Available { field, item } => {
+                let own = matches!(edit_row, EditRow::Item { .. });
+                let FieldKind::OrderedList { items, available } = &draft.fields[field].kind else {
                     continue;
                 };
-                let Some(entry) = items.get(item) else {
+                let list = if own {
+                    items.as_slice()
+                } else {
+                    available.as_deref().unwrap_or_default()
+                };
+                let Some(entry) = list.get(item) else {
                     continue;
                 };
-                let section_key = (field, entry.member);
+                let section_key = (field, own);
                 if last_item_section != Some(section_key) {
                     last_item_section = Some(section_key);
-                    let (text, suffix) = section_header_text(domain, entry.member);
+                    let (text, suffix) = section_header_text(domain, own);
                     let field_key = draft.fields[field].key.clone();
                     section_header = Some(
                         div()
@@ -2053,17 +2069,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                             .into_any_element(),
                     );
                 }
-                // The grip marks a row as reorderable — every item in
-                // Groupings' `dimensions` (`ListItem::member` is always
-                // `true` there) and only the member block of Views'
-                // `columns`; an available row gets an equal-width spacer
-                // instead, so the tick beside it still lines up. The tick
-                // is the inclusion state, and a hidden item is muted as
-                // well as unticked — one signal is a thing a glance
-                // misses on a 30-row list. Neither the grip nor the tick
-                // is part of what the filter ranked (`Draft::row_label`);
-                // only the name itself is highlighted.
-                let grip = if entry.member {
+                // The grip marks a row as reorderable — every item of the
+                // object's own list, which for Groupings' `dimensions` is
+                // all of them (it has no catalogue); an available row gets
+                // an equal-width spacer instead, so the tick beside it
+                // still lines up. The tick is the inclusion state, and a
+                // hidden item is muted as well as unticked — one signal is
+                // a thing a glance misses on a 30-row list. Neither the
+                // grip nor the tick is part of what the filter ranked
+                // (`Draft::row_label`); only the name itself is
+                // highlighted.
+                let grip = if own {
                     div()
                         .text_color(theme.muted_foreground)
                         .w(px(11.))
@@ -2283,13 +2299,12 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
 }
 
 /// The small-caps text and selector suffix for the section header that
-/// opens an ordered list's member or available block (§18.1). `member`
-/// distinguishes Views' own columns from the rest of its dataset's;
-/// Groupings' `dimensions` sets `member` `true` on every item
-/// (`ListItem::member`'s own doc), so only the first arm there is ever
-/// reached.
-fn section_header_text(domain: Domain, member: bool) -> (&'static str, &'static str) {
-    match (domain, member) {
+/// opens an ordered list's own items or its available catalogue (§18.1).
+/// `own` distinguishes Views' own columns from the rest of its dataset's;
+/// Groupings' `dimensions` has no catalogue at all (`groupings.rs`'s own
+/// module doc), so only the first arm there is ever reached.
+fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str) {
+    match (domain, own) {
         (Domain::Views, true) => (
             "COLUMNS — space hides · shift+j / shift+k reorder · x removes",
             "members",
@@ -2320,12 +2335,13 @@ fn field_value(field: &super::Field) -> String {
             0 => "none".to_string(),
             n => format!("{n} selected"),
         },
-        FieldKind::OrderedList { items } => {
-            // Only the member block is the object's own — an available
-            // row nothing has ticked on yet is not one of its columns,
-            // and must not inflate this count or read as "hidden".
-            let total = items.iter().filter(|i| i.member).count();
-            let hidden = items.iter().filter(|i| i.member && !i.included).count();
+        FieldKind::OrderedList { items, .. } => {
+            // `items` alone — the available catalogue is not the object's,
+            // so it must not inflate this count or read as "hidden", and
+            // that is now a matter of which list is read rather than of a
+            // filter this could forget.
+            let total = items.len();
+            let hidden = items.iter().filter(|i| !i.included).count();
             match (total, hidden) {
                 (1, 0) => "1 column".to_string(),
                 (n, 0) => format!("{n} columns"),
