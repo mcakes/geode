@@ -735,48 +735,25 @@ impl BlotterTile {
                     }
                 }
             }
-            // `s` walks the signed cycle (asc → desc → clear) and `S` the
-            // absolute one (abs desc → abs asc → clear); either key
-            // pressed while the other's order is showing starts its own
-            // cycle afresh rather than continuing a cycle the trader did
-            // not choose. `S` on a text column does nothing: it has no
-            // magnitude, and a sort it did apply would just be `s`'s.
+            // `s` walks the signed cycle and `S` the absolute one; the
+            // step itself is `SortOrder::cycle`, which also keeps `S`
+            // inert on a column with no magnitude.
             "sort_cycle" | "sort_cycle_abs" => {
                 let absolute = name == "sort_cycle_abs";
-                let changed = self.with_delegate(cx, |d| {
+                self.with_delegate(cx, |d| {
                     let col = d.cursor.col;
                     if col == 0 {
-                        return false;
+                        return;
                     }
-                    let measure = d
-                        .plan
-                        .as_ref()
-                        .and_then(|p| p.columns.get(col))
-                        .is_some_and(|c| c.kind == ColumnKind::Measure);
-                    if absolute && !measure {
-                        return false;
-                    }
+                    let measure = d.is_measure(col);
                     let current = d.sort.filter(|s| s.column == col).map(|s| s.order);
-                    let next = if absolute {
-                        match current {
-                            Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),
-                            Some(SortOrder::AbsAsc) => None,
-                            _ => Some(SortOrder::AbsDesc),
-                        }
-                    } else {
-                        match current {
-                            Some(SortOrder::Asc) => Some(SortOrder::Desc),
-                            Some(SortOrder::Desc) => None,
-                            _ => Some(SortOrder::Asc),
-                        }
-                    };
+                    let next = SortOrder::cycle(current, absolute, measure);
+                    if next == current {
+                        return;
+                    }
                     d.sort = next.map(|order| SortSpec { column: col, order });
                     d.reflatten();
-                    true
                 });
-                if !changed {
-                    return true;
-                }
                 self.table.update(cx, |t, cx| {
                     t.refresh_header_layout(cx);
                     t.refresh(cx);
@@ -955,6 +932,9 @@ impl BlotterTile {
                         .columns
                         .iter()
                         .position(|c| c.name == column)?;
+                    // A text column has no magnitude: `abs` on it is its
+                    // signed direction, in the state as on the screen.
+                    let order = order.on_column(d.is_measure(col));
                     d.sort = Some(SortSpec { column: col, order });
                     d.reflatten();
                     Some(())

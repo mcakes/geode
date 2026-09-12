@@ -2375,17 +2375,45 @@ run_mutation "flatten: the absolute orders compare magnitudes, not signed values
   geode-blotter \
   absolute_orders_compare_magnitudes_and_keep_null_last
 
-run_mutation "tile: S is refused on a column with no magnitude, never on a measure" \
-  crates/geode-blotter/src/tile.rs \
-  '                    if absolute && !measure {' \
-  '                    if absolute && measure {' \
+run_mutation "flatten: NaN is a NULL to the comparator, not Equal-to-everything" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    snapshot.f64_at(i, row).filter(|v| !v.is_nan())' \
+  '    snapshot.f64_at(i, row)' \
   geode-blotter \
-  s_and_shift_s_cycle_signed_and_absolute_sorts
+  nan_sorts_last_like_null_and_never_panics_the_sort
 
-run_mutation "tile: S steps abs desc on to abs asc before clearing" \
+run_mutation "sort cycle: S is inert on a column with no magnitude" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '        if absolute && !measure {' \
+  '        if false {' \
+  geode-blotter \
+  shift_s_is_inert_on_a_column_with_no_magnitude_where_s_is_not
+
+run_mutation "sort cycle: S steps abs desc on to abs asc before clearing" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
+  '                Some(SortOrder::AbsDesc) => None,' \
+  geode-blotter \
+  the_key_cycles_walk_their_own_orders_and_restart_from_the_others
+
+run_mutation "sort cycle: s from an absolute order restarts at asc, not desc" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                _ => Some(SortOrder::Asc),' \
+  '                _ => Some(SortOrder::Desc),' \
+  geode-blotter \
+  the_key_cycles_walk_their_own_orders_and_restart_from_the_others
+
+run_mutation "sort order: abs asked of a text column is its signed direction" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            (SortOrder::AbsDesc, false) => SortOrder::Desc,' \
+  '            (SortOrder::AbsDesc, false) => SortOrder::AbsDesc,' \
+  geode-blotter \
+  an_absolute_order_asked_of_a_text_column_becomes_its_signed_direction
+
+run_mutation "tile: the key cycle reaches the delegate through SortOrder::cycle, not a stale copy" \
   crates/geode-blotter/src/tile.rs \
-  '                            Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
-  '                            Some(SortOrder::AbsDesc) => None,' \
+  '                    let next = SortOrder::cycle(current, absolute, measure);' \
+  '                    let next = SortOrder::cycle(current, false, measure);' \
   geode-blotter \
   s_and_shift_s_cycle_signed_and_absolute_sorts
 

@@ -133,7 +133,13 @@ pub fn parse(line: &str) -> Result<Command, String> {
             let mut words = rest.split_whitespace();
             let column = match words.next() {
                 None => return Err("sort needs a column, or `clear`".into()),
-                Some("clear") if words.clone().next().is_none() => return Ok(Command::SortClear),
+                Some("clear") => {
+                    return if words.next().is_none() {
+                        Ok(Command::SortClear)
+                    } else {
+                        Err("sort clear takes nothing after it".into())
+                    };
+                }
                 Some(c) => c,
             };
             // A bare `abs` is `abs desc`: the biggest exposures first.
@@ -204,6 +210,7 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
             v.push("clear".into());
             v
         }
+        ["sort", "clear"] => Vec::new(),
         ["sort", _] => vec!["abs".into(), "asc".into(), "desc".into()],
         ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
         ["group"] => {
@@ -344,6 +351,7 @@ mod tests {
         assert!(parse("group save x").unwrap_err().contains("1–9"));
         assert!(parse("sort").unwrap_err().contains("column"));
         assert!(parse("sort delta01 up").unwrap_err().contains("abs"));
+        assert!(parse("sort clear extra").unwrap_err().contains("clear"));
         assert!(parse("sort delta01 abs up").unwrap_err().contains("abs"));
         assert!(parse("sort delta01 desc abs").unwrap_err().contains("abs"));
         assert!(parse("view").unwrap_err().contains("name"));
@@ -426,6 +434,7 @@ mod tests {
         assert_eq!(names("sort "), vec!["book", "clear", "delta01", "lhu"]);
         assert_eq!(names("sort delta01 "), vec!["abs", "asc", "desc"]);
         assert_eq!(names("sort delta01 abs "), vec!["asc", "desc"]);
+        assert!(names("sort clear ").is_empty());
         assert_eq!(
             names("group "),
             vec!["book", "lhu", "save", "slot"],

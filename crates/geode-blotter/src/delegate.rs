@@ -520,6 +520,17 @@ fn tree_glyph(
     }
 }
 
+impl BlotterDelegate {
+    /// Whether plan column `col` is a measure — the only kind with a
+    /// magnitude to sort on.
+    pub(crate) fn is_measure(&self, col: usize) -> bool {
+        self.plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col))
+            .is_some_and(|c| c.kind == ColumnKind::Measure)
+    }
+}
+
 impl TableDelegate for BlotterDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
         self.plan.as_ref().map_or(0, |p| p.columns.len())
