@@ -72,6 +72,9 @@ impl ShellView {
         self.palette_scroll = ScrollHandle::new();
         self.palette_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        // Recorded before the palette takes focus, for `close_palette`
+        // (see `ShellView::overlay_return_to_filter`).
+        self.overlay_return_to_filter = self.filter_field_focused(window, cx);
         self.palette_input
             .read(cx)
             .focus_handle(cx)
@@ -91,8 +94,15 @@ impl ShellView {
     /// exception — see that call site's own comment for why (no `Window`
     /// available there).
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
-        self.focus_handle.focus(window, cx);
+        // Only a palette that WAS open moves focus. The dialog door calls
+        // this unconditionally on every open, and an unconditional focus
+        // of the root here blurred the scope bar's text field a line
+        // before the door asked whether the field held focus — so every
+        // dialog opened from the field returned to the root instead.
+        if self.palette.take().is_none() {
+            return;
+        }
+        self.return_focus_from_overlay(window, cx);
     }
 
     /// Scroll the palette's results viewport so the currently selected row

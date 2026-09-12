@@ -505,3 +505,95 @@ fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppCont
         log.borrow()
     );
 }
+
+/// A dialog launched from the focused text field hands focus back to
+/// the field when it closes (user ruling 2026-09-12: "if I'm focused on
+/// the text field, launch a dialog, and dismiss it with Esc, I'd expect
+/// focus to return to the text field"). A dialog launched from the shell
+/// root still returns to the root (`settings_open_opens_the_modal` and
+/// friends pin that half).
+#[gpui::test]
+fn a_dialog_opened_from_the_field_returns_focus_to_it_when_closed(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-,");
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_some()));
+    assert!(
+        !filter_is_focused(&shell, &mut vcx),
+        "the open dialog owns the keyboard, not the field"
+    );
+    vcx.simulate_keystrokes("escape");
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(
+        filter_is_focused(&shell, &mut vcx),
+        "escape must return focus to the field the dialog was opened from"
+    );
+}
+
+/// The palette is an overlay like any dialog: opened from the field,
+/// escape returns to the field. Opened from the root it still returns to
+/// the root (`palette.rs`'s escape test pins that half).
+#[gpui::test]
+fn the_palette_opened_from_the_field_returns_focus_to_it_on_escape(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_some()));
+    assert!(!filter_is_focused(&shell, &mut vcx));
+    vcx.simulate_keystrokes("escape");
+    assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
+    assert!(
+        filter_is_focused(&shell, &mut vcx),
+        "escape must return focus to the field the palette was opened from"
+    );
+}
+
+/// Field → palette → a dialog the palette opens → escape lands back in
+/// the field: the palette closes before it dispatches, so the dialog's
+/// door sees the field focused again and records it for itself.
+#[gpui::test]
+fn a_dialog_opened_through_the_palette_from_the_field_returns_focus_to_the_field(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-k");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("Open settings");
+    vcx.simulate_keystrokes("enter");
+    assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
+    assert!(
+        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        "the palette must have opened the settings dialog"
+    );
+    assert!(!filter_is_focused(&shell, &mut vcx));
+    vcx.simulate_keystrokes("escape");
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+    assert!(
+        filter_is_focused(&shell, &mut vcx),
+        "escape must return focus to the field the whole chain started from"
+    );
+}

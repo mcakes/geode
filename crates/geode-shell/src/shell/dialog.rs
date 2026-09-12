@@ -445,6 +445,11 @@ pub fn open_shell_dialog_with_key<F>(
     // deaf to escape/enter/tab.
     view.cancel_command_line(window, cx);
 
+    // Recorded after the palette close above (which may itself have just
+    // returned focus to the field) and before the dialog takes focus, for
+    // `close_modal` (see `ShellView::overlay_return_to_filter`).
+    view.overlay_return_to_filter = view.filter_field_focused(window, cx);
+
     view.modal = Some(ShellModal {
         title: title.into(),
         title_extra: None,
