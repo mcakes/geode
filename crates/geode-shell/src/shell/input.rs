@@ -566,9 +566,9 @@ impl ShellView {
         // (below) has had first refusal, which is how a dialog swallows an
         // Escape as "cancel" without closing: today that is only the
         // keybinding dialog's rebind capture (`keybindings_view`'s
-        // `listening` branch) — the settings dialog claims no keys of its
-        // own on Escape, so it always falls through to this branch's
-        // close.
+        // `listening` branch) and every modal dialog's escape ladder
+        // (`dialogmode::escape_step`), whose last rung is the one
+        // `escape` that reaches this branch's close.
         if self.modal.is_some() || window.has_active_dialog(cx) {
             if self.modal.is_some() {
                 // Offer the modal's own key handler (if any) first

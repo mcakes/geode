@@ -70,7 +70,7 @@ typing.** Declared per surface, never inferred at runtime.
 | Surface | Kind | Normal-mode verbs |
 |---|---|---|
 | Command palette (`ctrl+k`) | filter-only | — |
-| Settings (`ctrl+,`) | filter-only | — |
+| Settings (`ctrl+,`) | filter-only → **modal** since §18 (2026-09-12) | `space`/`shift+space` step · `/` filter |
 | Dimension picker, both stages | filter-only | — |
 | As-of selector | filter-only | — |
 | **Keybindings** | **modal** | `enter` rebind · `d` unbind · `r` reset · `/` filter |
@@ -773,3 +773,104 @@ starting count, before Task 1) to 576 anchors across the range as each
 task's entries landed. Whole-workspace verification (`cargo test
 --workspace`, workspace clippy, `--changed`) for the finished branch is
 recorded in this plan's task-8 report.
+
+## 18. Amendment — the settings dialog goes modal (2026-09-12)
+
+Approved 2026-09-12 from a user request the same day: "Convert the user
+settings dialog to having normal mode / filter mode like the key
+bindings dialog."
+
+### 18.1 Why §3's ruling is superseded
+
+§3 kept settings filter-only on two grounds: stepping is `tab`, which a
+focused input leaves free, and "if settings ever grows a
+reset-to-default, it becomes modal by this same rule". Neither ground
+changed. What changed is the app around the dialog: the keybinding
+dialog and all of Phase 4c's config dialogs are modal, so settings had
+become the one *dialog-shaped* surface (title row, filter row, a flat
+list of rows with a footer) that read the keyboard the other way. §11's
+risk 2 — "a user who learns the config dialogs will press `j` in
+settings and type a `j` into its filter" — is the cost that §3's
+mitigations were meant to make visible, and the ruling here is that it
+is cheaper to remove the difference than to keep signposting it. The
+palette, the picker and the as-of selector stay filter-only: none is
+dialog-shaped, and §3's reasoning for each stands.
+
+### 18.2 The vocabulary, as this dialog wears it
+
+The shared table of §4, with the settings-specific verbs filled in:
+
+| Key | Normal mode | Filter mode |
+|---|---|---|
+| `j` / `k` / `g` / `shift+g` | move | (text) |
+| arrows, `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, `pageup`/`pagedown` | move | move |
+| `space` / `shift+space` | step the value forward / back (§4's `Toggle`/`ToggleBack`, the keys 4c's `Choice` rows use) | (text) |
+| `tab` / `shift+tab` | step forward / back | step forward / back |
+| `/` | enter filter mode | (text) |
+| `enter` | claimed and dropped | claimed and dropped |
+| `escape` | the ladder of §5, no nested stage | the ladder's first rung |
+| any other bare key | claimed and dropped | text |
+
+`enter` stays inert in both modes: a step applies the instant it
+happens, so there is nothing to confirm, and the reason it must be
+*claimed* rather than ignored (an unclaimed `enter` reaching the focused
+`Input` fires a `Change` that resets the selection) is unchanged.
+`tab`/`shift+tab` stay live in both modes rather than being retired:
+they were the dialog's stepping keys and a hand that learned them
+should not be retrained; normal mode adds `space` beside them. No
+per-surface letter verb is claimed — `h`/`l` as a second spelling of
+step were considered and dropped as one action under two names.
+
+Mouse parity (§17) applies unchanged: the frozen filter row is the
+mouse form of `/` (`dialog::enter_filter_by_mouse` gains a settings
+arm), and a row click keeps the dialog's existing two-step rule
+(`click_selects_or_steps`: a first click selects, a click on the
+selected row steps forward) because this dialog's `enter` opens
+nothing, so §17.1 rule 2 has nothing for a click to be the mouse form
+of. The click handler ends in `sync_dialog_text` as every row click
+does (rule 3), so a click in normal mode leaves the shell root holding
+the keys and a click in filter mode keeps the caret in the field.
+
+### 18.3 As built
+
+`settings_view::SettingsState` gained `mode: DialogMode`, opening in
+`Normal` through a hand-written `Default` (the same greppable line the
+keybinding and object dialogs have). `settings_view::route(mode,
+query_is_empty, ks) -> KeyAction` is the whole key table above as one
+pure function — `Nav`, `Step`, `EnterFilter`, `LeaveFilter`,
+`ClearQuery`, `Drop`, `PassThrough` — and `handle_key` only applies the
+answer; every arm is a pure mutation of the state, and
+`dialog::sync_dialog_text` (which gained a third arm reading
+`shell.settings`) moves focus and the field on the handler's return.
+`open` passes `focus_filter: false` and sets the state before the door
+runs, and puts the mode pill in the title row through
+`dialog::set_title_extra`. The filter row is frozen throughout normal
+mode with `slash_filters: true` (this dialog has no capture state in
+which `/` means something else), and the footer states the current
+mode's vocabulary. One deliberate widening: a `tab` on an empty
+filtered list is now claimed and dropped rather than passed through —
+before, it fell into the `Input` as a literal tab character.
+
+Window tests (`shell/tests/chrome_and_dialogs.rs`):
+`opening_the_settings_dialog_leaves_the_filter_blurred` (replacing
+`..._focuses_the_filter`),
+`the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type`,
+`slash_enters_settings_filter_mode_and_typing_narrows`,
+`j_and_k_move_in_the_settings_dialogs_normal_mode`,
+`settings_escape_walks_the_ladder_one_rung_at_a_time`,
+`the_settings_mode_pill_paints_the_mode_it_is_actually_in`,
+`space_and_shift_space_step_the_selected_value_in_normal_mode`,
+`space_types_in_settings_filter_mode_rather_than_stepping`,
+`tab_still_steps_in_settings_normal_mode`,
+`clicking_the_settings_frozen_filter_row_enters_filter_mode` and
+`a_settings_row_click_keeps_focus_where_the_mode_says`; the pre-modal
+tests now press `/` first where they type. Pure tests on `route` cover
+each row of the table. Harness entries: the dialog opening in filter
+mode, the query cleared on leaving filter, the clear rung skipped,
+`space` stepping in filter mode, filter mode dropping text, and the two
+`dialog.rs` arms (the sync's and `enter_filter_by_mouse`'s) ignoring
+the settings state.
+
+The display check on a real window is pending, as it is for every
+dialog change on this branch's lineage.
+

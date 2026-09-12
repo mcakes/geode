@@ -503,10 +503,11 @@ pub fn open_shell_dialog_with_key<F>(
 /// each of these handlers is its transition's only tail; `press_verb`
 /// is the audited exception, since it can only arm a `Confirm` and
 /// moves neither mode nor query. A no-op when no modal dialog with a
-/// mode is open; the filter-only dialogs (settings, picker, as-of) keep
-/// their own open-time focus (§16.4). The two `if let` arms below are
-/// mutually exclusive by `close_modal`'s contract (it clears every
-/// dialog state together), so their order carries no meaning.
+/// mode is open; the filter-only dialogs (picker, as-of) keep their own
+/// open-time focus (§16.4). The three `if let` arms below (the settings
+/// dialog joined on 2026-09-12, spec §18) are mutually exclusive by
+/// `close_modal`'s contract (it clears every dialog state together), so
+/// their order carries no meaning.
 ///
 /// The text write is guarded by a compare because `InputState::set_value`
 /// emits no `InputEvent::Change`: writing unconditionally would be
@@ -524,6 +525,8 @@ pub(crate) fn sync_dialog_text(
         (state.mode, state.listening.is_some(), state.query.as_str())
     } else if let Some(state) = shell.object_dialog.as_ref() {
         (state.mode, false, state.effective_query())
+    } else if let Some(state) = shell.settings.as_ref() {
+        (state.mode, false, state.query.as_str())
     } else {
         return;
     };
@@ -609,6 +612,8 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
         state.listening = None;
         state.mode = DialogMode::Filter;
     } else if let Some(state) = shell.object_dialog.as_mut() {
+        state.mode = DialogMode::Filter;
+    } else if let Some(state) = shell.settings.as_mut() {
         state.mode = DialogMode::Filter;
     }
 }

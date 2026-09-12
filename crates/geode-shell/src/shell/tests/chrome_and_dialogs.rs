@@ -498,13 +498,351 @@ fn escape_keystroke_closes_the_modal(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The settings dialog went modal (interaction-model spec §18): it opens
+/// in normal mode with the shared filter BLURRED (it used to be focused —
+/// the filter-first shape it kept while the keybinding dialog went
+/// modal), so a bare letter is a verb rather than filter text. `/` is
+/// what hands the field focus.
 #[gpui::test]
-fn opening_the_settings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext) {
+fn opening_the_settings_dialog_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     assert!(shell.read_with(&cx, |shell, _| shell.settings.is_some()));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Normal,
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "the filter must NOT own focus in normal mode — a focused Input \
+         would eat every verb as text"
+    );
+    assert!(
+        cx.update(|window, cx| shell.read(cx).focus_handle.is_focused(window)),
+        "the shell root holds the keys instead"
+    );
+}
+
+/// The behaviour change the switch turns on: a bare letter in normal
+/// mode does not reach the filter. `s` is chosen because it is a letter
+/// neither mode's vocabulary claims — the one that would type if the
+/// dialog had silently opened filter-first.
+#[gpui::test]
+fn the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("s");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "",
+        "a bare letter in normal mode must not reach the filter"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and a stray letter is claimed and dropped, never passed to the shell"
+    );
+}
+
+/// `/` enters filter mode and typing narrows, exactly as the dialog
+/// always did once the field had focus.
+#[gpui::test]
+fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("/");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Filter,
+    );
     assert!(
         dialog_filter_is_focused(&shell, &mut cx),
-        "the filter must own focus the moment the dialog opens"
+        "entering filter mode must hand focus to the filter"
+    );
+    cx.simulate_keystrokes("f o n t");
+    cx.run_until_parked();
+    let (query, visible) = shell.read_with(&cx, |s, _| {
+        let state = s.settings.as_ref().unwrap();
+        let rows = settings_view::derive_rows(
+            &s.services.theme.names(),
+            s.services.theme.active_name(),
+            s.font_size,
+            s.find_style,
+            s.line_numbers,
+            s.add_direction,
+        );
+        (
+            state.query.clone(),
+            settings_view::visible_rows(state, &rows).len(),
+        )
+    });
+    assert_eq!(query, "font");
+    assert_eq!(visible, 1, "the query narrows to the Font size row");
+}
+
+/// `j`/`k` move in normal mode; the arrows and ctrl-steps still work in
+/// both modes, so one navigation vocabulary serves both.
+#[gpui::test]
+fn j_and_k_move_in_the_settings_dialogs_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("j j");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        2
+    );
+    cx.simulate_keystrokes("k");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        1
+    );
+    cx.simulate_keystrokes("down");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        2,
+        "the arrows keep working in normal mode"
+    );
+}
+
+/// The ladder, one visible step at a time: filter → normal keeping the
+/// query, → clear the query, → close. A dialog that skipped a rung would
+/// close on the first escape and lose the user's filter with it.
+#[gpui::test]
+fn settings_escape_walks_the_ladder_one_rung_at_a_time(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("/ f o n t");
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape");
+    let (mode, q) = shell.read_with(&cx, |s, _| {
+        let st = s.settings.as_ref().unwrap();
+        (st.mode, st.query.clone())
+    });
+    assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
+    assert_eq!(q, "font", "leaving filter must keep the query applied");
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "and must blur the filter, or normal mode's letters would still type"
+    );
+
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "",
+        "the second escape clears the query"
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_some()),
+        "and does not close"
+    );
+    // The cleared query must have reached the Input too, not just the
+    // mirrored copy — the next filter session starts blank.
+    cx.simulate_keystrokes("/ x");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "x",
+        "the field must have been emptied along with the mirrored query"
+    );
+    cx.simulate_keystrokes("escape escape");
+
+    cx.simulate_keystrokes("escape");
+    assert!(
+        shell.read_with(&cx, |s, _| s.modal.is_none()),
+        "the third closes"
+    );
+}
+
+/// The mode is *legible*, not just held: the pill paints in both modes,
+/// in the title row, and the frozen empty filter shows its placeholder.
+#[gpui::test]
+fn the_settings_mode_pill_paints_the_mode_it_is_actually_in(cx: &mut gpui::TestAppContext) {
+    let (_shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let normal = cx.debug_bounds("dialog-mode-pill-normal");
+    assert!(
+        normal.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "the pill should paint, labelled 'normal', in normal mode, got {normal:?}"
+    );
+    assert!(
+        cx.debug_bounds("dialog-mode-pill-filter").is_none(),
+        "and must not be labelled 'filter' there"
+    );
+    let title = cx.debug_bounds("shell-modal-title").expect("title paints");
+    let pill = normal.unwrap();
+    assert!(
+        (pill.origin.y - title.origin.y).abs() < title.size.height,
+        "the pill sits in the title row, not in the dialog's content"
+    );
+    assert!(
+        cx.debug_bounds("dialog-filter-placeholder").is_some(),
+        "the frozen empty filter says how to start typing"
+    );
+
+    cx.simulate_keystrokes("/");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let filter = cx.debug_bounds("dialog-mode-pill-filter");
+    assert!(
+        filter.is_some_and(|b| b.size.width > gpui::px(0.0) && b.size.height > gpui::px(0.0)),
+        "and 'filter' in filter mode, got {filter:?}"
+    );
+    assert!(
+        cx.debug_bounds("dialog-mode-pill-normal").is_none(),
+        "with the 'normal' label gone"
+    );
+    assert!(
+        cx.debug_bounds("dialog-filter-placeholder").is_none(),
+        "and the placeholder gone with the live Input in its place"
+    );
+}
+
+/// `space`/`shift+space` step the selected row's value in normal mode —
+/// the shared vocabulary's `Toggle`/`ToggleBack`, the same keys Phase
+/// 4c's `Choice` rows use. Font size (three values) rather than a
+/// two-value row, for the direction-pinning reason
+/// `tab_and_shift_tab_step_the_selected_value` gives.
+#[gpui::test]
+fn space_and_shift_space_step_the_selected_value_in_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("j");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Medium,
+        "sanity: the test shell starts at the Medium default"
+    );
+
+    cx.simulate_keystrokes("space");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Large,
+        "space should step Font size forward, Medium -> Large"
+    );
+
+    cx.simulate_keystrokes("shift-space");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Medium,
+        "shift+space should step it back, Large -> Medium"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "stepping never moves focus — the dialog is still in normal mode"
+    );
+}
+
+/// The spec's own risk item (§11.3): `space` in FILTER mode is text, not
+/// a step. A handler that stepped on `space` regardless of mode would
+/// pass every normal-mode test and silently change a setting under a
+/// trader typing a two-word query.
+#[gpui::test]
+fn space_types_in_settings_filter_mode_rather_than_stepping(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("/ f o n t");
+    cx.run_until_parked();
+    let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        before,
+        "space in filter mode must not step the value"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "font ",
+        "it is a character in the query"
+    );
+}
+
+/// `tab`/`shift+tab` keep stepping in normal mode too: they were the
+/// dialog's stepping keys before it went modal, and normal mode adds
+/// `space` beside them rather than retiring them.
+#[gpui::test]
+fn tab_still_steps_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("j tab");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Large,
+        "tab should step Font size forward in normal mode"
+    );
+    cx.simulate_keystrokes("shift-tab");
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell.font_size),
+        crate::fontsize::FontSize::Medium,
+    );
+}
+
+/// §17.1 rule 1 reaches this dialog too: the frozen filter row is the
+/// mouse form of `/`.
+#[gpui::test]
+fn clicking_the_settings_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the frozen filter row paints in normal mode");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
+        crate::dialogmode::DialogMode::Filter,
+        "a click on the field is the mouse form of /"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the sync handed the keyboard to the Input"
+    );
+    cx.simulate_input("j");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
+        "j",
+        "and typing now filters rather than moving"
+    );
+}
+
+/// A row click is a sync seam (§16.1 class 3): it must hand focus back to
+/// whichever surface the current mode owns. In normal mode that is the
+/// shell root — a click that focused the filter would silently defeat
+/// normal mode; in filter mode it is the field, so typing keeps
+/// filtering. Both halves in one test so a handler hardcoded either
+/// way is caught.
+#[gpui::test]
+fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    let click_row = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+        let row = cx.debug_bounds(selector).expect("row paints");
+        cx.simulate_mouse_down(
+            gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+            MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+        cx.run_until_parked();
+    };
+
+    click_row(&mut cx, "settings-row-2");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        2,
+        "the click selected the row"
+    );
+    assert!(
+        !dialog_filter_is_focused(&shell, &mut cx),
+        "a click in normal mode leaves the filter blurred"
+    );
+    cx.simulate_keystrokes("k");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        1,
+        "and the letters are still verbs afterwards"
+    );
+
+    cx.simulate_keystrokes("/");
+    click_row(&mut cx, "settings-row-3");
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "a click in filter mode keeps the filter focused"
     );
 }
 
@@ -514,6 +852,7 @@ fn opening_the_settings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext)
 fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    cx.simulate_keystrokes("/");
     cx.simulate_input("font");
     let (query, selected) = shell.read_with(&cx, |shell, _| {
         let state = shell.settings.as_ref().unwrap();
@@ -543,6 +882,7 @@ fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
+    cx.simulate_keystrokes("/");
     cx.simulate_input("font");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.font_size),
@@ -585,6 +925,7 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
         let before = shell.read_with(&cx, |shell, _| {
             shell.services.theme.active_name().to_string()
         });
+        cx.simulate_keystrokes("/");
         cx.simulate_input("theme");
         cx.simulate_keystrokes("tab");
         let after = shell.read_with(&cx, |shell, _| {
@@ -599,6 +940,7 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
         let before = shell.read_with(&cx, |shell, _| shell.find_style);
+        cx.simulate_keystrokes("/");
         cx.simulate_input("keyboard");
         cx.simulate_keystrokes("tab");
         let after = shell.read_with(&cx, |shell, _| shell.find_style);
@@ -609,17 +951,33 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     }
 }
 
-/// Enter is inert and reserved here (spec §3): it must not step a
-/// value, and must not close the dialog either.
+/// Enter is inert and reserved here (spec §3), in BOTH modes: it must
+/// not step a value, and must not close the dialog either. (In normal
+/// mode it arrives as `NormalCommand::Commit`, which this dialog has
+/// nothing to commit with — a step applies the instant it happens.)
 #[gpui::test]
 fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    cx.simulate_input("font");
+    cx.simulate_keystrokes("j");
     let before = shell.read_with(&cx, |shell, _| shell.font_size);
 
     cx.simulate_keystrokes("enter");
     shell.read_with(&cx, |shell, _| {
-        assert_eq!(shell.font_size, before, "enter must not step the value");
+        assert_eq!(
+            shell.font_size, before,
+            "enter must not step the value in normal mode"
+        );
+        assert!(shell.modal.is_some(), "and must not close the dialog");
+    });
+
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("font");
+    cx.simulate_keystrokes("enter");
+    shell.read_with(&cx, |shell, _| {
+        assert_eq!(
+            shell.font_size, before,
+            "enter must not step the value in filter mode"
+        );
         assert!(shell.modal.is_some(), "and must not close the dialog");
     });
 }
@@ -636,7 +994,9 @@ fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    cx.simulate_keystrokes("down down");
+    // In filter mode, where the focused `Input` is what makes an
+    // unclaimed `enter` harmful (see the doc comment above).
+    cx.simulate_keystrokes("/ down down");
     let selected_before =
         shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected);
     assert_eq!(
