@@ -113,7 +113,7 @@ impl ShellView {
 
     /// Dispatch one selected palette row: an `Action` item goes through the
     /// normal [`dispatch`](Self::dispatch) chain (brief: "action -> the
-    /// normal dispatch chain incl. theme::toggle_mode"); a `Theme` item
+    /// normal dispatch chain"); a `Theme` item
     /// applies that theme directly via `ThemeService::apply`. The palette
     /// is assumed already closed by the caller (Enter closes before
     /// dispatching) — so the `palette::toggle` action id is deliberately
@@ -144,12 +144,8 @@ impl ShellView {
             PaletteItem::Action(id, ..) => self.dispatch(id, None, window, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
-                // Dark"), which `ThemeService::resolve` matches outright
-                // regardless of the `mode` argument — so the mode passed
-                // here is irrelevant to which theme gets applied.
-                self.services
-                    .theme
-                    .apply(name, crate::theme::Mode::Dark, cx);
+                // Dark"), which `ThemeService::resolve` matches outright.
+                self.services.theme.apply(name, cx);
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {
