@@ -6539,7 +6539,7 @@ run_mutation "objectdialog: section headers do not add list children" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        list = list.child(match section_header {
             Some(header) => v_flex().child(header).child(row_el).into_any_element(),
-            None => row_el.into_any_element(),
+            None => row_el,
         });' \
   '        if let Some(header) = section_header {
             list = list.child(header);
