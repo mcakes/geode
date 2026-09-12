@@ -69,6 +69,7 @@
 pub mod apply;
 mod groupings;
 pub mod render;
+mod schema;
 mod scopes;
 mod views;
 
@@ -78,14 +79,24 @@ use geode_core::config::{Config, Diagnostic, Layer};
 
 use crate::dialogmode::DialogMode;
 
+/// The one notice every mutating verb on a [`Domain::writable`] `false`
+/// domain shows — `render.rs`'s browse `n` gate, `handle_edit_key`'s
+/// verb gate, and `render::edit_commit_notice` all read this same
+/// string, so a trader sees one consistent answer wherever they reach
+/// for a key the schema inspector cannot honour.
+pub const READ_ONLY_NOTICE: &str = "the schema is read-only";
+
 /// Which config domain a dialog is browsing. One variant per adapter
-/// module under this directory (spec §8 has two more — Sources and the
-/// read-only Schema — still to arrive with their own adapters).
+/// module under this directory (spec §8 has one more — Sources — still to
+/// arrive with its own adapter).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
     Views,
     Groupings,
     Scopes,
+    /// Read-only (§9, §19.4): the datasets the other adapters build their
+    /// choices from.
+    Schema,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -168,6 +179,7 @@ impl Domain {
             Domain::Views => views::DOC,
             Domain::Groupings => groupings::DOC,
             Domain::Scopes => scopes::DOC,
+            Domain::Schema => schema::DOC,
         }
     }
 
@@ -177,6 +189,7 @@ impl Domain {
             Domain::Views => "Views",
             Domain::Groupings => "Groupings",
             Domain::Scopes => "Scopes",
+            Domain::Schema => "Schema",
         }
     }
 
@@ -188,6 +201,7 @@ impl Domain {
             Domain::Views => "views",
             Domain::Groupings => "slots",
             Domain::Scopes => "saved",
+            Domain::Schema => "datasets",
         }
     }
 
@@ -199,6 +213,7 @@ impl Domain {
             Domain::Views => views::summary,
             Domain::Groupings => groupings::summary,
             Domain::Scopes => scopes::summary,
+            Domain::Schema => schema::summary,
         }
     }
 
@@ -211,14 +226,18 @@ impl Domain {
     /// reasoning) — so [`derive_rows`]'s "personalised without
     /// overriding" check, and `render::run_confirmed`'s removal list,
     /// both have either a real doc name to look for or nothing to look
-    /// for, rather than a name that could never correspond to a file.
+    /// for, rather than a name that could never correspond to a file. Also
+    /// `None` for Schema, which has no user-facing overlay of any kind —
+    /// [`Domain::writable`] is `false` for it, so there is nothing to
+    /// personalise without forking in the first place.
     fn presentation_doc(self) -> Option<&'static str> {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
             // Scopes has no presentation doc for the same reason
             // Groupings does not: every field this domain has is
-            // `Destination::Doc` (`scopes.rs`'s module doc).
-            Domain::Groupings | Domain::Scopes => None,
+            // `Destination::Doc` (`scopes.rs`'s module doc). Schema joins
+            // them for the reason this method's own doc comment gives.
+            Domain::Groupings | Domain::Scopes | Domain::Schema => None,
         }
     }
 
@@ -230,11 +249,28 @@ impl Domain {
     /// Slot `0` is not here: `ctrl+0` is `frame::slot_clear`, the view's
     /// own grouping, and `GroupingSlots` is nine wide (user ruling
     /// 2026-09-10).
+    ///
+    /// A separate question from [`Domain::writable`], which follows right
+    /// below: this is "can anything be created that is not already
+    /// listed", not "can this domain be written to at all" — Schema
+    /// answers `None` here (nothing fixes its list; it simply lists
+    /// whatever `datasets.toml` declares) and `false` to `writable`.
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes => None,
+            Domain::Views | Domain::Scopes | Domain::Schema => None,
         }
+    }
+
+    /// `false` for [`Domain::Schema`] alone (§19.4): the create gate, the
+    /// footer hints and every mutating verb — `space`, `shift+space`,
+    /// `i`, `d`, `r`, `x`, `n`, `o`, `shift+j`/`shift+k`, a tick click,
+    /// a drop — read this, so a read-only surface refuses in one place
+    /// rather than by each verb forgetting. The Groupings roster gate
+    /// (`roster().is_some()`) is a separate question ("can anything be
+    /// created that is not already listed") and stays beside it.
+    pub fn writable(self) -> bool {
+        !matches!(self, Domain::Schema)
     }
 
     /// Every named object in this domain, with its provenance markers.
@@ -493,6 +529,13 @@ impl Destination {
             (Destination::Presentation, Domain::Scopes) => {
                 unreachable!("Scopes has no Presentation-destined fields")
             }
+            // Schema has no fields at all in the writable sense — every
+            // one of its `Field`s is `Destination::Doc` (`schema.rs`'s
+            // module doc) — so this arm, like the two above, exists only
+            // to keep the match exhaustive.
+            (Destination::Presentation, Domain::Schema) => {
+                unreachable!("Schema has no Presentation-destined fields")
+            }
         }
     }
 }
@@ -600,6 +643,12 @@ pub struct Field {
     pub label: String,
     pub kind: FieldKind,
     pub dest: Destination,
+    /// The layer this row's value came from, painted as a badge on the
+    /// row when `Some` (§19.4). Filled by the Schema adapter from
+    /// `Config::explain`; every writable domain leaves it `None`, since
+    /// the object-level badge in the header already says whose copy is
+    /// on screen and a second badge per row would only repeat it.
+    pub layer: Option<Layer>,
 }
 
 /// One row of the edit stage: a field, or one item of a field's ordered
@@ -1690,7 +1739,7 @@ impl Domain {
     /// must refuse. Sources (§19.3) is the first `true`.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Views | Domain::Groupings | Domain::Scopes => {
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
                 let _ = key;
                 false
             }
@@ -1703,7 +1752,7 @@ impl Domain {
     /// path list) overrides its own keys.
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
-            Domain::Views | Domain::Groupings | Domain::Scopes => {
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
@@ -1721,6 +1770,7 @@ impl Domain {
             Domain::Views => views::fields(config, object),
             Domain::Groupings => groupings::fields(config, object),
             Domain::Scopes => scopes::fields(config, object),
+            Domain::Schema => schema::fields(config, object),
         }
     }
 
@@ -1776,6 +1826,7 @@ impl Domain {
             Domain::Views => views::to_table(draft, dest),
             Domain::Groupings => groupings::to_table(draft, dest),
             Domain::Scopes => scopes::to_table(draft, dest),
+            Domain::Schema => schema::to_table(draft, dest),
         }
     }
 
@@ -1787,6 +1838,7 @@ impl Domain {
             Domain::Views => views::validate(draft, config),
             Domain::Groupings => groupings::validate(draft, config),
             Domain::Scopes => scopes::validate(draft, config),
+            Domain::Schema => schema::validate(draft, config),
         }
     }
 }
@@ -2716,6 +2768,7 @@ mod tests {
             label: "Value".to_string(),
             kind,
             dest: Destination::Doc,
+            layer: None,
         };
         Draft {
             name: "test".to_string(),
@@ -3628,6 +3681,7 @@ mod tests {
                 available: None,
             },
             dest: Destination::Doc,
+            layer: None,
         });
         assert_eq!(
             draft.drop_row(&drag("columns", true, "book"), &drag("other", true, "z")),
@@ -3849,12 +3903,14 @@ mod tests {
                         max: 100,
                     },
                     dest: Destination::Doc,
+                    layer: None,
                 },
                 Field {
                     key: "interval".to_string(),
                     label: "Poll interval".to_string(),
                     kind: FieldKind::Text("30s".to_string()),
                     dest: Destination::Doc,
+                    layer: None,
                 },
             ],
             toml::Table::new(),
@@ -3894,6 +3950,7 @@ mod tests {
                 label: "On".to_string(),
                 kind: FieldKind::Bool(true),
                 dest: Destination::Doc,
+                layer: None,
             }],
             toml::Table::new(),
         );
@@ -4003,18 +4060,21 @@ mod tests {
                         max: 100,
                     },
                     dest: Destination::Doc,
+                    layer: None,
                 },
                 Field {
                     key: "interval".to_string(),
                     label: "Poll interval".to_string(),
                     kind: FieldKind::Text("30s".to_string()),
                     dest: Destination::Doc,
+                    layer: None,
                 },
                 Field {
                     key: "on".to_string(),
                     label: "On".to_string(),
                     kind: FieldKind::Bool(true),
                     dest: Destination::Doc,
+                    layer: None,
                 },
             ],
             toml::Table::new(),

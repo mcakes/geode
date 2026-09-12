@@ -123,8 +123,8 @@ use super::apply;
 use super::scopes;
 use super::views;
 use super::{
-    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow, RowDrag,
-    Stage, Step,
+    Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow,
+    READ_ONLY_NOTICE, RowDrag, Stage, Step,
 };
 use crate::dialogmode::{self, DialogMode, EscapeStep, NormalCommand};
 use crate::keymap::{Keystroke, Modifiers};
@@ -378,12 +378,16 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                 open_selected(shell, cx);
                 return true;
             }
-            // `n`: the naming stage (§18.2), unless the domain's own
-            // roster already names every row there is — Groupings' nine
-            // fixed slots, where nothing can be created that is not
-            // already on the list (`Domain::roster`'s own doc).
+            // `n`: the naming stage (§18.2), unless the domain refuses it
+            // outright — read-only (`Domain::writable`, §19.4 — Schema)
+            // — or the domain's own roster already names every row there
+            // is — Groupings' nine fixed slots, where nothing can be
+            // created that is not already on the list (`Domain::roster`'s
+            // own doc).
             NormalCommand::Verb('n') => {
-                if state.domain.roster().is_some() {
+                if !state.domain.writable() {
+                    state.notice = Some(READ_ONLY_NOTICE.to_string());
+                } else if state.domain.roster().is_some() {
                     state.notice = Some("the slots are fixed — open one to fill it".to_string());
                 } else {
                     // `begin_naming` is the whole transition: it clears
@@ -916,6 +920,32 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     let Some(cmd) = dialogmode::normal_command(ks) else {
         return true;
     };
+
+    // §19.4: every verb that would change the object is refused here, in
+    // one place, on a `Domain::writable() == false` surface (Schema is
+    // the one today) — rather than by each arm below remembering to
+    // check. `Nav`, `EnterFilter`, `Commit` and a bare unbound letter all
+    // stay live: reading and filtering are exactly what a read-only
+    // inspector is for.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|s| s.domain.writable());
+    if !writable
+        && matches!(
+            cmd,
+            NormalCommand::Toggle
+                | NormalCommand::ToggleBack
+                | NormalCommand::EditText
+                | NormalCommand::MoveItem(_)
+                | NormalCommand::Verb('d' | 'r' | 'x' | 'n' | 'o')
+        )
+    {
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        cx.notify();
+        return true;
+    }
+
     match cmd {
         NormalCommand::Nav(nav) => {
             let selected = shell.object_dialog.as_mut().and_then(|state| {
@@ -1062,6 +1092,19 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
 /// selected row, since every field here is a choice, a list, or a
 /// read-only `Text`, and `space` only helps for the first two.
 fn edit_commit_notice(shell: &mut ShellView) {
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {
+        // §19.4: agree with `i` and every other verb's refusal on a
+        // read-only domain rather than falling back to the ordinary
+        // "this row is read-only" wording, which names the ROW, not the
+        // whole surface, and would read as a truth about this one field
+        // that a writable neighbour lacks.
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        return;
+    }
     let steppable = shell
         .object_dialog
         .as_ref()
@@ -1813,6 +1856,9 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     if state.draft.is_none() {
         return Vec::new();
     }
+    if !state.domain.writable() {
+        return Vec::new();
+    }
     let row = editing_row(shell);
     let mut out = Vec::new();
     if row.as_ref().is_some_and(|r| r.layer == Some(Layer::User)) {
@@ -2054,8 +2100,10 @@ fn build(
                     // `n` is not on the footer at all for a domain whose
                     // roster is fixed (Groupings) — advertising a key that
                     // only ever says "the slots are fixed" teaches a verb
-                    // with nothing behind it.
-                    if state.domain.roster().is_none() {
+                    // with nothing behind it — nor for a read-only domain
+                    // (Schema, §19.4), for the same reason: `n` there only
+                    // ever says the surface cannot be written to.
+                    if state.domain.writable() && state.domain.roster().is_none() {
                         action.push(chip("n"));
                         action.push(sep("new ·"));
                     }
@@ -2302,13 +2350,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                                 .text_color(theme.muted_foreground)
                                 .child(field_value(field)),
                         )
-                        .child(dialog::badge(
-                            dest_label,
-                            theme.muted_foreground,
-                            theme.border,
-                            Some(format!("objectdialog-dest-{}", field.key)),
-                            cx,
-                        ))
+                        // §19.4: the layer a schema row's value came from
+                        // — `None` on every writable domain (`Field::
+                        // layer`'s own doc has the reasoning).
+                        .children(field.layer.map(|layer| {
+                            dialog::badge(
+                                layer.name(),
+                                theme.muted_foreground,
+                                theme.border,
+                                Some(format!("objectdialog-field-layer-{}", field.key)),
+                                cx,
+                            )
+                        }))
+                        // A `doc`/`pres` badge promises a write this row
+                        // can make — painting it on a read-only domain
+                        // would promise one the scaffold refuses outright.
+                        .children(domain.writable().then(|| {
+                            dialog::badge(
+                                dest_label,
+                                theme.muted_foreground,
+                                theme.border,
+                                Some(format!("objectdialog-dest-{}", field.key)),
+                                cx,
+                            )
+                        }))
                         .into_any_element(),
                 )
             }
@@ -2634,6 +2699,24 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             ],
             vec![chip("escape"), sep("back to normal")],
         )
+    } else if !state.domain.writable() {
+        // §19.4: a read-only domain's normal-mode vocabulary is reading
+        // and filtering alone — no `space`/`shift+space` to change a row,
+        // no `shift+j`/`shift+k` to reorder, none of `d`/`r`/`x`/`n`/`o`,
+        // since every one of those is refused by the gate above.
+        (
+            vec![chip("j"), chip("k"), sep("move")],
+            vec![
+                chip("/"),
+                sep("filter ·"),
+                chip("escape"),
+                sep(if draft.query.is_empty() {
+                    "back to the list"
+                } else {
+                    "clear the filter"
+                }),
+            ],
+        )
     } else {
         let mut motion = vec![
             chip("j"),
@@ -2761,10 +2844,11 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "DIMENSIONS — space includes · shift+j / shift+k reorder",
             "members",
         ),
-        // Scopes has no `OrderedList` field at all (`scopes.rs`'s module
-        // doc — the whole object is a read-only summary), so this arm is
-        // unreachable; kept only to stay exhaustive as domains are added.
-        (Domain::Scopes, _) => ("", "members"),
+        // Neither Scopes nor Schema has an `OrderedList` field at all
+        // (`scopes.rs`'s and `schema.rs`'s own module docs — both are
+        // read-only summaries), so this arm is unreachable for either;
+        // kept only to stay exhaustive as domains are added.
+        (Domain::Scopes | Domain::Schema, _) => ("", "members"),
     }
 }
 
@@ -2937,6 +3021,19 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
         && state.notice.take().is_some()
     {
         cx.notify();
+    }
+    // §19.4: belt-and-braces — `actions()` already paints an empty bar on
+    // a read-only domain, so this button is unreachable by the mouse in
+    // practice, but a test (or a future caller) can still call this door
+    // directly, and it must refuse exactly as the keyboard does.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        cx.notify();
+        return;
     }
     match key {
         "d" => arm_delete(shell),

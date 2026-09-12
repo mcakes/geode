@@ -4465,3 +4465,82 @@ fn a_drop_whose_name_has_left_the_list_says_that_row_is_gone(cx: &mut gpui::Test
         "a drop that resolved to nothing writes nothing"
     );
 }
+
+/// A `datasets` doc across two datasets, `risk` and `vol` — enough for
+/// the browse list, and for `risk`'s `book` column to carry a layer.
+fn services_with_schema() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [vol.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §19.4: the inspector lists datasets, opens one to its column rows —
+/// each with the layer it came from — and refuses every verb with one
+/// notice; `n` is refused in browse and the footer never offers it.
+#[gpui::test]
+fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    assert!(cx.debug_bounds("objectdialog-row-risk").is_some());
+    assert!(cx.debug_bounds("objectdialog-row-vol").is_some());
+
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE)
+    );
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    ));
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-field-columns.book").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-field-layer-columns.book")
+            .is_some(),
+        "the row's own layer badge"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-dest-columns.book").is_none(),
+        "no doc badge on a read-only row"
+    );
+
+    for key in ["space", "i", "d", "shift-j"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+            Some(objectdialog::READ_ONLY_NOTICE),
+            "{key}"
+        );
+        assert!(
+            shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+            "{key} queued a write"
+        );
+    }
+    // `/` still filters.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("pos");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-field-columns.position_ref")
+            .is_some()
+    );
+    assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
+}

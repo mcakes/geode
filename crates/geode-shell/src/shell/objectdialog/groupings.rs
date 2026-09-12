@@ -148,6 +148,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             label: "Slot".to_string(),
             kind: FieldKind::Text(object.unwrap_or("").to_string()),
             dest: Destination::Doc,
+            layer: None,
         },
         Field {
             key: "dimensions".to_string(),
@@ -158,6 +159,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                 available: None,
             },
             dest: Destination::Doc,
+            layer: None,
         },
     ]
 }

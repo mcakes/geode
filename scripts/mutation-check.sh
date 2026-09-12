@@ -7466,6 +7466,32 @@ run_mutation "objectdialog: a plain text field leaves the rows unfiltered" \
   geode-shell \
   a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected
 
+# §19.4: `writable()` is the one gate every mutating verb on the schema
+# inspector reads. Flipping it to `true` must be caught by the window
+# test, which presses four verbs and asserts nothing queued.
+run_mutation "objectdialog: Schema is not writable" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        !matches!(self, Domain::Schema)' \
+  '        true' \
+  geode-shell \
+  the_schema_inspector_lists_datasets_and_refuses_every_verb
+
+# §19.4: a schema row carries the layer `Config::explain` names.
+run_mutation "objectdialog: schema rows carry the dataset's layer" \
+  crates/geode-shell/src/shell/objectdialog/schema.rs \
+  '    let dataset_layer = config.explain(DOC, name);' \
+  '    let dataset_layer: Option<Layer> = None;' \
+  geode-shell \
+  every_row_carries_the_layer_that_defined_it
+
+# §19.4: derived rows are those whose `from` is one of THIS dataset's columns.
+run_mutation "objectdialog: schema lists only this dataset's derived dimensions" \
+  crates/geode-shell/src/shell/objectdialog/schema.rs \
+  '    for dim in dims.all().filter(|d| dataset.column(&d.from).is_some()) {' \
+  '    for dim in dims.all() {' \
+  geode-shell \
+  fields_are_one_read_only_text_per_column_then_the_derived_dimensions
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

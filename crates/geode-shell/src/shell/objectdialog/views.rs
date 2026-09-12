@@ -189,12 +189,14 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             label: "Dataset".to_string(),
             kind: FieldKind::Choice { options, selected },
             dest: Destination::Doc,
+            layer: None,
         },
         Field {
             key: "columns".to_string(),
             label: "Columns".to_string(),
             kind: FieldKind::OrderedList { items, available },
             dest: Destination::Presentation,
+            layer: None,
         },
     ]
 }
