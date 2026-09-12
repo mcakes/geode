@@ -6953,6 +6953,15 @@ run_mutation "objectdialog: the cursor follows a dropped item" \
         Step::Changed' \
   geode-shell the_cursor_follows_the_dropped_item
 
+# `locate` resolves a payload by NAME, not by whatever index the row
+# happened to be at when it was dragged. Mutated to a positional
+# resolve, every payload lands on the list's first row instead.
+run_mutation "objectdialog: locate resolves a drag payload by name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let item = list.iter().position(|i| i.name == drag.name)?;' \
+  '        let item = 0;' \
+  geode-shell row_drag_round_trips_through_locate
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -1241,9 +1241,11 @@ impl Draft {
     /// no available row to drop such a demotion *onto* in the first
     /// place: `dst` claiming a catalogue that does not exist fails to
     /// `locate` and the whole drop is `Inert` before the per-case match
-    /// below ever runs. The `(true, false)` arm's own `available.as_mut()`
-    /// guard is therefore unreachable in practice — a safety net, not a
-    /// second path to that refusal.
+    /// below ever runs. The `(true, false)` **and** `(false, true)` arms'
+    /// own `available.as_mut()` guards are therefore unreachable in
+    /// practice — safety nets, not a second path to that refusal:
+    /// whichever of `src`/`dst` resolved to an `Available` row already
+    /// proved `available` was `Some` inside `locate`.
     pub fn drop_row(&mut self, src: &RowDrag, dst: &RowDrag) -> Step {
         let (Some(src_row), Some(dst_row)) = (self.locate(src), self.locate(dst)) else {
             return Step::Inert;
@@ -3397,12 +3399,16 @@ mod tests {
     }
 
     /// Nothing to do: same row, catalogue to catalogue, a name that no
-    /// longer resolves (a keystroke removed it mid-drag), or a field that
-    /// is not a list. None of these writes.
+    /// longer resolves (a keystroke removed it mid-drag), a field whose
+    /// kind is not a list at all, or two rows that resolve on different
+    /// fields. None of these writes, and none moves the cursor either —
+    /// only a real drop reaches `follow`.
     #[test]
     fn inert_drops_change_nothing() {
         let mut draft = two_column_draft_with_one_available();
+        draft.selected = 1;
         let before = draft.fields.clone();
+        let selected_before = draft.selected;
         assert_eq!(
             draft.drop_row(
                 &drag("columns", true, "book"),
@@ -3424,7 +3430,36 @@ mod tests {
             ),
             Step::Inert
         );
+        // `dataset` exists but is a `Choice`, not a list — `locate`
+        // refuses it before the per-case match ever runs.
+        assert_eq!(
+            draft.drop_row(
+                &drag("dataset", true, "irrelevant"),
+                &drag("columns", true, "book")
+            ),
+            Step::Inert
+        );
+        // Two rows that both resolve, on two different real lists: the
+        // `field != dst_field` guard, not a locate failure.
+        draft.fields.push(Field {
+            key: "other".to_string(),
+            label: "Other".to_string(),
+            kind: FieldKind::OrderedList {
+                items: vec![item("z")],
+                available: None,
+            },
+            dest: Destination::Doc,
+        });
+        assert_eq!(
+            draft.drop_row(&drag("columns", true, "book"), &drag("other", true, "z")),
+            Step::Inert
+        );
+        draft.fields.pop();
         assert_eq!(draft.fields, before);
+        assert_eq!(
+            draft.selected, selected_before,
+            "an inert drop must never move the cursor"
+        );
         // Two catalogue rows (add a second available item first).
         let FieldKind::OrderedList { available, .. } = &mut draft.fields[1].kind else {
             panic!()
@@ -3437,12 +3472,17 @@ mod tests {
             ),
             Step::Inert
         );
+        assert_eq!(draft.selected, selected_before);
     }
 
-    /// A list with no catalogue (Groupings) refuses a demotion the same
-    /// way `x` does — the wording is `remove_selected`'s.
+    /// A list with no catalogue (Groupings) is `Inert`, not
+    /// `remove_selected`'s `Step::Refused("space unticks here")`: `dst`
+    /// claims a catalogue that does not exist, so it fails to `locate`
+    /// and the whole drop is `Inert` before `drop_row`'s per-case match
+    /// ever runs — there is no available row for that refusal's demotion
+    /// to land on in the first place (see `drop_row`'s own doc).
     #[test]
-    fn a_drop_into_a_missing_catalogue_is_refused_like_x() {
+    fn a_drop_onto_a_missing_catalogue_is_inert() {
         let mut draft = groupings_draft(); // items book, lhu; available None
         // There is no available row to target, so the refusal is reached
         // through a payload claiming one.
@@ -3457,6 +3497,17 @@ mod tests {
         assert!(
             matches!(step, Step::Inert),
             "a target that does not resolve is inert, never a phantom removal"
+        );
+        let names: Vec<&str> = draft
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["book", "lhu"],
+            "an Inert drop must write nothing — book is not a phantom removal"
         );
     }
 
