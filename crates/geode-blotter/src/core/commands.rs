@@ -2,6 +2,8 @@
 //! `Command` the tile applies, and the vocabulary for the word under the
 //! cursor is what the shell ranks (§3.4).
 
+use crate::core::flatten::SortOrder;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Group(Vec<String>),
@@ -24,7 +26,7 @@ pub enum Command {
     AsOfUndo,
     Live,
     View(String),
-    Sort { column: String, descending: bool },
+    Sort { column: String, order: SortOrder },
     SortClear,
 }
 
@@ -129,23 +131,29 @@ pub fn parse(line: &str) -> Result<Command, String> {
         }
         "sort" => {
             let mut words = rest.split_whitespace();
-            match (words.next(), words.next(), words.next()) {
-                (None, _, _) => Err("sort needs a column, or `clear`".into()),
-                (Some("clear"), None, _) => Ok(Command::SortClear),
-                (Some(column), None, _) => Ok(Command::Sort {
-                    column: column.into(),
-                    descending: false,
-                }),
-                (Some(column), Some("desc"), None) => Ok(Command::Sort {
-                    column: column.into(),
-                    descending: true,
-                }),
-                (Some(column), Some("asc"), None) => Ok(Command::Sort {
-                    column: column.into(),
-                    descending: false,
-                }),
-                _ => Err("sort takes a column and optionally `desc`".into()),
-            }
+            let column = match words.next() {
+                None => return Err("sort needs a column, or `clear`".into()),
+                Some("clear") if words.clone().next().is_none() => return Ok(Command::SortClear),
+                Some(c) => c,
+            };
+            // A bare `abs` is `abs desc`: the biggest exposures first.
+            let order = match (words.next(), words.next(), words.next()) {
+                (None, _, _) => SortOrder::Asc,
+                (Some("asc"), None, _) => SortOrder::Asc,
+                (Some("desc"), None, _) => SortOrder::Desc,
+                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,
+                (Some("abs"), Some("asc"), None) => SortOrder::AbsAsc,
+                _ => {
+                    return Err(
+                        "sort takes a column and optionally `asc`, `desc`, `abs`, `abs asc` or `abs desc`"
+                            .into(),
+                    );
+                }
+            };
+            Ok(Command::Sort {
+                column: column.into(),
+                order,
+            })
         }
         other => Err(format!("unknown command '{other}'")),
     }
@@ -196,7 +204,8 @@ pub fn completions(line: &str, cursor: usize, vocab: &Vocabulary) -> Vec<String>
             v.push("clear".into());
             v
         }
-        ["sort", _] => vec!["desc".into()],
+        ["sort", _] => vec!["abs".into(), "asc".into(), "desc".into()],
+        ["sort", _, "abs"] => vec!["asc".into(), "desc".into()],
         ["group"] => {
             let mut v = vocab.dimensions.clone();
             v.push("save".into());
@@ -285,27 +294,40 @@ mod tests {
         assert_eq!(parse("asof 14:05").unwrap(), Command::AsOf("14:05".into()));
         assert_eq!(parse("live").unwrap(), Command::Live);
         assert_eq!(parse("view wide").unwrap(), Command::View("wide".into()));
+        let sort = |column: &str, order| Command::Sort {
+            column: column.into(),
+            order,
+        };
         assert_eq!(
             parse("sort delta01").unwrap(),
-            Command::Sort {
-                column: "delta01".into(),
-                descending: false
-            }
+            sort("delta01", SortOrder::Asc)
+        );
+        assert_eq!(
+            parse("sort delta01 asc").unwrap(),
+            sort("delta01", SortOrder::Asc)
         );
         assert_eq!(
             parse("sort delta01 desc").unwrap(),
-            Command::Sort {
-                column: "delta01".into(),
-                descending: true
-            }
+            sort("delta01", SortOrder::Desc)
+        );
+        // A bare `abs` is the biggest exposures first: what a trader
+        // reaches for when the sign is noise.
+        assert_eq!(
+            parse("sort delta01 abs").unwrap(),
+            sort("delta01", SortOrder::AbsDesc)
+        );
+        assert_eq!(
+            parse("sort delta01 abs desc").unwrap(),
+            sort("delta01", SortOrder::AbsDesc)
+        );
+        assert_eq!(
+            parse("sort delta01 abs asc").unwrap(),
+            sort("delta01", SortOrder::AbsAsc)
         );
         assert_eq!(parse("sort clear").unwrap(), Command::SortClear);
         assert_eq!(
             parse("  sort   delta01  ").unwrap(),
-            Command::Sort {
-                column: "delta01".into(),
-                descending: false
-            }
+            sort("delta01", SortOrder::Asc)
         );
     }
 
@@ -321,7 +343,9 @@ mod tests {
         assert!(parse("group slot 12").unwrap_err().contains("1–9"));
         assert!(parse("group save x").unwrap_err().contains("1–9"));
         assert!(parse("sort").unwrap_err().contains("column"));
-        assert!(parse("sort delta01 up").unwrap_err().contains("desc"));
+        assert!(parse("sort delta01 up").unwrap_err().contains("abs"));
+        assert!(parse("sort delta01 abs up").unwrap_err().contains("abs"));
+        assert!(parse("sort delta01 desc abs").unwrap_err().contains("abs"));
         assert!(parse("view").unwrap_err().contains("name"));
         assert!(parse("scope").unwrap_err().contains("scope"));
         assert!(parse("asof").unwrap_err().contains("time"));
@@ -400,7 +424,8 @@ mod tests {
             "the shell ranks; the vocabulary is whole"
         );
         assert_eq!(names("sort "), vec!["book", "clear", "delta01", "lhu"]);
-        assert_eq!(names("sort delta01 "), vec!["desc"]);
+        assert_eq!(names("sort delta01 "), vec!["abs", "asc", "desc"]);
+        assert_eq!(names("sort delta01 abs "), vec!["asc", "desc"]);
         assert_eq!(
             names("group "),
             vec!["book", "lhu", "save", "slot"],

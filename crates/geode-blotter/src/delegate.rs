@@ -7,7 +7,7 @@
 use crate::core::cache::{FormatCache, cell};
 use crate::core::cursor::{Cursor, Mode, restore_by_path, selection};
 use crate::core::expansion::{Expansion, Path, depth_bound, path_of};
-use crate::core::flatten::{SortSpec, flatten};
+use crate::core::flatten::{SortOrder, SortSpec, flatten};
 use crate::core::format::Sign;
 use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::attribution::Attribution;
@@ -533,14 +533,20 @@ impl TableDelegate for BlotterDelegate {
         let Some(c) = self.plan.as_ref().and_then(|p| p.columns.get(col_ix)) else {
             return Column::default();
         };
-        let sort = match self.sort {
-            Some(s) if s.column == col_ix && s.descending => Some(ColumnSort::Descending),
-            Some(s) if s.column == col_ix => Some(ColumnSort::Ascending),
-            _ => Some(ColumnSort::Default),
+        let own_sort = self.sort.filter(|s| s.column == col_ix);
+        let sort = match own_sort {
+            Some(s) if s.order.descending() => Some(ColumnSort::Descending),
+            Some(_) => Some(ColumnSort::Ascending),
+            None => Some(ColumnSort::Default),
         };
         let mut label = c.label.clone();
         if !c.semi_joined.is_empty() {
             label.push_str(" ⋈");
+        }
+        // gpui-component's header arrow only knows a direction, so an
+        // absolute sort says so in the label: `delta01 |x| ▾`.
+        if own_sort.is_some_and(|s| s.order.absolute()) {
+            label.push_str(" |x|");
         }
         Column {
             key: SharedString::from(c.name.clone()),
@@ -587,15 +593,17 @@ impl TableDelegate for BlotterDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+        // A header click is gpui-component's own asc/desc/clear cycle; it
+        // never reaches an absolute order (`S` and `:sort … abs` do).
         self.sort = match sort {
             ColumnSort::Default => None,
             ColumnSort::Ascending => Some(SortSpec {
                 column: col_ix,
-                descending: false,
+                order: SortOrder::Asc,
             }),
             ColumnSort::Descending => Some(SortSpec {
                 column: col_ix,
-                descending: true,
+                order: SortOrder::Desc,
             }),
         };
         self.reflatten();

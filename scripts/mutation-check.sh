@@ -2356,10 +2356,45 @@ run_mutation "yank: numbers are raw and unscaled" \
 
 run_mutation "commands: sort desc is parsed" \
   crates/geode-blotter/src/core/commands.rs \
-  '                    descending: true,' \
-  '                    descending: false,' \
+  '                (Some("desc"), None, _) => SortOrder::Desc,' \
+  '                (Some("desc"), None, _) => SortOrder::Asc,' \
   geode-blotter \
   every_command_parses
+
+run_mutation "commands: a bare sort abs is abs desc" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
+  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
+  geode-blotter \
+  every_command_parses
+
+run_mutation "flatten: the absolute orders compare magnitudes, not signed values" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    let key = |v: f64| if absolute { v.abs() } else { v };' \
+  '    let key = |v: f64| v;' \
+  geode-blotter \
+  absolute_orders_compare_magnitudes_and_keep_null_last
+
+run_mutation "tile: S is refused on a column with no magnitude, never on a measure" \
+  crates/geode-blotter/src/tile.rs \
+  '                    if absolute && !measure {' \
+  '                    if absolute && measure {' \
+  geode-blotter \
+  s_and_shift_s_cycle_signed_and_absolute_sorts
+
+run_mutation "tile: S steps abs desc on to abs asc before clearing" \
+  crates/geode-blotter/src/tile.rs \
+  '                            Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
+  '                            Some(SortOrder::AbsDesc) => None,' \
+  geode-blotter \
+  s_and_shift_s_cycle_signed_and_absolute_sorts
+
+run_mutation "delegate: the header marks an absolute sort" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if own_sort.is_some_and(|s| s.order.absolute()) {' \
+  '        if false {' \
+  geode-blotter \
+  s_and_shift_s_cycle_signed_and_absolute_sorts
 
 run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
   crates/geode-blotter/src/core/commands.rs \
