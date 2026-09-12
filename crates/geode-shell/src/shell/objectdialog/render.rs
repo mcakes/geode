@@ -2057,6 +2057,7 @@ fn build(
     let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
         query: state.query.as_str(),
         slash_filters: true,
+        entity: entity.clone(),
     });
 
     let top_row = if naming {
@@ -2509,6 +2510,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let frozen_query = (state.mode == DialogMode::Normal).then_some(dialog::FrozenFilter {
         query: draft.query.as_str(),
         slash_filters: true,
+        entity: entity.clone(),
     });
     // §18.8: while the chain field is open it takes the filter row's
     // place — the same shared `Input`, labelled for what its text now

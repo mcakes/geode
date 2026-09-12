@@ -579,6 +579,26 @@ pub struct FrozenFilter<'a> {
     /// Whether a bare `/` would enter filter mode from here. `false`
     /// only while the keybinding dialog is capturing a keystroke.
     pub slash_filters: bool,
+    /// The shell, so the frozen row's mouse-down can reach
+    /// [`enter_filter_by_mouse`] (§17.1 rule 1). Only the frozen branch
+    /// needs it — the live `Input` branches are already focused.
+    pub entity: Entity<ShellView>,
+}
+
+/// §17.1 rule 1: a mouse-down on the frozen filter row is the mouse form
+/// of `/`. A pure mutation — [`sync_dialog_text`] on the handler's return
+/// is what focuses the `Input`. On the keybinding dialog a capture in
+/// progress is cancelled first: a click on a text field is never a
+/// keystroke to bind, and `listening` wins over the mode in
+/// `dialogmode::focus_target`, so leaving it set would keep the keys on
+/// the shell root under a pill reading `filter`.
+pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
+    if let Some(state) = shell.keybindings.as_mut() {
+        state.listening = None;
+        state.mode = DialogMode::Filter;
+    } else if let Some(state) = shell.object_dialog.as_mut() {
+        state.mode = DialogMode::Filter;
+    }
 }
 
 /// The filter row every list dialog wears at the top: the shared
@@ -622,50 +642,65 @@ pub fn filter_row(
     let row = div().w_full().border_b_1().border_color(theme.border);
     let search_icon = || Icon::new(IconName::Search).text_color(theme.muted_foreground);
     match frozen {
-        // §18.1: a frozen, EMPTY query is the state every normal-mode
-        // dialog opens in — nothing yet says `/` exists. A placeholder
-        // in the search icon's own row is the one place a trader's eye
-        // already goes to check "is this thing typeable right now". The
-        // selector rides the text itself, not the row around it — a row
-        // paints regardless of what its text says, so a selector on the
-        // row alone would still be found even if the label emptied out
-        // from under it (exactly the "markers, not values" failure this
-        // crate's mutation harness exists to catch — see the harness's
-        // own header comment).
-        //
-        // `slash_filters` is the second half of the condition, not a
-        // refinement of it: a hint for a key that does something else
-        // where it is painted is worse than no hint, and the keybinding
-        // dialog's capture state is exactly that (see `FrozenFilter`).
-        Some(frozen) if frozen.query.is_empty() && frozen.slash_filters => row
-            .py_1()
-            .child(
+        // §17.1 rule 1: the frozen row is the mouse form of `/` — a
+        // mouse-down anywhere on it is a pure `enter_filter_by_mouse` +
+        // `sync_dialog_text`, the same shape every other mouse-driven
+        // dialog transition in this crate takes (see `sync_dialog_text`'s
+        // own doc comment for the four seam classes). `cursor_text`
+        // (gpui's I-beam) tells the eye the row is typeable before the
+        // click, which a plain arrow cursor over static text would not.
+        Some(frozen) => {
+            let entity = frozen.entity.clone();
+            let row = row
+                .py_1()
+                .cursor_text()
+                .debug_selector(|| "dialog-filter-frozen".to_string())
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                    entity.update(cx, |shell, cx| {
+                        enter_filter_by_mouse(shell);
+                        sync_dialog_text(shell, window, cx);
+                        cx.notify();
+                    });
+                });
+            // §18.1: a frozen, EMPTY query is the state every
+            // normal-mode dialog opens in — nothing yet says `/` exists.
+            // A placeholder in the search icon's own row is the one
+            // place a trader's eye already goes to check "is this thing
+            // typeable right now". The selector rides the text itself,
+            // not the row around it — a row paints regardless of what
+            // its text says, so a selector on the row alone would still
+            // be found even if the label emptied out from under it
+            // (exactly the "markers, not values" failure this crate's
+            // mutation harness exists to catch — see the harness's own
+            // header comment).
+            //
+            // `slash_filters` is the second half of the condition, not a
+            // refinement of it: a hint for a key that does something
+            // else where it is painted is worse than no hint, and the
+            // keybinding dialog's capture state is exactly that (see
+            // `FrozenFilter`).
+            let body = if frozen.query.is_empty() && frozen.slash_filters {
+                div()
+                    .debug_selector(|| "dialog-filter-placeholder".to_string())
+                    .child("press / to filter")
+                    .into_any_element()
+            } else {
+                // Either a real query to echo, or an empty one in a
+                // state where `/` is not the filter's key — the bare
+                // icon this row painted for every frozen query before
+                // §18.1.
+                div().child(frozen.query.to_string()).into_any_element()
+            };
+            row.child(
                 h_flex()
                     .items_center()
                     .gap(px(6.))
                     .text_color(theme.muted_foreground)
                     .child(search_icon())
-                    .child(
-                        div()
-                            .debug_selector(|| "dialog-filter-placeholder".to_string())
-                            .child("press / to filter"),
-                    ),
+                    .child(body),
             )
-            .into_any_element(),
-        // Either a real query to echo, or an empty one in a state where
-        // `/` is not the filter's key — the bare icon this row painted
-        // for every frozen query before §18.1.
-        Some(frozen) => row
-            .py_1()
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .text_color(theme.muted_foreground)
-                    .child(search_icon())
-                    .child(frozen.query.to_string()),
-            )
-            .into_any_element(),
+            .into_any_element()
+        }
         None => row
             .child(
                 Input::new(input)

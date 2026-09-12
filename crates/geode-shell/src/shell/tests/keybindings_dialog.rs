@@ -2,6 +2,7 @@
 //! new binding, and persisting it to the user keymap file.
 
 use super::*;
+use crate::dialogmode::DialogMode;
 
 // --- Part B: the keybinding dialog -----------------------------------
 
@@ -1657,4 +1658,74 @@ fn focus_and_text_follow_the_pure_state_through_every_transition(cx: &mut gpui::
         dialog_filter_is_focused(&shell, &mut cx),
         "back to the mode underneath: filter"
     );
+}
+
+// --- Mouse parity (interaction-model spec §17) --------------------------
+
+/// §17.1 rule 1: the frozen filter row is the mouse form of `/`. The
+/// dialog opens in normal mode with the row frozen; a mouse-down on it
+/// must leave the pill reading `filter` with the shared `Input` focused.
+#[gpui::test]
+fn clicking_the_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, test_services(), "keybindings::open");
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().mode),
+        DialogMode::Normal
+    );
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the frozen filter row paints in normal mode");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().mode),
+        DialogMode::Filter,
+        "a click on the field is the mouse form of /"
+    );
+    let input_focused = cx.update(|window, cx| {
+        let input = shell.read(cx).dialog_input.clone();
+        input.read(cx).focus_handle(cx).is_focused(window)
+    });
+    assert!(input_focused, "the sync handed the keyboard to the Input");
+    // And typing now filters rather than acting as a verb.
+    cx.simulate_input("j");
+    cx.run_until_parked();
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.keybindings.as_ref().unwrap().query.clone()),
+        "j"
+    );
+}
+
+/// The one frozen state where `/` is NOT the filter's key: a capture in
+/// progress. A click on the field there cancels the capture and enters
+/// filter mode — a click on a text field is never a keystroke to bind.
+#[gpui::test]
+fn clicking_the_frozen_filter_row_while_listening_cancels_the_capture(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, test_services(), "keybindings::open");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| {
+        s.keybindings.as_ref().unwrap().listening.is_some()
+    }));
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the row is frozen while listening");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let (listening, mode) = shell.read_with(&cx, |s, _| {
+        let k = s.keybindings.as_ref().unwrap();
+        (k.listening.is_some(), k.mode)
+    });
+    assert!(!listening, "the capture was cancelled");
+    assert_eq!(mode, DialogMode::Filter);
 }

@@ -6483,6 +6483,28 @@ run_mutation "dialog: the filter placeholder needs / to actually filter" \
   geode-shell \
   the_filter_placeholder_is_gone_while_listening_for_a_capture
 
+# ---- Mouse parity (spec §17.1 rule 1): the frozen filter row -----------
+
+# §17.1 rule 1: the frozen filter row is the mouse form of `/`. Mutated
+# to a click that syncs without the transition, the row is inert and the
+# dialog stays in normal mode under the click.
+run_mutation "dialog: a click on the frozen filter row enters filter mode" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '                        enter_filter_by_mouse(shell);
+                        sync_dialog_text(shell, window, cx);' \
+  '                        sync_dialog_text(shell, window, cx);' \
+  geode-shell clicking_the_frozen_filter_row_enters_filter_mode
+
+# The listening half of the same rule: a capture must be cancelled by the
+# click, or `focus_target` keeps the keys on the shell root under a pill
+# reading `filter`.
+run_mutation "dialog: the frozen-row click cancels a capture in progress" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '        state.listening = None;
+        state.mode = DialogMode::Filter;' \
+  '        state.mode = DialogMode::Filter;' \
+  geode-shell clicking_the_frozen_filter_row_while_listening_cancels_the_capture
+
 # ---- Task 8: the object dialog to the mock (§18.1) ---------------------
 
 # The section header rides on the first item's element so the edit

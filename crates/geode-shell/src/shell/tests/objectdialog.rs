@@ -3806,3 +3806,44 @@ fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
     cx.simulate_click(bounds.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 }
+
+// --- Mouse parity (interaction-model spec §17, 4c §18.9) ----------------
+
+/// §17.1 rule 1 on the object dialog's browse stage.
+#[gpui::test]
+fn clicking_the_browse_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("browse opens in normal mode with the row frozen");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    cx.simulate_input("w");
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.query.clone()), "w");
+}
+
+/// And on the edit stage, whose frozen row is the draft's own (§18.3).
+#[gpui::test]
+fn clicking_the_edit_frozen_filter_row_enters_filter_mode(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let row = cx
+        .debug_bounds("dialog-filter-frozen")
+        .expect("the edit stage opens in normal mode with the row frozen");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(20.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
+    cx.simulate_input("n");
+    cx.run_until_parked();
+    assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "n");
+}

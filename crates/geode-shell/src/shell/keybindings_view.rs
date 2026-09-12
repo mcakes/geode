@@ -1566,6 +1566,7 @@ fn build(
         dialog::FrozenFilter {
             query: state.query.as_str(),
             slash_filters: state.listening.is_none(),
+            entity: entity.clone(),
         },
     );
 
