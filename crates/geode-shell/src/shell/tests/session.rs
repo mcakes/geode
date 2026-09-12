@@ -9,7 +9,7 @@ use crate::session;
 
 // --- Task 3: session save/restore wiring ----------------------------
 
-fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
+pub(super) fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
     let mut services = test_services();
     services.session_path = Some(session_path);
     services
@@ -374,7 +374,12 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     // through `session::from_toml`, exactly as `main.rs` restores a
     // real session file — must have its `state` handed to the
     // recorder's `create` as `Some(...)`.
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::palette_usage::PaletteUsage::new(),
+    );
     let ws1: toml::Table = r#"
         focused = 1
         [node]
@@ -412,17 +417,17 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     );
 }
 
-/// End-to-end (design doc, "Tests"): a real `mod+shift+t` keystroke,
-/// with a real `user_dir` wired up (a tempdir, exactly like
-/// `build_shell_services` wires the real `%APPDATA%`/`$HOME/.config`
-/// dir in `main.rs`), must leave the new mode written into
-/// `<user_dir>/app.toml`'s `[theme]` table on disk — the whole point of
-/// the apply-then-persist seam (`ShellView::persist_theme`) replacing
-/// the removed session `theme_mode` mechanism.
+/// End-to-end (design doc, "Tests"): a theme pick through the settings
+/// dialog's own apply seam, with a real `user_dir` wired up (a tempdir,
+/// exactly like `build_shell_services` wires the real
+/// `%APPDATA%`/`$HOME/.config` dir in `main.rs`), must leave the new
+/// name written into `<user_dir>/app.toml`'s `[theme]` table on disk —
+/// the whole point of the apply-then-persist seam
+/// (`ShellView::persist_theme`) replacing the removed session
+/// `theme_mode` mechanism. (Until 2026-09-12 this was a `mod+shift+t`
+/// keystroke flipping a mode; the chord and the mode are both retired.)
 #[gpui::test]
-fn mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file(
-    cx: &mut gpui::TestAppContext,
-) {
+fn a_theme_pick_persists_the_new_name_to_the_user_config_file(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let dir = tempfile::tempdir().unwrap();
@@ -446,10 +451,17 @@ fn mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file(
 
     assert!(
         !user_dir.join("app.toml").exists(),
-        "sanity: nothing written before the toggle"
+        "sanity: nothing written before the pick"
     );
 
-    cx.simulate_keystrokes("alt-shift-t");
+    let root = window.root(&mut cx).unwrap();
+    let shell = root.read_with(&cx, |root, _cx| {
+        root.view()
+            .clone()
+            .downcast::<ShellView>()
+            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
+    });
+    cx.update(|_window, cx| settings_view::set_theme(&shell, "Gruvbox Light", cx));
 
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -464,27 +476,26 @@ fn mod_shift_t_keystroke_persists_the_new_mode_to_the_user_config_file(
     // work.
     cx.run_until_parked();
 
-    let root = window.root(&mut cx).unwrap();
-    let shell = root.read_with(&cx, |root, _cx| {
-        root.view()
-            .clone()
-            .downcast::<ShellView>()
-            .unwrap_or_else(|_| panic!("root view is not a ShellView"))
-    });
-    let active_mode = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode());
-    let expected_mode = if active_mode.is_dark() {
-        "dark"
-    } else {
-        "light"
-    };
-
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "sanity: the pick applied live"
+    );
     let text = std::fs::read_to_string(user_dir.join("app.toml"))
-        .expect("the keystroke must have written app.toml");
+        .expect("the pick must have written app.toml");
     let doc: toml_edit::DocumentMut = text.parse().unwrap();
     assert_eq!(
-        doc["theme"]["mode"].as_str(),
-        Some(expected_mode),
-        "the persisted [theme].mode must match the mode the keystroke applied"
+        doc["theme"]["name"].as_str(),
+        Some("Gruvbox Light"),
+        "the persisted [theme].name must be the theme the pick applied"
+    );
+    assert!(
+        doc["theme"].get("mode").is_none(),
+        "no mode key: the light/dark axis is retired"
     );
 }
 

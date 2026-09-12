@@ -5,10 +5,10 @@
 use crate::core::commands::{Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
-use crate::core::flatten::SortSpec;
+use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
-use crate::delegate::BlotterDelegate;
+use crate::delegate::{BlotterDelegate, ChevronClicked};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
@@ -68,6 +68,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
+    (
+        "blotter::sort_cycle_abs",
+        "Sort by cursor column's magnitude",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,14 +238,23 @@ impl BlotterTile {
                 .col_movable(true)
                 .sortable(true)
         });
-        cx.subscribe(&table, |this, _, event: &TableEvent, cx| {
-            if let TableEvent::SelectRow(row) = event {
+        cx.subscribe(&table, |this, _, event: &TableEvent, cx| match event {
+            TableEvent::SelectRow(row) => {
                 this.table.update(cx, |t, _| {
                     let d = t.delegate_mut();
                     d.cursor.to_row(*row, d.shown.len());
                 });
                 cx.notify();
             }
+            // A double-click anywhere on a row is `space` on it. The
+            // table selects the row before emitting this, so the cursor
+            // is already there; `toggle_row` moves it again regardless.
+            TableEvent::DoubleClickedRow(row) => this.toggle_row(*row, cx),
+            _ => {}
+        })
+        .detach();
+        cx.subscribe(&table, |this, _, event: &ChevronClicked, cx| {
+            this.toggle_row(event.0, cx);
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
@@ -596,6 +609,35 @@ impl BlotterTile {
         });
     }
 
+    /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
+    /// path every mouse toggle (a row double-click, a chevron click) goes
+    /// through too, so the keyboard and the mouse can never disagree
+    /// about what opening a node entails: reflatten, refresh the table,
+    /// resync the cursor, and requery one level deeper when the node
+    /// opened past what the snapshot materialised.
+    fn expand_at_cursor(&mut self, open: Option<bool>, n: u32, cx: &mut Context<Self>) {
+        let grouping_len = self.last_grouping.len();
+        let needs_depth = self.with_delegate(cx, |d| {
+            for _ in 0..n {
+                d.expand_cursor(open);
+            }
+            d.cursor_needs_more_depth(grouping_len)
+        });
+        self.table.update(cx, |t, cx| t.refresh(cx));
+        self.sync_cursor(cx);
+        if needs_depth {
+            self.requery(cx);
+        }
+    }
+
+    /// A mouse toggle on the *shown* row `row`: the cursor is moved there
+    /// explicitly rather than trusting that the table's own `SelectRow`
+    /// arrived first, then the row toggles as `space` would.
+    fn toggle_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.with_delegate(cx, |d| d.cursor.to_row(row, d.shown.len()));
+        self.expand_at_cursor(None, 1, cx);
+    }
+
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -605,7 +647,6 @@ impl BlotterTile {
         let Some(name) = action.0.strip_prefix("blotter::") else {
             return false;
         };
-        let grouping_len = self.last_grouping.len();
         match name {
             // The step sizes are `vimnav`'s own convention, shared with
             // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
@@ -648,18 +689,7 @@ impl BlotterTile {
                     "collapse" => Some(false),
                     _ => None,
                 };
-                let n = count.unwrap_or(1).max(1);
-                let needs_depth = self.with_delegate(cx, |d| {
-                    for _ in 0..n {
-                        d.expand_cursor(open);
-                    }
-                    d.cursor_needs_more_depth(grouping_len)
-                });
-                self.table.update(cx, |t, cx| t.refresh(cx));
-                self.sync_cursor(cx);
-                if needs_depth {
-                    self.requery(cx);
-                }
+                self.expand_at_cursor(open, count.unwrap_or(1).max(1), cx);
             }
             "expand_all" | "collapse_all" => {
                 // `expand_all` always requeries with the full depth
@@ -731,23 +761,23 @@ impl BlotterTile {
                     }
                 }
             }
-            "sort_cycle" => {
+            // `s` walks the signed cycle and `S` the absolute one; the
+            // step itself is `SortOrder::cycle`, which also keeps `S`
+            // inert on a column with no magnitude.
+            "sort_cycle" | "sort_cycle_abs" => {
+                let absolute = name == "sort_cycle_abs";
                 self.with_delegate(cx, |d| {
                     let col = d.cursor.col;
                     if col == 0 {
                         return;
                     }
-                    d.sort = match d.sort {
-                        Some(s) if s.column == col && !s.descending => Some(SortSpec {
-                            column: col,
-                            descending: true,
-                        }),
-                        Some(s) if s.column == col => None,
-                        _ => Some(SortSpec {
-                            column: col,
-                            descending: false,
-                        }),
-                    };
+                    let measure = d.is_measure(col);
+                    let current = d.sort.filter(|s| s.column == col).map(|s| s.order);
+                    let next = SortOrder::cycle(current, absolute, measure);
+                    if next == current {
+                        return;
+                    }
+                    d.sort = next.map(|order| SortSpec { column: col, order });
                     d.reflatten();
                 });
                 self.table.update(cx, |t, cx| {
@@ -920,7 +950,7 @@ impl BlotterTile {
                 self.with_delegate(cx, |d| d.plan = None);
                 self.requery(cx);
             }
-            Command::Sort { column, descending } => {
+            Command::Sort { column, order } => {
                 let found = self.with_delegate(cx, |d| {
                     let col = d
                         .plan
@@ -928,10 +958,10 @@ impl BlotterTile {
                         .columns
                         .iter()
                         .position(|c| c.name == column)?;
-                    d.sort = Some(SortSpec {
-                        column: col,
-                        descending,
-                    });
+                    // A text column has no magnitude: `abs` on it is its
+                    // signed direction, in the state as on the screen.
+                    let order = order.on_column(d.is_measure(col));
+                    d.sort = Some(SortSpec { column: col, order });
                     d.reflatten();
                     Some(())
                 });
@@ -2094,6 +2124,190 @@ mod tests {
         assert_eq!(state["unscoped"].as_bool(), Some(false));
     }
 
+    /// `s` walks asc → desc → clear and `S` abs desc → abs asc → clear on
+    /// the cursor's measure column; each key starts its own cycle afresh
+    /// from the other's order; neither touches the tree column; the
+    /// header says `|x|` only while an absolute order is showing; and
+    /// `:sort <col> abs …` reaches the same state by typing.
+    #[gpui::test]
+    fn s_and_shift_s_cycle_signed_and_absolute_sorts(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let act = |cx: &mut gpui::VisualTestContext, id: &str| {
+            h.tile
+                .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+        };
+        let sort = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                d.sort.map(|s| (s.column, s.order))
+            })
+        };
+        let header = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let table = t.table().read(cx);
+                gpui_component::table::TableDelegate::column(table.delegate(), 1, cx)
+                    .name
+                    .to_string()
+            })
+        };
+
+        // On the tree column both keys are inert.
+        assert!(act(&mut cx, "blotter::sort_cycle"));
+        assert!(act(&mut cx, "blotter::sort_cycle_abs"));
+        assert_eq!(sort(&mut cx), None);
+
+        act(&mut cx, "blotter::right");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(header(&mut cx), "delta01");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Desc)));
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), None);
+
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(header(&mut cx), "delta01 |x|");
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), None);
+        assert_eq!(header(&mut cx), "delta01");
+
+        // Crossing over: `s` from an absolute order restarts at asc, `S`
+        // from a signed order restarts at abs desc.
+        act(&mut cx, "blotter::sort_cycle_abs");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        act(&mut cx, "blotter::sort_cycle");
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.command("sort daily_trading_pnl abs asc", cx).unwrap()
+        });
+        assert_eq!(sort(&mut cx), Some((2, SortOrder::AbsAsc)));
+        assert_eq!(
+            header(&mut cx),
+            "delta01",
+            "the marker follows the sort column"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort delta01 abs", cx).unwrap());
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
+        assert_eq!(sort(&mut cx), None);
+    }
+
+    /// A header click reaches every order a measure can show, desc first
+    /// (user ruling 2026-09-12), whatever three-state value gpui-component
+    /// proposes; the header label follows; the tree column paints no sort
+    /// icon and its hook is a no-op; and the component's row highlight
+    /// follows the cursor's row across the resort. Drives the delegate
+    /// hook the component's click handler calls, with a deliberately
+    /// wrong proposal each time. Not observable here: the component's
+    /// cached arrow after the deferred refresh (`col_groups` is private),
+    /// so its direction on the 3rd/4th click is on the display-check list.
+    #[gpui::test]
+    fn a_header_click_cycles_through_the_absolute_orders_too(cx: &mut gpui::TestAppContext) {
+        use gpui_component::table::{ColumnSort, TableDelegate as _};
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let click = |cx: &mut gpui::VisualTestContext, col: usize| {
+            let table = h.tile.read_with(cx, |t, _| t.table().clone());
+            cx.update(|window, cx| {
+                table.update(cx, |t, cx| {
+                    t.delegate_mut()
+                        .perform_sort(col, ColumnSort::Ascending, window, cx)
+                })
+            });
+            cx.run_until_parked();
+        };
+        let sort = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table()
+                    .read(cx)
+                    .delegate()
+                    .sort
+                    .map(|s| (s.column, s.order))
+            })
+        };
+        let header = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                t.table().read(cx).delegate().column(1, cx).name.to_string()
+            })
+        };
+        let act = |cx: &mut gpui::VisualTestContext, id: &str| {
+            h.tile
+                .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+        };
+        // (cursor row, the node id shown at it)
+        let row_of = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                (d.cursor.row, d.shown[d.cursor.row])
+            })
+        };
+
+        // The tree column: no icon to click, and the hook refuses anyway.
+        assert!(h.tile.read_with(&cx, |t, cx| {
+            t.table().read(cx).delegate().column(0, cx).sort.is_none()
+        }));
+        click(&mut cx, 0);
+        assert_eq!(sort(&mut cx), None, "the tree column cannot be sorted");
+
+        // Rows: root 9, L1 5, L2 4, L1/SPX 5. Open L1 and put the cursor
+        // on L2, so that an ascending sort moves L2 above L1's subtree.
+        act(&mut cx, "blotter::down");
+        act(&mut cx, "blotter::expand");
+        act(&mut cx, "blotter::down");
+        act(&mut cx, "blotter::down");
+        assert_eq!(
+            row_of(&mut cx),
+            (3, 2),
+            "cursor on L2, below L1's open child"
+        );
+
+        click(&mut cx, 1);
+        assert_eq!(
+            sort(&mut cx),
+            Some((1, SortOrder::Desc)),
+            "first click: desc"
+        );
+        assert_eq!(row_of(&mut cx), (3, 2), "desc keeps L1 (5) above L2 (4)");
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(header(&mut cx), "delta01");
+        // Asc puts L2 (4) above L1 (5) and its open child: the cursor
+        // follows L2 to row 1 by path, and so does the component's
+        // highlight, through the deferred closure.
+        assert_eq!(row_of(&mut cx), (1, 2), "cursor followed L2 up to row 1");
+        assert_eq!(
+            h.tile
+                .read_with(&cx, |t, cx| t.table().read(cx).selected_row()),
+            Some(1),
+            "the component's highlight followed the cursor"
+        );
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(header(&mut cx), "delta01 |x|");
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        click(&mut cx, 1);
+        assert_eq!(sort(&mut cx), None);
+        assert_eq!(header(&mut cx), "delta01");
+        // Another column's click starts its own cycle at desc.
+        click(&mut cx, 1);
+        click(&mut cx, 2);
+        assert_eq!(sort(&mut cx), Some((2, SortOrder::Desc)));
+    }
+
     /// `:filter` narrows through `tile_scope`, composed into the query's
     /// scope by `effective_scope`'s tile argument — never by
     /// post-filtering rows — so it must reach only the tile that set it.
@@ -2235,6 +2449,171 @@ mod tests {
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().cursor.row),
             2
+        );
+    }
+
+    /// Paints the tile and hands back the centre of one painted element
+    /// by its debug selector — the mouse tests below click real bounds,
+    /// never a synthesised event, so a listener that is not actually
+    /// wired to the painted element fails them.
+    fn centre_of(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"))
+            .center()
+    }
+
+    /// A left mouse-down/up pair at `at` carrying `click_count` — gpui's
+    /// own `simulate_click` hardwires a count of 1, and a double-click
+    /// is nothing but the second press of a pair with a count of 2.
+    fn click_at(
+        cx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) {
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+        });
+    }
+
+    fn shown_rows(h: &Harness, cx: &gpui::VisualTestContext) -> Vec<u32> {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().shown.clone())
+    }
+
+    fn cursor_row(h: &Harness, cx: &gpui::VisualTestContext) -> usize {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
+    }
+
+    /// A double-click anywhere on a row is `space` on it: the cursor
+    /// moves there and the node toggles. Row 1 is L1, whose child SPX is
+    /// already materialised, so opening it needs no requery; the second
+    /// double-click closes it again.
+    #[gpui::test]
+    fn a_double_click_on_a_row_toggles_it_like_space(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
+
+        // A measure cell, well away from the chevron.
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(cursor_row(&h, &cx), 1, "the click moved the cursor");
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            h.requests.try_recv().is_err(),
+            "no requery: SPX was in hand"
+        );
+
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2], "L1 closed again");
+    }
+
+    /// Opening a node whose children the snapshot stopped short of
+    /// requeries one level deeper — the same path `space` takes.
+    #[gpui::test]
+    fn a_double_click_at_the_depth_bound_requeries(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        // Row 2 is L2, which has no fetched child.
+        let at = centre_of(&mut cx, "blotter-cell-2-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        let p = next_query(&h.requests);
+        assert_eq!(
+            p.max_depth, 2,
+            "opening at the bound requeries one level deeper"
+        );
+    }
+
+    /// A leaf has nothing to toggle: `space` on it is a no-op, and so is
+    /// a double-click.
+    #[gpui::test]
+    fn a_double_click_on_a_leaf_changes_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), None, cx);
+            t.dispatch(&ActionId("blotter::expand".into()), None, cx);
+        });
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2]);
+
+        // Row 2 is now SPX, the leaf.
+        let at = centre_of(&mut cx, "blotter-cell-2-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(cursor_row(&h, &cx), 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "nothing to toggle");
+        assert!(h.requests.try_recv().is_err(), "a leaf never requeries");
+    }
+
+    /// A single click on the tree column's chevron toggles that row and
+    /// moves the cursor to it, exactly as a double-click on the row does.
+    #[gpui::test]
+    fn a_chevron_click_toggles_the_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(cursor_row(&h, &cx), 1, "the chevron click moved the cursor");
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            h.requests.try_recv().is_err(),
+            "no requery: SPX was in hand"
+        );
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2], "L1 closed again");
+    }
+
+    /// A fast double-click that lands on the chevron toggles ONCE: the
+    /// chevron's own listener acts on the first press only and stops the
+    /// row's click from reaching the double-click path, so the pair can
+    /// neither toggle twice (open, close) nor three times.
+    #[gpui::test]
+    fn a_double_click_on_the_chevron_toggles_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(
+            shown_rows(&h, &cx),
+            vec![0, 1, 3, 2],
+            "L1 opened once and stayed open"
         );
     }
 

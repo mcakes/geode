@@ -88,10 +88,21 @@
 //! on first switch and persist" — spec §3.6), so a session restore leaves
 //! the *set* of touched workspaces exactly as the user left it, not just the
 //! non-empty ones.
+//!
+//! Two more top-level tables ride the same file, each written only when
+//! there is something to write and read back as "nothing" when absent:
+//! `[frame]` (Phase 4a §3.6 — the global scope, active grouping slot and
+//! as-of, see [`FrameRecord`]) and `[palette.usage]` (2026-09-12 — the
+//! command palette's per-row use count and last-used stamp, see
+//! [`crate::palette_usage::PaletteUsage`]; it lives here rather than in a
+//! file of its own because the user config dir is mtime-watched for every
+//! `*.toml` but this one, and a separate file would trigger a config
+//! reload on every palette dispatch).
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::palette_usage::PaletteUsage;
 use crate::tiling::{
     DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock, DockSide, Docks, FocusRegion, Node, Orientation, TileId,
     Tree, Workspace, Workspaces,
@@ -149,6 +160,9 @@ pub struct Restored {
     pub workspaces: Workspaces,
     pub tiles: TileRecords,
     pub frame: Option<FrameRecord>,
+    /// The palette's usage history (`[palette.usage]`), empty for every
+    /// file written before it existed — a fresh history, never a warning.
+    pub palette_usage: PaletteUsage,
     pub warnings: Vec<String>,
 }
 
@@ -309,6 +323,7 @@ pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    palette_usage: &PaletteUsage,
 ) -> toml::Table {
     let mut root = toml::Table::new();
     root.insert(
@@ -429,6 +444,17 @@ pub fn to_toml(
         root.insert("frame".to_string(), toml::Value::Table(record.to_toml()));
     }
 
+    // The palette's usage history as `[palette.usage]` — omitted while
+    // empty, the same present-only-when-meaningful rule as `[frame]`.
+    if !palette_usage.is_empty() {
+        let mut palette = toml::Table::new();
+        palette.insert(
+            "usage".to_string(),
+            toml::Value::Table(palette_usage.to_toml()),
+        );
+        root.insert("palette".to_string(), toml::Value::Table(palette));
+    }
+
     root
 }
 
@@ -525,10 +551,31 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         }
     };
 
+    // The palette's usage history (`[palette.usage]`): absent in every
+    // file written before it existed, which is an empty history and no
+    // warning; a `palette` or `usage` that is not a table is a warning
+    // and an empty history, never a failed load.
+    let palette_usage = match table.get("palette") {
+        None => PaletteUsage::new(),
+        Some(toml::Value::Table(palette)) => match palette.get("usage") {
+            None => PaletteUsage::new(),
+            Some(toml::Value::Table(usage)) => PaletteUsage::from_toml(usage, &mut warnings),
+            Some(_) => {
+                warnings.push("palette.usage is not a table; ignored".to_string());
+                PaletteUsage::new()
+            }
+        },
+        Some(_) => {
+            warnings.push("palette is not a table; ignored".to_string());
+            PaletteUsage::new()
+        }
+    };
+
     Ok(Restored {
         workspaces,
         tiles,
         frame,
+        palette_usage,
         warnings,
     })
 }
@@ -915,8 +962,9 @@ pub fn to_string_pretty(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    palette_usage: &PaletteUsage,
 ) -> Result<String, String> {
-    let table = to_toml(workspaces, tiles, frame);
+    let table = to_toml(workspaces, tiles, frame, palette_usage);
     toml::to_string_pretty(&table).map_err(|e| e.to_string())
 }
 
@@ -979,8 +1027,9 @@ pub fn save(
     workspaces: &Workspaces,
     tiles: &TileRecords,
     frame: Option<&FrameRecord>,
+    palette_usage: &PaletteUsage,
 ) -> std::io::Result<()> {
-    let text = to_string_pretty(workspaces, tiles, frame)
+    let text = to_string_pretty(workspaces, tiles, frame, palette_usage)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     write_atomic(path, &text)
 }
@@ -997,6 +1046,7 @@ pub fn load(path: &Path) -> Restored {
         workspaces: Workspaces::new(),
         tiles: TileRecords::new(),
         frame: None,
+        palette_usage: PaletteUsage::new(),
         warnings,
     };
 
@@ -1021,6 +1071,12 @@ pub fn load(path: &Path) -> Restored {
 mod tests {
     use super::*;
     use crate::tiling::{Direction, apply_workspace_action};
+
+    /// An empty usage history, for the tests that serialize a session and
+    /// do not care about the palette.
+    fn no_usage() -> PaletteUsage {
+        PaletteUsage::new()
+    }
 
     fn act(s: &str) -> crate::actions::ActionId {
         crate::actions::ActionId(s.to_string())
@@ -1065,7 +1121,7 @@ mod tests {
             },
         );
 
-        let text = to_string_pretty(&ws, &tiles, None).unwrap();
+        let text = to_string_pretty(&ws, &tiles, None, &no_usage()).unwrap();
         assert!(
             text.contains(&format!("[workspaces.1.tiles.{}]", ids[0].0)),
             "{text}"
@@ -1090,7 +1146,7 @@ mod tests {
                 state: toml::Table::new(),
             },
         );
-        let mut table = to_toml(&ws, &tiles, None);
+        let mut table = to_toml(&ws, &tiles, None, &no_usage());
         // Force the stray record in under workspace 1 regardless of what
         // `to_toml` filtered.
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
@@ -1117,7 +1173,7 @@ mod tests {
     fn a_tile_record_without_a_module_or_with_a_bad_state_is_dropped_with_a_warning() {
         let ws = two_tile_workspaces();
         let id = ws.active().tree().tiles()[0].0;
-        let mut table = to_toml(&ws, &TileRecords::new(), None);
+        let mut table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
         let mut tiles_table = toml::Table::new();
         let mut no_module = toml::Table::new();
@@ -1133,7 +1189,7 @@ mod tests {
     fn a_session_without_tiles_still_loads_and_writes_no_tiles_table() {
         // Every pre-Phase-3 session file.
         let ws = two_tile_workspaces();
-        let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
+        let text = to_string_pretty(&ws, &TileRecords::new(), None, &no_usage()).unwrap();
         assert!(!text.contains("tiles"), "{text}");
         let restored = from_toml(&text.parse().unwrap()).unwrap();
         assert!(restored.tiles.is_empty());
@@ -1144,7 +1200,7 @@ mod tests {
     #[test]
     fn round_trips_a_fresh_workspaces() {
         let ws = Workspaces::new();
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: restored,
             warnings,
@@ -1166,7 +1222,7 @@ mod tests {
         apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
         ws.switch(1);
 
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: restored,
             warnings,
@@ -1210,7 +1266,7 @@ mod tests {
         // `from_toml` no longer reads `extra` at all — the layout must
         // still load intact, with the legacy key simply ignored like any
         // other unknown key.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let mut extra_table = toml::Table::new();
         extra_table.insert(
             "theme_mode".to_string(),
@@ -1230,7 +1286,7 @@ mod tests {
 
     #[test]
     fn from_toml_tolerates_unknown_keys() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         table.insert(
             "some_future_field".to_string(),
             toml::Value::String("ignored".to_string()),
@@ -1536,7 +1592,7 @@ mod tests {
         ws.split_active(Orientation::Horizontal);
         ws.split_active(Orientation::Horizontal);
 
-        save(&path, &ws, &TileRecords::new(), None).unwrap();
+        save(&path, &ws, &TileRecords::new(), None, &no_usage()).unwrap();
         assert!(path.exists());
         // The atomic-write temp file must not be left behind, whatever its
         // (now pid+counter-suffixed, fix wave Fix 2) exact name was.
@@ -1566,7 +1622,14 @@ mod tests {
     fn save_does_not_write_a_theme_mode_or_extra_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
-        save(&path, &Workspaces::new(), &TileRecords::new(), None).unwrap();
+        save(
+            &path,
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &no_usage(),
+        )
+        .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("theme_mode"), "{text}");
         assert!(!text.contains("[extra]"), "{text}");
@@ -1576,7 +1639,14 @@ mod tests {
     fn save_creates_the_parent_directory_if_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("session.toml");
-        save(&path, &Workspaces::new(), &TileRecords::new(), None).unwrap();
+        save(
+            &path,
+            &Workspaces::new(),
+            &TileRecords::new(),
+            None,
+            &no_usage(),
+        )
+        .unwrap();
         assert!(path.exists());
     }
 
@@ -1586,7 +1656,7 @@ mod tests {
         ws.split_active(Orientation::Horizontal);
         ws.split_active(Orientation::Horizontal);
         ws.split_active(Orientation::Horizontal);
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: mut restored,
             warnings,
@@ -1632,7 +1702,7 @@ mod tests {
     #[test]
     fn round_trips_docks_and_region() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: restored,
             warnings,
@@ -1692,7 +1762,7 @@ mod tests {
             "fixture sanity: the dock really is empty"
         );
 
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: restored,
             warnings,
@@ -1718,7 +1788,7 @@ mod tests {
         // Pre-dock-shaped state must keep producing pre-dock-shaped files.
         let mut ws = Workspaces::new();
         ws.split_active(Orientation::Horizontal);
-        let text = to_string_pretty(&ws, &TileRecords::new(), None).unwrap();
+        let text = to_string_pretty(&ws, &TileRecords::new(), None, &no_usage()).unwrap();
         assert!(!text.contains("docks"), "{text}");
         assert!(!text.contains("region"), "{text}");
     }
@@ -1726,7 +1796,7 @@ mod tests {
     #[test]
     fn restored_docked_tile_ids_do_not_collide_with_new_allocations() {
         let ws = docked_workspaces();
-        let table = to_toml(&ws, &TileRecords::new(), None);
+        let table = to_toml(&ws, &TileRecords::new(), None, &no_usage());
         let Restored {
             workspaces: mut restored,
             warnings: _,
@@ -1759,7 +1829,7 @@ mod tests {
 
     #[test]
     fn from_toml_drops_a_dock_tile_also_present_in_the_tree() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1_text = r#"
             focused = 1
             region = "left"
@@ -1796,7 +1866,7 @@ mod tests {
 
     #[test]
     fn from_toml_heals_a_region_pointing_at_a_hidden_or_absent_dock() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             focused = 1
             region = "bottom"
@@ -1821,7 +1891,7 @@ mod tests {
     #[test]
     fn from_toml_heals_an_out_of_range_or_nan_dock_size_to_default() {
         for bad in ["size = 0.9", "size = -3.0", "size = nan"] {
-            let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+            let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
             let ws1: toml::Table = format!(
                 r#"
                     [docks.right]
@@ -1860,7 +1930,7 @@ mod tests {
         // live: fullscreen blocks focus from entering docks, and mod+f is
         // a no-op while dock-focused). Heals by clearing fullscreen and
         // keeping the dock focus, with a warning.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             focused = 1
             fullscreen = 1
@@ -1897,7 +1967,7 @@ mod tests {
 
     #[test]
     fn from_toml_heals_an_unknown_region_string_to_main() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
             ws_table.insert("1".to_string(), toml::Value::Table(ws1));
@@ -1918,7 +1988,7 @@ mod tests {
     fn from_toml_tolerates_hostile_dock_shapes_without_failing() {
         // docks not a table; a side not a table; tile negative/non-integer;
         // visible non-bool — every one heals with a warning, none fails.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [node]
             kind = "leaf"
@@ -2015,7 +2085,7 @@ mod tests {
 
     #[test]
     fn a_dock_with_both_node_and_legacy_tile_picks_the_node_with_a_warning() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [docks.left]
             tile = 9
@@ -2050,7 +2120,7 @@ mod tests {
         // Dock trees never have fullscreen — a hand-edited `fullscreen`
         // key inside a dock table is ignored (warned), and the dock's
         // tree loads without it.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [docks.bottom]
             visible = true
@@ -2084,7 +2154,7 @@ mod tests {
         // A structurally invalid dock subtree (single-child split) heals
         // to an empty dock with a warning — the workspace's main tree is
         // never discarded over a dock (docks are an adornment).
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -2125,7 +2195,7 @@ mod tests {
         // AND its right dock tree; tile 2 only in the right dock. The
         // main tree wins, then first dock claim wins; the right dock
         // keeps its unique tile.
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             focused = 1
             [node]
@@ -2180,7 +2250,7 @@ mod tests {
         // exactly one warning is emitted for the one healed duplicate
         // (the pre-fix all-copies prune deleted both leaves and, walking
         // a pre-removal snapshot, warned twice).
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -2223,7 +2293,7 @@ mod tests {
 
     #[test]
     fn a_dangling_dock_focused_reference_heals_to_the_first_tile() {
-        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         let ws1: toml::Table = r#"
             [docks.left]
             visible = true
@@ -2275,7 +2345,12 @@ mod tests {
     #[test]
     fn a_frame_record_round_trips_through_session_toml_with_every_field() {
         let record = sample_frame_record();
-        let table = to_toml(&Workspaces::new(), &TileRecords::new(), Some(&record));
+        let table = to_toml(
+            &Workspaces::new(),
+            &TileRecords::new(),
+            Some(&record),
+            &no_usage(),
+        );
         assert!(table.contains_key("frame"), "{table:?}");
 
         let Restored {
@@ -2309,10 +2384,74 @@ mod tests {
 
     #[test]
     fn no_frame_record_writes_no_frame_table() {
-        let table = to_toml(&Workspaces::new(), &TileRecords::new(), None);
+        let table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
         assert!(!table.contains_key("frame"), "{table:?}");
         let Restored { frame, .. } = from_toml(&table).unwrap();
         assert_eq!(frame, None);
+    }
+
+    // -- palette usage ----------------------------------------------------
+
+    #[test]
+    fn palette_usage_round_trips_through_session_toml() {
+        let mut usage = PaletteUsage::new();
+        usage.record("action:workspace::close_tile", 1_800_000_000);
+        usage.record("theme:Gruvbox Dark", 1_800_000_100);
+        let text = to_string_pretty(&Workspaces::new(), &TileRecords::new(), None, &usage).unwrap();
+        assert!(text.contains("[palette.usage"), "{text}");
+        let Restored {
+            palette_usage: restored,
+            warnings,
+            ..
+        } = from_toml(&text.parse().unwrap()).unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(restored, usage);
+    }
+
+    #[test]
+    fn empty_palette_usage_writes_no_palette_table() {
+        let table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
+        assert!(!table.contains_key("palette"), "{table:?}");
+    }
+
+    /// Every pre-existing session file has no `[palette]` table: that is
+    /// a fresh, empty history, not a warning.
+    #[test]
+    fn a_session_file_without_a_palette_table_restores_empty_usage_silently() {
+        let table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
+        assert!(!table.contains_key("palette"), "{table:?}");
+        let Restored {
+            palette_usage,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(palette_usage.is_empty());
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_malformed_palette_table_warns_and_restores_empty_usage() {
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
+        table.insert("palette".to_string(), toml::Value::Integer(3));
+        let Restored {
+            palette_usage,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(palette_usage.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+
+        let mut table = to_toml(&Workspaces::new(), &TileRecords::new(), None, &no_usage());
+        let mut palette = toml::Table::new();
+        palette.insert("usage".to_string(), toml::Value::Boolean(true));
+        table.insert("palette".to_string(), toml::Value::Table(palette));
+        let Restored {
+            palette_usage,
+            warnings,
+            ..
+        } = from_toml(&table).unwrap();
+        assert!(palette_usage.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     #[test]

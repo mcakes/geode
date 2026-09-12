@@ -193,6 +193,71 @@ fn add_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
 /// on its right), so the only divider available is its left one; moving
 /// it left widens the focused tile (the edge-flip case documented on
 /// `Tree::move_divider`).
+/// Moving focus must not move content. gpui sizes a box border-box, so
+/// a tile whose ring grows from 1px to 2px on focus hands its occupant
+/// a content box 1px smaller on every side — every row of a blotter
+/// jogged a pixel whenever focus arrived or left. The chrome's
+/// border + padding is constant, so the occupant's box is too.
+#[gpui::test]
+fn moving_focus_does_not_shift_tile_content(cx: &mut gpui::TestAppContext) {
+    let (window, mut cx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut cx);
+    cx.simulate_keystrokes("ctrl-v");
+    cx.simulate_keystrokes("ctrl-v");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let right = shell.read_with(&cx, |s, _| {
+        s.services.workspaces.active().focused_tile().unwrap()
+    });
+    let left = shell.read_with(&cx, |s, _| {
+        s.services
+            .workspaces
+            .active()
+            .tree()
+            .layout(Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 800.0,
+                h: 600.0,
+            })
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| *id != right)
+            .expect("two tiles")
+    });
+    // `debug_bounds` takes `&'static str`; leak the dynamic selectors
+    // (test-only, a few bytes).
+    let left_sel: &'static str = Box::leak(format!("tile-content-{}", left.0).into_boxed_str());
+    let right_sel: &'static str = Box::leak(format!("tile-content-{}", right.0).into_boxed_str());
+    let left_before = cx.debug_bounds(left_sel).expect("left occupant painted");
+    let right_before = cx.debug_bounds(right_sel).expect("right occupant painted");
+
+    cx.simulate_keystrokes("alt-h");
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        Some(left),
+        "sanity: mod+h moved focus to the left tile"
+    );
+    let left_after = cx
+        .debug_bounds(left_sel)
+        .expect("left occupant still painted");
+    let right_after = cx
+        .debug_bounds(right_sel)
+        .expect("right occupant still painted");
+    assert_eq!(
+        left_before, left_after,
+        "the tile that GAINED focus must keep its content box"
+    );
+    assert_eq!(
+        right_before, right_after,
+        "the tile that LOST focus must keep its content box"
+    );
+}
+
 #[gpui::test]
 fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);

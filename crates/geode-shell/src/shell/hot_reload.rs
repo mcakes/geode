@@ -131,7 +131,7 @@ pub fn rebuild_saved_scopes(
 impl ShellView {
     /// Apply (or reject) a freshly loaded `Config` (Task 1c-1): rebuild the
     /// keymap and mod alias from it, re-apply the theme only if `[theme]`
-    /// actually changed (so a runtime `theme::toggle_mode` isn't silently
+    /// actually changed (so a runtime palette theme pick isn't silently
     /// clobbered by an unrelated reload — e.g. only `keymap.toml` edited),
     /// close an open palette only if ITS snapshot inputs actually changed
     /// (Review fix round 1, Finding 2 — refines the original brief's "must

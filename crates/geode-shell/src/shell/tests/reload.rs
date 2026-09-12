@@ -30,7 +30,7 @@ fn services_with_a_builtin_views_doc() -> ShellServices {
 }
 
 /// The bug a trader actually hit: the app writes a config file of its own
-/// accord — here `theme::toggle_mode`'s `persist_theme`, exactly as the
+/// accord — here a theme pick's `persist_theme`, exactly as the
 /// views dialog's save or a font-size change would — the mtime watcher
 /// sees the change and reloads, and the views the app compiled in are
 /// gone. Under `--demo` that meant the views dialog reporting "no views
@@ -60,20 +60,16 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
 
     // The user changes the theme; `persist_theme` writes `app.toml` into
     // the user config dir off the UI thread.
-    vcx.update(|window, cx| {
+    vcx.update(|_window, cx| {
         shell.update(cx, |shell, cx| {
-            shell.dispatch(
-                &ActionId("theme::toggle_mode".to_string()),
-                None,
-                window,
-                cx,
-            );
+            assert!(shell.services.theme.apply("Gruvbox Light", cx));
+            shell.persist_theme(cx);
         });
     });
     vcx.run_until_parked();
     assert!(
         dir.path().join("app.toml").exists(),
-        "the theme toggle should have written app.toml — without that \
+        "the theme pick should have written app.toml — without that \
          write there is no reload to test"
     );
 
@@ -355,15 +351,9 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
     });
 }
 
-fn config_with_theme(name: &str, mode: &str) -> Config {
+fn config_with_theme(name: &str) -> Config {
     Config::load(&ConfigSources {
-        builtin: vec![
-            LayerDoc::builtin(
-                "app",
-                &format!("[theme]\nname = \"{name}\"\nmode = \"{mode}\"\n"),
-            )
-            .unwrap(),
-        ],
+        builtin: vec![LayerDoc::builtin("app", &format!("[theme]\nname = \"{name}\"\n")).unwrap()],
         desk: None,
         user: None,
     })
@@ -386,7 +376,7 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
                 // (below and via `new_config`), which only ever assigns
                 // `self.services.config` and never reads `builtin` — see
                 // `test_services`'s own comment.
-                services.config = config_with_theme("Gruvbox", "dark");
+                services.config = config_with_theme("Gruvbox Dark");
                 let view = cx.new(|cx| {
                     // Mirrors what main.rs does before opening the
                     // window: apply the theme the starting config
@@ -425,7 +415,7 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
         "sanity: the starting theme must actually be the one the old config names"
     );
 
-    let new_config = config_with_theme("Default", "dark");
+    let new_config = config_with_theme("Default Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     shell.read_with(&cx, |shell, _| {
@@ -439,11 +429,12 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
 
 /// `apply_reload`'s theme-reapply guard, holding: when the new config's
 /// `[theme]` table is identical to the old one's, the reload must NOT
-/// re-apply the theme — a runtime `theme::toggle_mode` done between the
-/// old config being applied and this reload survives untouched, rather
-/// than being silently reverted to what `[theme]` still says.
+/// re-apply the theme — a runtime palette/settings theme pick done
+/// between the old config being applied and this reload survives
+/// untouched, rather than being silently reverted to what `[theme]`
+/// still says.
 #[gpui::test]
-fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
+fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
     cx: &mut gpui::TestAppContext,
 ) {
     cx.update(gpui_component::init);
@@ -457,7 +448,7 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
                 // (below and via `new_config`), which only ever assigns
                 // `self.services.config` and never reads `builtin` — see
                 // `test_services`'s own comment.
-                services.config = config_with_theme("Gruvbox", "dark");
+                services.config = config_with_theme("Gruvbox Dark");
                 let view = cx.new(|cx| {
                     services.theme.apply_from_config(&services.config, cx);
                     ShellView::new(services, None, None, window, cx)
@@ -480,9 +471,11 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    // A runtime toggle (mod+shift+t / theme::toggle_mode), independent
-    // of config, before any reload happens.
-    shell.update(&mut cx, |shell, cx| shell.services.theme.toggle_mode(cx));
+    // A runtime pick (palette or settings dialog), independent of
+    // config, before any reload happens.
+    shell.update(&mut cx, |shell, cx| {
+        assert!(shell.services.theme.apply("Gruvbox Light", cx));
+    });
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell
             .services
@@ -490,12 +483,12 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
             .active_name()
             .to_string()),
         "Gruvbox Light",
-        "sanity: toggling from Gruvbox Dark should flip to Gruvbox Light"
+        "sanity: the pick applied"
     );
 
     // Same [theme] table as the config already applied — a reload
     // triggered by, say, an unrelated keymap.toml edit.
-    let new_config = config_with_theme("Gruvbox", "dark");
+    let new_config = config_with_theme("Gruvbox Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     shell.read_with(&cx, |shell, _| {
@@ -503,7 +496,7 @@ fn apply_reload_preserves_a_runtime_toggle_when_theme_table_is_unchanged(
             shell.services.theme.active_name(),
             "Gruvbox Light",
             "an unchanged [theme] table must not re-apply the theme, or the \
-             runtime toggle above would be silently reverted"
+             runtime pick above would be silently reverted"
         );
         assert_eq!(
             shell.last_reload,
@@ -558,7 +551,7 @@ fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
     // ever writes an "app" doc's `[theme]` section, so this new
     // config's `layered_docs("keymap")` is just as empty as the
     // starting one's, and neither sets `[keymap] mod`).
-    let new_config = config_with_theme("Gruvbox", "dark");
+    let new_config = config_with_theme("Gruvbox Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
     shell.read_with(&cx, |shell, _| {

@@ -730,8 +730,21 @@ never gets near either number.
 | `frame::scope_undo` / `frame::scope_redo` | `mod+z` / `mod+shift+z` | The stacks of §3.8. |
 | `scope::<name>` | unbound | Load a saved scope; one per name, palette category "Scope". |
 
-All in the `shell` context, so they work with any tile focused and are
-unavailable while an input has focus, same as every shell chord.
+All in the `shell` context, so they work with any tile focused — and,
+since 2026-09-12 (user ruling: "when focused on a text field, key
+bindings with modifier keys should still work"), from the scope bar's
+text field too. While that field has focus a keystroke carrying ctrl,
+alt or cmd (`Modifiers::is_chord`; shift alone is typing, `shift+d` is
+`D`) is resolved as a single keystroke against the `workspace` context
+alone — never the focused tile's, so a blotter's `ctrl+d` does not page
+it behind the typing — and dispatched; an unbind swallows it; anything
+else falls through to the field. A chord that changes the frame's text
+while the field keeps focus (`mod+z`) is reflected back into the field.
+The per-tile command line keeps only its palette-toggle exception, and
+a modal dialog still owns the keyboard outright — but an overlay (the
+palette or any modal) opened while the field held focus returns focus
+to the field when it closes, not to the shell root (second ruling of
+2026-09-12); opened from the root it returns to the root as before.
 
 As built: `mod+/`, `mod+p`, `mod+t`, `mod+z` and `mod+shift+z` ship
 exactly as bound above. `frame::live`, `frame::as_of_undo` and

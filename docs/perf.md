@@ -63,7 +63,14 @@ These rows read `—` until a module records its first requery (Plan 3c).
   palette's size) 5.9 µs → 11.5 µs — all per keystroke, not per frame,
   and well inside the 8 ms pure-UI budget. The two `n × m` tables are
   allocated per call; a reusable scratch buffer is the first thing to
-  reach for if a much larger list ever makes this visible.
+  reach for if a much larger list ever makes this visible. Later the
+  same day the category joined the match text (`"{title} {category}"`,
+  discounted past the title) and a per-row usage bonus joined the sort
+  key: the per-item text is ~6–10 chars longer, so the 66-item pass
+  read 13.2 µs (was 11.5), the 2000-item pass 405 µs (was 360), and
+  `fuzzy_match_one` (a bare title, no category) 400 ns, unchanged. The
+  bonus itself costs nothing per keystroke — one `u32` add per matched
+  row, baked per row once at palette open.
 - `cargo bench -p geode-demo-data` — the synthetic data generator
   (100k/1M rows), established in phase 0.
 - `cargo bench --workspace --no-run` — CI compiles every bench on both

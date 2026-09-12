@@ -111,6 +111,10 @@ pub struct ShellServices {
     /// fresh session (no file, or one with no `[frame]` table yet) and in
     /// every test setup that doesn't opt in.
     pub restored_frame: Option<crate::session::FrameRecord>,
+    /// The palette's usage history from `session.toml`'s `[palette.usage]`
+    /// table — empty for a fresh session and in every test setup that
+    /// doesn't opt in. `ShellView::new` takes it as the live history.
+    pub restored_palette_usage: crate::palette_usage::PaletteUsage,
     /// The `tracing` foundation (Phase 4b Task 2): the ring the
     /// diagnostics tile reads, the control `:level` writes through, and
     /// the levels `[log]` resolved to at startup. `None` in every test
@@ -360,6 +364,19 @@ pub struct ShellView {
     /// built once at palette-open, not per frame) and dropped on close —
     /// nothing about it survives being closed and reopened.
     palette: Option<PaletteState>,
+    /// How often and how recently each palette row was chosen
+    /// (`crate::palette_usage`): read once per palette open to rank the
+    /// rows (`PaletteState::with_usage`), written by every palette
+    /// dispatch but `palette::toggle`'s own row, and persisted as
+    /// `session.toml`'s `[palette.usage]` table through the same
+    /// coalesced flush the layout rides.
+    palette_usage: crate::palette_usage::PaletteUsage,
+    /// Bumped by every `palette_usage` mutation; `take_dirty_session_write`
+    /// compares it against `last_palette_usage_written`, the same shape
+    /// as `last_frame_versions_written`, so a palette dispatch that
+    /// mutates nothing else still reaches the flush.
+    palette_usage_version: u64,
+    last_palette_usage_written: u64,
     /// The open modal's state (Task 9, instant-modal redesign), or `None`
     /// when closed. Set only through [`dialog::open_shell_dialog`] (the one
     /// standard door — see that function's and `dialog`'s module doc), read
@@ -553,6 +570,19 @@ pub struct ShellView {
     /// whole bug) — a fix that waited for the next keystroke to run would
     /// never run at all.
     pending_focus_restore: bool,
+    /// Did the scope bar's text field hold focus when the current overlay
+    /// (palette or modal) opened? Recorded by `toggle_palette`'s open arm
+    /// and `dialog::open_shell_dialog_with_key`, consumed by
+    /// `close_palette` and `close_modal`, which return focus to the field
+    /// instead of the shell root (user ruling 2026-09-12: a dialog
+    /// launched from the field hands focus back to it). The palette's
+    /// enter arm closes the palette *before* dispatching, so a dialog an
+    /// item opens sees the field focused again and records it afresh —
+    /// palette → dialog → escape lands back in the field with no chain
+    /// bookkeeping. The overlays are mutually exclusive (the door closes
+    /// the palette; the modal branch of `handle_key_down` never lets the
+    /// toggle through), so one flag serves both.
+    overlay_return_to_filter: bool,
     /// The in-flight divider drag, or `None` when no drag is active
     /// (drag-splitters task). Set by a strip's mouse-down, advanced by the
     /// full-window drag catcher's mouse-moves (live re-layout via the pure
@@ -1290,6 +1320,9 @@ impl ShellView {
         // built. `clear_history` afterwards drops the undo entry
         // `set_scope` just pushed: a restored session must not start with
         // a phantom "undo" back to the empty scope nobody actually chose.
+        // The palette's usage history restored with the session, the same
+        // way as the frame record just below.
+        let palette_usage = services.restored_palette_usage.clone();
         if let Some(record) = services.restored_frame.clone() {
             frame.update(cx, |f, _cx| {
                 f.set_scope(record.scope);
@@ -1319,6 +1352,9 @@ impl ShellView {
             find_style,
             focus_handle,
             palette: None,
+            palette_usage,
+            palette_usage_version: 0,
+            last_palette_usage_written: 0,
             modal: None,
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
@@ -1337,6 +1373,7 @@ impl ShellView {
             last_tiles_written: crate::session::TileRecords::new(),
             last_frame_versions_written: (0, 0, 0),
             pending_focus_restore: false,
+            overlay_return_to_filter: false,
             divider_drag: None,
             tile_drag: None,
             filter_input,
@@ -1396,8 +1433,35 @@ impl ShellView {
         self.picker = None;
         self.as_of_dialog = None;
         self.object_dialog = None;
-        self.focus_handle.focus(window, cx);
+        self.return_focus_from_overlay(window, cx);
         cx.notify();
+    }
+
+    /// Where focus goes when an overlay closes: back to the scope bar's
+    /// text field if it was focused when the overlay opened
+    /// (`overlay_return_to_filter`, consumed here), the shell root
+    /// otherwise. The one door both `close_modal` and `close_palette` use.
+    pub(super) fn return_focus_from_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.overlay_return_to_filter) {
+            self.filter_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
+    /// Does the scope bar's text field hold keyboard focus right now?
+    pub(super) fn filter_field_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
     }
 
     /// Fired by the `cx.observe_in(&frame, ..)` set up in `new` whenever

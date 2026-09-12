@@ -420,7 +420,7 @@ globally, as §4.3 says a `:scope` from any tile should.
 | `:asof <time>` | Set the frame as-of. `HH:MM` means today; RFC 3339 for anything else. |
 | `:live` | Return to live. |
 | `:view <name>` | Show a different view in this tile. |
-| `:sort <column> [desc]` / `:sort clear` | Sort siblings by a column (§6.3); `s` on the cursor column is the no-typing form. |
+| `:sort <column> [asc\|desc\|abs [asc\|desc]]` / `:sort clear` | Sort siblings by a column (§6.3); `s` (signed) and `S` (absolute) on the cursor column are the no-typing forms. A bare `abs` is `abs desc`. |
 
 ### 4.4 The readout
 
@@ -760,11 +760,28 @@ are left-aligned in the UI face. Dates and booleans go through
 
 `s` in normal mode cycles the cursor column through ascending,
 descending and cleared — `h`/`l` already put the cursor on the column,
-so the common case needs no typing. `:sort delta01 desc` (completed,
-§3.4) covers a column that is off-screen, and a header click does the
-same by mouse. All three set the same tile-local sort, shown as an
-arrow in the column header. It is applied inside flatten to each sibling range: siblings are compared on
-the column's value with NULL last, ties keep row order. This is
+so the common case needs no typing. `S` cycles the same column through
+the two *absolute* orders, magnitude descending then ascending, then
+cleared (added 2026-09-12): a trader hunting the biggest exposure does
+not care which way it points. Each key starts its own cycle afresh
+from the other's order rather than continuing a cycle the trader did
+not choose, and `S` is inert on a text column, which has no magnitude.
+`:sort delta01 desc` (completed, §3.4) covers a column that is
+off-screen — `:sort delta01 abs`, `abs asc` and `abs desc` spell the
+absolute orders, a bare `abs` meaning `abs desc` — and a header click
+does the same by mouse: a header click walks cleared → desc → asc →
+abs desc → abs asc → cleared on a measure (user ruling 2026-09-12;
+desc first because that is where gpui-component's own three-state
+click cycle started before the blotter took it over — the delegate
+ignores the component's proposal and steps its own cycle, then
+refreshes the table so the cached arrow and drag-preview name follow;
+the painted label is read live) and
+cleared → desc → asc → cleared on a text column. All three set the same
+tile-local sort, shown as an arrow in the column header; an absolute
+sort also appends `|x|` to the header label, since the arrow only
+knows a direction. It is applied inside flatten to each sibling range:
+siblings are compared on the column's value — its magnitude under an
+absolute order — with NULL last, ties keep row order. This is
 view-shaping in-app (PHILOSOPHY §1 lists sorting as such) and it keeps
 the compiler's determinism order untouched. A `NonAttributable` cell
 sorts as NULL; a `DeterminedNonAdditive` cell sorts on its value — it is

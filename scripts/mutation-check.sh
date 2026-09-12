@@ -1949,6 +1949,80 @@ run_mutation "hosting: a closed tile drops its occupant" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# ---- chords from the scope bar's text field (Phase 4 §3.11, ruling 2026-09-12)
+
+run_mutation "field chords: a modified keystroke in the focused field dispatches its shell binding" \
+  crates/geode-shell/src/shell/input.rs \
+  '                && ks.mods.is_chord()' \
+  '                && false' \
+  geode-shell \
+  a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
+
+run_mutation "field chords: shift alone is typing, not a chord" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '        self.ctrl || self.alt || self.cmd' \
+  '        self.ctrl || self.alt || self.cmd || self.shift' \
+  geode-shell \
+  a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
+
+run_mutation "field chords: resolved against the workspace context alone, never the focused tile's" \
+  crates/geode-shell/src/shell/input.rs \
+  '                let stack = [KeyContext::new("workspace")];' \
+  '                let stack = self.context_stack(cx);' \
+  geode-shell \
+  a_chord_in_the_focused_tiles_own_context_does_not_fire_from_the_field
+
+run_mutation "field chords: an unbind swallows the chord rather than falling through to the builtin" \
+  crates/geode-shell/src/shell/input.rs \
+  '                    if action.0 != UNBOUND_ACTION {' \
+  '                    if true {' \
+  geode-shell \
+  an_unbound_chord_typed_into_the_field_is_swallowed
+
+run_mutation "field chords: the last matching layer wins, so a user unbind shadows the builtin" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.services.keymap.bindings().iter().rfind(|binding| {' \
+  '        self.services.keymap.bindings().iter().find(|binding| {' \
+  geode-shell \
+  an_unbound_chord_typed_into_the_field_is_swallowed
+
+run_mutation "field chords: a dispatched chord reflects the frame's text back into the still-focused field" \
+  crates/geode-shell/src/shell/input.rs \
+  '                        self.reflect_frame_text_into_focused_field(window, cx);' \
+  '' \
+  geode-shell \
+  a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it
+
+# ---- overlays return focus to the field they opened from (ruling 2026-09-12)
+
+run_mutation "overlay focus: the dialog door records whether the field held focus" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    view.overlay_return_to_filter = view.filter_field_focused(window, cx);' \
+  '    view.overlay_return_to_filter = false;' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
+run_mutation "overlay focus: closing an overlay returns focus to the field when recorded" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if std::mem::take(&mut self.overlay_return_to_filter) {' \
+  '        if !std::mem::take(&mut self.overlay_return_to_filter) && false {' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
+run_mutation "overlay focus: the palette's open arm records whether the field held focus" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.overlay_return_to_filter = self.filter_field_focused(window, cx);' \
+  '        self.overlay_return_to_filter = false;' \
+  geode-shell \
+  the_palette_opened_from_the_field_returns_focus_to_it_on_escape
+
+run_mutation "overlay focus: closing a palette that was not open leaves focus alone" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if self.palette.take().is_none() {' \
+  '        if self.palette.take().is_none() && false {' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
 # Re-anchored 2026-09-08 (add-tile): the bare
 # `o.content.set_visible(false, cx);` line matched the FIRST of two
 # occurrences — MAJ-2's vanished-occupant loop, which the MAJ-2 entry
@@ -2042,8 +2116,8 @@ run_mutation "session: tile state round-trips" \
 
 run_mutation "session: a state-only change alone still flushes" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty {' \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty {' \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
@@ -2094,6 +2168,13 @@ run_mutation "commandline: a second tab refreshes the accepted word range instea
   '                        let _ = cursor;' \
   geode-shell \
   a_second_tab_cycles_the_completion_instead_of_corrupting_the_line
+
+run_mutation "tile chrome: the unfocused tile pads the pixel its thinner ring gives up, so focus never shifts content" \
+  crates/geode-shell/src/shell/render.rs \
+  '                .when(!is_focused, |el| el.border_1().p(px(1.0)))' \
+  '                .when(!is_focused, |el| el.border_1())' \
+  geode-shell \
+  moving_focus_does_not_shift_tile_content
 
 run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
   crates/geode-shell/src/shell/render.rs \
@@ -2364,10 +2445,101 @@ run_mutation "yank: numbers are raw and unscaled" \
 
 run_mutation "commands: sort desc is parsed" \
   crates/geode-blotter/src/core/commands.rs \
-  '                    descending: true,' \
-  '                    descending: false,' \
+  '                (Some("desc"), None, _) => SortOrder::Desc,' \
+  '                (Some("desc"), None, _) => SortOrder::Asc,' \
   geode-blotter \
   every_command_parses
+
+run_mutation "commands: a bare sort abs is abs desc" \
+  crates/geode-blotter/src/core/commands.rs \
+  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsDesc,' \
+  '                (Some("abs"), None, _) | (Some("abs"), Some("desc"), None) => SortOrder::AbsAsc,' \
+  geode-blotter \
+  every_command_parses
+
+run_mutation "flatten: the absolute orders compare magnitudes, not signed values" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    let key = |v: f64| if absolute { v.abs() } else { v };' \
+  '    let key = |v: f64| v;' \
+  geode-blotter \
+  absolute_orders_compare_magnitudes_and_keep_null_last
+
+run_mutation "flatten: NaN is a NULL to the comparator, not Equal-to-everything" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '    snapshot.f64_at(i, row).filter(|v| !v.is_nan())' \
+  '    snapshot.f64_at(i, row)' \
+  geode-blotter \
+  nan_sorts_last_like_null_and_never_panics_the_sort
+
+run_mutation "sort cycle: S is inert on a column with no magnitude" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '        if absolute && !measure {' \
+  '        if false {' \
+  geode-blotter \
+  shift_s_is_inert_on_a_column_with_no_magnitude_where_s_is_not
+
+run_mutation "sort cycle: S steps abs desc on to abs asc before clearing" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),' \
+  '                Some(SortOrder::AbsDesc) => None,' \
+  geode-blotter \
+  the_key_cycles_walk_their_own_orders_and_restart_from_the_others
+
+run_mutation "sort cycle: s from an absolute order restarts at asc, not desc" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '                _ => Some(SortOrder::Asc),' \
+  '                _ => Some(SortOrder::Desc),' \
+  geode-blotter \
+  the_key_cycles_walk_their_own_orders_and_restart_from_the_others
+
+run_mutation "click cycle: a measure's click goes on from asc to abs desc, not to cleared" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
+  '            Some(SortOrder::Asc) if measure => None,' \
+  geode-blotter \
+  a_header_click_walks_every_order_a_measure_can_show_desc_first
+
+run_mutation "click cycle: a text column's click clears after asc instead of entering the absolute pair" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            Some(SortOrder::Asc) if measure => Some(SortOrder::AbsDesc),' \
+  '            Some(SortOrder::Asc) => Some(SortOrder::AbsDesc),' \
+  geode-blotter \
+  a_header_click_on_a_text_column_skips_the_absolute_pair
+
+run_mutation "delegate: a header-click resort moves the component's highlight with the cursor" \
+  crates/geode-blotter/src/delegate.rs \
+  '            table.set_selected_row(row, cx);' \
+  '            let _ = row;' \
+  geode-blotter \
+  a_header_click_cycles_through_the_absolute_orders_too
+
+run_mutation "delegate: a header click steps the blotter's own cycle, not the component's proposal" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let next = SortOrder::click_cycle(current, self.is_measure(col_ix));' \
+  '        let next = SortOrder::cycle(current, false, self.is_measure(col_ix));' \
+  geode-blotter \
+  a_header_click_cycles_through_the_absolute_orders_too
+
+run_mutation "sort order: abs asked of a text column is its signed direction" \
+  crates/geode-blotter/src/core/flatten.rs \
+  '            (SortOrder::AbsDesc, false) => SortOrder::Desc,' \
+  '            (SortOrder::AbsDesc, false) => SortOrder::AbsDesc,' \
+  geode-blotter \
+  an_absolute_order_asked_of_a_text_column_becomes_its_signed_direction
+
+run_mutation "tile: the key cycle reaches the delegate through SortOrder::cycle, not a stale copy" \
+  crates/geode-blotter/src/tile.rs \
+  '                    let next = SortOrder::cycle(current, absolute, measure);' \
+  '                    let next = SortOrder::cycle(current, false, measure);' \
+  geode-blotter \
+  s_and_shift_s_cycle_signed_and_absolute_sorts
+
+run_mutation "delegate: the header marks an absolute sort" \
+  crates/geode-blotter/src/delegate.rs \
+  '        if own_sort.is_some_and(|s| s.order.absolute()) {' \
+  '        if false {' \
+  geode-blotter \
+  s_and_shift_s_cycle_signed_and_absolute_sorts
 
 run_mutation "commands: a completions cursor mid-character is clamped to a boundary" \
   crates/geode-blotter/src/core/commands.rs \
@@ -2627,6 +2799,33 @@ run_mutation "tile: completions offer dataset dimensions, not just displayed col
   '                        Vec::new()' \
   geode-blotter \
   completions_offer_dataset_dimensions_not_just_displayed_columns
+
+# ---- blotter mouse toggles (2026-09-12): a row double-click and a chevron
+# click are `space`. The chevron listener's explicit cursor move in
+# `toggle_row` is deliberately NOT an entry: the table's own `SelectRow`
+# also lands the cursor there, so the two defences overlap and neither
+# is isolated (header rule 2).
+
+run_mutation "tile: a row double-click toggles the row" \
+  crates/geode-blotter/src/tile.rs \
+  '            TableEvent::DoubleClickedRow(row) => this.toggle_row(*row, cx),' \
+  '            TableEvent::DoubleClickedRow(_) => {}' \
+  geode-blotter \
+  a_double_click_on_a_row_toggles_it_like_space
+
+run_mutation "delegate: a single chevron click toggles, a second press is ignored" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        if e.click_count() > 1 {' \
+  '                        if e.click_count() > 0 {' \
+  geode-blotter \
+  a_chevron_click_toggles_the_row
+
+run_mutation "delegate: the chevron stops the row's own click from double-toggling" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        cx.stop_propagation();' \
+  '                        let _ = 0;' \
+  geode-blotter \
+  a_double_click_on_the_chevron_toggles_once
 
 # ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
 
@@ -3118,7 +3317,7 @@ run_mutation "session: [frame] restores as-of" \
 # highlight — the defect the screenshot of 2026-09-12 showed.
 run_mutation "palette: the alignment continues a run rather than restarting greedily" \
   crates/geode-shell/src/palette.rs \
-  '                    let cont = ends_at[prev].map(|s| s + RUN_BONUS);' \
+  '                    let cont = ends_at[prev].map(|s| s + run_at(j));' \
   '                    let cont: Option<u32> = None;' \
   geode-shell indices_prefer_a_later_contiguous_run_over_an_earlier_scattered_one
 
@@ -3137,6 +3336,70 @@ run_mutation "palette: selecting a saved scope loads it" \
   '                    if let Ok(true) = f.load_scope(&name) {' \
   '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
+
+# 2026-09-12 palette ranking: the category joins the match text at a
+# discount. Without the discount a word-start run in a category (`work`
+# in "Workspace", 39) outbids the same letters mid-word in a title
+# ("Framework tools", 31), and the category stops being the
+# lower-preference field the design names it.
+run_mutation "palette: a category character earns less than a title character" \
+  crates/geode-shell/src/palette.rs \
+  '        score.div_ceil(CATEGORY_DIVISOR)' \
+  '        score' \
+  geode-shell a_mid_word_title_match_outranks_a_word_start_category_match
+
+# The usage bonus must actually reach the sort key — dropping it leaves
+# an empty query in bare registry order, the pre-feature behaviour.
+run_mutation "palette: the usage bonus is added to the match score" \
+  crates/geode-shell/src/palette.rs \
+  '                scored.push((i, score + self.bonus[i], indices));' \
+  '                scored.push((i, score, indices));' \
+  geode-shell an_empty_query_lists_used_items_first_by_bonus_then_registry_order
+
+# Recency must be bucketed by age, not flat: reading every record as
+# just-used leaves frequency alone to rank, and a command used once this
+# minute no longer outranks one used once a month ago.
+run_mutation "palette usage: the recency bonus falls with age" \
+  crates/geode-shell/src/palette_usage.rs \
+  '        RECENCY_BONUS[bucket] + self.count.saturating_sub(1).min(FREQUENCY_CAP)' \
+  '        RECENCY_BONUS[0] + self.count.saturating_sub(1).min(FREQUENCY_CAP)' \
+  geode-shell a_more_recent_use_earns_more_than_an_older_one_at_equal_count
+
+# The map is bounded: without the prune the session file grows with every
+# theme or scope a trader ever cycles through.
+run_mutation "palette usage: recording past the cap prunes the lowest entry" \
+  crates/geode-shell/src/palette_usage.rs \
+  '        while self.entries.len() > MAX_ENTRIES {' \
+  '        while self.entries.len() > usize::MAX {' \
+  geode-shell recording_past_the_cap_drops_the_lowest_bonus_entry
+
+# `palette::toggle`'s own row only closes the palette; counting it as a
+# use would climb it up the ranking for doing nothing.
+run_mutation "palette: the toggle row records no use" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if !is_toggle {' \
+  '        {' \
+  geode-shell choosing_the_palette_toggle_row_records_nothing
+
+# The backtrack must use the same discounted constants as the forward
+# pass. Drifting it back to the plain RUN_BONUS keeps every SCORE right
+# and corrupts only the INDICES — `ic` on "Perf overlay" / "Diagnostics"
+# paints the title's `i` plus the category's `c` instead of the one run —
+# the indices-wrong-score-right hole a marker-only test cannot see.
+run_mutation "palette: the backtrack continues a run by the discounted bonus" \
+  crates/geode-shell/src/palette.rs \
+  '            Some(s) if s + run_at(j) + base == cell => j - 1,' \
+  '            Some(s) if s + RUN_BONUS + base == cell => j - 1,' \
+  geode-shell a_contiguous_category_match_backtracks_to_one_run
+
+# A palette dispatch that mutates nothing else (a theme row) must still
+# reach the session flush, or a restart forgets every use since the last
+# layout change.
+run_mutation "palette usage: a usage change alone dirties the session flush" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
+  geode-shell a_palette_dispatch_reaches_the_session_flush
 
 run_mutation "bar: a keystroke sets the frame text" \
   crates/geode-shell/src/shell/mod.rs \

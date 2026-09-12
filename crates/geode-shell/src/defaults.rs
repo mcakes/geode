@@ -117,7 +117,6 @@ context = "workspace"
 [bindings.keys]
 "ctrl+k" = "palette::toggle"
 "ctrl+shift+p" = "palette::toggle"
-"mod+shift+t" = "theme::toggle_mode"
 "ctrl+," = "settings::open"
 "ctrl+=" = "fontsize::increase"
 "ctrl+-" = "fontsize::decrease"
@@ -164,6 +163,7 @@ context = "blotter && mode == normal"
 "n" = "blotter::find_next"
 "shift+n" = "blotter::find_prev"
 "s" = "blotter::sort_cycle"
+"shift+s" = "blotter::sort_cycle_abs"
 "escape" = "blotter::escape"
 
 [[bindings]]
@@ -241,6 +241,10 @@ pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
+    (
+        "blotter::sort_cycle_abs",
+        "Sort by cursor column's magnitude",
+    ),
 ];
 
 /// Just the ids from [`BLOTTER_ACTION_DEFS`], for the mirror test.
@@ -268,6 +272,7 @@ pub const BLOTTER_ACTIONS: &[&str] = &[
     "blotter::find_next",
     "blotter::find_prev",
     "blotter::sort_cycle",
+    "blotter::sort_cycle_abs",
 ];
 
 /// Mirrors `geode_diagnostics::ACTIONS` (id, title) exactly — same
@@ -402,12 +407,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         );
     }
     action(reg, "palette::toggle", "Toggle command palette", "Palette");
-    action(
-        reg,
-        "theme::toggle_mode",
-        "Toggle light/dark theme",
-        "Theme",
-    );
+    // No `theme::toggle_mode` (user ruling 2026-09-12): a theme's name
+    // carries its own light/dark, and the palette's theme rows are the
+    // whole vocabulary — see `theme.rs`'s "No light/dark mode".
     // The sidebar's bottom profile icon, ctrl+,, and the palette all
     // dispatch this (Task 5: the real settings dialog). Category
     // "Appearance" — not a standalone "Settings" category — groups it in

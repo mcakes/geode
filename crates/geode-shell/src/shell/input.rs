@@ -12,7 +12,7 @@ use gpui_component::WindowExt as _;
 
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
-use crate::keymap::{KeyContext, MatchResult};
+use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
 use crate::tiling::{Orientation, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
@@ -67,18 +67,39 @@ impl ShellView {
     /// its action is `palette::toggle`.
     fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke, cx: &App) -> bool {
         let stack = self.context_stack(cx);
-        let winner = self.services.keymap.bindings().iter().rfind(|binding| {
+        self.single_keystroke_binding(keystroke, &stack)
+            .is_some_and(|binding| binding.action.0 == "palette::toggle")
+    }
+
+    /// The binding that governs `keystroke` as a *single* keystroke under
+    /// `stack` — the last exact match whose predicate passes, mirroring
+    /// `Matcher::press`'s last-exact-match-wins layering (spec §3.4) —
+    /// or `None` when no binding claims it. Resolved straight against the
+    /// keymap rather than through `self.matcher` so a caller with its own
+    /// keyboard owner (the palette toggle above, the scope bar's text
+    /// field in `handle_key_down`) never touches, or is confused by, the
+    /// matcher's pending-sequence and count state: a count typed into a
+    /// text field is text, and a chord typed there is not the second
+    /// half of whatever sequence was pending before the field took focus.
+    /// An unbind (`"ctrl+k" = "none"`) is a winner like any other: the
+    /// caller reads `action` and treats [`UNBOUND_ACTION`] as "swallowed",
+    /// the way the matcher does.
+    fn single_keystroke_binding(
+        &self,
+        keystroke: &crate::keymap::Keystroke,
+        stack: &[KeyContext],
+    ) -> Option<&Binding> {
+        self.services.keymap.bindings().iter().rfind(|binding| {
             binding.keystrokes.len() == 1
                 && binding.keystrokes[0] == *keystroke
-                && binding.predicate.as_ref().is_none_or(|p| p.eval(&stack))
-        });
-        winner.is_some_and(|binding| binding.action.0 == "palette::toggle")
+                && binding.predicate.as_ref().is_none_or(|p| p.eval(stack))
+        })
     }
 
     /// Apply one resolved action id through the shell's one dispatch chain
     /// (spec: "one keymap, ours" — no parallel action-dispatch system).
     /// Workspace verbs go through `apply_workspace_action`; the shell's own
-    /// non-workspace actions (`palette::toggle`, `theme::toggle_mode`) are
+    /// non-workspace actions (`palette::toggle`, `settings::open`, …) are
     /// handled here when that leaves them unhandled. Shared by the normal
     /// keymap-matcher path and the palette's Enter-to-dispatch path, so
     /// both take exactly the same action to the same place.
@@ -124,9 +145,6 @@ impl ShellView {
             self.session_dirty = true;
         } else if action.0 == "palette::toggle" {
             self.toggle_palette(window, cx);
-        } else if action.0 == "theme::toggle_mode" {
-            self.services.theme.toggle_mode(cx);
-            self.persist_theme(cx);
         } else if action.0 == "settings::open" {
             // The settings dialog (settings-dialog rewrite: the keybinding
             // dialog's keyboard-driven row-list pattern, home-rolled —
@@ -323,9 +341,9 @@ impl ShellView {
     }
 
     /// The apply-then-persist seam every UI theme-change path calls right
-    /// after applying a change live through `ThemeService` (`theme::
-    /// toggle_mode` above, `dispatch_palette_item`'s `Theme` branch below,
-    /// and `settings_view::set_theme`/`set_dark_mode`) — one place that
+    /// after applying a change live through `ThemeService`
+    /// (`dispatch_palette_item`'s `Theme` branch below and
+    /// `settings_view::set_theme`) — one place that
     /// knows how to turn "the active theme just changed" into a write of
     /// `<user_dir>/app.toml`'s `[theme]` table (`theme::
     /// persist_to_user_config`), so a theme choice survives a restart via
@@ -338,7 +356,7 @@ impl ShellView {
     /// (PHILOSOPHY.md: "nothing may stall the render thread"), the same
     /// reasoning `session::write_atomic` already gets in this file's own
     /// watcher loop (see `new`'s doc comment). Only the cheap part — reading
-    /// `user_dir`/`active_name`/`active_mode` off `self` — happens here, on
+    /// `user_dir`/`active_name` off `self` — happens here, on
     /// the UI thread; the actual read-modify-write runs inside a task handed
     /// to `cx.background_executor()`, fire-and-forget (`.detach()`): theme
     /// changes are infrequent (a user action, not a hot path like key-repeat),
@@ -373,10 +391,9 @@ impl ShellView {
             return;
         };
         let name = self.services.theme.active_name().to_string();
-        let mode = self.services.theme.active_mode();
         cx.background_executor()
             .spawn(async move {
-                if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
+                if let Err(e) = theme::persist_to_user_config(&dir, &name) {
                     tracing::warn!(target: "geode::theme", "{e}");
                 }
             })
@@ -488,6 +505,31 @@ impl ShellView {
         let handle = self.filter_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
         cx.notify();
+    }
+
+    /// After a chord dispatched from inside the focused text field: if the
+    /// field still has focus and the frame's text no longer matches what
+    /// it shows, show the frame's. See the chord branch of
+    /// `handle_key_down` for why this is the one focused-field write.
+    fn reflect_frame_text_into_focused_field(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
+        {
+            return;
+        }
+        let frame_text = self.frame.read(cx).scope().text.clone().unwrap_or_default();
+        if self.filter_input.read(cx).value().as_ref() != frame_text.as_str() {
+            self.filter_input.update(cx, |i, cx| {
+                i.set_value(frame_text, window, cx);
+            });
+        }
     }
 
     pub(super) fn handle_key_down(
@@ -622,13 +664,12 @@ impl ShellView {
         }
 
         // The filter field (Task 4) owns its own key handling while it has
-        // focus — typing must reach it, not the shell's keymap `Matcher`
-        // (brief: "shell chords won't fire — acceptable while typing a
-        // filter"). This has to be handled explicitly rather than relying
-        // on gpui's dispatch to simply not reach here: gpui-component's
-        // `Input` binds most editing keys (typing, backspace, arrows,
-        // ctrl+v paste, …) as *actions* scoped to its own key context, but
-        // its `Escape` action handler calls `cx.propagate()` whenever there
+        // focus — typing must reach it, not the shell's keymap `Matcher`.
+        // This has to be handled explicitly rather than relying on gpui's
+        // dispatch to simply not reach here: gpui-component's `Input`
+        // binds most editing keys (typing, backspace, arrows, ctrl+v
+        // paste, …) as *actions* scoped to its own key context, but its
+        // `Escape` action handler calls `cx.propagate()` whenever there
         // is no popover/inline-completion/IME-marked-text/`clean_on_escape`
         // to consume it (the plain-filter case, always, here) — and any key
         // with *no* action binding at all in that context (e.g. `ctrl+w`,
@@ -637,16 +678,57 @@ impl ShellView {
         // `on_key_down` listener up the dispatch path, this one included
         // (verified against the pinned gpui rev's `Window::
         // finish_dispatch_key_event`/`dispatch_key_down_up_event`), so
-        // without this guard e.g. `ctrl+w` typed into the filter would
-        // *also* dispatch `workspace::close_tile`. Esc is the one key this
-        // view still acts on itself: it hands focus back to the shell root
-        // so hjkl and friends resume working immediately.
+        // without this guard a bare `j` typed into the filter would *also*
+        // reach the matcher as a blotter motion.
+        //
+        // Two kinds of key still act on the shell from here. Esc hands
+        // focus back to the shell root so hjkl and friends resume working
+        // immediately. And a *chord* — any keystroke carrying ctrl, alt or
+        // cmd (`Modifiers::is_chord`; shift alone is typing, `shift+d` is
+        // `D`) — dispatches its shell binding (user ruling 2026-09-12: the
+        // original brief's "shell chords won't fire — acceptable while
+        // typing a filter" is superseded; `ctrl+k`, `ctrl+,` and the rest
+        // must work from the field). Resolved as a single keystroke
+        // against the `workspace` context ALONE, never `context_stack`:
+        // while the field has focus the keyboard belongs to the field and
+        // the shell's chrome, not to whichever tile the layout has
+        // focused, so a blotter's `ctrl+d` (page down) does not page the
+        // blotter behind a trader's typing. Only chords the `Input` left
+        // alone ever arrive here (it consumes its own — cmd+a, cmd+v,
+        // shift+arrows — as actions before any listener runs), so a
+        // dispatched chord is one the field had no use for; it is still
+        // stopped from propagating, since a macOS `alt+letter` carries a
+        // typed character the field would otherwise insert. A dispatched
+        // action may move the frame's text (`mod+z` undoes the session's
+        // own typing) while the field stays focused — the field is then
+        // reflected from the frame here, the one place the "unfocused
+        // field shows the frame's truth" rule of `on_frame_changed` is
+        // applied to a focused one, because after an action the action's
+        // result is the truth, not the caret. `set_value` emits no
+        // `Change`, so the reflection cannot feed back into the session.
         if self
             .filter_input
             .read(cx)
             .focus_handle(cx)
             .is_focused(window)
         {
+            if let Some(ks) = convert_keystroke(&event.keystroke)
+                && ks.mods.is_chord()
+            {
+                let stack = [KeyContext::new("workspace")];
+                let action = self
+                    .single_keystroke_binding(&ks, &stack)
+                    .map(|binding| binding.action.clone());
+                if let Some(action) = action {
+                    if action.0 != UNBOUND_ACTION {
+                        self.dispatch(&action, None, window, cx);
+                        self.reflect_frame_text_into_focused_field(window, cx);
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+            }
             if event.keystroke.key == "escape" {
                 // Restore the text the field had when it took focus (spec
                 // §3.11) — `filter_session_base` is only `Some` while a

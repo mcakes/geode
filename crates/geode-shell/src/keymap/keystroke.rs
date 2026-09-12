@@ -32,6 +32,15 @@ impl Modifiers {
         cmd: true,
     };
 
+    /// Does this keystroke carry a modifier that makes it a chord rather
+    /// than typing? `ctrl`, `alt` and `cmd` each do; `shift` alone does
+    /// not — `shift+d` is the letter `D` to a text field, and a focused
+    /// field must keep it (spec §3.11; user ruling 2026-09-12: chords
+    /// still dispatch from the scope bar's text field, typing does not).
+    pub fn is_chord(self) -> bool {
+        self.ctrl || self.alt || self.cmd
+    }
+
     pub fn union(self, other: Modifiers) -> Modifiers {
         Modifiers {
             ctrl: self.ctrl || other.ctrl,

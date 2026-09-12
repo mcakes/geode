@@ -23,6 +23,28 @@
 //! full routing story (why up/down/ctrl+p/ctrl+n/enter/escape still reach
 //! `ShellView::handle_palette_key` as bubbled `KeyDownEvent`s while
 //! printable/caret/ctrl+a/ctrl+v are consumed natively by the `Input`).
+//!
+//! **Ranking** (2026-09-12): a row's match text is `"{title} {category}"`
+//! — the same `searchable_text` shape the keybindings and settings dialogs
+//! filter over — with every score earned past the title's end divided by
+//! [`CATEGORY_DIVISOR`], so the category is searchable but the lower-
+//! preference field: the same letters in a title outrank them in a
+//! category, and the alignment (and so the highlight, split across the
+//! two labels by [`split_label_indices`]) lands on the title copy when
+//! both hold them. On top of the match score each row adds its usage
+//! bonus (`crate::palette_usage`, baked once per open by
+//! [`PaletteState::with_usage`]): an empty query lists the rows a trader
+//! has actually chosen first, most recent and most used first, and a typed
+//! query lets a habitual row edge past a marginally better textual match.
+//! The bonus is capped at two run bonuses (`palette_usage::MAX_BONUS`,
+//! 18), and the ruling on where that cap meets the category discount
+//! (review 2026-09-12) is: a bare scattered match never beats a
+//! contiguous run whatever its usage; a maxed-out row whose only hit is
+//! in its category leads an unused title prefix on a query of three
+//! characters or fewer, ties it at four (registry order holds) and loses
+//! to it from five on — pinned by
+//! `a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one`,
+//! the test to read before moving either constant.
 
 use std::collections::BTreeMap;
 
@@ -69,6 +91,19 @@ impl PaletteItem {
             PaletteItem::Action(_, _, category, _) => category,
             PaletteItem::Theme(_) => THEME_CATEGORY,
             PaletteItem::Scope(_) => SCOPE_CATEGORY,
+        }
+    }
+
+    /// The key this row's usage is recorded under
+    /// (`crate::palette_usage::PaletteUsage`): the kind, then the identity
+    /// the dispatch itself keys on — `action:{id}`, `theme:{name}`,
+    /// `scope:{name}` — so a retitled action keeps its history and a theme
+    /// and a scope that happen to share a name never share a record.
+    pub fn usage_key(&self) -> String {
+        match self {
+            PaletteItem::Action(id, ..) => format!("action:{}", id.0),
+            PaletteItem::Theme(name) => format!("theme:{name}"),
+            PaletteItem::Scope(name) => format!("scope:{name}"),
         }
     }
 
@@ -120,7 +155,7 @@ impl PaletteItem {
 /// see [`PaletteState::filtered`] for why that specific score value
 /// matters.
 pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
-    fuzzy_match_lowered(&query.to_lowercase(), &candidate.to_lowercase())
+    fuzzy_match_lowered(&query.to_lowercase(), &candidate.to_lowercase(), usize::MAX)
 }
 
 /// [`fuzzy_match`]'s core over ALREADY-lowercased inputs (post-merge
@@ -130,7 +165,21 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
 /// no per-item `title()` clone, no per-item `to_lowercase`. The public
 /// wrapper above keeps the original lowercase-both contract for callers
 /// (and tests) holding raw strings.
-fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)> {
+///
+/// `title_len` is the char index where the candidate's title ends and its
+/// category begins (the palette matches `"{title} {category}"`, the same
+/// `searchable_text` shape the keybindings and settings dialogs use):
+/// every score a character at or past that boundary earns — its own base
+/// and the run bonus for continuing onto it — is divided by
+/// [`CATEGORY_DIVISOR`], so the same letters in a title outrank them in a
+/// category, and the alignment lands on the title copy when both hold
+/// them (the highlight has to agree with the ranking). `usize::MAX` means
+/// the whole candidate is title.
+fn fuzzy_match_lowered(
+    query: &str,
+    candidate: &str,
+    title_len: usize,
+) -> Option<(u32, Vec<usize>)> {
     if query.is_empty() {
         return Some((0, Vec::new()));
     }
@@ -141,6 +190,8 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
     if n > m {
         return None;
     }
+    let base_at = |j: usize| discounted(char_base(&c, j), j, title_len);
+    let run_at = |j: usize| discounted(RUN_BONUS, j, title_len);
 
     // Two row-major `n × m` tables (Smith–Waterman in the mould of fzf's
     // v2 matcher, without its gap penalty):
@@ -157,13 +208,13 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
         for j in 0..m {
             let mut cell = None;
             if c[j] == q[i] && j >= i {
-                let base = char_base(&c, j);
+                let base = base_at(j);
                 if i == 0 {
                     cell = Some(base);
                 } else {
                     let prev = (i - 1) * m + (j - 1);
                     let fresh = within[prev];
-                    let cont = ends_at[prev].map(|s| s + RUN_BONUS);
+                    let cont = ends_at[prev].map(|s| s + run_at(j));
                     cell = fresh.max(cont).map(|s| s + base);
                 }
             }
@@ -193,10 +244,10 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
     indices[n - 1] = j;
     for i in (1..n).rev() {
         let cell = ends_at[i * m + j]?;
-        let base = char_base(&c, j);
+        let base = base_at(j);
         let prev = (i - 1) * m + (j - 1);
         j = match ends_at[prev] {
-            Some(s) if s + RUN_BONUS + base == cell => j - 1,
+            Some(s) if s + run_at(j) + base == cell => j - 1,
             _ => {
                 let target = within[prev];
                 (0..j).find(|&jj| ends_at[(i - 1) * m + jj] == target)?
@@ -223,8 +274,28 @@ const WORD_START_BONUS: u32 = 8;
 /// the run bonus the smaller, `app` on "Apple Pie" would paint `Ap` + `P`
 /// rather than `App` — a contiguous region is the better match, and the
 /// highlight has to say so.
-const RUN_BONUS: u32 = 9;
+pub(crate) const RUN_BONUS: u32 = 9;
 const _: () = assert!(RUN_BONUS > WORD_START_BONUS);
+
+/// What a character matched in the category region earns, as a divisor
+/// over the score a title character would have earned in the same place
+/// (base and run bonus alike, rounded up so every match still scores at
+/// least 1). At 2, a word-start run in a category (`work` in "Workspace",
+/// 23) sits below the same letters mid-word in a title (`work` in
+/// "Framework tools", 31) and well below a title word start (39) — the
+/// category is searchable, and it is also the lower-preference field.
+const CATEGORY_DIVISOR: u32 = 2;
+
+/// `score` as earned at char index `idx` of a `"{title} {category}"`
+/// candidate whose title is `title_len` chars: unchanged inside the title,
+/// divided by [`CATEGORY_DIVISOR`] from the separating space onward.
+fn discounted(score: u32, idx: usize, title_len: usize) -> u32 {
+    if idx >= title_len {
+        score.div_ceil(CATEGORY_DIVISOR)
+    } else {
+        score
+    }
+}
 
 /// A matched character's own score at `idx`, independent of what was
 /// matched around it: 1, plus [`PREFIX_BONUS`] for the candidate's first
@@ -331,10 +402,21 @@ pub(crate) fn highlight_runs(title: &str, indices: &[usize]) -> Vec<std::ops::Ra
 /// None`) rather than mutating an open one.
 pub struct PaletteState {
     items: Vec<PaletteItem>,
-    /// Each item's lowercased match text, built once at construction so
-    /// a filter pass does no per-item `title()` clone or `to_lowercase`
-    /// (perf 11 — see [`fuzzy_match_lowered`]).
+    /// Each item's lowercased match text — `"{title} {category}"`, the
+    /// same `searchable_text` shape the keybindings and settings dialogs
+    /// filter over — built once at construction so a filter pass does no
+    /// per-item `title()` clone or `to_lowercase` (perf 11 — see
+    /// [`fuzzy_match_lowered`]).
     lowered: Vec<String>,
+    /// Each item's lowered title length in chars: where `lowered`'s title
+    /// ends and its category begins, the boundary [`fuzzy_match_lowered`]
+    /// discounts past and [`split_label_indices`] splits the highlight at.
+    title_len: Vec<usize>,
+    /// Each item's usage bonus (`crate::palette_usage`), baked once at
+    /// construction against the clock as it stood when the palette opened
+    /// — a filter pass adds this integer to each match's score and never
+    /// looks a key up. All zero from [`PaletteState::new`].
+    bonus: Vec<u32>,
     query: String,
     selected: usize,
     /// The cached filter result: index into `items` plus the matched
@@ -351,14 +433,46 @@ pub struct PaletteState {
 }
 
 impl PaletteState {
+    /// A palette with no usage history: every row's bonus is 0, so an
+    /// empty query is registry order and a typed one is score order.
     pub fn new(items: Vec<PaletteItem>) -> Self {
-        let lowered = items
+        let bonus = vec![0; items.len()];
+        Self::with_bonus(items, bonus)
+    }
+
+    /// A palette ranked by `usage` as of `now` (unix seconds): each row's
+    /// bonus is read once here and added to its match score on every
+    /// filter pass — an empty query lists the used rows first, best bonus
+    /// first, and the rest in registry order; a typed query lets a
+    /// well-used row edge past a marginally better textual match, within
+    /// the bound the module doc states (`palette_usage::MAX_BONUS`).
+    pub fn with_usage(
+        items: Vec<PaletteItem>,
+        usage: &crate::palette_usage::PaletteUsage,
+        now: u64,
+    ) -> Self {
+        let bonus = items
             .iter()
-            .map(|item| item.title().to_lowercase())
+            .map(|item| usage.bonus(&item.usage_key(), now))
             .collect();
+        Self::with_bonus(items, bonus)
+    }
+
+    fn with_bonus(items: Vec<PaletteItem>, bonus: Vec<u32>) -> Self {
+        let mut lowered = Vec::with_capacity(items.len());
+        let mut title_len = Vec::with_capacity(items.len());
+        for item in &items {
+            let mut text = item.title().to_lowercase();
+            title_len.push(text.chars().count());
+            text.push(' ');
+            text.push_str(&item.category().to_lowercase());
+            lowered.push(text);
+        }
         let mut state = PaletteState {
             items,
             lowered,
+            title_len,
+            bonus,
             query: String::new(),
             selected: 0,
             filtered: Vec::new(),
@@ -379,13 +493,15 @@ impl PaletteState {
         for (i, lowered) in self.lowered.iter().enumerate() {
             #[cfg(test)]
             self.match_calls.set(self.match_calls.get() + 1);
-            if let Some((score, indices)) = fuzzy_match_lowered(&query, lowered) {
-                scored.push((i, score, indices));
+            if let Some((score, indices)) = fuzzy_match_lowered(&query, lowered, self.title_len[i])
+            {
+                scored.push((i, score + self.bonus[i], indices));
             }
         }
         // Stable sort: ties — including an empty query, where every item
-        // scores the same 0 — keep their original `items` order (the
-        // brief's "empty query returns all in registry order").
+        // scores the same 0 plus its usage bonus — keep their original
+        // `items` order (the brief's "empty query returns all in registry
+        // order", now after the rows a trader has actually used).
         scored.sort_by_key(|(_, score, _)| std::cmp::Reverse(*score));
         self.filtered = scored
             .into_iter()
@@ -441,21 +557,33 @@ impl PaletteState {
         self.selected = index.min(len - 1);
     }
 
-    /// Every item whose title fuzzy-matches the current query, best match
-    /// first, paired with the matched char indices `render` highlights.
-    /// Ties — including an empty query, where every item scores the same
-    /// 0 — keep their original `items` order (see `recompute_filtered`).
-    /// A cache read (perf 11 — see the struct doc): no matching happens
-    /// here, only a walk of the stored result. The signature still
-    /// returns owned index `Vec`s (a handful of small clones) rather
-    /// than borrows purely to keep the pre-cache API shape; the cost
-    /// this existed to kill — the full fuzzy re-match per call — is
-    /// gone.
+    /// Every item whose title or category fuzzy-matches the current
+    /// query, best score plus usage bonus first, paired with the matched
+    /// char indices over `"{title} {category}"`. Ties — including an empty
+    /// query, where every item scores its bonus alone — keep their
+    /// original `items` order (see `recompute_filtered`). A cache read
+    /// (perf 11 — see the struct doc): no matching happens here, only a
+    /// walk of the stored result. The signature still returns owned index
+    /// `Vec`s (a handful of small clones) rather than borrows purely to
+    /// keep the pre-cache API shape for tests; `render` walks
+    /// [`PaletteState::rows`] instead, which borrows.
     pub fn filtered(&self) -> Vec<(&PaletteItem, Vec<usize>)> {
         self.filtered
             .iter()
             .map(|(i, indices)| (&self.items[*i], indices.clone()))
             .collect()
+    }
+
+    /// [`filtered`](Self::filtered) without the clones — the render's
+    /// per-frame walk: each row's item, its matched indices over
+    /// `"{title} {category}"`, and the title length the matcher scored
+    /// against (the lowered title's char count), which is what
+    /// [`split_label_indices`] must split at for the highlight to agree
+    /// with the alignment by construction.
+    pub fn rows(&self) -> impl Iterator<Item = (&PaletteItem, &[usize], usize)> {
+        self.filtered
+            .iter()
+            .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
@@ -572,6 +700,27 @@ pub fn build_items(
     items.extend(theme.names().into_iter().map(PaletteItem::Theme));
     items.extend(saved.keys().cloned().map(PaletteItem::Scope));
     items
+}
+
+/// Split ranked `indices` (char offsets into a row's `searchable_text`,
+/// `"{title} {category}"` — see `searchable_text` in this module and in
+/// `settings_view`) back across the two label lines a row paints them on.
+/// `title_len` is the title's own char count; the offset at exactly
+/// `title_len` is the separating space and belongs to neither returned
+/// list. Shared by both list dialogs' `build` (`keybindings_view` and
+/// `settings_view`) rather than duplicated: the arithmetic is only
+/// correct as long as *both* modules' `searchable_text` stays
+/// `"{title} {category}"`, so one copy is what keeps a future separator
+/// change from silently mis-highlighting whichever module didn't get the
+/// memo.
+pub(crate) fn split_label_indices(indices: &[usize], title_len: usize) -> (Vec<usize>, Vec<usize>) {
+    let title_ix = indices.iter().copied().filter(|&i| i < title_len).collect();
+    let cat_ix = indices
+        .iter()
+        .filter(|&&i| i > title_len)
+        .map(|&i| i - title_len - 1)
+        .collect();
+    (title_ix, cat_ix)
 }
 
 // ---------------------------------------------------------------------
@@ -727,7 +876,7 @@ pub fn render(
     // separate top-third anchor for spatial memory).
     let top = (viewport_height * crate::shell::dialog::MODAL_TOP_RATIO).max(0.0);
 
-    let results = state.filtered();
+    let row_count = state.filtered.len();
 
     // Fixed-height, scrollable viewport over the FULL filtered list (no
     // truncation) — `.id(..)` makes this a `Stateful<Div>`, required for
@@ -741,7 +890,7 @@ pub fn render(
         .id("palette-results")
         .w_full()
         .h(px(
-            (results.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            (row_count.max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
         ))
         .overflow_y_scroll()
         .track_scroll(scroll_handle)
@@ -751,7 +900,7 @@ pub fn render(
         // debug_bounds` and check a row's bounds actually fall inside it
         // — i.e. that scroll-follow, not just selection, moved.
         .debug_selector(|| "palette-list".to_string());
-    if results.is_empty() {
+    if row_count == 0 {
         list = list.child(
             div()
                 .px_2()
@@ -760,7 +909,7 @@ pub fn render(
                 .child("No matches"),
         );
     } else {
-        for (i, (item, indices)) in results.into_iter().enumerate() {
+        for (i, (item, indices, title_len)) in state.rows().enumerate() {
             let is_selected = i == state.selected();
             let mut row = h_flex()
                 .w_full()
@@ -783,14 +932,28 @@ pub fn render(
             let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 click(i, window, cx);
             });
+            // The indices are over `"{title} {category}"`, ascending, so
+            // each label paints only its own half: the title's are a
+            // prefix slice (no allocation) and the category's are rebased
+            // past the separating space — the same split
+            // `split_label_indices` makes for the dialogs, done in place
+            // here because this runs once per row per frame. A category
+            // match glows in the category, not off the end of the title.
+            let split = indices.partition_point(|&ix| ix < title_len);
+            let title_ix = &indices[..split];
+            let cat_ix: Vec<usize> = indices[split..]
+                .iter()
+                .filter(|&&ix| ix > title_len)
+                .map(|&ix| ix - title_len - 1)
+                .collect();
             let label = h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().child(highlighted_title(&item.title(), &indices, theme.primary)))
+                .child(div().child(highlighted_title(&item.title(), title_ix, theme.primary)))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
-                        .child(item.category().to_string()),
+                        .child(highlighted_title(item.category(), &cat_ix, theme.primary)),
                 );
             let binding = div()
                 .font_family(fonts::MONO)
@@ -1110,7 +1273,10 @@ mod tests {
     fn query_filters_out_non_matching_items() {
         let mut state = PaletteState::new(vec![
             action("workspace::close_tile", "Close tile", "Workspace", None),
-            action("workspace::focus_left", "Focus left", "Workspace", None),
+            // Under "Workspace" this row WOULD match: `close` is a
+            // subsequence of "focus left workspace" once the category
+            // joins the match text, so the fixture keeps it out of reach.
+            action("workspace::focus_left", "Focus left", "Tiling", None),
             PaletteItem::Theme("Gruvbox Dark".to_string()),
         ]);
         state.set_query("close");
@@ -1482,5 +1648,245 @@ mod tests {
             .find(|item| matches!(item, PaletteItem::Action(id, ..) if id.0 == "workspace::close_tile"))
             .unwrap();
         assert_eq!(close.binding(), Some("ctrl+w"));
+    }
+
+    // -- split_label_indices ---------------------------------------------
+
+    #[test]
+    fn split_label_indices_partitions_around_the_separating_space() {
+        // "Toggle palette Palette" — title "Toggle palette" is 14 chars
+        // (indices 0..=13), index 14 is the separating space, category
+        // "Palette" starts at 15.
+        let title_len = "Toggle palette".chars().count();
+        assert_eq!(title_len, 14);
+        // One index from the title (0), the separator itself (14, must be
+        // dropped by both sides), and one from the category (15, the
+        // category's own first char).
+        let (title_ix, cat_ix) = split_label_indices(&[0, 14, 15], title_len);
+        assert_eq!(
+            title_ix,
+            vec![0],
+            "the separator index must not land in the title half"
+        );
+        assert_eq!(
+            cat_ix,
+            vec![0],
+            "a category-side index is rebased to be relative to the category's own start"
+        );
+    }
+
+    #[test]
+    fn split_label_indices_on_empty_indices_is_two_empty_lists() {
+        let (title_ix, cat_ix) = split_label_indices(&[], 5);
+        assert!(title_ix.is_empty());
+        assert!(cat_ix.is_empty());
+    }
+
+    // -- category matching ----------------------------------------------
+
+    #[test]
+    fn a_category_only_match_is_found() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Focus left", "Workspace", None),
+            action("b", "Perf overlay", "Diagnostics", None),
+        ]);
+        state.set_query("workspace");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Focus left"]);
+    }
+
+    /// The ranking half of the category discount: `work` sits mid-word in
+    /// "Framework tools" (no prefix or word-start bonus at all) and at a
+    /// word start in the category "Workspace" — undiscounted, the category
+    /// placement would score higher, so this only passes while a category
+    /// character earns less than a title character.
+    #[test]
+    fn a_mid_word_title_match_outranks_a_word_start_category_match() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Focus left", "Workspace", None),
+            action("b", "Framework tools", "Tiling", None),
+        ]);
+        state.set_query("work");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Framework tools", "Focus left"]);
+    }
+
+    /// The alignment half: when both the title and the category contain the
+    /// letters, the indices land in the title — the highlight must agree
+    /// with the ranking's preference.
+    #[test]
+    fn indices_prefer_the_title_over_the_category() {
+        let mut state = PaletteState::new(vec![action("b", "Framework tools", "Workspace", None)]);
+        state.set_query("work");
+        let filtered = state.filtered();
+        let (_, indices) = &filtered[0];
+        assert_eq!(indices, &vec![5, 6, 7, 8]);
+    }
+
+    /// A query can span the title and the category — `left work` finds
+    /// "Focus left" under "Workspace".
+    #[test]
+    fn a_query_can_span_title_and_category() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Focus left", "Workspace", None),
+            action("b", "Focus left", "Dock", None),
+        ]);
+        state.set_query("left work");
+        let filtered = state.filtered();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0.category(), "Workspace");
+        let (title_ix, cat_ix) = split_label_indices(&filtered[0].1, "Focus left".chars().count());
+        assert_eq!(title_ix, vec![6, 7, 8, 9]);
+        assert_eq!(cat_ix, vec![0, 1, 2, 3]);
+    }
+
+    // -- usage ranking --------------------------------------------------
+
+    use crate::palette_usage::PaletteUsage;
+
+    const NOW: u64 = 1_800_000_000;
+
+    #[test]
+    fn usage_key_names_the_kind_and_the_identity() {
+        assert_eq!(
+            action("workspace::close_tile", "Close tile", "Workspace", None).usage_key(),
+            "action:workspace::close_tile"
+        );
+        assert_eq!(
+            PaletteItem::Theme("Gruvbox Dark".to_string()).usage_key(),
+            "theme:Gruvbox Dark"
+        );
+        assert_eq!(
+            PaletteItem::Scope("eu-books".to_string()).usage_key(),
+            "scope:eu-books"
+        );
+    }
+
+    #[test]
+    fn an_empty_query_lists_used_items_first_by_bonus_then_registry_order() {
+        let items = vec![
+            action("a", "Alpha", "Test", None),
+            action("b", "Beta", "Test", None),
+            action("c", "Gamma", "Test", None),
+            action("d", "Delta", "Test", None),
+        ];
+        let mut usage = PaletteUsage::new();
+        usage.record("action:c", NOW - 3 * 24 * 60 * 60);
+        usage.record("action:d", NOW);
+        let state = PaletteState::with_usage(items, &usage, NOW);
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Delta", "Gamma", "Alpha", "Beta"]);
+    }
+
+    /// `Tiles` and `Toggle` both take `t` as a prefix hit — a tie on
+    /// score, which usage breaks in favour of the row chosen before.
+    #[test]
+    fn a_used_item_wins_a_tie_on_score() {
+        let items = vec![
+            action("tiles", "Tiles", "Test", None),
+            action("toggle", "Toggle", "Test", None),
+        ];
+        let mut usage = PaletteUsage::new();
+        usage.record("action:toggle", NOW);
+        let mut state = PaletteState::with_usage(items, &usage, NOW);
+        state.set_query("t");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Toggle", "Tiles"]);
+    }
+
+    /// The bonus is bounded at two run bonuses: even at the cap it cannot
+    /// drag a bare scattered match (`tog` mid-word across "Batch log",
+    /// three points) past a never-used row's contiguous prefix run.
+    #[test]
+    fn the_capped_bonus_cannot_lift_a_scattered_match_over_a_contiguous_run() {
+        let items = vec![
+            action("scattered", "Batch log", "Test", None),
+            action("toggle", "Toggle", "Test", None),
+        ];
+        let mut usage = PaletteUsage::new();
+        for _ in 0..20 {
+            usage.record("action:scattered", NOW);
+        }
+        let mut state = PaletteState::with_usage(items, &usage, NOW);
+        state.set_query("tog");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Toggle", "Batch log"]);
+    }
+
+    #[test]
+    fn new_ranks_with_no_usage_at_all() {
+        let mut usage = PaletteUsage::new();
+        usage.record("action:b", NOW);
+        let items = vec![
+            action("a", "Alpha", "Test", None),
+            action("b", "Beta", "Test", None),
+        ];
+        let plain = PaletteState::new(items.clone());
+        let used = PaletteState::with_usage(items, &usage, NOW);
+        assert_eq!(plain.filtered()[0].0.title(), "Alpha");
+        assert_eq!(used.filtered()[0].0.title(), "Beta");
+    }
+
+    /// The bound where the usage cap and the category discount meet,
+    /// pinned as the ruling it is (review 2026-09-12): a maxed-out row
+    /// whose only hit is in its category leads an unused title prefix on a
+    /// SHORT query (`wor`: 17 + 18 against 31) — that is the brain-reading
+    /// point — and loses to it once the prefix run reaches five characters
+    /// (`works`: 29 + 18 against 51). At four they tie and registry order
+    /// holds. Move either constant and this is the test that says so.
+    #[test]
+    fn a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one() {
+        let items = vec![
+            action("focus", "Focus left", "Workspace", None),
+            action("next", "Workspace: next", "Tiling", None),
+        ];
+        let mut usage = PaletteUsage::new();
+        for _ in 0..20 {
+            usage.record("action:focus", NOW);
+        }
+        let mut state = PaletteState::with_usage(items, &usage, NOW);
+        state.set_query("wor");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Focus left", "Workspace: next"]);
+        state.set_query("works");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Workspace: next", "Focus left"]);
+    }
+
+    /// The backtrack must use the same discounted constants as the
+    /// forward pass: with the plain `RUN_BONUS` there, `ic` on
+    /// "Perf overlay" / "Diagnostics" keeps its score but paints the
+    /// title's `i` plus the category's `c` — a scattered highlight for a
+    /// contiguous category match (review 2026-09-12).
+    #[test]
+    fn a_contiguous_category_match_backtracks_to_one_run() {
+        let mut state =
+            PaletteState::new(vec![action("perf", "Perf overlay", "Diagnostics", None)]);
+        state.set_query("ic");
+        let filtered = state.filtered();
+        let title_len = "Perf overlay".chars().count();
+        let (title_ix, cat_ix) = split_label_indices(&filtered[0].1, title_len);
+        assert!(title_ix.is_empty(), "{title_ix:?}");
+        assert_eq!(cat_ix, vec![8, 9]);
+    }
+
+    /// `rows()` is the render's borrow-only walk of the cache: the same
+    /// order and indices `filtered()` hands out, plus each row's title
+    /// length so the render splits the highlight without recounting.
+    #[test]
+    fn rows_borrow_the_same_result_filtered_clones() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Focus left", "Workspace", None),
+            action("b", "Framework tools", "Tiling", None),
+        ]);
+        state.set_query("work");
+        let cloned = state.filtered();
+        let rows: Vec<_> = state.rows().collect();
+        assert_eq!(rows.len(), cloned.len());
+        for ((item, indices), (row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
+            assert_eq!(*item, *row_item);
+            assert_eq!(indices, row_indices);
+            assert_eq!(*title_len, item.title().chars().count());
+        }
     }
 }

@@ -3,13 +3,14 @@
 
 use super::*;
 
-/// End-to-end: a real `mod+shift+t` keystroke, dispatched through gpui's
-/// own key-event pipeline, flips the active theme's mode. Exercises the
-/// same wiring as `ctrl_v_keystroke_splits_the_active_workspace` above,
-/// but through the `theme::toggle_mode` branch of `handle_key_down`
-/// added in Task 5.
+/// End-to-end: a theme picked from the palette by real keystrokes —
+/// open, type its full name, `enter` — is applied through
+/// `dispatch_palette_item`'s `Theme` arm. Exercises the same wiring as
+/// `ctrl_v_keystroke_splits_the_active_workspace` above, through the
+/// one keyboard path a theme change has now that `mod+shift+t` and its
+/// light/dark toggle are retired (user ruling 2026-09-12).
 #[gpui::test]
-fn mod_shift_t_keystroke_toggles_the_theme_mode(cx: &mut gpui::TestAppContext) {
+fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -35,22 +36,37 @@ fn mod_shift_t_keystroke_toggles_the_theme_mode(cx: &mut gpui::TestAppContext) {
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let before = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
-    });
+    assert_ne!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "sanity: the pick must change something"
+    );
 
-    cx.simulate_keystrokes("alt-shift-t");
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+    cx.simulate_input("Gruvbox Light");
+    cx.simulate_keystrokes("enter");
 
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
 
-    let after = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
-    });
-    assert_ne!(
-        before, after,
-        "alt-shift-t (mod+shift+t = theme::toggle_mode) should have changed the active theme"
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "the top-ranked row for a theme's full name is that theme, and enter applies it"
+    );
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+        "enter closes the palette"
     );
 }
 
@@ -1334,4 +1350,124 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
         v0 + 1,
         "loading the scope must bump the scope version exactly once"
     );
+}
+
+// -- usage ranking ------------------------------------------------------
+
+/// [`open_shell`] plus the downcast shell entity, for the tests below.
+fn open_ranked_shell(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+) -> (gpui::VisualTestContext, Entity<ShellView>) {
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    (cx, shell)
+}
+
+fn first_palette_title(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |shell, _| {
+        shell
+            .palette
+            .as_ref()
+            .and_then(PaletteState::selected_item)
+            .map(|item| item.title())
+    })
+}
+
+/// Dispatching a row from the palette records a use of it, and the next
+/// open lists it first on an empty query — the whole "brain-reading"
+/// loop, through the real key pipeline.
+#[gpui::test]
+fn a_palette_dispatch_is_recorded_and_ranks_first_on_the_next_open(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = open_ranked_shell(cx, test_services());
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert_ne!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical"),
+        "the fixture's registry order must not already lead with the row under test"
+    );
+    cx.simulate_input("rec: split vertical");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical")
+    );
+    cx.simulate_keystrokes("enter");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
+
+    let record = shell.read_with(&cx, |shell, _| {
+        shell
+            .palette_usage
+            .get("action:tile::add_rec_vertical")
+            .copied()
+    });
+    assert_eq!(record.map(|r| r.count), Some(1), "{record:?}");
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical"),
+        "the row just used must lead an empty query"
+    );
+}
+
+/// Closing the palette with `palette::toggle` itself (its own row, or
+/// `ctrl+k` again) is not a use of anything.
+#[gpui::test]
+fn choosing_the_palette_toggle_row_records_nothing(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = open_ranked_shell(cx, test_services());
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("toggle command palette");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Toggle command palette")
+    );
+    cx.simulate_keystrokes("enter");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette_usage.is_empty()));
+}
+
+/// A restored history (`ShellServices::restored_palette_usage`, from
+/// `session.toml`) ranks the very first open of a new process.
+#[gpui::test]
+fn restored_usage_ranks_the_first_open(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services
+        .restored_palette_usage
+        .record("action:tile::add_rec_vertical", 1_800_000_000);
+    let (mut cx, shell) = open_ranked_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical")
+    );
+}
+
+/// A palette dispatch that mutates nothing else (a theme row) still
+/// dirties the session flush, and the flushed text carries the usage
+/// table — so a restart forgets nothing.
+#[gpui::test]
+fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.toml");
+    let (mut cx, shell) =
+        open_ranked_shell(cx, super::session::test_services_with_session(session_path));
+
+    let clean = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    assert!(clean.is_none(), "a fresh shell has nothing to flush");
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("theme: gruvbox dark");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Theme: Gruvbox Dark")
+    );
+    cx.simulate_keystrokes("enter");
+
+    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let (_, text) = pending.expect("a palette dispatch must dirty the session flush");
+    assert!(text.contains("[palette.usage"), "{text}");
+    assert!(text.contains("\"theme:Gruvbox Dark\""), "{text}");
+
+    let again = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    assert!(again.is_none(), "one dispatch flushes once");
 }

@@ -1,5 +1,5 @@
 //! Theming (Task 5): gpui-component's bundled theme JSONs, selectable from
-//! config, with a runtime light/dark mode toggle. Geode is a lens, not a
+//! config, the palette and the settings dialog. Geode is a lens, not a
 //! brand exercise (PHILOSOPHY.md): theming stays entirely inside
 //! gpui-component's own theme-config format, applied through its own theme
 //! global — nothing here invents a raw color.
@@ -32,8 +32,7 @@
 //!   amber text, blue column heads), and `"Bloomberg Modern"`, the current
 //!   look (near-black blue-grey ground, white text, orange as accent only).
 //! - `modus.json` — `"Modus Operandi"`/`"Modus Vivendi"`, the one family
-//!   here that ships a real light/dark pair, so `toggle_mode` swaps within
-//!   it instead of falling back to Default. Its whole design constraint is a
+//!   here that ships a real light/dark pair. Its whole design constraint is a
 //!   7:1 (WCAG AAA) floor on every information-bearing pairing; that floor
 //!   is measured, not assumed — see the note below.
 //! - `nord.json` — the canonical nord0–nord15 palette.
@@ -50,9 +49,23 @@
 //! Parsing uses the crate's own config type, `gpui_component::ThemeSet` /
 //! `ThemeConfig` (`crates/ui/src/theme/schema.rs`) — a theme JSON file is a
 //! `ThemeSet` (a family: `name`, `author`, `url`, and a `themes: Vec<
-//! ThemeConfig>` list, one `ThemeConfig` per mode the family ships). A
+//! ThemeConfig>` list, one `ThemeConfig` per variant the family ships). A
 //! `ThemeConfig`'s own `.name` is already fully qualified, e.g. `"Gruvbox
 //! Dark"`; the `ThemeSet`'s `.name` is the bare family, e.g. `"Gruvbox"`.
+//!
+//! ## No light/dark mode
+//!
+//! There is no mode axis (user ruling 2026-09-12): Geode has themes, some
+//! of which are light and some dark, and a theme's name says which. The
+//! family is a file-level grouping only — `"Gruvbox"` is not a theme and
+//! resolves to nothing; `"Gruvbox Light"` and `"Gruvbox Dark"` are two
+//! themes. The `theme::toggle_mode` action, its `mod+shift+t` chord, the
+//! settings dialog's Dark mode row and the `[theme] mode` config key were
+//! all retired with it; a `mode` key still present in a config file is
+//! ignored with a warning, and the next persisted theme pick removes it.
+//! `ThemeConfig.mode` itself stays, because gpui-component reads it for
+//! its own Base-layer projection — it is a property of the theme, not a
+//! choice a trader makes.
 //!
 //! Application goes through the crate's own two-call sequence — confirmed
 //! against its own reference usage (`crates/story/src/themes.rs::
@@ -69,17 +82,16 @@
 //! used as our index: it is a gpui `Global`, reachable only via `cx: &mut
 //! App`, which would make the parsing/lookup step untestable without a
 //! window. `ThemeService` is its own `cx`-free bundled-theme index instead;
-//! only the two `cx`-touching methods (`apply`, `apply_from_config`,
-//! `toggle_mode`) reach into gpui at all.
+//! only the two `cx`-touching methods (`apply`, `apply_from_config`)
+//! reach into gpui at all.
 //!
 //! ## Persistence
 //!
-//! Every UI theme change (settings dialog, palette theme pick,
-//! `theme::toggle_mode`) is applied live through this service, then
-//! persisted into the user config layer by [`persist_to_user_config`] —
-//! see its own doc comment for the full contract, and `ShellView::
-//! persist_theme` (`shell/mod.rs`) for the one seam all three UI paths
-//! call through. There is no longer a session-file theme mechanism: a
+//! Every UI theme change (settings dialog, palette theme pick) is applied
+//! live through this service, then persisted into the user config layer
+//! by [`persist_to_user_config`] — see its own doc comment for the full
+//! contract, and `ShellView::persist_theme` (`shell/input.rs`) for the
+//! one seam both UI paths call through. There is no longer a session-file theme mechanism: a
 //! theme choice is ordinary config, resolved by the same builtin → desk →
 //! user merge (`geode_core::config`) as everything else.
 
@@ -92,13 +104,9 @@ use toml_edit::{Item, Table, value};
 
 use geode_core::config::{Config, Layer};
 
-/// Re-exported so callers don't need a direct `gpui_component` dependency
-/// just to name a mode.
-pub use gpui_component::ThemeMode as Mode;
-
-/// The family every bundled theme set falls back to: gpui-component's own
-/// default, which always ships both a light and a dark variant.
-pub const DEFAULT_FAMILY: &str = "Default";
+/// The theme applied when config names none, or names one that does not
+/// exist: gpui-component's own default family, at its dark variant.
+pub const DEFAULT_THEME: &str = "Default Dark";
 
 /// One vendored theme JSON, embedded at compile time as `(label, json)`.
 /// `label` is only used in parse-failure warnings — the real family name
@@ -192,14 +200,13 @@ const BUNDLED: &[(&str, &str)] = &[
 /// once via [`load_bundled`]; the app keeps one instance for the life of the
 /// window (spec: `ShellServices`).
 pub struct ThemeService {
-    /// `(family, config)` pairs, in bundle order. Flat and possibly several
-    /// entries per family (some families ship more than one dark variant,
-    /// e.g. Tokyo Night/Storm/Moon) — deliberately not deduplicated down to
-    /// one-per-mode, or those extra variants would be unreachable.
-    entries: Vec<(String, Rc<ThemeConfig>)>,
+    /// Every bundled `ThemeConfig`, in bundle order. Flat: a family that
+    /// ships several variants (Tokyo Night/Storm/Moon, Gruvbox Light and
+    /// Dark) contributes one entry each, and nothing here groups them
+    /// back into families — a theme is one named entry (see the module
+    /// doc's "No light/dark mode").
+    entries: Vec<Rc<ThemeConfig>>,
     active_name: String,
-    active_mode: Mode,
-    active_family: String,
 }
 
 /// Parse every [`BUNDLED`] theme JSON. A file that fails to parse becomes a
@@ -216,9 +223,8 @@ pub fn load_bundled() -> (ThemeService, Vec<String>) {
     for (label, json) in BUNDLED {
         match serde_json::from_str::<ThemeSet>(json) {
             Ok(set) => {
-                let family = set.name.to_string();
                 for config in set.themes {
-                    entries.push((family.clone(), Rc::new(config)));
+                    entries.push(Rc::new(config));
                 }
             }
             Err(err) => {
@@ -234,18 +240,15 @@ pub fn load_bundled() -> (ThemeService, Vec<String>) {
         // `Theme::change(ThemeMode::Light, None, cx)`, and the registry's
         // default light theme is this same "Default Light").
         active_name: "Default Light".to_string(),
-        active_mode: Mode::Light,
-        active_family: DEFAULT_FAMILY.to_string(),
     };
     (service, warnings)
 }
 
-/// Normalize a theme family name for lookup (Task 6): `-` and `_` become
-/// spaces, then the whole string is lowercased — so `"macos-classic"`,
-/// `"macos_classic"`, and `"macOS Classic"` all compare equal. Used only
-/// by [`ThemeService::find_family`]; [`ThemeService::find_exact`] still
-/// matches a `ThemeConfig.name` byte-for-byte, since that's already a
-/// known-good fully qualified name.
+/// Normalize a theme name for lookup (Task 6): `-` and `_` become spaces,
+/// then the whole string is lowercased — so `"macos-classic-light"`,
+/// `"macos_classic_light"`, and `"macOS Classic Light"` all compare equal.
+/// [`ThemeService::resolve`]'s second, forgiving pass; its first pass
+/// still matches a `ThemeConfig.name` byte-for-byte.
 fn normalize_theme_name(name: &str) -> String {
     name.chars()
         .map(|c| if c == '-' || c == '_' { ' ' } else { c })
@@ -255,108 +258,91 @@ fn normalize_theme_name(name: &str) -> String {
 
 impl ThemeService {
     /// Every bundled theme's fully qualified name (e.g. `"Gruvbox Dark"`),
-    /// sorted and deduplicated — the palette's theme-picker list.
+    /// sorted and deduplicated — the palette's theme-picker list and the
+    /// settings dialog's Theme row.
     pub fn names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .entries
-            .iter()
-            .map(|(_, c)| c.name.to_string())
-            .collect();
+        let mut names: Vec<String> = self.entries.iter().map(|c| c.name.to_string()).collect();
         names.sort();
         names.dedup();
         names
     }
 
     /// The fully qualified name of the theme last successfully applied
-    /// (`apply`, `apply_from_config`, or `toggle_mode`) — what the status
-    /// bar shows.
+    /// (`apply` or `apply_from_config`) — what the status bar shows.
     pub fn active_name(&self) -> &str {
         &self.active_name
     }
 
-    /// Pure lookup, no `cx`: an exact `ThemeConfig.name` match wins outright
-    /// (e.g. `"Gruvbox Dark"`, ignoring `mode` — a fully qualified name
-    /// already says which mode it is); failing that, a case- and
-    /// punctuation-insensitive family name (`-`/`_` normalize to a space
-    /// before case-fold, Task 6 — see [`normalize_theme_name`]) combined
-    /// with `mode` (e.g. `"Gruvbox"` + dark -> `"Gruvbox Dark"`, or
-    /// `"macos-classic"` + light -> `"macOS Classic Light"`). `None` means
-    /// "no such theme" — callers decide the default-theme fallback.
-    pub fn resolve(&self, name: &str, mode: Mode) -> Option<&Rc<ThemeConfig>> {
-        self.find_exact(name)
-            .or_else(|| self.find_family(name, mode))
-            .map(|(_, config)| config)
-    }
-
-    fn find_exact(&self, name: &str) -> Option<(&str, &Rc<ThemeConfig>)> {
+    /// Pure lookup, no `cx`: an exact `ThemeConfig.name` match wins
+    /// outright (`"Gruvbox Dark"`); failing that, a case- and
+    /// punctuation-insensitive match on the same full name
+    /// (`"gruvbox-dark"`, `"macos_classic_light"` — see
+    /// [`normalize_theme_name`]). A bare family name (`"Gruvbox"`) is not
+    /// a theme and resolves to nothing: there is no light/dark axis to
+    /// complete it with (module doc, "No light/dark mode"), so a config
+    /// must name the variant it means. `None` means "no such theme" —
+    /// callers decide the fallback.
+    pub fn resolve(&self, name: &str) -> Option<&Rc<ThemeConfig>> {
         self.entries
             .iter()
-            .find(|(_, config)| config.name.as_ref() == name)
-            .map(|(family, config)| (family.as_str(), config))
-    }
-
-    /// Family-name lookup is punctuation- and case-insensitive: `-`/`_`
-    /// normalize to a space before case-folding (Task 6), so a palette
-    /// query like `"macos-classic"` resolves the same family as
-    /// `"macOS Classic"` (the actual bundled name, `assets/themes/
-    /// macos-classic.json`'s `ThemeSet.name`) or `"macos_classic"`.
-    fn find_family(&self, family: &str, mode: Mode) -> Option<(&str, &Rc<ThemeConfig>)> {
-        let target = normalize_theme_name(family);
-        self.entries
-            .iter()
-            .find(|(fam, config)| normalize_theme_name(fam) == target && config.mode == mode)
-            .map(|(fam, config)| (fam.as_str(), config))
+            .find(|c| c.name.as_ref() == name)
+            .or_else(|| {
+                let target = normalize_theme_name(name);
+                self.entries
+                    .iter()
+                    .find(|c| normalize_theme_name(&c.name) == target)
+            })
     }
 
     /// Pure `[theme]` config resolution, no `cx`: what `apply_from_config`
-    /// would apply, plus any warnings. `theme.mode` defaults to dark and
-    /// `theme.name` to [`DEFAULT_FAMILY`] when absent; an unrecognized
-    /// `theme.mode` or `theme.name` value falls back the same way, with a
-    /// warning (config philosophy: bad input is a warning, never a crash).
+    /// would apply, plus any warnings. `theme.name` defaults to
+    /// [`DEFAULT_THEME`] when absent, and an unrecognized name falls back
+    /// to it with a warning (config philosophy: bad input is a warning,
+    /// never a crash). A `theme.mode` key — the retired light/dark axis —
+    /// is ignored with a warning that names the replacement, since the
+    /// theme's own name is what carries it now; `persist_to_user_config`
+    /// removes the key on the next theme pick, so the warning is
+    /// self-clearing.
     pub fn resolve_config(&self, config: &Config) -> (Option<&Rc<ThemeConfig>>, Vec<String>) {
         let mut warnings = Vec::new();
 
-        let mode_raw = config.get("app", "theme.mode").and_then(|v| v.as_str());
-        let mode = match mode_raw {
-            Some("light") => Mode::Light,
-            Some("dark") | None => Mode::Dark,
-            Some(other) => {
-                warnings.push(format!(
-                    "theme.mode '{other}' is not 'light' or 'dark'; using dark"
-                ));
-                Mode::Dark
-            }
-        };
+        if config.get("app", "theme.mode").is_some() {
+            warnings.push(
+                "theme.mode is retired and ignored: a theme's name already says whether it \
+                 is light or dark (e.g. \"Gruvbox Light\"); set theme.name to the variant you want"
+                    .to_string(),
+            );
+        }
 
         let name = config.get("app", "theme.name").and_then(|v| v.as_str());
         let resolved = match name {
-            Some(n) => self.resolve(n, mode).or_else(|| {
-                warnings.push(format!("unknown theme '{n}'; using default"));
-                self.resolve(DEFAULT_FAMILY, mode)
+            Some(n) => self.resolve(n).or_else(|| {
+                warnings.push(format!("unknown theme '{n}'; using {DEFAULT_THEME}"));
+                self.resolve(DEFAULT_THEME)
             }),
-            None => self.resolve(DEFAULT_FAMILY, mode),
+            None => self.resolve(DEFAULT_THEME),
         };
 
         (resolved, warnings)
     }
 
-    /// Apply a theme by exact or family name (see [`resolve`](Self::resolve)
-    /// for the matching rule). Returns whether anything matched — an unknown
-    /// name leaves the current theme untouched, mirroring the config
-    /// philosophy at the call site (caller decides the fallback + warning).
-    pub fn apply(&mut self, name: &str, mode: Mode, cx: &mut App) -> bool {
-        let Some(config) = self.resolve(name, mode).cloned() else {
+    /// Apply a theme by name (see [`resolve`](Self::resolve) for the
+    /// matching rule). Returns whether anything matched — an unknown name
+    /// leaves the current theme untouched, mirroring the config philosophy
+    /// at the call site (caller decides the fallback + warning).
+    pub fn apply(&mut self, name: &str, cx: &mut App) -> bool {
+        let Some(config) = self.resolve(name).cloned() else {
             return false;
         };
         self.apply_theme(&config, cx);
         true
     }
 
-    /// Read `[theme] name`/`mode` from `config` and apply the result (see
+    /// Read `[theme] name` from `config` and apply the result (see
     /// [`resolve_config`](Self::resolve_config)), falling back to
-    /// [`DEFAULT_FAMILY`] at the resolved mode when nothing matches. Returns
-    /// any warnings for the caller to surface (main.rs prints one line per
-    /// warning, same as config/keymap diagnostics).
+    /// [`DEFAULT_THEME`] when nothing matches. Returns any warnings for
+    /// the caller to surface (main.rs prints one line per warning, same as
+    /// config/keymap diagnostics).
     pub fn apply_from_config(&mut self, config: &Config, cx: &mut App) -> Vec<String> {
         let (resolved, warnings) = self.resolve_config(config);
         if let Some(theme) = resolved.cloned() {
@@ -365,69 +351,24 @@ impl ThemeService {
         warnings
     }
 
-    /// The active theme's mode — what [`persist_to_user_config`] writes to
-    /// the user config layer whenever a UI theme change applies (settings
-    /// dialog, palette theme pick, `theme::toggle_mode`; see
-    /// `ShellView::persist_theme`, `shell/mod.rs`).
-    pub fn active_mode(&self) -> Mode {
-        self.active_mode
-    }
-
-    /// Flip light/dark for the active family (`theme::toggle_mode`). Stays
-    /// on the same family when it ships both modes; when it doesn't (a
-    /// single-mode family like "Harper"), falls back to [`DEFAULT_FAMILY`]
-    /// at the target mode rather than doing nothing — a mode toggle should
-    /// always visibly change something.
-    pub fn toggle_mode(&mut self, cx: &mut App) {
-        let target = if self.active_mode.is_dark() {
-            Mode::Light
-        } else {
-            Mode::Dark
-        };
-        self.set_mode(target, cx);
-    }
-
-    /// Set the active family's mode directly (rather than flipping it —
-    /// see [`toggle_mode`](Self::toggle_mode)). Used by the settings
-    /// dialog's dark-mode switch (`settings_view::set_dark_mode`). A no-op
-    /// when already at `mode`. Falls back to [`DEFAULT_FAMILY`] at `mode`
-    /// when the active family doesn't ship it, same fallback `toggle_mode`
-    /// uses.
-    pub fn set_mode(&mut self, mode: Mode, cx: &mut App) {
-        if self.active_mode == mode {
-            return;
-        }
-        let family = self.active_family.clone();
-        let next = self
-            .find_family(&family, mode)
-            .or_else(|| self.find_family(DEFAULT_FAMILY, mode))
-            .map(|(_, config)| config.clone());
-        if let Some(config) = next {
-            self.apply_theme(&config, cx);
-        }
-    }
-
     fn apply_theme(&mut self, config: &Rc<ThemeConfig>, cx: &mut App) {
         Theme::global_mut(cx).apply_config(config);
+        // `config.mode` is the theme's own light/dark character, which
+        // gpui-component needs for its Base-layer projection — a property
+        // of the theme, not a mode a trader chose (Geode has none).
         Theme::change(config.mode, None, cx);
-
         self.active_name = config.name.to_string();
-        self.active_mode = config.mode;
-        self.active_family = self
-            .entries
-            .iter()
-            .find(|(_, c)| Rc::ptr_eq(c, config))
-            .map(|(family, _)| family.clone())
-            .unwrap_or_else(|| config.name.to_string());
     }
 }
 
 /// Persist a theme choice into the user config layer (`<user_dir>/app.toml`,
-/// `[theme] name`/`mode`), so it survives a restart via the ordinary
-/// desk/user config merge (`geode_core::config`) rather than a session file
-/// — the settings dialog, palette theme picks, and `theme::toggle_mode` all
-/// call this right after applying the change live (`ShellView::
-/// persist_theme`, `shell/mod.rs`).
+/// `[theme] name`), so it survives a restart via the ordinary desk/user
+/// config merge (`geode_core::config`) rather than a session file — the
+/// settings dialog and palette theme picks both call this right after
+/// applying the change live (`ShellView::persist_theme`, `shell/input.rs`).
+/// A `mode` key left in `[theme]` from before the light/dark axis was
+/// retired (module doc) is removed by the same write, so the load-time
+/// "theme.mode is retired" warning clears itself on the first theme pick.
 ///
 /// `toml_edit` — not the plain `toml` crate already used elsewhere in this
 /// codebase (`session.rs`, `geode_core::config`) — is the whole reason this
@@ -442,9 +383,10 @@ impl ThemeService {
 /// - **Missing file**: created fresh, with `config_version = 1` at the top
 ///   (matching every other config document in this codebase) followed by
 ///   `[theme]`.
-/// - **Existing, valid file**: `[theme]` is created if absent; `name`/
-///   `mode` are set (or overwritten) inside it. Everything else — every
-///   other table, key, and comment — is byte-preserved by `toml_edit`.
+/// - **Existing, valid file**: `[theme]` is created if absent; `name` is
+///   set (or overwritten) inside it and a stale `mode` removed. Everything
+///   else — every other table, key, and comment — is byte-preserved by
+///   `toml_edit`.
 /// - **Existing, unparseable file**: returns `Err` without touching the
 ///   file at all. A user's hand-edited config, however broken, must never
 ///   be destroyed by a UI-driven write; the caller turns this into a
@@ -473,14 +415,14 @@ impl ThemeService {
 /// in-memory copy, that first post-write reload's comparison DOES read as
 /// changed and DOES call `apply_from_config` again. That is redundant, not
 /// skipped: it re-applies a theme that's already active in `ThemeService`
-/// (matching the same name/mode this function just wrote), so it is still
+/// (matching the same name this function just wrote), so it is still
 /// harmless — merely idempotent in effect, not guarded away in mechanism.
 /// (Finding 2 of the same review, separately: this reload must also not
 /// close an open palette on a theme-only change — see `ShellView::
 /// apply_reload`'s own `palette_snapshot_changed` check.) Accepted as-is:
 /// deliberately no self-write suppression here, so this stays one plain
 /// write path with no special-casing of its own output.
-pub fn persist_to_user_config(user_dir: &Path, name: &str, mode: Mode) -> Result<(), String> {
+pub fn persist_to_user_config(user_dir: &Path, name: &str) -> Result<(), String> {
     crate::config_write::edit(user_dir, Layer::User, "app", |doc| {
         if !doc.get("theme").is_some_and(Item::is_table_like) {
             doc["theme"] = Item::Table(Table::new());
@@ -489,7 +431,7 @@ pub fn persist_to_user_config(user_dir: &Path, name: &str, mode: Mode) -> Result
             .as_table_mut()
             .expect("just ensured [theme] is a table");
         theme_table["name"] = value(name);
-        theme_table["mode"] = value(if mode.is_dark() { "dark" } else { "light" });
+        theme_table.remove("mode");
     })
 }
 
@@ -522,19 +464,16 @@ mod tests {
     }
 
     #[test]
-    fn modus_ships_a_light_dark_pair_so_the_mode_toggle_stays_in_family() {
+    fn modus_ships_both_a_light_and_a_dark_theme() {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
-        // Unlike the dark-only families, Modus ships both modes, so
-        // `set_mode`/`toggle_mode` swap within it instead of falling back
-        // to Default (see `ThemeService::set_mode`).
-        assert_eq!(
-            service.resolve("Modus", Mode::Light).unwrap().name.as_ref(),
-            "Modus Operandi"
-        );
-        assert_eq!(
-            service.resolve("Modus", Mode::Dark).unwrap().name.as_ref(),
-            "Modus Vivendi"
+        let light = service.resolve("Modus Operandi").unwrap();
+        assert!(!light.mode.is_dark());
+        let dark = service.resolve("Modus Vivendi").unwrap();
+        assert!(dark.mode.is_dark());
+        assert!(
+            service.resolve("Modus").is_none(),
+            "the family is a file-level grouping, not a theme"
         );
     }
 
@@ -543,15 +482,15 @@ mod tests {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
         let nord = service
-            .resolve("nord", Mode::Dark)
-            .expect("family lookup is case-insensitive");
+            .resolve("nord")
+            .expect("lookup is case-insensitive on the full name");
         assert_eq!(nord.name.as_ref(), "Nord");
         assert!(nord.mode.is_dark());
         // Named "TradingView Dark" rather than bare (the product ships a
-        // light theme too), so the family + mode form is what resolves it.
-        let tv = service.resolve("TradingView", Mode::Dark).unwrap();
-        assert_eq!(tv.name.as_ref(), "TradingView Dark");
+        // light theme too), so only the full name resolves it.
+        let tv = service.resolve("TradingView Dark").unwrap();
         assert!(tv.mode.is_dark());
+        assert!(service.resolve("TradingView").is_none());
     }
 
     #[test]
@@ -559,25 +498,12 @@ mod tests {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert!(service.names().contains(&"Bloomberg".to_string()));
-        // Family lookup normalizes case (see `normalize_theme_name`), so a
-        // config `theme.name = "bloomberg"` and a palette pick of the
-        // display name land on the same single dark variant.
-        assert_eq!(
-            service
-                .resolve("bloomberg", Mode::Dark)
-                .unwrap()
-                .name
-                .as_ref(),
-            "Bloomberg"
-        );
-        // Dark-only family, named bare like Twilight/Harper: the exact-name
-        // match wins outright, so a stale `theme.mode = "light"` alongside
-        // it still resolves the dark theme rather than falling back.
-        let light = service
-            .resolve("Bloomberg", Mode::Light)
-            .expect("exact name matches regardless of the mode argument");
-        assert_eq!(light.name.as_ref(), "Bloomberg");
-        assert!(light.mode.is_dark());
+        // Lookup normalizes case (see `normalize_theme_name`), so a config
+        // `theme.name = "bloomberg"` and a palette pick of the display
+        // name land on the same theme.
+        let found = service.resolve("bloomberg").unwrap();
+        assert_eq!(found.name.as_ref(), "Bloomberg");
+        assert!(found.mode.is_dark());
     }
 
     #[test]
@@ -585,22 +511,15 @@ mod tests {
         let (service, warnings) = load_bundled();
         assert!(warnings.is_empty(), "{warnings:?}");
         // Two dark variants in one family, the Tokyo Night arrangement
-        // (three darks under "Tokyo Night") — `entries` is deliberately not
-        // deduplicated per mode, so both stay reachable.
+        // (three darks under "Tokyo Night") — `entries` is flat, so both
+        // stay reachable by their own names.
         assert!(service.names().contains(&"Bloomberg Modern".to_string()));
         let modern = service
-            .resolve("Bloomberg Modern", Mode::Dark)
+            .resolve("Bloomberg Modern")
             .expect("the modern variant resolves by its fully qualified name");
         assert!(modern.mode.is_dark());
-        // The bare family name keeps resolving the classic amber variant:
-        // `find_family` takes the first entry at the requested mode, and
-        // bloomberg.json lists the classic one first.
         assert_eq!(
-            service
-                .resolve("Bloomberg", Mode::Dark)
-                .unwrap()
-                .name
-                .as_ref(),
+            service.resolve("Bloomberg").unwrap().name.as_ref(),
             "Bloomberg"
         );
     }
@@ -622,72 +541,54 @@ mod tests {
     }
 
     #[test]
-    fn resolve_matches_an_exact_name_regardless_of_the_mode_argument() {
+    fn resolve_matches_an_exact_name() {
         let (service, _) = load_bundled();
-        let found = service
-            .resolve("Gruvbox Dark", Mode::Light)
-            .expect("exact name should match even with a mismatched mode arg");
+        let found = service.resolve("Gruvbox Dark").unwrap();
         assert_eq!(found.name.as_ref(), "Gruvbox Dark");
     }
 
     #[test]
-    fn resolve_matches_a_family_name_combined_with_mode() {
+    fn resolve_is_case_and_punctuation_insensitive_on_the_full_name() {
         let (service, _) = load_bundled();
         assert_eq!(
-            service
-                .resolve("Gruvbox", Mode::Dark)
-                .unwrap()
-                .name
-                .as_ref(),
-            "Gruvbox Dark"
+            service.resolve("gruvbox light").unwrap().name.as_ref(),
+            "Gruvbox Light"
         );
+        // The bundled name is "macOS Classic Light" (spaces); Task 6:
+        // dash/underscore spellings must resolve the same theme.
         assert_eq!(
             service
-                .resolve("gruvbox", Mode::Light)
-                .unwrap()
-                .name
-                .as_ref(),
-            "Gruvbox Light",
-            "family lookup is case-insensitive"
-        );
-    }
-
-    #[test]
-    fn resolve_normalizes_dashes_and_underscores_to_spaces_in_family_lookup() {
-        let (service, _) = load_bundled();
-        // The bundled family name is "macOS Classic" (a space); Task 6:
-        // dash/underscore variants of it must resolve the same theme.
-        assert_eq!(
-            service
-                .resolve("macos-classic", Mode::Light)
+                .resolve("macos-classic-light")
                 .unwrap()
                 .name
                 .as_ref(),
             "macOS Classic Light"
         );
         assert_eq!(
-            service
-                .resolve("macos_classic", Mode::Dark)
-                .unwrap()
-                .name
-                .as_ref(),
+            service.resolve("macos_classic_dark").unwrap().name.as_ref(),
             "macOS Classic Dark"
         );
         assert_eq!(
-            service
-                .resolve("MacOS-Classic", Mode::Dark)
-                .unwrap()
-                .name
-                .as_ref(),
+            service.resolve("MacOS-Classic Dark").unwrap().name.as_ref(),
             "macOS Classic Dark",
-            "normalization combines with the existing case-insensitivity"
+            "normalization combines with the case-insensitivity"
         );
+    }
+
+    #[test]
+    fn a_bare_family_name_is_not_a_theme() {
+        // User ruling 2026-09-12: there is no mode to complete "Gruvbox"
+        // with, so it resolves to nothing rather than to a guessed variant.
+        let (service, _) = load_bundled();
+        assert!(service.resolve("Gruvbox").is_none());
+        assert!(service.resolve("macos-classic").is_none());
+        assert!(service.resolve("Default").is_none());
     }
 
     #[test]
     fn resolve_returns_none_for_an_unknown_name() {
         let (service, _) = load_bundled();
-        assert!(service.resolve("not-a-real-theme", Mode::Dark).is_none());
+        assert!(service.resolve("not-a-real-theme").is_none());
     }
 
     #[test]
@@ -696,13 +597,13 @@ mod tests {
         let config = Config::load(&ConfigSources::default());
         let (resolved, warnings) = service.resolve_config(&config);
         assert!(warnings.is_empty());
-        assert_eq!(resolved.unwrap().name.as_ref(), "Default Dark");
+        assert_eq!(resolved.unwrap().name.as_ref(), DEFAULT_THEME);
     }
 
     #[test]
-    fn resolve_config_reads_theme_name_and_mode_from_config() {
+    fn resolve_config_reads_theme_name_from_config() {
         let (service, _) = load_bundled();
-        let config = config_from("[theme]\nname = \"Gruvbox\"\nmode = \"light\"\n");
+        let config = config_from("[theme]\nname = \"Gruvbox Light\"\n");
         let (resolved, warnings) = service.resolve_config(&config);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(resolved.unwrap().name.as_ref(), "Gruvbox Light");
@@ -711,21 +612,38 @@ mod tests {
     #[test]
     fn resolve_config_falls_back_to_default_with_a_warning_for_an_unknown_name() {
         let (service, _) = load_bundled();
-        let config = config_from("[theme]\nname = \"not-a-real-theme\"\nmode = \"dark\"\n");
+        let config = config_from("[theme]\nname = \"not-a-real-theme\"\n");
         let (resolved, warnings) = service.resolve_config(&config);
-        assert_eq!(resolved.unwrap().name.as_ref(), "Default Dark");
+        assert_eq!(resolved.unwrap().name.as_ref(), DEFAULT_THEME);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("not-a-real-theme"));
     }
 
     #[test]
-    fn resolve_config_falls_back_to_dark_with_a_warning_for_an_invalid_mode() {
+    fn resolve_config_treats_a_bare_family_name_as_unknown() {
+        // The pre-ruling shape, `name = "Gruvbox"` completed by `mode`:
+        // now a warning and the default, never a silently guessed variant.
         let (service, _) = load_bundled();
-        let config = config_from("[theme]\nmode = \"nocturnal\"\n");
+        let config = config_from("[theme]\nname = \"Gruvbox\"\n");
         let (resolved, warnings) = service.resolve_config(&config);
-        assert_eq!(resolved.unwrap().name.as_ref(), "Default Dark");
+        assert_eq!(resolved.unwrap().name.as_ref(), DEFAULT_THEME);
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("nocturnal"));
+        assert!(warnings[0].contains("Gruvbox"));
+    }
+
+    #[test]
+    fn resolve_config_warns_that_theme_mode_is_retired_and_ignores_it() {
+        let (service, _) = load_bundled();
+        let config = config_from("[theme]\nname = \"Gruvbox Light\"\nmode = \"dark\"\n");
+        let (resolved, warnings) = service.resolve_config(&config);
+        assert_eq!(
+            resolved.unwrap().name.as_ref(),
+            "Gruvbox Light",
+            "the name decides; a contradicting mode key changes nothing"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("theme.mode"));
+        assert!(warnings[0].contains("retired"));
     }
 }
 
@@ -739,13 +657,16 @@ mod persist_tests {
     #[test]
     fn creates_a_fresh_file_with_config_version_and_theme() {
         let dir = tempfile::tempdir().unwrap();
-        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark").unwrap();
 
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         let doc: toml_edit::DocumentMut = text.parse().unwrap();
         assert_eq!(doc["config_version"].as_integer(), Some(1));
         assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Dark"));
-        assert_eq!(doc["theme"]["mode"].as_str(), Some("dark"));
+        assert!(
+            doc["theme"].get("mode").is_none(),
+            "there is no mode to write"
+        );
     }
 
     #[test]
@@ -761,12 +682,11 @@ mod = \"ctrl\" # inline comment
 
 [theme]
 # old theme comment
-name = \"Default\"
-mode = \"light\"
+name = \"Default Light\"
 ";
         std::fs::write(dir.path().join("app.toml"), original).unwrap();
 
-        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark").unwrap();
 
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         assert!(text.contains("# a hand-written config"));
@@ -776,12 +696,38 @@ mode = \"light\"
 
         let doc: toml_edit::DocumentMut = text.parse().unwrap();
         assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Dark"));
-        assert_eq!(doc["theme"]["mode"].as_str(), Some("dark"));
         assert_eq!(
             doc["keymap"]["mod"].as_str(),
             Some("ctrl"),
             "unrelated [keymap] table must be untouched"
         );
+    }
+
+    #[test]
+    fn a_stale_mode_key_is_removed_and_its_neighbours_kept() {
+        // A file written before the light/dark axis was retired: the
+        // write that follows the first theme pick cleans the key, and
+        // only the key.
+        let dir = tempfile::tempdir().unwrap();
+        let original = "\
+config_version = 1
+
+[theme]
+name = \"Default Light\"
+mode = \"light\"
+
+[ui]
+font_size = \"large\"
+";
+        std::fs::write(dir.path().join("app.toml"), original).unwrap();
+
+        persist_to_user_config(dir.path(), "Gruvbox Dark").unwrap();
+
+        let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = text.parse().unwrap();
+        assert_eq!(doc["theme"]["name"].as_str(), Some("Gruvbox Dark"));
+        assert!(doc["theme"].get("mode").is_none(), "{text}");
+        assert_eq!(doc["ui"]["font_size"].as_str(), Some("large"));
     }
 
     #[test]
@@ -793,12 +739,11 @@ mode = \"light\"
         )
         .unwrap();
 
-        persist_to_user_config(dir.path(), "Default Light", Mode::Light).unwrap();
+        persist_to_user_config(dir.path(), "Default Light").unwrap();
 
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         let doc: toml_edit::DocumentMut = text.parse().unwrap();
         assert_eq!(doc["theme"]["name"].as_str(), Some("Default Light"));
-        assert_eq!(doc["theme"]["mode"].as_str(), Some("light"));
         assert_eq!(
             doc["keymap"]["mod"].as_str(),
             Some("cmd"),
@@ -817,7 +762,7 @@ mode = \"light\"
         let corrupt = "this is [not valid toml";
         std::fs::write(&path, corrupt).unwrap();
 
-        let result = persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark);
+        let result = persist_to_user_config(dir.path(), "Gruvbox Dark");
         assert!(result.is_err(), "a parse failure must return Err");
 
         let text = std::fs::read_to_string(&path).unwrap();
@@ -835,21 +780,20 @@ mode = \"light\"
     }
 
     #[test]
-    fn overwriting_an_existing_theme_replaces_name_and_mode() {
+    fn overwriting_an_existing_theme_replaces_the_name() {
         let dir = tempfile::tempdir().unwrap();
-        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
-        persist_to_user_config(dir.path(), "Default Light", Mode::Light).unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark").unwrap();
+        persist_to_user_config(dir.path(), "Default Light").unwrap();
 
         let text = std::fs::read_to_string(dir.path().join("app.toml")).unwrap();
         let doc: toml_edit::DocumentMut = text.parse().unwrap();
         assert_eq!(doc["theme"]["name"].as_str(), Some("Default Light"));
-        assert_eq!(doc["theme"]["mode"].as_str(), Some("light"));
     }
 
     #[test]
     fn no_leftover_tmp_files_after_a_successful_write() {
         let dir = tempfile::tempdir().unwrap();
-        persist_to_user_config(dir.path(), "Gruvbox Dark", Mode::Dark).unwrap();
+        persist_to_user_config(dir.path(), "Gruvbox Dark").unwrap();
 
         let leftover_tmp: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -879,7 +823,7 @@ mod gpui_tests {
     fn apply_from_config_applies_the_resolved_theme_to_the_live_global(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (mut service, _) = load_bundled();
-        let config = config_from("[theme]\nname = \"Gruvbox\"\nmode = \"light\"\n");
+        let config = config_from("[theme]\nname = \"Gruvbox Light\"\n");
 
         let warnings = cx.update(|cx| service.apply_from_config(&config, cx));
 
@@ -890,57 +834,38 @@ mod gpui_tests {
                 gpui_component::Theme::global(cx).theme_name().as_ref(),
                 "Gruvbox Light"
             );
+            assert!(
+                !gpui_component::Theme::global(cx).mode.is_dark(),
+                "the theme's own mode reaches gpui-component"
+            );
         });
     }
 
     #[gpui::test]
-    fn set_mode_applies_the_target_mode_within_the_active_family(cx: &mut TestAppContext) {
+    fn apply_by_a_normalized_name_activates_the_exact_theme(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (mut service, _) = load_bundled();
-        cx.update(|cx| assert!(service.apply("Gruvbox", Mode::Dark, cx)));
-        assert_eq!(service.active_mode(), Mode::Dark);
-
-        cx.update(|cx| service.set_mode(Mode::Light, cx));
-        assert_eq!(service.active_name(), "Gruvbox Light");
-        assert_eq!(service.active_mode(), Mode::Light);
+        cx.update(|cx| assert!(service.apply("gruvbox-dark", cx)));
+        assert_eq!(service.active_name(), "Gruvbox Dark");
+        cx.update(|cx| {
+            assert!(gpui_component::Theme::global(cx).mode.is_dark());
+        });
     }
 
     #[gpui::test]
-    fn set_mode_to_the_current_mode_is_a_noop(cx: &mut TestAppContext) {
+    fn apply_refuses_an_unknown_or_bare_family_name_and_keeps_the_theme(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (mut service, _) = load_bundled();
-        cx.update(|cx| assert!(service.apply("Gruvbox", Mode::Dark, cx)));
+        cx.update(|cx| assert!(service.apply("Gruvbox Light", cx)));
 
-        cx.update(|cx| service.set_mode(Mode::Dark, cx));
-        assert_eq!(service.active_name(), "Gruvbox Dark");
-    }
-
-    #[gpui::test]
-    fn toggle_mode_flips_light_and_dark_within_the_active_family(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (mut service, _) = load_bundled();
-        cx.update(|cx| assert!(service.apply("Gruvbox", Mode::Dark, cx)));
-        assert_eq!(service.active_name(), "Gruvbox Dark");
-
-        cx.update(|cx| service.toggle_mode(cx));
+        cx.update(|cx| assert!(!service.apply("not-a-real-theme", cx)));
         assert_eq!(service.active_name(), "Gruvbox Light");
 
-        cx.update(|cx| service.toggle_mode(cx));
-        assert_eq!(service.active_name(), "Gruvbox Dark");
-    }
-
-    #[gpui::test]
-    fn toggle_mode_falls_back_to_default_family_for_a_single_mode_theme(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (mut service, _) = load_bundled();
-        cx.update(|cx| assert!(service.apply("Harper", Mode::Dark, cx)));
-        assert_eq!(service.active_name(), "Harper");
-
-        cx.update(|cx| service.toggle_mode(cx));
+        cx.update(|cx| assert!(!service.apply("Gruvbox", cx)));
         assert_eq!(
             service.active_name(),
-            "Default Light",
-            "Harper has no light variant, so toggling falls back to Default"
+            "Gruvbox Light",
+            "a family name is not a theme and must not pick a variant"
         );
     }
 }

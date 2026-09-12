@@ -106,13 +106,16 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
     );
 }
 
-/// Focus interplay (brief): while the filter input has focus, a shell
-/// chord that has no key binding at all in the input's own gpui action
-/// context (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`)
-/// must not reach the shell's keymap `Matcher` — it stays with the
-/// input instead of adding a tile to the workspace.
+/// Focus interplay: while the filter input has focus, a shell chord
+/// that has no key binding at all in the input's own gpui action context
+/// (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`) reaches the
+/// shell and adds a tile. The original brief's rule was the opposite
+/// ("shell chords won't fire — acceptable while typing a filter"); the
+/// user ruling of 2026-09-12 superseded it, and `scopebar.rs`'s
+/// `a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types`
+/// pins the half that did not change: shift alone is still typing.
 #[gpui::test]
-fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
+fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -150,9 +153,9 @@ fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::Test
         shell.services.workspaces.active().tree().tiles().len()
     });
     assert_eq!(
-        tile_count, 0,
-        "ctrl+h (the test layer's tile::add_rec_vertical) must not dispatch \
-         while the filter input has focus"
+        tile_count, 1,
+        "ctrl+h (the test layer's tile::add_rec_vertical) must dispatch \
+         from the focused filter input"
     );
 }
 
@@ -510,16 +513,16 @@ fn opening_the_settings_dialog_focuses_the_filter(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
-    cx.simulate_input("dark");
+    let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    cx.simulate_input("font");
     let (query, selected) = shell.read_with(&cx, |shell, _| {
         let state = shell.settings.as_ref().unwrap();
         (state.query.clone(), state.selected)
     });
-    assert_eq!(query, "dark");
+    assert_eq!(query, "font");
     assert_eq!(selected, 0, "a query selects the top match");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark()),
+        shell.read_with(&cx, |shell, _| shell.font_size),
         before,
         "typing must never apply a setting — the old h/l/enter stepping \
          keys are plain text now"
@@ -564,7 +567,7 @@ fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
 
 /// The three `apply_setting` arms `tab_and_shift_tab_step_the_
 /// selected_value` doesn't reach (that test covers Font size) --
-/// Theme, Dark mode, Find style -- each stepped once through a real
+/// Theme and Find style -- each stepped once through a real
 /// `tab` keystroke, so a mis-wired arm (e.g. `SettingId::Theme =>
 /// set_font_size_on`) is caught here rather than nowhere: `
 /// apply_setting` takes `&mut ShellView` and has no pure unit test of
@@ -572,8 +575,9 @@ fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
 /// with `j`/`k` (as the retired vim-nav version of this test did):
 /// selecting a different row now means typing a different filter
 /// query, and there's no key that clears the shared field back to
-/// empty mid-session, so three small dialogs are simpler than one
-/// that fights its own filter.
+/// empty mid-session, so two small dialogs are simpler than one
+/// that fights its own filter. (A Dark mode row used to be the third;
+/// retired 2026-09-12.)
 #[gpui::test]
 fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     {
@@ -594,15 +598,6 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
 
     {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-        let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
-        cx.simulate_input("dark");
-        cx.simulate_keystrokes("tab");
-        let after = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
-        assert_eq!(after, !before, "tab on the Dark mode row should toggle it");
-    }
-
-    {
-        let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
         let before = shell.read_with(&cx, |shell, _| shell.find_style);
         cx.simulate_input("keyboard");
         cx.simulate_keystrokes("tab");
@@ -619,16 +614,12 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    cx.simulate_input("dark");
-    let before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+    cx.simulate_input("font");
+    let before = shell.read_with(&cx, |shell, _| shell.font_size);
 
     cx.simulate_keystrokes("enter");
     shell.read_with(&cx, |shell, _| {
-        assert_eq!(
-            shell.services.theme.active_mode().is_dark(),
-            before,
-            "enter must not step the value"
-        );
+        assert_eq!(shell.font_size, before, "enter must not step the value");
         assert!(shell.modal.is_some(), "and must not close the dialog");
     });
 }
@@ -652,16 +643,16 @@ fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::Tes
         selected_before, 2,
         "sanity: two downs land on the third row"
     );
-    let dark_before = shell.read_with(&cx, |shell, _| shell.services.theme.active_mode().is_dark());
+    let style_before = shell.read_with(&cx, |shell, _| shell.find_style);
 
     cx.simulate_keystrokes("enter");
 
-    let (query, selected, dark_after, open) = shell.read_with(&cx, |shell, _| {
+    let (query, selected, style_after, open) = shell.read_with(&cx, |shell, _| {
         let state = shell.settings.as_ref().unwrap();
         (
             state.query.clone(),
             state.selected,
-            shell.services.theme.active_mode().is_dark(),
+            shell.find_style,
             shell.modal.is_some(),
         )
     });
@@ -673,7 +664,7 @@ fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::Tes
         selected, selected_before,
         "enter must not reset the selection to the top match"
     );
-    assert_eq!(dark_after, dark_before, "enter must not step any value");
+    assert_eq!(style_after, style_before, "enter must not step any value");
     assert!(open, "enter must not close the dialog");
 }
 
@@ -886,19 +877,17 @@ fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContex
     }
 }
 
-/// `settings_view::set_theme`/`set_dark_mode` are the exact handlers the
-/// dialog's theme dropdown/dark-mode switch invoke on selection/click
-/// (see those functions' doc comments: simulating a real click through
-/// the dropdown's popup-menu overlay, or the switch's own mouse
-/// handling, is impractical from a `#[gpui::test]` — this drives the
-/// identical path instead). Exercises both live-apply and the
-/// `ThemeService` bookkeeping (`active_name`/`active_mode`) staying in
-/// sync, the same contract `theme::toggle_mode` already has coverage
-/// for elsewhere in this file.
+/// `settings_view::set_theme` is the exact core the dialog's Theme row
+/// applies on a step (see its doc comment: driving the row through real
+/// keystrokes is covered elsewhere — this drives the identical apply
+/// path directly). Exercises both live-apply and the `ThemeService`
+/// bookkeeping (`active_name`) staying in sync, the same contract
+/// `theme::toggle_mode` already has coverage for elsewhere in this file.
+/// The dialog's own Dark mode row and its `set_dark_mode` setter were
+/// retired 2026-09-12 (every theme name carries its mode already), so
+/// mode flipping is `theme::toggle_mode`'s test alone now.
 #[gpui::test]
-fn settings_dialog_theme_and_mode_setters_apply_live_through_theme_service(
-    cx: &mut gpui::TestAppContext,
-) {
+fn settings_dialog_theme_setter_applies_live_through_theme_service(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -923,16 +912,6 @@ fn settings_dialog_theme_and_mode_setters_apply_live_through_theme_service(
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    // test_services() never calls apply_from_config, so the starting
-    // state is exactly load_bundled()'s own default: "Default Light",
-    // mode Light (matches gpui_component::init's own initial theme).
-    assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
-        crate::theme::Mode::Light,
-        "sanity: the starting mode must be Light, or the assertions below \
-         wouldn't prove set_dark_mode actually flipped anything"
-    );
-
     // Fully qualified name, matching what the real dropdown passes
     // (its options come from `ThemeService::names()`, already
     // fully-qualified) — exercises `resolve`'s exact-name path
@@ -949,25 +928,6 @@ fn settings_dialog_theme_and_mode_setters_apply_live_through_theme_service(
         "set_theme should apply the exact fully-qualified name through \
          ThemeService::apply, regardless of the currently active mode \
          argument (find_exact ignores it)"
-    );
-
-    cx.update(|_window, cx| settings_view::set_dark_mode(&shell, true, cx));
-    assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .theme
-            .active_name()
-            .to_string()),
-        "Gruvbox Dark",
-        "set_dark_mode(true) should flip to the dark variant through \
-         ThemeService::set_mode, staying within the same family"
-    );
-
-    cx.update(|_window, cx| settings_view::set_dark_mode(&shell, false, cx));
-    assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.services.theme.active_mode()),
-        crate::theme::Mode::Light,
-        "set_dark_mode(false) should flip back to light"
     );
 }
 
@@ -1445,8 +1405,8 @@ fn a_configured_add_direction_resolves_at_startup_and_on_reload(cx: &mut gpui::T
 /// too: with no filter narrowing the list, four `down`s land on Add
 /// tile, and `tab` steps `Auto → Horizontal` — [`step`]'s wrap, since
 /// `Auto` is `AddDirection::ALL`'s last value. Companion to `tab_steps_
-/// every_remaining_apply_setting_arm` above, which drives the first
-/// four rows through a filtered query each; this one exercises the row
+/// every_remaining_apply_setting_arm` above, which drives the earlier
+/// rows through a filtered query each; this one exercises the row
 /// `apply_setting`'s `SettingId::AddDirection` arm dispatches to.
 #[gpui::test]
 fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
@@ -1457,11 +1417,11 @@ fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
         AddDirection::Auto,
         "sanity: Auto is the default"
     );
-    cx.simulate_keystrokes("down down down down down");
+    cx.simulate_keystrokes("down down down down");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
-        5,
-        "sanity: five downs land on the sixth row"
+        4,
+        "sanity: four downs land on the fifth row"
     );
     cx.simulate_keystrokes("tab");
     assert_eq!(
@@ -1485,11 +1445,11 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
         LineNumbers::Off,
         "sanity: the global is seeded Off at startup"
     );
-    cx.simulate_keystrokes("down down down down");
+    cx.simulate_keystrokes("down down down");
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.settings.as_ref().unwrap().selected),
-        4,
-        "sanity: four downs land on the Line numbers row"
+        3,
+        "sanity: three downs land on the Line numbers row"
     );
     cx.simulate_keystrokes("tab");
     assert_eq!(

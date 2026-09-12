@@ -60,7 +60,11 @@ impl ShellView {
             &bindings,
             &saved,
         );
-        self.palette = Some(PaletteState::new(items));
+        self.palette = Some(PaletteState::with_usage(
+            items,
+            &self.palette_usage,
+            unix_now(),
+        ));
         // Fresh scroll state for a fresh palette session — a stale offset
         // left over from a previous open (a different query, a different
         // scroll position) must not carry over now that the results list
@@ -68,6 +72,9 @@ impl ShellView {
         self.palette_scroll = ScrollHandle::new();
         self.palette_input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        // Recorded before the palette takes focus, for `close_palette`
+        // (see `ShellView::overlay_return_to_filter`).
+        self.overlay_return_to_filter = self.filter_field_focused(window, cx);
         self.palette_input
             .read(cx)
             .focus_handle(cx)
@@ -87,8 +94,15 @@ impl ShellView {
     /// exception — see that call site's own comment for why (no `Window`
     /// available there).
     pub(super) fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.palette = None;
-        self.focus_handle.focus(window, cx);
+        // Only a palette that WAS open moves focus. The dialog door calls
+        // this unconditionally on every open, and an unconditional focus
+        // of the root here blurred the scope bar's text field a line
+        // before the door asked whether the field held focus — so every
+        // dialog opened from the field returned to the root instead.
+        if self.palette.take().is_none() {
+            return;
+        }
+        self.return_focus_from_overlay(window, cx);
     }
 
     /// Scroll the palette's results viewport so the currently selected row
@@ -109,7 +123,7 @@ impl ShellView {
 
     /// Dispatch one selected palette row: an `Action` item goes through the
     /// normal [`dispatch`](Self::dispatch) chain (brief: "action -> the
-    /// normal dispatch chain incl. theme::toggle_mode"); a `Theme` item
+    /// normal dispatch chain"); a `Theme` item
     /// applies that theme directly via `ThemeService::apply`. The palette
     /// is assumed already closed by the caller (Enter closes before
     /// dispatching) — so the `palette::toggle` action id is deliberately
@@ -125,17 +139,23 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every real choice counts as a use — the one exception is the
+        // palette's own toggle row, which only ever closes the palette
+        // (the empty arm below) and would otherwise climb the ranking for
+        // doing nothing. Decided once here, for both the record and the
+        // dispatch.
+        let is_toggle = matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle");
+        if !is_toggle {
+            self.palette_usage.record(&item.usage_key(), unix_now());
+            self.palette_usage_version += 1;
+        }
         match item {
-            PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
+            PaletteItem::Action(..) if is_toggle => {}
             PaletteItem::Action(id, ..) => self.dispatch(id, None, window, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
-                // Dark"), which `ThemeService::resolve` matches outright
-                // regardless of the `mode` argument — so the mode passed
-                // here is irrelevant to which theme gets applied.
-                self.services
-                    .theme
-                    .apply(name, crate::theme::Mode::Dark, cx);
+                // Dark"), which `ThemeService::resolve` matches outright.
+                self.services.theme.apply(name, cx);
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {
@@ -269,4 +289,13 @@ impl ShellView {
             }
         }
     }
+}
+
+/// The wall clock as unix seconds, for `palette_usage`'s `now` — read
+/// once per palette open and once per palette dispatch, never per frame.
+/// A clock before the epoch reads as 0 rather than panicking.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }

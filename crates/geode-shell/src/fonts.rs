@@ -178,14 +178,14 @@ mod tests {
     /// run once at startup rather than after every theme switch.
     #[gpui::test]
     fn mono_family_survives_a_theme_switch(cx: &mut gpui::TestAppContext) {
-        use crate::theme::{Mode, load_bundled};
+        use crate::theme::load_bundled;
 
         cx.update(|cx| {
             gpui_component::init(cx);
             register(cx);
 
             let (mut theme_service, _warnings) = load_bundled();
-            theme_service.set_mode(Mode::Dark, cx);
+            assert!(theme_service.apply("Default Dark", cx));
 
             let theme = gpui_component::Theme::global(cx);
             assert_eq!(theme.font_family.as_ref(), UI);

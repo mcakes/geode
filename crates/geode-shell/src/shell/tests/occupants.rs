@@ -169,7 +169,12 @@ fn services_with_an_unknown_restored_kind() -> (
     std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
     session::TileRecord,
 ) {
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::palette_usage::PaletteUsage::new(),
+    );
     let ws1: toml::Table = r#"
         focused = 1
         [node]
@@ -294,7 +299,12 @@ fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestApp
 fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
     cx: &mut gpui::TestAppContext,
 ) {
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::palette_usage::PaletteUsage::new(),
+    );
     // Workspace 1 (the default active one) stays empty. Workspace 2
     // gets one tile, restored with the recorder's own kind — this is
     // the occupant that is created on the very first render while
