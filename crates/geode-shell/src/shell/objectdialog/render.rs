@@ -761,16 +761,19 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
 /// screen are never one keystroke behind the value they describe.
 ///
 /// [`NormalCommand::MoveItem`] is the one deliberate exception — it
-/// commits without revalidating — and it is safe because none of the three
+/// commits without revalidating — and it is safe because none of the four
 /// `Domain::validate` implementations is order-sensitive: each renders the
 /// object and hands it to its own loader (`ViewSpec::from_doc`,
-/// `GroupingSlots::from_doc`, `saved_scopes_from_doc`), none of which has a
-/// diagnostic a reorder can produce or resolve. That is a property of
-/// today's validators rather than of the dispatch table, so a future
-/// order-sensitive one has to add the call; the branch is also the only way
-/// a test can reach the commit gate with an injected diagnostic still
-/// standing (`an_edit_the_reader_rejects_does_not_join_the_batch` depends
-/// on exactly that).
+/// `GroupingSlots::from_doc`, `saved_scopes_from_doc`, `SchemaSpec::
+/// from_doc`), none of which has a diagnostic a reorder can produce or
+/// resolve — and Schema's own `MoveItem` never reaches here at all, gated
+/// out by the `writable()` check above with every other mutating verb, so
+/// its validator's order-sensitivity is moot regardless. That is a
+/// property of today's validators rather than of the dispatch table, so a
+/// future order-sensitive one has to add the call; the branch is also the
+/// only way a test can reach the commit gate with an injected diagnostic
+/// still standing (`an_edit_the_reader_rejects_does_not_join_the_batch`
+/// depends on exactly that).
 fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     // The same notice door `handle_browse_key` opens with, for the same
     // reason: a notice reports on the keystroke that produced it.
@@ -3117,6 +3120,18 @@ fn on_tick_clicked(
     {
         cx.notify();
     }
+    // §19.4: the tick is `space`'s exact mouse path (this function's own
+    // doc comment) — a read-only domain refuses it the same way the key
+    // does, in the same words.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        cx.notify();
+        return;
+    }
     let Some(draft) = draft_mut(shell) else {
         return;
     };
@@ -3258,6 +3273,17 @@ pub(in crate::shell) fn on_row_dropped(
         && state.notice.take().is_some()
     {
         cx.notify();
+    }
+    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
+    // as the tick — so a read-only domain refuses it identically.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        cx.notify();
+        return;
     }
     let Some(draft) = draft_mut(shell) else {
         return;

@@ -7492,6 +7492,29 @@ run_mutation "objectdialog: schema lists only this dataset's derived dimensions"
   geode-shell \
   fields_are_one_read_only_text_per_column_then_the_derived_dimensions
 
+# Review round 1's Important: a mouse drop is its own gate site, distinct
+# from the keyboard's — `Domain::writable`'s own doc names both a tick
+# click and a drop. Flipping this local condition off must be caught even
+# if the shared `Domain::writable()` method itself were untouched.
+run_mutation "objectdialog: a drop on the schema inspector is refused" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
+    // as the tick — so a read-only domain refuses it identically.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if !writable {' \
+  '    // §19.4: a drop is a reorder or a promotion/demotion — a write, same
+    // as the tick — so a read-only domain refuses it identically.
+    let writable = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.domain.writable());
+    if false {' \
+  geode-shell \
+  a_drop_on_the_schema_inspector_is_refused
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

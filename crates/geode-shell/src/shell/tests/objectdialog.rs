@@ -4521,7 +4521,7 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
         "no doc badge on a read-only row"
     );
 
-    for key in ["space", "i", "d", "shift-j"] {
+    for key in ["space", "i", "d", "shift-j", "enter"] {
         cx.simulate_keystrokes(key);
         cx.run_until_parked();
         assert_eq!(
@@ -4543,4 +4543,39 @@ fn the_schema_inspector_lists_datasets_and_refuses_every_verb(cx: &mut gpui::Tes
             .is_some()
     );
     assert!(cx.debug_bounds("objectdialog-field-columns.book").is_none());
+}
+
+/// Review round 1's Important: `on_tick_clicked` and `on_row_dropped`
+/// are the mouse's own paths to the same writes the keyboard gate above
+/// refuses, and `Domain::writable`'s own doc comment names both as gate
+/// sites — a mouse drop on a read-only row must refuse identically to a
+/// keystroke, not merely fail to find anything to drag. `on_row_dropped`
+/// is `pub(in crate::shell)` precisely so this can drive it directly,
+/// the same door `a_drop_whose_name_has_left_the_list_says_that_row_is_gone`
+/// above uses.
+#[gpui::test]
+fn a_drop_on_the_schema_inspector_is_refused(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_with(cx, services_with_schema(), "config::schema");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let row = objectdialog::RowDrag {
+        field: "columns.book".to_string(),
+        own: true,
+        name: "book".to_string(),
+    };
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &row, &row, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(objectdialog::READ_ONLY_NOTICE)
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_none()),
+        "a drop on a read-only row queued a write"
+    );
 }

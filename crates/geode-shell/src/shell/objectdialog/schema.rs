@@ -11,7 +11,7 @@
 use super::{Destination, Draft, Field, FieldKind};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::schema::{ColumnRole, ColumnSpec, ColumnType, SchemaSpec};
+use geode_core::schema::{Aggregate, ColumnRole, ColumnSpec, ColumnType, SchemaSpec};
 
 pub const DOC: &str = "datasets";
 
@@ -52,8 +52,29 @@ fn type_name(ty: ColumnType) -> &'static str {
     }
 }
 
+/// The same spelling `parse_column` reads back off `[[columns]] aggregate
+/// = "..."` (`geode-core/src/schema/column.rs`'s `Aggregate::parse`), so
+/// a trader reading this row sees the exact word they would type to
+/// change it.
+fn aggregate_name(aggregate: Aggregate) -> &'static str {
+    match aggregate {
+        Aggregate::Sum => "sum",
+        Aggregate::Min => "min",
+        Aggregate::Max => "max",
+        Aggregate::Any => "any",
+    }
+}
+
 /// One column, one line: type, role, the grain where the role has one,
 /// then whichever of `required`/`textual`/`categorical` hold.
+///
+/// A measure names its `aggregate` in the role clause itself
+/// (`measure (sum) · grain instrument`) rather than as a trailing flag:
+/// spec §19.4's inspector exists to show what the other dialogs build on,
+/// and how a measure aggregates is the most consequential fact about it
+/// — a trader deciding whether a rollup is additive reads this before
+/// anything else on the row. `source_name` stays dropped; it is an
+/// ingest-time rename with nothing for a config dialog to act on.
 pub fn describe_column(column: &ColumnSpec) -> String {
     let mut out = format!("{} · ", type_name(column.ty));
     match &column.role {
@@ -62,9 +83,11 @@ pub fn describe_column(column: &ColumnSpec) -> String {
         ColumnRole::Dimension { grain: Some(g) } => {
             out.push_str(&format!("dimension · carried by {}", g.short()))
         }
-        ColumnRole::Measure { grain, .. } => {
-            out.push_str(&format!("measure · grain {}", grain.short()))
-        }
+        ColumnRole::Measure { grain, aggregate } => out.push_str(&format!(
+            "measure ({}) · grain {}",
+            aggregate_name(*aggregate),
+            grain.short()
+        )),
         ColumnRole::Attribute { grain } => {
             out.push_str(&format!("attribute · grain {}", grain.short()))
         }
@@ -166,10 +189,13 @@ mod tests {
 
     // `required` defaults to true and `categorical` to true for a
     // dimension (`schema::parse_column`), so the expected strings below
-    // carry both flags for `book` and neither for `note`.
+    // carry both flags for `book` and neither for `note`. `npv` is the
+    // one measure — review round 1's ruling that `describe_column` must
+    // name a measure's aggregate, which needs a fixture measure to pin.
     const DATASETS: &str = "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
                             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
-                            [risk.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\ngrain = \"position\"\nrequired = false\n";
+                            [risk.columns.note]\ntype = \"utf8\"\nrole = \"attribute\"\ngrain = \"position\"\nrequired = false\n\
+                            [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\naggregate = \"sum\"\n";
 
     fn config() -> Config {
         Config::load(&ConfigSources {
@@ -198,14 +224,15 @@ mod tests {
             .get("risk")
             .cloned()
             .unwrap();
-        assert_eq!(summary(&value), "3 columns · 0 measures · 1 dimension");
+        assert_eq!(summary(&value), "4 columns · 1 measure · 1 dimension");
     }
 
     // Column order is FILE order, not alphabetical — the workspace-wide
     // `preserve_order` ruling (CLAUDE.md: "a schema's column order is
     // file order everywhere it is iterated") — so `book`, `position_ref`,
-    // `note` here matches `DATASETS`'s own declaration order, and the
-    // `note` descriptor this test pins is at index 2, not 1.
+    // `note`, `npv` here matches `DATASETS`'s own declaration order, and
+    // the `note`/`npv` descriptors this test pins are at indices 2 and 3,
+    // not 1 and 2.
     #[test]
     fn fields_are_one_read_only_text_per_column_then_the_derived_dimensions() {
         let fields = fields(&config(), Some("risk"));
@@ -216,6 +243,7 @@ mod tests {
                 "columns.book",
                 "columns.position_ref",
                 "columns.note",
+                "columns.npv",
                 "derived.region"
             ]
         );
@@ -225,12 +253,18 @@ mod tests {
         assert!(
             matches!(&fields[2].kind, FieldKind::Text(t) if t == "utf8 · attribute · grain position")
         );
+        // Review round 1's ruling: a measure names its aggregate in the
+        // role clause itself, since how it aggregates is the most
+        // consequential fact about it.
+        assert!(
+            matches!(&fields[3].kind, FieldKind::Text(t) if t == "f64 · measure (sum) · grain instrument · required")
+        );
         assert!(
             !fields.iter().any(|f| f.key == "derived.other"),
             "not this dataset's"
         );
-        assert!(matches!(&fields[3].kind, FieldKind::Text(t) if t == "from book · 1 value"));
-        assert_eq!(fields[3].label, "region (derived)");
+        assert!(matches!(&fields[4].kind, FieldKind::Text(t) if t == "from book · 1 value"));
+        assert_eq!(fields[4].label, "region (derived)");
     }
 
     #[test]
