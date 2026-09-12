@@ -163,6 +163,7 @@ context = "blotter && mode == normal"
 "n" = "blotter::find_next"
 "shift+n" = "blotter::find_prev"
 "s" = "blotter::sort_cycle"
+"shift+s" = "blotter::sort_cycle_abs"
 "escape" = "blotter::escape"
 
 [[bindings]]
@@ -240,6 +241,10 @@ pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
+    (
+        "blotter::sort_cycle_abs",
+        "Sort by cursor column's magnitude",
+    ),
 ];
 
 /// Just the ids from [`BLOTTER_ACTION_DEFS`], for the mirror test.
@@ -267,6 +272,7 @@ pub const BLOTTER_ACTIONS: &[&str] = &[
     "blotter::find_next",
     "blotter::find_prev",
     "blotter::sort_cycle",
+    "blotter::sort_cycle_abs",
 ];
 
 /// Mirrors `geode_diagnostics::ACTIONS` (id, title) exactly — same

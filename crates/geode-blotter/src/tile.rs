@@ -5,7 +5,7 @@
 use crate::core::commands::{Command, Vocabulary, completions, parse, parse_as_of};
 use crate::core::cursor::{Mode, selection};
 use crate::core::find::FindState;
-use crate::core::flatten::SortSpec;
+use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, ChevronClicked};
@@ -68,6 +68,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::find_next", "Next match"),
     ("blotter::find_prev", "Previous match"),
     ("blotter::sort_cycle", "Sort by cursor column"),
+    (
+        "blotter::sort_cycle_abs",
+        "Sort by cursor column's magnitude",
+    ),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -757,23 +761,23 @@ impl BlotterTile {
                     }
                 }
             }
-            "sort_cycle" => {
+            // `s` walks the signed cycle and `S` the absolute one; the
+            // step itself is `SortOrder::cycle`, which also keeps `S`
+            // inert on a column with no magnitude.
+            "sort_cycle" | "sort_cycle_abs" => {
+                let absolute = name == "sort_cycle_abs";
                 self.with_delegate(cx, |d| {
                     let col = d.cursor.col;
                     if col == 0 {
                         return;
                     }
-                    d.sort = match d.sort {
-                        Some(s) if s.column == col && !s.descending => Some(SortSpec {
-                            column: col,
-                            descending: true,
-                        }),
-                        Some(s) if s.column == col => None,
-                        _ => Some(SortSpec {
-                            column: col,
-                            descending: false,
-                        }),
-                    };
+                    let measure = d.is_measure(col);
+                    let current = d.sort.filter(|s| s.column == col).map(|s| s.order);
+                    let next = SortOrder::cycle(current, absolute, measure);
+                    if next == current {
+                        return;
+                    }
+                    d.sort = next.map(|order| SortSpec { column: col, order });
                     d.reflatten();
                 });
                 self.table.update(cx, |t, cx| {
@@ -946,7 +950,7 @@ impl BlotterTile {
                 self.with_delegate(cx, |d| d.plan = None);
                 self.requery(cx);
             }
-            Command::Sort { column, descending } => {
+            Command::Sort { column, order } => {
                 let found = self.with_delegate(cx, |d| {
                     let col = d
                         .plan
@@ -954,10 +958,10 @@ impl BlotterTile {
                         .columns
                         .iter()
                         .position(|c| c.name == column)?;
-                    d.sort = Some(SortSpec {
-                        column: col,
-                        descending,
-                    });
+                    // A text column has no magnitude: `abs` on it is its
+                    // signed direction, in the state as on the screen.
+                    let order = order.on_column(d.is_measure(col));
+                    d.sort = Some(SortSpec { column: col, order });
                     d.reflatten();
                     Some(())
                 });
@@ -2118,6 +2122,85 @@ mod tests {
         let state = h.tile.read_with(&cx, |t, _| t.serialize());
         assert_eq!(state["view"].as_str(), Some("tree"));
         assert_eq!(state["unscoped"].as_bool(), Some(false));
+    }
+
+    /// `s` walks asc → desc → clear and `S` abs desc → abs asc → clear on
+    /// the cursor's measure column; each key starts its own cycle afresh
+    /// from the other's order; neither touches the tree column; the
+    /// header says `|x|` only while an absolute order is showing; and
+    /// `:sort <col> abs …` reaches the same state by typing.
+    #[gpui::test]
+    fn s_and_shift_s_cycle_signed_and_absolute_sorts(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        let act = |cx: &mut gpui::VisualTestContext, id: &str| {
+            h.tile
+                .update(cx, |t, cx| t.dispatch(&ActionId(id.into()), None, cx))
+        };
+        let sort = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let d = t.table().read(cx).delegate();
+                d.sort.map(|s| (s.column, s.order))
+            })
+        };
+        let header = |cx: &mut gpui::VisualTestContext| {
+            h.tile.read_with(cx, |t, cx| {
+                let table = t.table().read(cx);
+                gpui_component::table::TableDelegate::column(table.delegate(), 1, cx)
+                    .name
+                    .to_string()
+            })
+        };
+
+        // On the tree column both keys are inert.
+        assert!(act(&mut cx, "blotter::sort_cycle"));
+        assert!(act(&mut cx, "blotter::sort_cycle_abs"));
+        assert_eq!(sort(&mut cx), None);
+
+        act(&mut cx, "blotter::right");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        assert_eq!(header(&mut cx), "delta01");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Desc)));
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), None);
+
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        assert_eq!(header(&mut cx), "delta01 |x|");
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsAsc)));
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), None);
+        assert_eq!(header(&mut cx), "delta01");
+
+        // Crossing over: `s` from an absolute order restarts at asc, `S`
+        // from a signed order restarts at abs desc.
+        act(&mut cx, "blotter::sort_cycle_abs");
+        act(&mut cx, "blotter::sort_cycle");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::Asc)));
+        act(&mut cx, "blotter::sort_cycle");
+        act(&mut cx, "blotter::sort_cycle_abs");
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+
+        h.tile.update(&mut cx, |t, cx| {
+            t.command("sort daily_trading_pnl abs asc", cx).unwrap()
+        });
+        assert_eq!(sort(&mut cx), Some((2, SortOrder::AbsAsc)));
+        assert_eq!(
+            header(&mut cx),
+            "delta01",
+            "the marker follows the sort column"
+        );
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort delta01 abs", cx).unwrap());
+        assert_eq!(sort(&mut cx), Some((1, SortOrder::AbsDesc)));
+        h.tile
+            .update(&mut cx, |t, cx| t.command("sort clear", cx).unwrap());
+        assert_eq!(sort(&mut cx), None);
     }
 
     /// `:filter` narrows through `tile_scope`, composed into the query's

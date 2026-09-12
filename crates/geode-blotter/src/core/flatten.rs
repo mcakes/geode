@@ -10,11 +10,73 @@ use crate::core::plan::{ColumnKind, ColumnPlan};
 use geode_core::snapshot::Snapshot;
 use std::cmp::Ordering;
 
+/// How siblings are ranked on the sort column (spec §6.3). The two
+/// absolute orders compare magnitudes — a trader hunting the biggest
+/// exposure does not care which way it points — and only mean anything
+/// on a measure: on a text column they fall back to their signed
+/// direction rather than refusing or doing something odd.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    Asc,
+    Desc,
+    AbsDesc,
+    AbsAsc,
+}
+
+impl SortOrder {
+    pub fn descending(self) -> bool {
+        matches!(self, SortOrder::Desc | SortOrder::AbsDesc)
+    }
+
+    pub fn absolute(self) -> bool {
+        matches!(self, SortOrder::AbsDesc | SortOrder::AbsAsc)
+    }
+
+    /// The order a column of the given kind can actually show: a text
+    /// column has no magnitude, so an absolute order asked of it is its
+    /// signed direction. `:sort <textcol> abs` lands here so the tile's
+    /// state, the header and the rows all say the same thing.
+    pub fn on_column(self, measure: bool) -> SortOrder {
+        match (self, measure) {
+            (SortOrder::AbsDesc, false) => SortOrder::Desc,
+            (SortOrder::AbsAsc, false) => SortOrder::Asc,
+            (order, _) => order,
+        }
+    }
+
+    /// What `s` (`absolute == false`) or `S` (`absolute == true`) does to
+    /// a column whose current order is `current`: `s` walks asc → desc →
+    /// clear, `S` walks abs desc → abs asc → clear, and either key pressed
+    /// while the other's order is showing starts its own cycle afresh
+    /// rather than continuing a cycle the trader did not choose. `S` on a
+    /// column with no magnitude (`measure == false`) leaves `current` as
+    /// it is — a sort it did apply would just be `s`'s.
+    pub fn cycle(current: Option<SortOrder>, absolute: bool, measure: bool) -> Option<SortOrder> {
+        if absolute && !measure {
+            return current;
+        }
+        if absolute {
+            match current {
+                Some(SortOrder::AbsDesc) => Some(SortOrder::AbsAsc),
+                Some(SortOrder::AbsAsc) => None,
+                _ => Some(SortOrder::AbsDesc),
+            }
+        } else {
+            match current {
+                Some(SortOrder::Asc) => Some(SortOrder::Desc),
+                Some(SortOrder::Desc) => None,
+                _ => Some(SortOrder::Asc),
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SortSpec {
     /// Index into `ColumnPlan::columns`.
     pub column: usize,
-    pub descending: bool,
+    pub order: SortOrder,
 }
 
 pub fn flatten(
@@ -110,12 +172,16 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
     };
     let idx = column.index;
     let numeric = column.kind == ColumnKind::Measure;
+    // Magnitude only ever applies to a number; a text column's `abs` is
+    // its signed direction.
+    let absolute = numeric && spec.order.absolute();
+    let key = |v: f64| if absolute { v.abs() } else { v };
     rows.sort_by(|a, b| {
         let (a, b) = (*a as usize, *b as usize);
         let ord = match idx {
             None => Ordering::Equal,
-            Some(i) if numeric => match (snapshot.f64_at(i, a), snapshot.f64_at(i, b)) {
-                (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            Some(i) if numeric => match (number_at(snapshot, i, a), number_at(snapshot, i, b)) {
+                (Some(x), Some(y)) => key(x).total_cmp(&key(y)),
                 (Some(_), None) => Ordering::Less,
                 (None, Some(_)) => Ordering::Greater,
                 (None, None) => Ordering::Equal,
@@ -128,7 +194,7 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
             },
         };
         // NULL last in both directions; ties keep row order (stable sort).
-        match (spec.descending, ord) {
+        match (spec.order.descending(), ord) {
             (_, Ordering::Equal) => Ordering::Equal,
             (true, o)
                 if is_null(snapshot, idx, numeric, a) || is_null(snapshot, idx, numeric, b) =>
@@ -141,10 +207,20 @@ fn sort_siblings(snapshot: &Snapshot, plan: &ColumnPlan, spec: &SortSpec, rows: 
     });
 }
 
+/// A measure cell as the comparator sees it: NULL (a `NonAttributable`
+/// cell included) and NaN are both `None`. NaN — a `SUM` over a source
+/// column holding one — would otherwise compare `Equal` to everything
+/// while everything else orders, which is not a total order, and
+/// `sort_by` panics on one of those (Rust ≥ 1.81); as `None` it sorts
+/// last like a NULL and the remaining values compare totally.
+fn number_at(snapshot: &Snapshot, i: usize, row: usize) -> Option<f64> {
+    snapshot.f64_at(i, row).filter(|v| !v.is_nan())
+}
+
 fn is_null(snapshot: &Snapshot, idx: Option<usize>, numeric: bool, row: usize) -> bool {
     match idx {
         None => true,
-        Some(i) if numeric => snapshot.f64_at(i, row).is_none(),
+        Some(i) if numeric => number_at(snapshot, i, row).is_none(),
         Some(i) => snapshot.text_at(i, row).is_none(),
     }
 }
@@ -281,7 +357,7 @@ mod tests {
         e.open_all();
         let delta = SortSpec {
             column: 1,
-            descending: true,
+            order: SortOrder::Desc,
         };
         assert_eq!(
             visible(&e, Some(&delta)),
@@ -290,13 +366,182 @@ mod tests {
         );
         let asc = SortSpec {
             column: 1,
-            descending: false,
+            order: SortOrder::Asc,
         };
         assert_eq!(
             visible(&e, Some(&asc)),
             vec![0, 2, 6, 4, 1, 3, 8, 7, 5],
             "ascending, NULL still last"
         );
+    }
+
+    /// Root; four children at depth 1 carrying -60, 40, 10 and NULL on
+    /// `delta01` (plan column 1) and a `desk` text column (plan column 2)
+    /// reading C, A, B, NULL. The absolute orders rank by magnitude —
+    /// -60 is the biggest exposure — where the signed orders put it
+    /// last; NULL is last in all four.
+    fn signed_snapshot() -> Snapshot {
+        Snapshot::for_tests(
+            vec![
+                (
+                    dim("lhu"),
+                    TestColumn::Dict(vec![None, s("A"), s("B"), s("C"), s("D")]),
+                ),
+                (dim("row_depth"), TestColumn::I32(vec![0, 1, 1, 1, 1])),
+                (
+                    dim("delta01"),
+                    TestColumn::F64(vec![Some(-10.0), Some(-60.0), Some(40.0), Some(10.0), None]),
+                ),
+                (
+                    dim("desk"),
+                    TestColumn::Dict(vec![None, s("C"), s("A"), s("B"), None]),
+                ),
+            ],
+            1,
+        )
+    }
+
+    fn signed_visible(column: usize, order: SortOrder) -> Vec<u32> {
+        let snap = signed_snapshot();
+        let text = "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"delta01\"\n[[t.columns]]\nname = \"desk\"\nkind = \"dimension\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        assert_eq!(plan.columns[2].kind, ColumnKind::Dimension, "sanity");
+        let spec = SortSpec { column, order };
+        let mut out = Vec::new();
+        flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
+        out
+    }
+
+    #[test]
+    fn absolute_orders_compare_magnitudes_and_keep_null_last() {
+        let by = |order| signed_visible(1, order);
+        assert_eq!(
+            by(SortOrder::Desc),
+            vec![0, 2, 3, 1, 4],
+            "40, 10, -60, NULL"
+        );
+        assert_eq!(by(SortOrder::Asc), vec![0, 1, 3, 2, 4], "-60, 10, 40, NULL");
+        assert_eq!(
+            by(SortOrder::AbsDesc),
+            vec![0, 1, 2, 3, 4],
+            "|-60|, |40|, |10|, NULL"
+        );
+        assert_eq!(
+            by(SortOrder::AbsAsc),
+            vec![0, 3, 2, 1, 4],
+            "|10|, |40|, |-60|, NULL"
+        );
+    }
+
+    /// Forty siblings, every fourth one NaN: enough for `sort_by`'s
+    /// total-order check to trip if NaN compared `Equal` to everything.
+    /// NaN sorts last like NULL, in both directions.
+    #[test]
+    fn nan_sorts_last_like_null_and_never_panics_the_sort() {
+        let n = 40usize;
+        let lhu: Vec<Option<String>> = std::iter::once(None)
+            .chain((0..n).map(|i| s(&format!("R{i:02}"))))
+            .collect();
+        let depth: Vec<i32> = std::iter::once(0).chain((0..n).map(|_| 1)).collect();
+        let values: Vec<Option<f64>> = std::iter::once(Some(0.0))
+            .chain((0..n).map(|i| {
+                if i % 4 == 3 {
+                    Some(f64::NAN)
+                } else {
+                    Some((n - i) as f64 * if i % 2 == 0 { -1.0 } else { 1.0 })
+                }
+            }))
+            .collect();
+        let snap = Snapshot::for_tests(
+            vec![
+                (dim("lhu"), TestColumn::Dict(lhu)),
+                (dim("row_depth"), TestColumn::I32(depth)),
+                (dim("delta01"), TestColumn::F64(values.clone())),
+            ],
+            1,
+        );
+        let text =
+            "[t]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n[[t.columns]]\nname = \"delta01\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.remove(0);
+        let plan = ColumnPlan::build(&view, snap.grouping(), &snap);
+        for order in [
+            SortOrder::Asc,
+            SortOrder::Desc,
+            SortOrder::AbsDesc,
+            SortOrder::AbsAsc,
+        ] {
+            let spec = SortSpec { column: 1, order };
+            let mut out = Vec::new();
+            flatten(&snap, &plan, &Expansion::default(), Some(&spec), &mut out);
+            let nan_count = (0..n).filter(|i| i % 4 == 3).count();
+            let tail = &out[out.len() - nan_count..];
+            assert!(
+                tail.iter().all(|&r| values[r as usize].unwrap().is_nan()),
+                "{order:?}: every NaN row is at the end, got {tail:?}"
+            );
+            let head = &out[1..out.len() - nan_count];
+            assert!(
+                head.iter().all(|&r| !values[r as usize].unwrap().is_nan()),
+                "{order:?}: no NaN before the tail"
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_cycles_walk_their_own_orders_and_restart_from_the_others() {
+        use SortOrder::*;
+        let s = |current| SortOrder::cycle(current, false, true);
+        let big_s = |current| SortOrder::cycle(current, true, true);
+        assert_eq!(s(None), Some(Asc));
+        assert_eq!(s(Some(Asc)), Some(Desc));
+        assert_eq!(s(Some(Desc)), None);
+        assert_eq!(big_s(None), Some(AbsDesc));
+        assert_eq!(big_s(Some(AbsDesc)), Some(AbsAsc));
+        assert_eq!(big_s(Some(AbsAsc)), None);
+        // Crossing over restarts the pressed key's own cycle.
+        assert_eq!(s(Some(AbsDesc)), Some(Asc));
+        assert_eq!(s(Some(AbsAsc)), Some(Asc));
+        assert_eq!(big_s(Some(Asc)), Some(AbsDesc));
+        assert_eq!(big_s(Some(Desc)), Some(AbsDesc));
+    }
+
+    #[test]
+    fn shift_s_is_inert_on_a_column_with_no_magnitude_where_s_is_not() {
+        use SortOrder::*;
+        for current in [None, Some(Asc), Some(Desc)] {
+            assert_eq!(
+                SortOrder::cycle(current, true, false),
+                current,
+                "{current:?}"
+            );
+        }
+        assert_eq!(SortOrder::cycle(None, false, false), Some(Asc));
+        assert_eq!(SortOrder::cycle(Some(Asc), false, false), Some(Desc));
+    }
+
+    #[test]
+    fn an_absolute_order_asked_of_a_text_column_becomes_its_signed_direction() {
+        use SortOrder::*;
+        assert_eq!(AbsDesc.on_column(false), Desc);
+        assert_eq!(AbsAsc.on_column(false), Asc);
+        assert_eq!(Desc.on_column(false), Desc);
+        for order in [Asc, Desc, AbsDesc, AbsAsc] {
+            assert_eq!(order.on_column(true), order, "a measure keeps {order:?}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_order_on_a_text_column_is_its_signed_direction() {
+        // Text has no magnitude; `abs` on it means the plain direction
+        // rather than an odd or refused sort.
+        let by = |order| signed_visible(2, order);
+        assert_eq!(by(SortOrder::Asc), vec![0, 2, 3, 1, 4], "A, B, C, NULL");
+        assert_eq!(by(SortOrder::Desc), vec![0, 1, 3, 2, 4], "C, B, A, NULL");
+        assert_eq!(by(SortOrder::AbsAsc), by(SortOrder::Asc));
+        assert_eq!(by(SortOrder::AbsDesc), by(SortOrder::Desc));
     }
 
     #[test]
