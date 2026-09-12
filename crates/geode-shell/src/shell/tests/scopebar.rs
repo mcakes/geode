@@ -340,6 +340,9 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
 ) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
+    // A tile to duplicate — on an empty workspace `duplicate_horizontal`
+    // is a no-op and the shift+d check below would prove nothing.
+    vcx.simulate_keystrokes("ctrl-v");
     vcx.update(|window, _cx| window.activate_window());
     vcx.run_until_parked();
     vcx.simulate_keystrokes("alt-/"); // mod+/ under the default mod
@@ -351,6 +354,7 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
     let tiles_before = shell.read_with(&vcx, |shell, _| {
         shell.services.workspaces.active().tree().tiles().len()
     });
+    assert_eq!(tiles_before, 1);
     vcx.simulate_keystrokes("shift-d");
     assert_eq!(
         shell.read_with(&vcx, |shell, _| {
@@ -467,10 +471,12 @@ fn a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it(
 
 /// An unbind in a higher layer governs the field's chords exactly as it
 /// governs the shell's: `"ctrl+k" = "none"` swallows the chord rather than
-/// letting the builtin palette toggle through.
+/// letting the builtin palette toggle through — and swallowed means
+/// swallowed: `none` is not dispatched to the focused occupant either
+/// (`dispatch` hands every id it does not know to the focused tile).
 #[gpui::test]
 fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppContext) {
-    let mut services = test_services();
+    let (mut services, log) = services_with_recorder();
     let unbind = LayerDoc::builtin(
         "keymap",
         "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"none\"\n",
@@ -479,6 +485,7 @@ fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppCont
     services.keymap = test_keymap(&services.registry, &[unbind]);
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
     vcx.update(|window, _cx| window.activate_window());
     vcx.run_until_parked();
     vcx.simulate_keystrokes("alt-/");
@@ -489,4 +496,12 @@ fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppCont
     vcx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
     assert!(filter_is_focused(&shell, &mut vcx));
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "none"
+        )),
+        "a swallowed chord must not reach the occupant as `none`: {:?}",
+        log.borrow()
+    );
 }

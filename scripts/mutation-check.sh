@@ -1964,6 +1964,13 @@ run_mutation "field chords: an unbind swallows the chord rather than falling thr
   geode-shell \
   an_unbound_chord_typed_into_the_field_is_swallowed
 
+run_mutation "field chords: the last matching layer wins, so a user unbind shadows the builtin" \
+  crates/geode-shell/src/shell/input.rs \
+  '        self.services.keymap.bindings().iter().rfind(|binding| {' \
+  '        self.services.keymap.bindings().iter().find(|binding| {' \
+  geode-shell \
+  an_unbound_chord_typed_into_the_field_is_swallowed
+
 run_mutation "field chords: a dispatched chord reflects the frame's text back into the still-focused field" \
   crates/geode-shell/src/shell/input.rs \
   '                        self.reflect_frame_text_into_focused_field(window, cx);' \

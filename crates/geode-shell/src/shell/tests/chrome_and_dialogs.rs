@@ -106,13 +106,16 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
     );
 }
 
-/// Focus interplay (brief): while the filter input has focus, a shell
-/// chord that has no key binding at all in the input's own gpui action
-/// context (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`)
-/// must not reach the shell's keymap `Matcher` — it stays with the
-/// input instead of adding a tile to the workspace.
+/// Focus interplay: while the filter input has focus, a shell chord
+/// that has no key binding at all in the input's own gpui action context
+/// (the fixture layer's `ctrl+h` = `tile::add_rec_vertical`) reaches the
+/// shell and adds a tile. The original brief's rule was the opposite
+/// ("shell chords won't fire — acceptable while typing a filter"); the
+/// user ruling of 2026-09-12 superseded it, and `scopebar.rs`'s
+/// `a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types`
+/// pins the half that did not change: shift alone is still typing.
 #[gpui::test]
-fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
+fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -150,9 +153,9 @@ fn shell_chords_do_not_fire_while_the_filter_input_has_focus(cx: &mut gpui::Test
         shell.services.workspaces.active().tree().tiles().len()
     });
     assert_eq!(
-        tile_count, 0,
-        "ctrl+h (the test layer's tile::add_rec_vertical) must not dispatch \
-         while the filter input has focus"
+        tile_count, 1,
+        "ctrl+h (the test layer's tile::add_rec_vertical) must dispatch \
+         from the focused filter input"
     );
 }
 
