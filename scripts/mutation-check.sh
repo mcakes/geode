@@ -4944,6 +4944,16 @@ run_mutation "blotter gutter: the stamp compares, not merely exists" \
   '        if self.numbers_stamp.is_some() {' \
   geode-blotter the_gutter_follows_the_mode_and_the_cursor
 
+run_mutation "blotter: the tree column is pinned left while the measures scroll" \
+  crates/geode-blotter/src/delegate.rs \
+  '            fixed: if c.kind == ColumnKind::Tree {
+                Some(ColumnFixed::Left)
+            } else {
+                None
+            },' \
+  '            fixed: None,' \
+  geode-blotter the_tree_column_stays_put_when_the_table_scrolls_right
+
 run_mutation "blotter gutter: the tree column widens by the gutter" \
   crates/geode-blotter/src/delegate.rs \
   '            width: px(if c.kind == ColumnKind::Tree {

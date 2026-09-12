@@ -18,7 +18,7 @@ use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
 use gpui::prelude::*;
 use gpui::{App, Context, Div, IntoElement, SharedString, Stateful, TextAlign, Window, div, px};
 use gpui_component::ActiveTheme as _;
-use gpui_component::table::{Column, ColumnSort, TableDelegate, TableState};
+use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -564,6 +564,18 @@ impl TableDelegate for BlotterDelegate {
                 c.width
             }),
             movable: c.kind != ColumnKind::Tree,
+            // The tree column is pinned at the left (user ruling
+            // 2026-09-12): the row's identity must stay readable however
+            // far right the measures scroll. gpui-component renders a
+            // `ColumnFixed::Left` column in its own unscrolled region
+            // (`TableState::col_fixed`, on by default) and `scroll_to_col`
+            // already subtracts the fixed count, so `sync_cursor`'s
+            // absolute column index still lands where it should.
+            fixed: if c.kind == ColumnKind::Tree {
+                Some(ColumnFixed::Left)
+            } else {
+                None
+            },
             ..Column::default()
         }
     }
