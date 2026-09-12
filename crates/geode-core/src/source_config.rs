@@ -117,13 +117,24 @@ pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
     }
 }
 
-fn diag(severity: Severity, name: &str, m: impl std::fmt::Display) -> Diagnostic {
+/// `sources.<name>[.<key>]` (§19.5): `key` is the deepest field the call
+/// site honestly knows — `None` only for "not a table", where there is no
+/// field to point into at all.
+fn diag(
+    severity: Severity,
+    name: &str,
+    key: Option<&str>,
+    m: impl std::fmt::Display,
+) -> Diagnostic {
     Diagnostic {
         severity,
         layer: None,
         file: None,
         message: format!("source '{name}': {m}"),
-        path: None,
+        path: Some(match key {
+            Some(k) => format!("sources.{name}.{k}"),
+            None => format!("sources.{name}"),
+        }),
     }
 }
 
@@ -137,7 +148,7 @@ impl SourceSpec {
                 continue;
             }
             let Some(table) = value.as_table() else {
-                diags.push(diag(Severity::Warning, name, "not a table"));
+                diags.push(diag(Severity::Warning, name, None, "not a table"));
                 continue;
             };
 
@@ -147,12 +158,18 @@ impl SourceSpec {
                     diags.push(diag(
                         Severity::Error,
                         name,
+                        Some("dataset"),
                         format!("names undeclared dataset '{d}'"),
                     ));
                     continue;
                 }
                 None => {
-                    diags.push(diag(Severity::Error, name, "missing 'dataset'"));
+                    diags.push(diag(
+                        Severity::Error,
+                        name,
+                        Some("dataset"),
+                        "missing 'dataset'",
+                    ));
                     continue;
                 }
             };
@@ -173,7 +190,7 @@ impl SourceSpec {
                 // dialog's `n` can create one and let the trader type the
                 // globs in afterwards. One line, so the harness can flip
                 // its severity by anchoring on it.
-                diags.push(diag(Severity::Warning, name, IDLE_PATHS));
+                diags.push(diag(Severity::Warning, name, Some("paths"), IDLE_PATHS));
                 continue;
             }
 
@@ -192,6 +209,7 @@ impl SourceSpec {
                         diags.push(diag(
                             Severity::Warning,
                             name,
+                            Some("readiness"),
                             format!("unrecognised readiness {v}; using \"sentinel\""),
                         ));
                         Readiness::Sentinel
@@ -207,6 +225,7 @@ impl SourceSpec {
                     diags.push(diag(
                         Severity::Warning,
                         name,
+                        Some("priority"),
                         format!("unknown priority '{other}'; using \"latest_risk\""),
                     ));
                     Priority::LatestRisk
@@ -222,6 +241,7 @@ impl SourceSpec {
                             diags.push(diag(
                                 Severity::Warning,
                                 name,
+                                Some(key),
                                 format!(
                                     "'{key}' must be an integer with unit s, m or h \
                                      (got {v}); using {}s",
@@ -241,7 +261,12 @@ impl SourceSpec {
                 Some(p) => match check_batch_pattern(p) {
                     Ok(()) => Some(p.to_string()),
                     Err(e) => {
-                        diags.push(diag(Severity::Warning, name, format!("'{e}'; ignoring it")));
+                        diags.push(diag(
+                            Severity::Warning,
+                            name,
+                            Some("batch_pattern"),
+                            format!("'{e}'; ignoring it"),
+                        ));
                         None
                     }
                 },
@@ -513,6 +538,33 @@ batch_pattern = "^risk_.*$"
         assert_eq!(specs[0].batch_pattern, None);
         assert!(
             diags.iter().any(|d| d.message.contains("batch")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_dataset_diagnostic_carries_its_field_path() {
+        let (_, diags) = parse("[live]\npaths = [\"/x/*.csv\"]\n");
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("sources.live.dataset"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_bad_poll_interval_diagnostic_carries_its_field_path() {
+        let (_, diags) = parse(
+            r#"
+[live]
+dataset = "risk_snapshot"
+paths = ["/x/*.csv"]
+poll_interval = "soon"
+"#,
+        );
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("sources.live.poll_interval"),
             "{diags:?}"
         );
     }

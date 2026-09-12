@@ -117,7 +117,10 @@ impl SchemaSpec {
                 columns: Vec::new(),
             };
             let Some(cols) = ds_value.get("columns").and_then(|v| v.as_table()) else {
-                diags.push(note(format!("dataset '{ds_name}': no [columns] table")));
+                diags.push(note(
+                    format!("datasets.{ds_name}"),
+                    format!("dataset '{ds_name}': no [columns] table"),
+                ));
                 out.datasets.push(dataset);
                 continue;
             };
@@ -152,13 +155,16 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
 
     for c in &ds.columns {
         if RESERVED_COLUMNS.contains(&c.name.as_str()) {
-            diags.push(note(format!(
-                "dataset '{}' column '{}': name is reserved by the storage \
-                 layer ({})",
-                ds.name,
-                c.name,
-                RESERVED_COLUMNS.join(", ")
-            )));
+            diags.push(note(
+                format!("datasets.{}.columns.{}", ds.name, c.name),
+                format!(
+                    "dataset '{}' column '{}': name is reserved by the storage \
+                     layer ({})",
+                    ds.name,
+                    c.name,
+                    RESERVED_COLUMNS.join(", ")
+                ),
+            ));
         }
     }
 
@@ -169,11 +175,18 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     for grain in ds.grains() {
         for key in grain.key_columns() {
             if ds.column(key).is_none() {
-                diags.push(note(format!(
-                    "dataset '{}': grain {:?} requires key column '{}', which \
-                     is not declared",
-                    ds.name, grain, key
-                )));
+                // The key column itself is the one this diagnostic is
+                // *about* even though it is not declared — pointing the
+                // path at it (rather than the dataset as a whole) is what
+                // lets a trader jump straight to where it should be added.
+                diags.push(note(
+                    format!("datasets.{}.columns.{}", ds.name, key),
+                    format!(
+                        "dataset '{}': grain {:?} requires key column '{}', which \
+                         is not declared",
+                        ds.name, grain, key
+                    ),
+                ));
             }
         }
     }
@@ -204,7 +217,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                 ds.name,
                 Grain::UnderlyingPair.key_columns().join(", ")
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     ds.columns.retain(|c| !bare_outside_key.contains(&c.name));
@@ -246,7 +259,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension; dropped",
                 ds.name
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     ds.columns
@@ -274,7 +287,7 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
                  dimension, so the text filter cannot route it; textual ignored",
                 ds.name
             ),
-            path: None,
+            path: Some(format!("datasets.{}.columns.{name}", ds.name)),
         });
     }
     for c in &mut ds.columns {
@@ -286,13 +299,13 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
     diags
 }
 
-fn note(message: String) -> Diagnostic {
+fn note(path: String, message: String) -> Diagnostic {
     Diagnostic {
         severity: Severity::Warning,
         layer: None,
         file: None,
         message,
-        path: None,
+        path: Some(path),
     }
 }
 
@@ -305,26 +318,40 @@ fn parse_column(
     name: &str,
     value: &toml::Value,
 ) -> Result<(ColumnSpec, Option<Diagnostic>), Diagnostic> {
-    let bad = |m: String| note(format!("dataset '{ds}' column '{name}': {m}"));
-    let table = value.as_table().ok_or_else(|| bad("not a table".into()))?;
+    // `datasets.<ds>.columns.<name>[.<key>]` — `key` is the deepest field
+    // a call site honestly knows (`type`, `role`, `grain`, `aggregate`,
+    // `categorical`); `None` only for "not a table", which names no key.
+    let bad = |key: Option<&str>, m: String| {
+        note(
+            match key {
+                Some(k) => format!("datasets.{ds}.columns.{name}.{k}"),
+                None => format!("datasets.{ds}.columns.{name}"),
+            },
+            format!("dataset '{ds}' column '{name}': {m}"),
+        )
+    };
+    let table = value
+        .as_table()
+        .ok_or_else(|| bad(None, "not a table".into()))?;
 
     let ty_str = table
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| bad("missing 'type'".into()))?;
-    let ty = ColumnType::parse(ty_str).ok_or_else(|| bad(format!("unknown type '{ty_str}'")))?;
+        .ok_or_else(|| bad(Some("type"), "missing 'type'".into()))?;
+    let ty = ColumnType::parse(ty_str)
+        .ok_or_else(|| bad(Some("type"), format!("unknown type '{ty_str}'")))?;
 
     let role_str = table
         .get("role")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| bad("missing 'role'".into()))?;
+        .ok_or_else(|| bad(Some("role"), "missing 'role'".into()))?;
 
     let grain_of = |table: &toml::Table| -> Result<Grain, Diagnostic> {
         let g = table
             .get("grain")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| bad("missing 'grain'".into()))?;
-        Grain::parse(g).ok_or_else(|| bad(format!("unknown grain '{g}'")))
+            .ok_or_else(|| bad(Some("grain"), "missing 'grain'".into()))?;
+        Grain::parse(g).ok_or_else(|| bad(Some("grain"), format!("unknown grain '{g}'")))
     };
 
     let role = match role_str {
@@ -332,9 +359,10 @@ fn parse_column(
         "dimension" => ColumnRole::Dimension {
             grain: match table.get("grain").and_then(|v| v.as_str()) {
                 None => None,
-                Some(g) => {
-                    Some(Grain::parse(g).ok_or_else(|| bad(format!("unknown grain '{g}'")))?)
-                }
+                Some(g) => Some(
+                    Grain::parse(g)
+                        .ok_or_else(|| bad(Some("grain"), format!("unknown grain '{g}'")))?,
+                ),
             },
         },
         "attribute" => ColumnRole::Attribute {
@@ -346,13 +374,13 @@ fn parse_column(
                 .and_then(|v| v.as_str())
                 .unwrap_or("sum");
             let aggregate = Aggregate::parse(agg_str)
-                .ok_or_else(|| bad(format!("unknown aggregate '{agg_str}'")))?;
+                .ok_or_else(|| bad(Some("aggregate"), format!("unknown aggregate '{agg_str}'")))?;
             ColumnRole::Measure {
                 grain: grain_of(table)?,
                 aggregate,
             }
         }
-        other => return Err(bad(format!("unknown role '{other}'"))),
+        other => return Err(bad(Some("role"), format!("unknown role '{other}'"))),
     };
 
     let categorical_default = matches!(role, ColumnRole::Dimension { .. });
@@ -360,10 +388,13 @@ fn parse_column(
     let categorical = match table.get("categorical").and_then(|v| v.as_bool()) {
         None => categorical_default,
         Some(true) if ty != ColumnType::Utf8 => {
-            warning = Some(bad(format!(
-                "categorical = true needs type = \"utf8\" (got '{ty_str}'); \
-                 only a string column can be an ENUM — categorical ignored"
-            )));
+            warning = Some(bad(
+                Some("categorical"),
+                format!(
+                    "categorical = true needs type = \"utf8\" (got '{ty_str}'); \
+                     only a string column can be an ENUM — categorical ignored"
+                ),
+            ));
             false
         }
         Some(v) => v,
@@ -751,6 +782,18 @@ grain = "underlying"
         assert!(
             ds.column("underlying2_ref").is_some(),
             "the key column itself stays"
+        );
+    }
+
+    #[test]
+    fn a_bad_column_type_diagnostic_carries_its_field_path() {
+        let (_, diags) = SchemaSpec::from_doc(&doc(
+            "[risk.columns.npv]\ntype = \"nonesuch\"\nrole = \"measure\"\ngrain = \"position\"\n",
+        ));
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("datasets.risk.columns.npv.type"),
+            "{diags:?}"
         );
     }
 }

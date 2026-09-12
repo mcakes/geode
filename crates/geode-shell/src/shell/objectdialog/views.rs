@@ -566,22 +566,24 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
             .map(|doc| SchemaSpec::from_doc(doc).0)
             .is_some_and(|schema| schema.dataset(dataset).is_some());
         if !known {
-            diags.push(Diagnostic {
-                severity: Severity::Warning,
-                layer: None,
-                file: None,
-                message: format!(
-                    "view '{}': dataset '{dataset}' is not in the schema",
-                    draft.name
-                ),
-                // `None`, like every other build site in the workspace:
-                // 4b added the field and filled it in from no reader
-                // ("Not filled in by any reader in 4b" — its own doc),
-                // and nothing yet reads it back. Attaching a field-row
-                // path here via `with_path` is the feature that field
-                // was added for, not something a merge should invent.
-                path: None,
-            });
+            diags.push(
+                Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!(
+                        "view '{}': dataset '{dataset}' is not in the schema",
+                        draft.name
+                    ),
+                    path: None,
+                }
+                // The one field this cross-check names is `dataset` —
+                // `ViewSpec::from_doc`'s own reader diagnostics land on
+                // this same key when it is missing (§19.5); this one
+                // lands there too, so `Draft::row_for_path` flags the
+                // same row whichever check found the problem.
+                .with_path(format!("views.{}.dataset", draft.name)),
+            );
         }
     }
     diags

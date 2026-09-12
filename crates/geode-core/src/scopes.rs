@@ -22,19 +22,25 @@ pub fn saved_scopes_from_doc(
 ) -> (SavedScopes, Vec<Diagnostic>) {
     let mut out = SavedScopes::new();
     let mut diags = Vec::new();
-    let warn = |m: String| Diagnostic {
+    // `scopes.<name>[.<suffix>]` (§19.5): most call sites below know
+    // exactly which key misbehaved (`.expression`, `.dimensions.<col>`);
+    // the ones that don't (not a table at all) name the object whole.
+    let warn = |path: String, m: String| Diagnostic {
         severity: Severity::Warning,
         layer: None,
         file: None,
         message: m,
-        path: None,
+        path: Some(path),
     };
     for (name, value) in &doc.value {
         if name == "config_version" {
             continue;
         }
         let Some(table) = value.as_table() else {
-            diags.push(warn(format!("scopes: '{name}' must be a table; ignored")));
+            diags.push(warn(
+                format!("scopes.{name}"),
+                format!("scopes: '{name}' must be a table; ignored"),
+            ));
             continue;
         };
         let mut scope = Scope::default();
@@ -68,9 +74,10 @@ pub fn saved_scopes_from_doc(
             match parse_expr(src) {
                 Ok(e) => scope.expression = Some(e),
                 Err(e) => {
-                    diags.push(warn(format!(
-                        "scopes: '{name}': expression: {e}; scope ignored"
-                    )));
+                    diags.push(warn(
+                        format!("scopes.{name}.expression"),
+                        format!("scopes: '{name}': expression: {e}; scope ignored"),
+                    ));
                     continue;
                 }
             }
@@ -85,10 +92,25 @@ pub fn saved_scopes_from_doc(
             .unwrap_or_default();
         if !bad.is_empty() {
             for d in bad {
-                diags.push(warn(format!(
-                    "scopes: '{name}': {}; scope ignored",
-                    d.message
-                )));
+                // `Scope::validate`'s message always quotes the offending
+                // column first (`scope references unknown column 'x'`,
+                // `'x' is a derived dimension, so...` — every message
+                // shape it produces), so the first single-quoted run is
+                // the column name. When that name is one of this scope's
+                // own dimension selections the diagnostic lands on that
+                // selection's row; otherwise (an expression-only column)
+                // it lands on the expression field, since that is the
+                // only other place a column name can come from here.
+                let column = d.message.split('\'').nth(1).unwrap_or("");
+                let path = if scope.dimensions.iter().any(|sel| sel.column == column) {
+                    format!("scopes.{name}.dimensions.{column}")
+                } else {
+                    format!("scopes.{name}.expression")
+                };
+                diags.push(warn(
+                    path,
+                    format!("scopes: '{name}': {}; scope ignored", d.message),
+                ));
             }
             continue;
         }
@@ -208,6 +230,32 @@ role = "key"
             diags[0].message.contains("expression"),
             "{}",
             diags[0].message
+        );
+    }
+
+    #[test]
+    fn a_bad_expression_diagnostic_carries_its_field_path() {
+        let schema = schema();
+        let dims = DerivedDimensions::default();
+        let doc = scope_doc("[eod]\nexpression = \"book = \"\n");
+        let (_, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("scopes.eod.expression"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_column_diagnostic_carries_its_dimension_path() {
+        let schema = schema();
+        let dims = DerivedDimensions::default();
+        let doc = scope_doc("[bad]\n[bad.dimensions]\nnonesuch = [\"X\"]\n");
+        let (_, diags) = saved_scopes_from_doc(&doc, &schema, &dims);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("scopes.bad.dimensions.nonesuch"),
+            "{diags:?}"
         );
     }
 

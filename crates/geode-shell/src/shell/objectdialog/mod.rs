@@ -76,7 +76,7 @@ mod views;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geode_core::config::{Config, Diagnostic, Layer};
+use geode_core::config::{Config, Diagnostic, Layer, Severity};
 
 use crate::dialogmode::DialogMode;
 
@@ -904,13 +904,13 @@ pub struct Draft {
     /// [`Domain::validate`]'s output for the draft as it stands, refreshed
     /// on every change (spec §7.2).
     ///
-    /// Shown against the object as a whole rather than against individual
-    /// field rows: attaching a diagnostic to the field whose `key` matches
-    /// its `path` needs `Diagnostic::path` (spec §8.5), which no reader
-    /// carries yet — adding it means a new field on `Diagnostic` and a
-    /// change to all 27 of its construction sites plus every reader that
-    /// would fill it, none of which are files this task owns. Reported as
-    /// a deviation rather than faked by matching on message text.
+    /// Shown on the header AND on the field row it names (§19.5): every
+    /// reader across `geode-core` now fills `Diagnostic::path` with the
+    /// key it was looking at, and [`Draft::row_for_path`] turns that path
+    /// back into the [`EditRow`] it describes — [`Draft::flagged_rows`] is
+    /// what `render.rs` reads to paint the row glyph, while the header
+    /// list (this field, read directly) stays the text of record for
+    /// every diagnostic, matched or not.
     pub diagnostics: Vec<Diagnostic>,
     /// The destructive keystroke waiting on a second one, if any. It
     /// replaces the action bar while armed, so the row list above it never
@@ -1765,6 +1765,53 @@ impl Draft {
             confirm: None,
             text_entry: None,
         }
+    }
+
+    /// The row a reader's diagnostic path names (§19.5), or `None` for a
+    /// path that is not this object's or names no row — those stay on the
+    /// header. The grammar is `<doc>.<object>.<field>[.<index>[...]]`: a
+    /// field matches by `key`; a list field's next segment, when it is an
+    /// index into `items`, matches that item (never an available row — the
+    /// object has no diagnostic about a column it does not have).
+    pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
+        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
+        self.fields.iter().enumerate().find_map(|(i, field)| {
+            let after = if rest == field.key {
+                ""
+            } else {
+                rest.strip_prefix(&format!("{}.", field.key))?
+            };
+            let index = after
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<usize>().ok());
+            match (&field.kind, index) {
+                (FieldKind::OrderedList { items, .. }, Some(item)) if item < items.len() => {
+                    Some(EditRow::Item { field: i, item })
+                }
+                _ => Some(EditRow::Field(i)),
+            }
+        })
+    }
+
+    /// Every row a current diagnostic lands on, with the worst severity
+    /// there, for the row glyph; the header list is what carries the
+    /// text.
+    pub fn flagged_rows(&self, doc: &str) -> Vec<(EditRow, Severity)> {
+        let mut out: Vec<(EditRow, Severity)> = Vec::new();
+        for d in &self.diagnostics {
+            let Some(row) = d.path.as_deref().and_then(|p| self.row_for_path(doc, p)) else {
+                continue;
+            };
+            match out.iter_mut().find(|(r, _)| *r == row) {
+                Some((_, s)) if *s == Severity::Warning && d.severity == Severity::Error => {
+                    *s = Severity::Error
+                }
+                Some(_) => {}
+                None => out.push((row, d.severity)),
+            }
+        }
+        out
     }
 }
 
@@ -4202,5 +4249,81 @@ mod tests {
             "unchanged after applying too"
         );
         assert_eq!(draft.selected_row(), Some(EditRow::Field(1)));
+    }
+
+    #[test]
+    fn row_for_path_matches_a_field_by_key_and_a_list_item_by_index() {
+        let draft = Draft::new_object(
+            "tree",
+            vec![
+                Field {
+                    key: "dataset".into(),
+                    label: "Dataset".into(),
+                    kind: FieldKind::Text("risk".into()),
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+                Field {
+                    key: "columns".into(),
+                    label: "Columns".into(),
+                    kind: FieldKind::OrderedList {
+                        items: vec![
+                            ListItem {
+                                name: "npv".into(),
+                                included: true,
+                                width: None,
+                                kind: None,
+                            },
+                            ListItem {
+                                name: "delta".into(),
+                                included: true,
+                                width: None,
+                                kind: None,
+                            },
+                        ],
+                        available: Some(vec![ListItem {
+                            name: "vega".into(),
+                            included: false,
+                            width: None,
+                            kind: None,
+                        }]),
+                    },
+                    dest: Destination::Doc,
+                    layer: None,
+                },
+            ],
+            toml::Table::new(),
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.dataset"),
+            Some(EditRow::Field(0))
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.1.format.precision"),
+            Some(EditRow::Item { field: 1, item: 1 })
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns"),
+            Some(EditRow::Field(1))
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.7"),
+            Some(EditRow::Field(1)),
+            "an index off the list lands on the field"
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.2"),
+            Some(EditRow::Field(1)),
+            "an index exactly at the list's length is still out of bounds \
+             (there is no items[2] when len() == 2) — the off-by-a-lot case \
+             above cannot tell `<` from `<=` on its own"
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree"),
+            None,
+            "object-level stays on the header"
+        );
+        assert_eq!(draft.row_for_path("views", "views.other.dataset"), None);
+        assert_eq!(draft.row_for_path("views", "sources.tree.dataset"), None);
     }
 }

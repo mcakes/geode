@@ -3772,9 +3772,9 @@ run_mutation "views: data_setup goes through load_views, not the raw views doc" 
 # that case's own skip-vs-drop behaviour, which this one cannot see.
 run_mutation "views: a presentation naming a column the view lacks warns, it does not error" \
   crates/geode-core/src/view.rs \
-  '            let warn = |m: String| Diagnostic {
+  '            let warn = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,' \
-  '            let warn = |m: String| Diagnostic {
+  '            let warn = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Error,' \
   geode-core \
   a_column_the_view_lacks_is_a_warning_not_an_error
@@ -3788,7 +3788,7 @@ run_mutation "views: a presentation naming a column the view lacks warns, it doe
 # why, which is the one outcome a trader cannot debug.
 run_mutation "views: a presentation naming a view the config lacks is skipped LOUDLY" \
   crates/geode-core/src/view.rs \
-  '                diags.push(warn("no view of that name — ignored".into()));' \
+  '                diags.push(warn("", "no view of that name — ignored".into()));' \
   '' \
   geode-core \
   a_view_the_config_lacks_is_a_warning_not_an_error
@@ -7534,8 +7534,8 @@ run_mutation "sources: polls are written only under stable_mtime" \
 # §19.3: an idle source is a WARNING — an error would block `n`.
 run_mutation "sources: empty paths is a warning not an error" \
   crates/geode-core/src/source_config.rs \
-  '                diags.push(diag(Severity::Warning, name, IDLE_PATHS));' \
-  '                diags.push(diag(Severity::Error, name, IDLE_PATHS));' \
+  '                diags.push(diag(Severity::Warning, name, Some("paths"), IDLE_PATHS));' \
+  '                diags.push(diag(Severity::Error, name, Some("paths"), IDLE_PATHS));' \
   geode-core \
   empty_paths_is_a_warning_and_the_source_is_skipped
 
@@ -7554,6 +7554,31 @@ run_mutation "sources: n seeds the dataset from the cursor row" \
   '    None' \
   geode-shell \
   n_on_sources_seeds_the_dataset_and_creates_an_idle_source
+
+# §19.5: a column diagnostic's path carries the column INDEX — without
+# it the row match lands on the `columns` field header, not the column.
+run_mutation "views reader: column diagnostics carry the column index" \
+  crates/geode-core/src/view.rs \
+  '                            &format!("columns.{i}.{key}"),' \
+  '                            &format!("columns.{key}"),' \
+  geode-core \
+  a_column_format_diagnostic_carries_its_indexed_path
+
+# §19.5: an index off the end lands on the field, never on a phantom row.
+run_mutation "objectdialog: row_for_path bounds the item index" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                (FieldKind::OrderedList { items, .. }, Some(item)) if item < items.len() => {' \
+  '                (FieldKind::OrderedList { items, .. }, Some(item)) if item <= items.len() => {' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.5: a path from another object never flags this draft's rows.
+run_mutation "objectdialog: row_for_path is scoped to this object" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;' \
+  '        let rest = path.strip_prefix(&format!("{doc}.")).and_then(|r| r.split_once('"'"'.'"'"')).map(|(_, r)| r)?;' \
+  geode-shell \
+  row_for_path_matches_a_field_by_key_and_a_list_item_by_index
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

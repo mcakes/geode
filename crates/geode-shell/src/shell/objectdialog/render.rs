@@ -113,7 +113,7 @@
 
 use std::rc::Rc;
 
-use geode_core::config::{Layer, check_object_name};
+use geode_core::config::{Layer, Severity, check_object_name};
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -2376,6 +2376,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let domain = state.domain;
     let rows = draft.rows();
     let visible = draft.visible_rows();
+    // §19.5: which rows a current diagnostic names, computed once per
+    // render rather than per row — `Draft::flagged_rows` is a linear scan
+    // of the diagnostic list, and doing it once here keeps the per-row
+    // work below to a single `Vec` lookup.
+    let flagged = draft.flagged_rows(domain.doc());
     let mut list = v_flex()
         .id("objectdialog-fields")
         .w(px(WIDTH))
@@ -2588,6 +2593,39 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 )
             }
         };
+        // §19.5: a glyph before the label, painted only when a current
+        // diagnostic names this row — an inert `div` of the same width
+        // otherwise, so every row keeps its height and the label column
+        // stays aligned whether or not anything is flagged. Built after
+        // the match above (rather than folded into each arm) because the
+        // selector string — this row's identity for `debug_selector` —
+        // is computed there, and one glyph rule for both arms is simpler
+        // than two copies of the same match on `flag`.
+        let flag = flagged
+            .iter()
+            .find(|(r, _)| *r == edit_row)
+            .map(|(_, s)| *s);
+        let glyph = match flag {
+            Some(Severity::Error) => {
+                let diag_selector = format!("objectdialog-diag-{selector}");
+                div()
+                    .w(px(12.))
+                    .text_color(theme.danger)
+                    .debug_selector(move || diag_selector.clone())
+                    .child("!")
+                    .into_any_element()
+            }
+            Some(Severity::Warning) => {
+                let diag_selector = format!("objectdialog-diag-{selector}");
+                div()
+                    .w(px(12.))
+                    .text_color(theme.warning)
+                    .debug_selector(move || diag_selector.clone())
+                    .child("!")
+                    .into_any_element()
+            }
+            None => div().w(px(12.)).into_any_element(),
+        };
         let entity_for_row = entity.clone();
         let clicked = position;
         // §19.1: while a field is open, the mouse agrees with the keys —
@@ -2598,6 +2636,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // click-to-edit path.
         let open = draft.text_entry.map(|t| t.completions);
         let row_el = element
+            .child(glyph)
             .child(label)
             .child(value)
             .debug_selector(move || selector.clone())
@@ -2700,20 +2739,29 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         );
     }
 
-    // Diagnostics for the object as a whole. Attaching each to the field
-    // whose `key` matches its `path` is spec §8.5's shape and needs
-    // `Diagnostic::path`, which no reader carries yet — see
-    // `Draft::diagnostics`.
+    // Diagnostics for the object as a whole, each prefixed with the row it
+    // names when `Diagnostic::path` resolves to one (§19.5, §8.5) — the
+    // same lookup `flagged_rows` above makes, but here for the LABEL a
+    // diagnostic's own row carries rather than the glyph. An object-level
+    // diagnostic (no matching row — `row_for_path` returns `None`, e.g. a
+    // cross-dataset check with no single field to blame) prints with no
+    // prefix at all, exactly as before this field existed.
     let diagnostics = v_flex().w(px(WIDTH)).gap_0p5().children(
         draft
             .diagnostics
             .iter()
             .map(|diagnostic| {
+                let prefix = diagnostic
+                    .path
+                    .as_deref()
+                    .and_then(|p| draft.row_for_path(domain.doc(), p))
+                    .map(|row| format!("{}: ", draft.row_label(row)))
+                    .unwrap_or_default();
                 div()
                     .text_xs()
                     .text_color(theme.warning)
                     .debug_selector(|| "objectdialog-diagnostic".to_string())
-                    .child(diagnostic.message.clone())
+                    .child(format!("{prefix}{}", diagnostic.message))
             })
             .collect::<Vec<_>>(),
     );

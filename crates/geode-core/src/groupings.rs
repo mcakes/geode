@@ -30,6 +30,18 @@ impl GroupingSlots {
             dims.get(column).is_some()
                 || schema.datasets.iter().any(|ds| ds.column(column).is_some())
         };
+        // `groupings.<slot>` — the slot number IS the object's identity
+        // (§19.5), so every diagnostic below names it whole; there is no
+        // finer key inside one slot's bare array to point into. The "not
+        // a slot number" case uses the raw `key` (it never parsed to a
+        // slot at all) — every other case uses the parsed `slot`.
+        let at = |severity: Severity, slot: &str, m: String| Diagnostic {
+            severity,
+            layer: None,
+            file: None,
+            message: m,
+            path: Some(format!("groupings.{slot}")),
+        };
         for (key, value) in &doc.value {
             if key == "config_version" {
                 continue;
@@ -37,15 +49,11 @@ impl GroupingSlots {
             let slot = match key.parse::<u8>().ok().filter(|s| (1..=9).contains(s)) {
                 Some(s) => s,
                 None => {
-                    diags.push(Diagnostic {
-                        severity: Severity::Warning,
-                        layer: None,
-                        file: None,
-                        message: format!(
-                            "groupings: key '{key}' is not a slot number 1–9; ignored"
-                        ),
-                        path: None,
-                    });
+                    diags.push(at(
+                        Severity::Warning,
+                        key,
+                        format!("groupings: key '{key}' is not a slot number 1–9; ignored"),
+                    ));
                     continue;
                 }
             };
@@ -56,37 +64,31 @@ impl GroupingSlots {
                     .map(str::to_string)
                     .collect(),
                 None => {
-                    diags.push(Diagnostic {
-                        severity: Severity::Warning,
-                        layer: None,
-                        file: None,
-                        message: format!("groupings: slot {slot} must be an array of column names"),
-                        path: None,
-                    });
+                    diags.push(at(
+                        Severity::Warning,
+                        &slot.to_string(),
+                        format!("groupings: slot {slot} must be an array of column names"),
+                    ));
                     continue;
                 }
             };
             if grouping.is_empty() {
-                diags.push(Diagnostic {
-                    severity: Severity::Warning,
-                    layer: None,
-                    file: None,
-                    message: format!("groupings: slot {slot} is empty; ignored"),
-                    path: None,
-                });
+                diags.push(at(
+                    Severity::Warning,
+                    &slot.to_string(),
+                    format!("groupings: slot {slot} is empty; ignored"),
+                ));
                 continue;
             }
             if let Some(unknown) = grouping.iter().find(|c| !known(c)) {
-                diags.push(Diagnostic {
-                    severity: Severity::Error,
-                    layer: None,
-                    file: None,
-                    message: format!(
+                diags.push(at(
+                    Severity::Error,
+                    &slot.to_string(),
+                    format!(
                         "groupings: slot {slot} names '{unknown}', which no dataset or \
                          derived dimension declares; slot dropped"
                     ),
-                    path: None,
-                });
+                ));
                 continue;
             }
             out.set(slot, grouping);
@@ -243,6 +245,16 @@ role = "key"
         assert!(slots.is_empty(), "{slots:?}");
         assert_eq!(diags.len(), 5, "{diags:?}");
         assert!(diags.iter().all(|d| d.severity == Severity::Warning));
+    }
+
+    #[test]
+    fn a_grouping_diagnostic_carries_its_slot_path() {
+        let doc = merge_docs(
+            "groupings",
+            &[LayerDoc::builtin("groupings", "3 = [\"book\", \"nonesuch\"]\n").unwrap()],
+        );
+        let (_, diags) = GroupingSlots::from_doc(&doc, &schema(), &dims());
+        assert_eq!(diags[0].path.as_deref(), Some("groupings.3"), "{diags:?}");
     }
 
     #[test]

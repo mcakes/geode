@@ -4729,3 +4729,51 @@ fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::Test
         "{written}"
     );
 }
+
+// --- Task 4: `Diagnostic.path` lands on its field row (4c §19.5) --------
+
+/// §19.5: a reader diagnostic that names a column lands on that column's
+/// row as a glyph, and its header line is prefixed with the row's label;
+/// an object-level one stays on the header alone.
+#[gpui::test]
+fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.npv]\ntype = \"f64\"\nrole = \"dimension\"\n[risk.columns.delta]\ntype = \"f64\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_with(cx, services, "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-delta")
+            .is_some(),
+        "the glyph on delta's row"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
+            .is_none()
+    );
+    let diags = edit_draft(&shell, &cx, |d| d.diagnostics.clone());
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.path.as_deref() == Some("views.tree.columns.1.format.precision")),
+        "{diags:?}"
+    );
+}

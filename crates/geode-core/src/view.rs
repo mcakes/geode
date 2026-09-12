@@ -336,15 +336,27 @@ impl ViewSpec {
             if name == "default" && value.as_table().is_none() {
                 continue;
             }
-            let bad = |m: String| Diagnostic {
+            // The object-level path (`views.<name>`) with an optional
+            // field suffix appended — every diagnostic below names the
+            // deepest key it honestly knows, so a reader that cannot tell
+            // which field misbehaved (e.g. "not a table") stays on the
+            // object as a whole rather than guessing.
+            let at = |suffix: &str| {
+                if suffix.is_empty() {
+                    format!("views.{name}")
+                } else {
+                    format!("views.{name}.{suffix}")
+                }
+            };
+            let bad = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
                 file: None,
                 message: format!("view '{name}': {m}"),
-                path: None,
+                path: Some(at(suffix)),
             };
             let Some(table) = value.as_table() else {
-                diags.push(bad("not a table".into()));
+                diags.push(bad("", "not a table".into()));
                 continue;
             };
 
@@ -358,7 +370,7 @@ impl ViewSpec {
                 ..ViewSpec::default()
             };
             if view.dataset.is_empty() {
-                diags.push(bad("missing 'dataset'".into()));
+                diags.push(bad("dataset", "missing 'dataset'".into()));
             }
 
             view.grouping = table
@@ -375,7 +387,7 @@ impl ViewSpec {
             if let Some(joins) = table.get("joins").and_then(|v| v.as_array()) {
                 for j in joins.iter().filter_map(|v| v.as_table()) {
                     let Some(dataset) = j.get("dataset").and_then(|v| v.as_str()) else {
-                        diags.push(bad("join missing 'dataset'".into()));
+                        diags.push(bad("joins", "join missing 'dataset'".into()));
                         continue;
                     };
                     view.joins.push(JoinSpec {
@@ -395,9 +407,17 @@ impl ViewSpec {
             }
 
             if let Some(cols) = table.get("columns").and_then(|v| v.as_array()) {
-                for c in cols.iter().filter_map(|v| v.as_table()) {
+                // `enumerate()` BEFORE filtering non-tables, so a
+                // diagnostic's index is the column's real position in the
+                // file (§19.5) — filtering first would renumber every
+                // column after a skipped non-table entry.
+                for (i, c) in cols.iter().enumerate() {
+                    let Some(c) = c.as_table() else { continue };
                     let Some(col_name) = c.get("name").and_then(|v| v.as_str()) else {
-                        diags.push(bad("column missing 'name'".into()));
+                        diags.push(bad(
+                            &format!("columns.{i}.name"),
+                            "column missing 'name'".into(),
+                        ));
                         continue;
                     };
                     let kind = c.get("kind").and_then(|v| v.as_str()).unwrap_or("measure");
@@ -414,25 +434,38 @@ impl ViewSpec {
                                 sql: sql.to_string(),
                             },
                             None => {
-                                diags
-                                    .push(bad(format!("derived column '{col_name}' has no 'sql'")));
+                                diags.push(bad(
+                                    &format!("columns.{i}.sql"),
+                                    format!("derived column '{col_name}' has no 'sql'"),
+                                ));
                                 continue;
                             }
                         },
                         other => {
-                            diags.push(bad(format!(
-                                "column '{col_name}' has unknown kind '{other}'"
-                            )));
+                            diags.push(bad(
+                                &format!("columns.{i}.kind"),
+                                format!("column '{col_name}' has unknown kind '{other}'"),
+                            ));
                             continue;
                         }
                     };
                     view.columns.push(column);
 
                     let mut p = ColumnPresentation::default();
-                    let warn = |m: String| bad(format!("column '{col_name}': {m}"));
+                    // Every format/label/width diagnostic below carries
+                    // the column's own index so a reader flags the exact
+                    // row it named, not just the `columns` field header
+                    // (the mutation harness's "views reader: column
+                    // diagnostics carry the column index" entry pins this).
+                    let warn = |key: &str, m: String| {
+                        bad(
+                            &format!("columns.{i}.{key}"),
+                            format!("column '{col_name}': {m}"),
+                        )
+                    };
                     if let Some(f) = c.get("format") {
                         match f.as_table() {
-                            None => diags.push(warn("'format' is not a table".into())),
+                            None => diags.push(warn("format", "'format' is not a table".into())),
                             Some(f) => {
                                 match f.get("precision") {
                                     None => {}
@@ -440,45 +473,54 @@ impl ViewSpec {
                                         Some(n) if (0..=12).contains(&n) => {
                                             p.precision = Some(n as u8)
                                         }
-                                        _ => diags.push(warn(format!(
-                                            "'precision' must be an integer 0–12 (got {v})"
-                                        ))),
+                                        _ => diags.push(warn(
+                                            "format.precision",
+                                            format!(
+                                                "'precision' must be an integer 0–12 (got {v})"
+                                            ),
+                                        )),
                                     },
                                 }
                                 match f.get("thousands") {
                                     None => {}
                                     Some(v) => match v.as_bool() {
                                         Some(b) => p.thousands = Some(b),
-                                        None => diags.push(warn(format!(
-                                            "'thousands' must be true or false (got {v})"
-                                        ))),
+                                        None => diags.push(warn(
+                                            "format.thousands",
+                                            format!("'thousands' must be true or false (got {v})"),
+                                        )),
                                     },
                                 }
                                 match f.get("negative").and_then(|v| v.as_str()) {
                                     None if f.get("negative").is_none() => {}
                                     Some("minus") => p.negative = Some(Negative::Minus),
                                     Some("parens") => p.negative = Some(Negative::Parens),
-                                    other => diags.push(warn(format!(
-                                        "'negative' must be \"minus\" or \"parens\" (got {other:?})"
-                                    ))),
+                                    other => diags.push(warn(
+                                        "format.negative",
+                                        format!("'negative' must be \"minus\" or \"parens\" (got {other:?})"),
+                                    )),
                                 }
                                 let colour = f.get("colour").or_else(|| f.get("color"));
                                 match colour.and_then(|v| v.as_str()) {
                                     None if colour.is_none() => {}
                                     Some("none") => p.colour = Some(Colour::None),
                                     Some("sign") => p.colour = Some(Colour::Sign),
-                                    other => diags.push(warn(format!(
-                                        "'colour' must be \"none\" or \"sign\" (got {other:?})"
-                                    ))),
+                                    other => diags.push(warn(
+                                        "format.colour",
+                                        format!(
+                                            "'colour' must be \"none\" or \"sign\" (got {other:?})"
+                                        ),
+                                    )),
                                 }
                                 match f.get("scale").and_then(|v| v.as_str()) {
                                     None if f.get("scale").is_none() => {}
                                     Some("none") => p.scale = Some(Scale::None),
                                     Some("k") => p.scale = Some(Scale::Thousands),
                                     Some("M") => p.scale = Some(Scale::Millions),
-                                    other => diags.push(warn(format!(
-                                        "'scale' must be \"none\", \"k\" or \"M\" (got {other:?})"
-                                    ))),
+                                    other => diags.push(warn(
+                                        "format.scale",
+                                        format!("'scale' must be \"none\", \"k\" or \"M\" (got {other:?})"),
+                                    )),
                                 }
                             }
                         }
@@ -486,14 +528,16 @@ impl ViewSpec {
                     if let Some(l) = c.get("label") {
                         match l.as_str() {
                             Some(s) => p.label = Some(s.to_string()),
-                            None => diags.push(warn("'label' must be a string".into())),
+                            None => diags.push(warn("label", "'label' must be a string".into())),
                         }
                     }
                     if let Some(w) = c.get("width") {
                         match w.as_float().or_else(|| w.as_integer().map(|i| i as f64)) {
                             Some(x) if x > 0.0 => p.width = Some(x as f32),
-                            _ => diags
-                                .push(warn(format!("'width' must be a positive number (got {w})"))),
+                            _ => diags.push(warn(
+                                "width",
+                                format!("'width' must be a positive number (got {w})"),
+                            )),
                         }
                     }
                     if p != ColumnPresentation::default() {
@@ -505,7 +549,7 @@ impl ViewSpec {
             if let Some(sorts) = table.get("sort").and_then(|v| v.as_array()) {
                 for s in sorts.iter().filter_map(|v| v.as_table()) {
                     let Some(column) = s.get("column").and_then(|v| v.as_str()) else {
-                        diags.push(bad("sort entry missing 'column'".into()));
+                        diags.push(bad("sort", "sort entry missing 'column'".into()));
                         continue;
                     };
                     view.sort.push(SortKey {
@@ -584,15 +628,24 @@ impl ViewPresentationSpec {
             if view_name == "config_version" {
                 continue;
             }
-            let bad = |m: String| Diagnostic {
+            // `view_presentation.<view>[.<suffix>]` — the same object-plus-
+            // suffix shape as `ViewSpec::from_doc`'s own `at`/`bad` above.
+            let at = |suffix: &str| {
+                if suffix.is_empty() {
+                    format!("view_presentation.{view_name}")
+                } else {
+                    format!("view_presentation.{view_name}.{suffix}")
+                }
+            };
+            let bad = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
                 file: None,
                 message: format!("view presentation '{view_name}': {m}"),
-                path: None,
+                path: Some(at(suffix)),
             };
             let Some(table) = value.as_table() else {
-                diags.push(bad("not a table".into()));
+                diags.push(bad("", "not a table".into()));
                 continue;
             };
 
@@ -603,12 +656,17 @@ impl ViewPresentationSpec {
                         for item in a {
                             match item.as_str() {
                                 Some(s) => p.order.push(s.to_string()),
-                                None => diags
-                                    .push(bad(format!("'order' entry is not a string: {item}"))),
+                                None => diags.push(bad(
+                                    "order",
+                                    format!("'order' entry is not a string: {item}"),
+                                )),
                             }
                         }
                     }
-                    None => diags.push(bad("'order' must be an array of column names".into())),
+                    None => diags.push(bad(
+                        "order",
+                        "'order' must be an array of column names".into(),
+                    )),
                 }
             }
             if let Some(v) = table.get("hidden") {
@@ -619,12 +677,17 @@ impl ViewPresentationSpec {
                                 Some(s) => {
                                     p.hidden.insert(s.to_string());
                                 }
-                                None => diags
-                                    .push(bad(format!("'hidden' entry is not a string: {item}"))),
+                                None => diags.push(bad(
+                                    "hidden",
+                                    format!("'hidden' entry is not a string: {item}"),
+                                )),
                             }
                         }
                     }
-                    None => diags.push(bad("'hidden' must be an array of column names".into())),
+                    None => diags.push(bad(
+                        "hidden",
+                        "'hidden' must be an array of column names".into(),
+                    )),
                 }
             }
             if let Some(v) = table.get("width") {
@@ -635,13 +698,19 @@ impl ViewPresentationSpec {
                                 Some(x) if x > 0.0 => {
                                     p.width.insert(col.clone(), x as f32);
                                 }
-                                _ => diags.push(bad(format!(
-                                    "column '{col}': 'width' must be a positive number (got {w})"
-                                ))),
+                                _ => diags.push(bad(
+                                    &format!("width.{col}"),
+                                    format!(
+                                        "column '{col}': 'width' must be a positive number (got {w})"
+                                    ),
+                                )),
                             }
                         }
                     }
-                    None => diags.push(bad("'width' must be a table of column widths".into())),
+                    None => diags.push(bad(
+                        "width",
+                        "'width' must be a table of column widths".into(),
+                    )),
                 }
             }
 
@@ -661,15 +730,22 @@ impl ViewPresentationSpec {
     pub fn apply(&self, views: &mut [ViewSpec]) -> Vec<Diagnostic> {
         let mut diags = Vec::new();
         for (view_name, p) in &self.views {
-            let warn = |m: String| Diagnostic {
+            let at = |suffix: &str| {
+                if suffix.is_empty() {
+                    format!("view_presentation.{view_name}")
+                } else {
+                    format!("view_presentation.{view_name}.{suffix}")
+                }
+            };
+            let warn = |suffix: &str, m: String| Diagnostic {
                 severity: Severity::Warning,
                 layer: None,
                 file: None,
                 message: format!("view presentation '{view_name}': {m}"),
-                path: None,
+                path: Some(at(suffix)),
             };
             let Some(view) = views.iter_mut().find(|v| &v.name == view_name) else {
-                diags.push(warn("no view of that name — ignored".into()));
+                diags.push(warn("", "no view of that name — ignored".into()));
                 continue;
             };
 
@@ -683,12 +759,18 @@ impl ViewPresentationSpec {
                         taken[i] = true;
                         permutation.push(i);
                     }
-                    Some(_) => diags.push(warn(format!(
-                        "column '{name}' is listed twice in 'order' — the repeat is ignored"
-                    ))),
-                    None => diags.push(warn(format!(
-                        "'order' names column '{name}', which the view does not have — ignored"
-                    ))),
+                    Some(_) => diags.push(warn(
+                        "order",
+                        format!(
+                            "column '{name}' is listed twice in 'order' — the repeat is ignored"
+                        ),
+                    )),
+                    None => diags.push(warn(
+                        "order",
+                        format!(
+                            "'order' names column '{name}', which the view does not have — ignored"
+                        ),
+                    )),
                 }
             }
             // A column the order omits is not dropped: it keeps its file
@@ -703,9 +785,12 @@ impl ViewPresentationSpec {
 
             for name in &p.hidden {
                 if !view.columns.iter().any(|c| c.name() == name) {
-                    diags.push(warn(format!(
-                        "'hidden' names column '{name}', which the view does not have — ignored"
-                    )));
+                    diags.push(warn(
+                        "hidden",
+                        format!(
+                            "'hidden' names column '{name}', which the view does not have — ignored"
+                        ),
+                    ));
                     continue;
                 }
                 view.presentation.entry(name.clone()).or_default().hidden = Some(true);
@@ -713,9 +798,12 @@ impl ViewPresentationSpec {
 
             for (name, width) in &p.width {
                 if !view.columns.iter().any(|c| c.name() == name) {
-                    diags.push(warn(format!(
-                        "'width' names column '{name}', which the view does not have — ignored"
-                    )));
+                    diags.push(warn(
+                        &format!("width.{name}"),
+                        format!(
+                            "'width' names column '{name}', which the view does not have — ignored"
+                        ),
+                    ));
                     continue;
                 }
                 view.presentation.entry(name.clone()).or_default().width = Some(*width);
@@ -1226,6 +1314,56 @@ npv = 120
         assert_eq!(
             views[0].presentation, presentation_before,
             "the real view's presentation is untouched"
+        );
+    }
+
+    #[test]
+    fn a_column_format_diagnostic_carries_its_indexed_path() {
+        let doc = merge_docs(
+            "views",
+            &[LayerDoc::builtin(
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n\
+                 [[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n",
+            )
+            .unwrap()],
+        );
+        let (_, diags) = ViewSpec::from_doc(&doc);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("views.tree.columns.1.format.precision"),
+            "{diags:?}"
+        );
+        assert!(
+            diags[0]
+                .to_string()
+                .ends_with(" (at views.tree.columns.1.format.precision)")
+        );
+    }
+
+    #[test]
+    fn a_missing_dataset_diagnostic_carries_its_field_path() {
+        let (_, diags) = ViewSpec::from_doc(&doc("[tree]\n"));
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("views.tree.dataset"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_presentation_order_diagnostic_carries_its_field_path() {
+        let (mut views, _) = ViewSpec::from_doc(&doc(
+            "[tree]\ndataset = \"risk_snapshot\"\n[[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+        ));
+        let (pres, _) = ViewPresentationSpec::from_doc(&presentation_doc(
+            "[tree]\norder = [\"missing_col\"]\n",
+        ));
+        let diags = pres.apply(&mut views);
+        assert_eq!(
+            diags[0].path.as_deref(),
+            Some("view_presentation.tree.order"),
+            "{diags:?}"
         );
     }
 }
