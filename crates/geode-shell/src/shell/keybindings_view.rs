@@ -78,10 +78,16 @@
 //!
 //! ## Rebind capture
 //!
-//! `enter` (or a click on the already-selected row) starts "listening"
-//! for a new binding on the selected row; every keystroke while
-//! listening appends to a pending sequence (multi-keystroke bindings,
-//! e.g. `"g g"`, are supported); `enter` commits it, `escape` cancels.
+//! `enter` on the selected row, or a single click on any row (§17.1 rule
+//! 2 — a click does what `enter` would, selecting and listening in one
+//! step rather than the superseded two-click rule where a first click
+//! only selected), starts "listening" for a new binding on the clicked
+//! or selected row; every keystroke while listening appends to a pending
+//! sequence (multi-keystroke bindings, e.g. `"g g"`, are supported);
+//! `enter` commits it, `escape` cancels. A click on a different row
+//! mid-capture retargets the capture to that row; a click on the row
+//! already being listened on restarts the capture, dropping whatever
+//! partial sequence had been typed.
 //! Capture is a third, *momentary* mode, deliberately checked before the
 //! mode routing and never passed through `normal_command`: while it is
 //! open every keystroke is the capture's, verbs included.
@@ -1981,7 +1987,9 @@ mod tests {
     #[test]
     fn setting_a_query_cancels_an_in_progress_capture() {
         // The filter is always live; a query edit is an external
-        // interruption to a capture in exactly the way a click is.
+        // interruption that cancels an in-progress capture outright —
+        // unlike a click (`click_listens`), which never cancels one,
+        // only ever starts a fresh capture on the row it landed on.
         let mut state = KeybindingsState::new();
         state.listening = Some(vec![key("a")]);
         state.set_query("foc".to_string());

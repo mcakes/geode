@@ -794,9 +794,11 @@ fn cancelling_a_capture_restores_focus_to_the_mode_that_started_it(cx: &mut gpui
     );
 }
 
-/// The same rule for the mouse: a click that only selects a row hands
-/// focus back to the filter *in filter mode*, and leaves it blurred in
-/// normal mode.
+/// The same rule for the mouse: since a click always starts listening
+/// (§17.1 rule 2), it blurs the filter unconditionally — normal mode's
+/// own reason to blur it and the capture's reason are now one and the
+/// same, so a click in normal mode leaves the filter exactly as blurred
+/// as it already was.
 #[gpui::test]
 fn a_selecting_click_in_normal_mode_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
