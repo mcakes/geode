@@ -2646,6 +2646,46 @@ fn n_refuses_a_name_any_layer_already_holds(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The half of "a name any layer already holds" that has no row to show
+/// for it: the desk dropped `gone` after the trader hid a column on it,
+/// so `view_presentation.toml` still names it while no layer of
+/// `views.toml` does. Creating it produced a fresh user view that
+/// silently inherited the orphaned overlay — and, being user-only, `r`
+/// refused it, so no verb in this dialog could clear it again.
+#[gpui::test]
+fn n_refuses_a_name_only_the_presentation_overlay_holds(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        desk_view_services(&[("view_presentation", "[gone]\nhidden = [\"npv\"]\n")]),
+        dir.path(),
+        "config::views",
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-row-tree").is_some(),
+        "the desk's view is listed"
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("gone");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Naming,
+        "still naming — nothing was created"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(
+        notice.contains("view_presentation.toml"),
+        "the notice must name the overlay entry that is in the way, not a \
+         row the trader can open: {notice}"
+    );
+    assert!(
+        !dir.path().join("views.toml").exists(),
+        "no user view was written"
+    );
+}
+
 /// Scopes' `n` saves the FRAME's current scope, not an empty object —
 /// the same read `run_confirmed`'s `Confirm::Overwrite` arm makes, made
 /// here instead because there is no existing object's row to read it
@@ -2793,6 +2833,60 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
     });
 }
 
+/// The mouse's half of §18.3's one switch. Clicking a row while the
+/// edit stage is filtering must not silently take the keyboard back:
+/// before §18.3 the edit stage could not be in `Filter` at all, so its
+/// click handler focused the shell unconditionally, which after this
+/// task left the pill reading `filter` and the caret painted while the
+/// `Input` was blurred — every following keystroke went nowhere until
+/// `escape`. Browse's own `on_row_clicked` already reads the mode; this
+/// asserts the edit stage's does too.
+#[gpui::test]
+fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    // "n" matches the `Columns` field label and the `npv` item, so the
+    // click below lands on a row the filter is still showing.
+    cx.simulate_input("n");
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("objectdialog-item-npv")
+        .expect("npv matches the query and should paint");
+    // Just inside the row's top edge rather than its centre: the
+    // section header rides on this row's own element (§18.1), so the
+    // row's box extends past the bottom of the scrolled list viewport
+    // and a centre click would land outside it.
+    cx.simulate_click(
+        gpui::point(row.origin.x + gpui::px(8.0), row.origin.y + gpui::px(2.0)),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        1,
+        "the click moved the cursor onto npv — the row it landed on"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Filter,
+        "a click must not change which mode the stage is in"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "and filter mode's own surface must still hold the keyboard"
+    );
+    cx.simulate_input("p");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "np",
+        "so the next character typed still reaches the filter"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Task 8: the object dialog to the mock — crumb, badges, grip and tick,
 // section headers (§18.1).
@@ -2842,11 +2936,24 @@ fn the_browse_crumb_counts_and_a_slot_crumb_names_its_chord(cx: &mut gpui::TestA
 /// bottom of the list needs an actual scroll, not just more rows fitting
 /// on screen.
 fn services_with_a_long_desk_view() -> ShellServices {
+    long_desk_view_services(14)
+}
+
+/// That fixture with `extra` unpicked measures instead of fourteen.
+///
+/// Fourteen is enough to make the list scroll at all, which is all the
+/// section-header test needs; it is *not* enough to put the top of the
+/// list off screen while the bottom is showing (the viewport holds
+/// roughly seventeen rows), so a verb that moves a row from the bottom
+/// of the list to the member block at the top still lands it in view by
+/// accident. The cursor-in-view tests for `space`/`shift+space` pass a
+/// much larger count for exactly that reason.
+fn long_desk_view_services(extra: usize) -> ShellServices {
     let mut columns = String::from(
         "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
          [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     );
-    for i in 0..14 {
+    for i in 0..extra {
         columns.push_str(&format!(
             "[risk_snapshot.columns.m{i}]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n"
         ));
@@ -2919,4 +3026,93 @@ fn the_cursor_stays_in_view_past_a_section_header_on_a_long_list(cx: &mut gpui::
         row.origin.y + row.size.height,
         list.origin.y + list.size.height
     );
+}
+
+/// `selector`'s row lies wholly inside the edit list's own viewport —
+/// the shape of "the cursor is still on screen" for a verb that moved
+/// the row it was on. A 1px margin either way, since the row's box and
+/// the scrolled viewport can share an edge.
+fn assert_row_in_view(cx: &mut gpui::VisualTestContext, selector: &'static str, after: &str) {
+    let list = cx
+        .debug_bounds("objectdialog-fields")
+        .expect("the fields list should paint");
+    let row = cx
+        .debug_bounds(selector)
+        .expect("the moved row should paint");
+    assert!(
+        row.origin.y + gpui::px(1.0) >= list.origin.y,
+        "after {after} the row's top ({:?}) is above the list's own top \
+         ({:?}) — the cursor moved off the top of the viewport",
+        row.origin.y,
+        list.origin.y
+    );
+    assert!(
+        row.origin.y + row.size.height <= list.origin.y + list.size.height + gpui::px(1.0),
+        "after {after} the row's bottom ({:?}) is past the list's own \
+         bottom ({:?}) — the cursor moved off the end of the viewport",
+        row.origin.y + row.size.height,
+        list.origin.y + list.size.height
+    );
+}
+
+/// `space` promotes the row under the cursor into the member block, at
+/// its *end* — which on a list long enough to scroll is a different
+/// screenful from the one the trader was looking at. `shift+j` already
+/// scrolled the cursor back into view after a move; these three verbs
+/// move it just as far and did not, so the cursor silently left the
+/// viewport and the next `j` appeared to jump.
+#[gpui::test]
+fn space_scrolls_the_promoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) =
+        dialog_test_shell_in_dir(cx, long_desk_view_services(40), dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // To the bottom of the list, on `m39` — the last available column,
+    // whose promotion lands it just under `npv` at the top, a whole
+    // screenful above.
+    cx.simulate_keystrokes("shift-g");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_row_in_view(&mut cx, "objectdialog-item-m39", "space");
+}
+
+/// `shift+space` steps the same row the same way (both directions share
+/// `Draft::step_selected`, whose add branch has no direction of its
+/// own), so it has to scroll for the same reason — asserted separately
+/// because the two arms are separate call sites in `handle_key`.
+#[gpui::test]
+fn shift_space_scrolls_the_promoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) =
+        dialog_test_shell_in_dir(cx, long_desk_view_services(40), dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-g");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-space");
+    cx.run_until_parked();
+    assert_row_in_view(&mut cx, "objectdialog-item-m39", "shift+space");
+}
+
+/// And `x` the other way: a member demoted to the *end* of the
+/// available block, from the top of a list too long to show both.
+#[gpui::test]
+fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (_shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_long_desk_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // Past `Dataset` and `Columns` onto `book`, the view's first member.
+    cx.simulate_keystrokes("j j");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("x");
+    cx.run_until_parked();
+    assert_row_in_view(&mut cx, "objectdialog-item-book", "x");
 }

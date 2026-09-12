@@ -5895,8 +5895,13 @@ run_mutation "objectdialog: an unconfigured slot never forks" \
   geode-shell \
   ticking_a_dimension_in_an_empty_slot_writes_it_without_asking
 
-# A new view must start on a real dataset, or `commit_create` is blocked
-# by the reader's own "missing dataset" error before a trader can pick.
+# A new view must start on a real dataset rather than an empty
+# placeholder: the trader would otherwise have to notice the empty
+# `Dataset` row and step it before the view selected anything at all.
+# (Not a write gate: `ViewSpec::from_doc` rates a missing dataset
+# `Severity::Warning`, which `apply::blocking_diagnostic` deliberately
+# lets through — only an error blocks. The mutation is caught by the
+# named pure test's own `choice("dataset")` assertion.)
 run_mutation "objectdialog: a new view starts on the first real dataset" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
   '        None => options.first().cloned().unwrap_or_default(),' \
@@ -6149,10 +6154,23 @@ run_mutation "diagnostics: the startup seeding carries build_keymap's own diagno
 # fork the desk's view under a verb that never said so.
 run_mutation "objectdialog: n refuses an existing name" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if derive_rows(shell).iter().any(|row| row.name == name) {' \
+  '    if domain.name_taken(&shell.services.config, &name) {' \
   '    if false {' \
   geode-shell \
   n_refuses_a_name_any_layer_already_holds
+
+# The third of `name_taken`'s union, and the only one with no row to show
+# for it: a name held by the user's `view_presentation.toml` alone (the
+# desk dropped a view the trader had hidden a column on). Dropping this
+# clause puts the row-based check back, and `n` on that name creates a
+# user view that silently inherits the orphaned overlay — with `r`
+# refusing it afterwards, since the new view is user-only.
+run_mutation "objectdialog: a create ignores a name the presentation overlay holds" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        personalised_names(config, self.presentation_doc()).contains(name)' \
+  '        false' \
+  geode-shell \
+  a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it
 
 # Scopes' n saves the FRAME's scope, not the empty object.
 run_mutation "objectdialog: n on scopes reads the frame" \
@@ -6300,6 +6318,89 @@ run_mutation "objectdialog: section headers do not add list children" \
         list = list.child(row_el);' \
   geode-shell \
   the_cursor_stays_in_view_past_a_section_header_on_a_long_list
+
+# ---- The final whole-branch review's fix wave (§18.6) ------------------
+
+# §18.3 made the edit stage reachable in filter mode, which its click
+# handler predates: focusing the shell unconditionally leaves the pill
+# reading `filter` and the caret painted over a blurred `Input`, and the
+# next keystroke goes nowhere. The anchor carries the preceding
+# `scroll_to_item(position)` line because browse's own `on_row_clicked`
+# ends in the identical five-line mode branch (`scroll_to_item(ix)`
+# there), which would otherwise make this anchor ambiguous.
+run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    shell.object_dialog_scroll.scroll_to_item(position);
+    if filter_mode {
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    } else {
+        shell.focus_handle.focus(window, cx);
+    }' \
+  '    shell.object_dialog_scroll.scroll_to_item(position);
+    shell.focus_handle.focus(window, cx);' \
+  geode-shell \
+  clicking_an_edit_row_while_filtering_keeps_the_filter_focused
+
+# `space` promotes a row to the END of the member block — a screenful
+# away on a list that scrolls — so the cursor has to be scrolled back
+# into view, exactly as `shift+j`'s own arm does. Anchored from the
+# `Toggle` arm's head because `ToggleBack`'s body below is character-for-
+# character identical.
+run_mutation "objectdialog: space moves the cursor off screen and leaves it there" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
+            Some(Step::Changed) => {
+                maybe_refresh_available(shell);
+                revalidate(shell);
+                scroll_to_cursor(shell);' \
+  '        NormalCommand::Toggle => match draft_mut(shell).map(Draft::toggle_selected) {
+            Some(Step::Changed) => {
+                maybe_refresh_available(shell);
+                revalidate(shell);' \
+  geode-shell \
+  space_scrolls_the_promoted_row_back_into_view
+
+# The same for `shift+space`: one `step_selected` underneath, two arms
+# above it, so a fix applied to one and not the other is exactly the
+# failure this pair of entries exists to notice.
+run_mutation "objectdialog: shift+space moves the cursor off screen and leaves it there" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
+            Some(Step::Changed) => {
+                maybe_refresh_available(shell);
+                revalidate(shell);
+                scroll_to_cursor(shell);' \
+  '        NormalCommand::ToggleBack => match draft_mut(shell).map(Draft::toggle_selected_back) {
+            Some(Step::Changed) => {
+                maybe_refresh_available(shell);
+                revalidate(shell);' \
+  geode-shell \
+  shift_space_scrolls_the_promoted_row_back_into_view
+
+# And `x`, which moves the cursor the other way — to the end of the
+# available block, off the BOTTOM of the viewport.
+run_mutation "objectdialog: x moves the cursor off screen and leaves it there" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            Some(Step::Changed) => {
+                revalidate(shell);
+                scroll_to_cursor(shell);' \
+  '            Some(Step::Changed) => {
+                revalidate(shell);' \
+  geode-shell \
+  x_scrolls_the_demoted_row_back_into_view
+
+# A `Key` or `Attribute` column has no honest `[[columns]]` kind, so it
+# is not offered in the available block at all. Forcing either into
+# "dimension" writes a kind that is not true of the column — the silent
+# wrong-data defect `ListItem.kind` exists to remove. One entry over the
+# shared arm: the test asserts the two roles separately, so it fails
+# whichever half a future split got wrong.
+run_mutation "objectdialog: a Key or Attribute column is offered as a dimension" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        ColumnRole::Key | ColumnRole::Attribute { .. } => None,' \
+  '        ColumnRole::Key | ColumnRole::Attribute { .. } => Some("dimension"),' \
+  geode-shell \
+  key_and_attribute_columns_are_not_offered
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

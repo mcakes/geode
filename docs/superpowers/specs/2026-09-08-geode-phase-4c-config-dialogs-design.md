@@ -1431,8 +1431,8 @@ are checked on a display against the artifact, not by test.
   survive into the name field verbatim; a fix round closed this after
   it was caught reachable end to end (`/tr`, `escape`, `n` used to open
   the name field already reading `tr`). `enter` validates through
-  `check_object_name`, refuses a name any layer already holds
-  (`'tree' already exists — open it instead`), and on success builds a
+  `check_object_name`, refuses a name anything already holds
+  (`Domain::name_taken`, below), and on success builds a
   draft from the adapter's empty-object fields, marks it `is_new`,
   writes it through `apply::commit_create` — **one `Doc` entry, `queue_
   batch` at `Duration::ZERO`, never through `edits_for`** (the map
@@ -1461,6 +1461,27 @@ are checked on a display against the artifact, not by test.
   not `Stage::Edit`) — deliberate: a name close to an existing object's
   stays visible as a near-collision warning while it is typed, not just
   refused after the fact on `enter`.
+
+- **"A name any layer already holds" is `Domain::name_taken`, which is
+  wider than the browse list.** The refusal used to read the rows
+  (`render::derive_rows`), and the rows are `doc`'s layered keys plus
+  the roster — so a name held by the user's presentation overlay ALONE
+  had no row and was not refused. That is a reachable state, not a
+  theoretical one: the desk drops a view the trader had hidden a column
+  on, `views.toml` no longer names it at any layer and
+  `view_presentation.toml` still does. `n` on that name created a fresh
+  user view that immediately inherited the orphaned overlay's
+  `hidden`/`order`/`width`, and — being user-only — `r` refused it, so
+  no verb in the dialog could clear it again. `name_taken` unions the
+  three: the roster, every layer of the domain's own doc, and
+  `personalised_names(config, presentation_doc)` — the same one walk
+  `derive_rows` uses for its "personalised without overriding" marker,
+  factored out so the two answers cannot drift. The notice distinguishes
+  the two cases, because the instructions differ: a listed name says
+  `'tree' already exists — open it instead`, while an overlay-only name
+  says `'gone' has a saved presentation — remove it from
+  view_presentation.toml first` — pointing at the browse list would be a
+  dead end for a name that is not on it.
 
 - **Views' column list is two `ListItem` blocks, `member` first.**
   `ListItem.member` is definitional (`Destination::Doc`, forks a desk
@@ -1504,7 +1525,11 @@ are checked on a display against the artifact, not by test.
   one call site (always the `dataset` field, always `rows()`'s first
   element, always first in row-ordered `visible_rows()` once §18.3's
   row-order painting landed) an index clamp and `follow` are provably
-  equivalent, which is why **this one call has no mutation entry**: any
+  equivalent — the two premises of that proof are now asserted in the
+  covering test itself (`rows()[0] == EditRow::Field(0)` and
+  `fields[0].key == "dataset"`), so an adapter that grew a field above
+  `dataset` would fail there rather than quietly retire the argument —
+  which is why **this one call has no mutation entry**: any
   mutation of the `follow` call is unavoidably `SURVIVED` there, and the
   harness's own header calls a `SURVIVED` entry with no discriminating
   test worse than no entry at all. `x` can empty a view's column set
@@ -1536,7 +1561,16 @@ are checked on a display against the artifact, not by test.
   carries no such structural meaning. This is why the two `visible_
   rows` (the free `render`-adjacent one for browse, `Draft`'s own
   method for the edit stage) are not the same function despite the
-  similar name.
+  similar name. Making the edit stage reachable in filter mode also
+  reached its **mouse** path: `render::on_edit_row_clicked` predates
+  §18.3 and focused the shell unconditionally, which after this task
+  left the pill reading `filter` and a caret painted over a blurred
+  `Input` — one switch, thrown halfway, with every following keystroke
+  going nowhere until `escape`. It now reads `state.mode` and focuses
+  whichever surface owns that mode, exactly as browse's own
+  `on_row_clicked` has since Part 1. **Any new mouse path into either
+  stage owes the same read**; focusing the shell is correct only in
+  normal mode.
 
 - **Chrome:** `ShellModal.title_extra` (`Option<TitleExtraBuilder>`,
   `dialog::set_title_extra`) puts a builder-supplied element between
@@ -1597,7 +1631,15 @@ are checked on a display against the artifact, not by test.
   `1c35a74` — 104 entries in files this plan changed, all `caught`, 0
   `SURVIVED`, 411 entries in unchanged files skipped, tree clean
   afterwards. `--anchors-only` reports 515 anchors, 0 stale, 0
-  ambiguous.
+  ambiguous. After the 2026-09-11 fix wave: six entries added or
+  re-anchored (`a create ignores a name the presentation overlay holds`;
+  `an edit-stage click takes the keyboard off the filter`;
+  `space`/`shift+space`/`x moves the cursor off screen and leaves it
+  there`; `a Key or Attribute column is offered as a dimension`; and
+  `n refuses an existing name` re-anchored onto `Domain::name_taken`),
+  and `zsh scripts/mutation-check.sh "objectdialog:"` runs all 63 of
+  this surface's entries `caught`, 0 `SURVIVED`, in about four minutes.
+  `--anchors-only` reports 521 anchors, 0 stale, 0 ambiguous.
 
 - **Deferred minors** (full detail in the plan's ledger,
   `.superpowers/sdd/2026-09-10-phase-4c-part-2-refinement/progress.md`):
@@ -1608,18 +1650,32 @@ are checked on a display against the artifact, not by test.
   `ObjectWrite::Remove` arm (`Destination::Doc` never removes) wants a
   one-line comment; a dataset switch queues a redundant same-bytes
   `view_presentation.toml` write alongside the real `views.toml` fork;
-  no test/entry for the `Key`/`Attribute` exclusion in
-  `schema_role_kind`; no `scroll_to_item` call after `space`/`x` moves
-  the cursor across the member/available boundary; Scopes' `o` action
-  does not gate on `editing_row` the way `d`/`r` do (a freshly created
-  scope's action bar offers "Overwrite from frame" before the object is
-  a row at all — harmless, since `arm_overwrite` already handles a
-  `None` row, but asymmetric); `Draft::visible_rows`/`selected_row`/
-  `follow` allocate a fresh `Vec` per keystroke; two `mod.rs` doc
-  comments still justify row-order filtering by "`[ ]` rows are
-  indistinguishable," stale now that the grip glyph tells member and
-  available rows apart (the row-order *decision* itself still stands,
-  independent of that stale justification); and
-  `crates/geode-shell/src/shell/tests/objectdialog.rs` has grown to
-  roughly 3,000 lines, a candidate for a seam split alongside the
-  crate's other oversized test files.
+  Scopes' `o` action does not gate on `editing_row` the way `d`/`r` do
+  (a freshly created scope's action bar offers "Overwrite from frame"
+  before the object is a row at all — harmless, since `arm_overwrite`
+  already handles a `None` row, but asymmetric); `Draft::visible_rows`/
+  `selected_row`/`follow` allocate a fresh `Vec` per keystroke; and
+  `crates/geode-shell/src/shell/tests/objectdialog.rs` has grown past
+  3,000 lines, a candidate for a seam split alongside the crate's other
+  oversized test files.
+
+- **The final review's fix wave (2026-09-11) closed three of those
+  minors and two Importants.** The Importants are the two bullets above
+  (`Domain::name_taken`; the edit-stage click's mode read). Of the
+  minors: the `Key`/`Attribute` exclusion now has a test and an entry —
+  `views::tests::tree_with_two_available_columns` carries an
+  `instrument_id` (`Key`) and a `strike` (`Attribute`) for no other
+  purpose, since without a column of each role in the fixture the
+  exclusion is indistinguishable from an empty match arm. `space`,
+  `shift+space` and `x` now scroll the cursor back into view through
+  `render::scroll_to_cursor`, which `shift+j`'s arm (the only one that
+  ever did) also calls, so a fourth verb that moves a row has one thing
+  to call rather than a snippet to copy; the covering tests need a
+  fixture of about forty columns, not the section-header test's
+  fourteen, because fourteen rows still fit the viewport well enough
+  that a promoted row lands back in view by accident. And the two
+  `mod.rs` doc comments that justified row-order filtering by "`[ ]`
+  rows are indistinguishable" are rewritten onto what §18.1 left true:
+  the order is a value `shift+j`/`shift+k` edit, and a section header
+  marks where its block BEGINS, so a score sort would put rows under
+  the wrong header rather than merely lose a cue.

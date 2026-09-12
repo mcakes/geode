@@ -454,8 +454,11 @@ fn handle_naming_key(
 
 /// `enter` in the naming row. The one moment a name is typed and the
 /// one place it is checked: [`check_object_name`]'s rule (the same one
-/// `:scope save` applies), then "no layer already holds it" — creating
-/// over a desk object would be a fork the trader did not ask for.
+/// `:scope save` applies), then "nothing already holds it"
+/// ([`Domain::name_taken`], which spans the presentation overlay as well
+/// as every layer of the domain's own doc) — creating over a desk object
+/// would be a fork the trader did not ask for, and creating over an
+/// orphaned overlay entry would silently inherit it.
 fn create_from_name(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
@@ -469,8 +472,23 @@ fn create_from_name(shell: &mut ShellView, window: &mut Window, cx: &mut Context
             return;
         }
     };
-    if derive_rows(shell).iter().any(|row| row.name == name) {
-        set_notice(shell, format!("'{name}' already exists — open it instead"));
+    if domain.name_taken(&shell.services.config, &name) {
+        // Two ways a name can be taken, and they need different
+        // instructions. A name with a row is one `escape` and an `enter`
+        // away; a name only the presentation overlay holds
+        // (`Domain::name_taken`'s own doc) has nothing on this list to
+        // open at all, so pointing the trader at the list would be a
+        // dead end — the orphaned `view_presentation.toml` entry is the
+        // thing in their way, and it is the thing the notice names.
+        let listed = derive_rows(shell).iter().any(|row| row.name == name);
+        let notice = if listed {
+            format!("'{name}' already exists — open it instead")
+        } else {
+            format!(
+                "'{name}' has a saved presentation — remove it from view_presentation.toml first"
+            )
+        };
+        set_notice(shell, notice);
         cx.notify();
         return;
     }
@@ -812,6 +830,7 @@ fn handle_edit_key(
             Some(Step::Changed) => {
                 maybe_refresh_available(shell);
                 revalidate(shell);
+                scroll_to_cursor(shell);
                 commit_or_confirm(shell, cx);
             }
             Some(Step::Refused(reason)) => refuse_step(shell, reason),
@@ -821,6 +840,7 @@ fn handle_edit_key(
             Some(Step::Changed) => {
                 maybe_refresh_available(shell);
                 revalidate(shell);
+                scroll_to_cursor(shell);
                 commit_or_confirm(shell, cx);
             }
             Some(Step::Refused(reason)) => refuse_step(shell, reason),
@@ -833,13 +853,7 @@ fn handle_edit_key(
             let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
             match skipped {
                 Some(skipped) => {
-                    let selected = shell
-                        .object_dialog
-                        .as_ref()
-                        .and_then(|state| state.draft.as_ref())
-                        .map(|draft| draft.selected)
-                        .unwrap_or(0);
-                    shell.object_dialog_scroll.scroll_to_item(selected);
+                    scroll_to_cursor(shell);
                     // Said out loud only when there was something to
                     // skip — a plain adjacent-item move under no filter
                     // (or under a filter that hides nothing between the
@@ -866,6 +880,7 @@ fn handle_edit_key(
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
+                scroll_to_cursor(shell);
                 commit_or_confirm(shell, cx);
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
@@ -1088,6 +1103,27 @@ fn commit_or_confirm(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if let Some(notice) = super::apply::commit_edit(shell, cx) {
         set_notice(shell, notice);
     }
+}
+
+/// Put the edit list's viewport back over the draft's cursor.
+///
+/// Every verb that moves the row the cursor is on has to call this, not
+/// just the ones that look like motions: `space`/`shift+space` promote a
+/// row to the end of the member block and `x` demotes one to the end of
+/// the available block, both of which are routinely a screenful away on
+/// a list with more rows than the panel can show — and a cursor left off
+/// screen makes the next `j` look like a jump. `shift+j`'s arm was the
+/// only one that did call it, inline; all four go through here now, so
+/// the next verb that moves a row has one obvious thing to call rather
+/// than a snippet to copy from whichever arm happens to have it.
+fn scroll_to_cursor(shell: &mut ShellView) {
+    let selected = shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .map(|draft| draft.selected)
+        .unwrap_or(0);
+    shell.object_dialog_scroll.scroll_to_item(selected);
 }
 
 /// Re-run [`Domain::validate`] over the draft as it now stands.
@@ -2394,12 +2430,25 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
 /// A click on an edit-stage row moves the draft's cursor there — the
 /// mouse's half of `j`/`k`, and the reason a click never also acts: the
 /// verb is a second, deliberate keystroke or button press.
+///
+/// Focus follows the current mode, exactly as browse's [`on_row_clicked`]
+/// does and for the same reason. Before §18.3 the edit stage could not be
+/// in [`DialogMode::Filter`] at all, so this handler focused the shell
+/// unconditionally; now that `/` reaches here, doing so would leave the
+/// pill reading `filter` and the caret painted over a blurred `Input` —
+/// the "one switch" broken by a mouse click, with every following
+/// keystroke going nowhere until `escape`.
 fn on_edit_row_clicked(
     shell: &mut ShellView,
     position: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
+    let input = shell.dialog_input.clone();
+    let filter_mode = shell
+        .object_dialog
+        .as_ref()
+        .is_some_and(|state| state.mode == DialogMode::Filter);
     if let Some(state) = shell.object_dialog.as_mut()
         && state.notice.take().is_some()
     {
@@ -2416,6 +2465,10 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
-    shell.focus_handle.focus(window, cx);
+    if filter_mode {
+        input.read(cx).focus_handle(cx).focus(window, cx);
+    } else {
+        shell.focus_handle.focus(window, cx);
+    }
     cx.notify();
 }

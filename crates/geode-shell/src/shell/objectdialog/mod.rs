@@ -260,6 +260,65 @@ impl Domain {
             self.summary_fn(),
         )
     }
+
+    /// Is `name` already spoken for in this domain (spec §18.2's "a name
+    /// any layer already holds is refused")?
+    ///
+    /// **Wider than [`Domain::objects`] on purpose, and that is the
+    /// whole reason it exists.** The rows are what the browse list can
+    /// show — `doc`'s layered keys plus the roster — but a name can also
+    /// be held by the user's presentation overlay alone
+    /// ([`personalised_names`]): the desk dropped a view the trader had
+    /// hidden a column on, so `view_presentation.toml` still names it
+    /// while no layer of `views.toml` does. Creating over that name made
+    /// a fresh user view that silently inherited the orphaned overlay's
+    /// `hidden`/`order`/`width`, and — being user-only — `r` then
+    /// refused it, so no dialog verb could clear it. A row-based check
+    /// cannot see that name at all, which is why the refusal reads this
+    /// union rather than the list.
+    ///
+    /// `config_version` never reaches here: `check_object_name` refuses
+    /// it before the caller asks.
+    pub fn name_taken(self, config: &Config, name: &str) -> bool {
+        if self.roster().is_some_and(|roster| roster.contains(&name)) {
+            return true;
+        }
+        if config
+            .layered_docs(self.doc())
+            .iter()
+            .any(|layered| layered.table.contains_key(name))
+        {
+            return true;
+        }
+        personalised_names(config, self.presentation_doc()).contains(name)
+    }
+}
+
+/// The objects a domain's user-layer presentation overlay names — the
+/// set [`derive_rows`] reads as "personalised without overriding" and
+/// [`Domain::name_taken`] reads as "a name that is spoken for even
+/// though nothing lists it". One walk, shared, because the two answers
+/// have to agree: a name this set holds and `doc` does not is exactly
+/// the case that produces no browse row at all, so nothing on screen
+/// could reveal the two walks having drifted apart.
+///
+/// Empty outright for a domain with no presentation doc
+/// (`presentation_doc: None`) — there is nothing to be personalised
+/// through. `config_version` is the schema stamp every layered doc
+/// carries, not an object.
+fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) -> BTreeSet<&'a str> {
+    presentation_doc
+        .map(|presentation_doc| {
+            config
+                .layered_docs(presentation_doc)
+                .iter()
+                .filter(|layered| layered.layer == Layer::User)
+                .flat_map(|layered| layered.table.keys())
+                .filter(|name| *name != "config_version")
+                .map(String::as_str)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Every object named in `doc`'s layered documents, plus every name
@@ -316,21 +375,7 @@ fn derive_rows(
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
-    // Empty outright for a domain with no presentation doc at all
-    // (`presentation_doc: None`) — there is nothing to be personalised
-    // through.
-    let personalised: BTreeSet<&str> = presentation_doc
-        .map(|presentation_doc| {
-            config
-                .layered_docs(presentation_doc)
-                .iter()
-                .filter(|layered| layered.layer == Layer::User)
-                .flat_map(|layered| layered.table.keys())
-                .filter(|name| *name != "config_version")
-                .map(String::as_str)
-                .collect()
-        })
-        .unwrap_or_default();
+    let personalised = personalised_names(config, presentation_doc);
     // Accumulated by name — one name can appear in up to three documents
     // and each appearance updates the same row — in a `BTreeMap`, whose
     // key order IS the by-name order described above, so the rows come
@@ -774,18 +819,18 @@ impl Draft {
     /// This is where the edit stage's own filtering deliberately parts
     /// ways with the browse list's (review round 1): browse's rows are
     /// an unordered catalogue, so ranking by match quality is a pure
-    /// improvement, but the edit stage's row order **is the data** —
-    /// a view's column order, a grouping slot's chain order — and
+    /// improvement, but the edit stage's row order **is the data** — a
+    /// view's column order, a grouping slot's chain order — and
     /// reordering it out from under a filter would be actively
-    /// misleading rather than merely surprising. A member hidden by
-    /// `space` and an available column both paint the same `[ ]` mark
-    /// with nothing else on screen to tell them apart; under a
-    /// score-sorted filter a trader has no way to tell whether `space`
-    /// on the row now under the cursor will unhide a member or add
-    /// (and fork) an available one, because the row's POSITION relative
-    /// to its neighbours — the one cue that currently exists — no longer
-    /// says. And `shift+j`/`shift+k` cannot mean anything coherent
-    /// against a list whose order shift+j itself does not control. So
+    /// misleading rather than merely surprising. Two reasons, both still
+    /// standing after §18.1 gave each block a header and each member row
+    /// a grip. First, the order is a value the trader is editing and
+    /// `shift+j`/`shift+k` are how they edit it: neither can mean
+    /// anything coherent against a list whose painted order `shift+j`
+    /// does not control. Second, a section header marks where its block
+    /// BEGINS — it says nothing about a row that a score sort has thrown
+    /// into the middle of the wrong block, so under score order the
+    /// header would be actively wrong rather than merely absent. So
     /// `rank` is used only to decide which rows survive the query;
     /// `sort_by_key` afterwards restores row order among the survivors,
     /// discarding nothing but the score-derived ordering.
@@ -1764,6 +1809,50 @@ mod tests {
         let rows = Domain::Views.objects(&config);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].overridden);
+    }
+
+    /// §18.2's "a name any layer already holds is refused" spans the
+    /// presentation overlay, not just the domain's own doc. A view the
+    /// desk has since dropped can still be named by the trader's own
+    /// `view_presentation.toml` (they hid a column on it while it
+    /// existed); that name produces no browse row at all, so a create
+    /// checking only the rows would happily make a fresh user view that
+    /// silently inherits the orphaned overlay's `hidden`/`order`/`width`
+    /// — and being user-only, `r` then refuses, leaving no dialog verb
+    /// that can clear it.
+    #[test]
+    fn a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it() {
+        let config = config_from(&[(
+            Layer::User,
+            "view_presentation",
+            "[tree]\nhidden = [\"npv\"]\n",
+        )]);
+        assert!(
+            Domain::Views.objects(&config).is_empty(),
+            "no layer of views.toml defines tree, so it has no browse row"
+        );
+        assert!(
+            Domain::Views.name_taken(&config, "tree"),
+            "the orphaned overlay still holds the name"
+        );
+        assert!(
+            !Domain::Views.name_taken(&config, "fresh"),
+            "and a name nothing holds is still free"
+        );
+    }
+
+    /// The other two thirds of `name_taken`'s union, each on the domain
+    /// that has it: a layered doc key (Views, any layer) and a roster
+    /// name no doc defines (Groupings' nine slots).
+    #[test]
+    fn name_taken_spans_every_layers_doc_keys_and_the_roster() {
+        let config = config_from(&[(Layer::Desk, "views", "[tree]\ndataset = \"risk\"\n")]);
+        assert!(Domain::Views.name_taken(&config, "tree"));
+        assert!(
+            Domain::Groupings.name_taken(&config, "7"),
+            "an unconfigured slot is still a name the roster holds"
+        );
+        assert!(!Domain::Scopes.name_taken(&config, "tree"));
     }
 
     /// The middle layer is the case a two-layer fixture cannot see: a
@@ -2834,11 +2923,11 @@ mod tests {
     /// order, chain order — so a filter must narrow it, never reorder
     /// it. `visible_rows` used to sort by fuzzy score like the browse
     /// list does, which put a later, better-scoring match ahead of an
-    /// earlier, worse-scoring one; under a filter that made `space` on a
-    /// `[ ]` row ambiguous (unhide, or add and fork — nothing on screen
-    /// says which) and made `shift+j` unable to change the painted order
-    /// at all. `apple` (row 3) scores far higher against "a" than
-    /// `banana` (row 2) does (an idx-0 match earns a head-start bonus —
+    /// earlier, worse-scoring one; that made `shift+j` unable to change
+    /// the painted order at all, and left §18.1's section header sitting
+    /// above whichever row happened to score best rather than at the
+    /// start of its block. `apple` (row 3) scores far higher against "a"
+    /// than `banana` (row 2) does (an idx-0 match earns a head-start bonus —
     /// see `palette::fuzzy_match_lowered`), so a score-ordered list would
     /// paint them in the wrong order despite both matching.
     #[test]

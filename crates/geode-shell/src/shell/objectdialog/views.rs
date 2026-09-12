@@ -621,6 +621,12 @@ mod tests {
     /// [`the_column_list_is_members_then_the_datasets_other_columns`] can
     /// prove it is deliberately excluded, not merely absent because
     /// nothing declared one.
+    ///
+    /// `instrument_id` (a `Key`) and `strike` (an `Attribute`) are here
+    /// for the same reason and no other: [`schema_role_kind`] answers
+    /// `None` for both roles, and without a column of each in the
+    /// fixture nothing could tell that exclusion from an empty match arm
+    /// (see [`key_and_attribute_columns_are_not_offered`]).
     fn tree_with_two_available_columns() -> Config {
         config_from(&[
             (
@@ -628,7 +634,9 @@ mod tests {
                 "datasets",
                 "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
                  [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
-                 [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+                 [risk.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.instrument_id]\ntype = \"utf8\"\nrole = \"key\"\n\
+                 [risk.columns.strike]\ntype = \"f64\"\nrole = \"attribute\"\ngrain = \"instrument\"\n",
             ),
             (Layer::Builtin, "dimensions", "[desk]\nfrom = \"book\"\n"),
             (
@@ -665,6 +673,45 @@ mod tests {
                 ("book", false, false, Some("dimension")),
                 ("delta01", false, false, Some("measure")),
             ]
+        );
+    }
+
+    /// A `Key` and an `Attribute` column are not offered in the
+    /// available block, each for its own reason and neither by accident.
+    /// `ViewSpec::from_doc` accepts only `"dimension"`, `"measure"` and
+    /// `"derived"`, so writing either role into `[[columns]]` means
+    /// picking a kind that is not true of it — the exact defect
+    /// `ListItem.kind` exists to remove (a promoted column silently
+    /// summing, or vanishing from the view). Asserted per role, so
+    /// mislabelling one of the two arms cannot hide behind the other.
+    #[test]
+    fn key_and_attribute_columns_are_not_offered() {
+        let config = tree_with_two_available_columns();
+        let items = Domain::Views
+            .draft(&config, "tree")
+            .list_items("columns")
+            .unwrap()
+            .to_vec();
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert!(
+            !names.contains(&"instrument_id"),
+            "a Key column has no honest [[columns]] kind: {names:?}"
+        );
+        assert!(
+            !names.contains(&"strike"),
+            "nor does an Attribute column: {names:?}"
+        );
+        assert_eq!(
+            schema_role_kind(&ColumnRole::Key),
+            None,
+            "and the exclusion is the role's own answer, not a filter \
+             somewhere above it"
+        );
+        assert_eq!(
+            schema_role_kind(&ColumnRole::Attribute {
+                grain: geode_core::schema::Grain::Instrument
+            }),
+            None
         );
     }
 
@@ -914,6 +961,16 @@ mod tests {
             ),
         ]);
         let mut draft = Domain::Views.draft(&config, "v");
+        // The premise the accepted "an index clamp would be equivalent
+        // here" argument rests on (spec §18.6): `dataset` is `rows()`'s
+        // own first entry, so whenever it matches the query at all it is
+        // also the first SURVIVING row. Asserted rather than assumed —
+        // an adapter that grew a field above `dataset` would silently
+        // retire that equivalence, and this test would go on passing on
+        // `follow`'s strength alone while the spec's claim quietly went
+        // false.
+        assert_eq!(draft.rows()[0], EditRow::Field(0));
+        assert_eq!(draft.fields[0].key, "dataset");
         // "at" matches "Dataset" (the field label) and "atom" (onedata's
         // own available column) — and neither "npv" (the member), nor
         // "lhu"/"delta01" (twodata's columns, the new available block).
