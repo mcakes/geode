@@ -35,9 +35,16 @@
 //! bonus (`crate::palette_usage`, baked once per open by
 //! [`PaletteState::with_usage`]): an empty query lists the rows a trader
 //! has actually chosen first, most recent and most used first, and a typed
-//! query lets a habitual row edge past a marginally better textual match —
-//! never a clearly better one, since the bonus is capped at two run
-//! bonuses.
+//! query lets a habitual row edge past a marginally better textual match.
+//! The bonus is capped at two run bonuses (`palette_usage::MAX_BONUS`,
+//! 18), and the ruling on where that cap meets the category discount
+//! (review 2026-09-12) is: a bare scattered match never beats a
+//! contiguous run whatever its usage; a maxed-out row whose only hit is
+//! in its category leads an unused title prefix on a query of three
+//! characters or fewer, ties it at four (registry order holds) and loses
+//! to it from five on — pinned by
+//! `a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one`,
+//! the test to read before moving either constant.
 
 use std::collections::BTreeMap;
 
@@ -437,8 +444,8 @@ impl PaletteState {
     /// bonus is read once here and added to its match score on every
     /// filter pass — an empty query lists the used rows first, best bonus
     /// first, and the rest in registry order; a typed query lets a
-    /// well-used row edge past a marginally better textual match and
-    /// never a clearly better one (`palette_usage::MAX_BONUS`).
+    /// well-used row edge past a marginally better textual match, within
+    /// the bound the module doc states (`palette_usage::MAX_BONUS`).
     pub fn with_usage(
         items: Vec<PaletteItem>,
         usage: &crate::palette_usage::PaletteUsage,
@@ -550,21 +557,33 @@ impl PaletteState {
         self.selected = index.min(len - 1);
     }
 
-    /// Every item whose title fuzzy-matches the current query, best match
-    /// first, paired with the matched char indices `render` highlights.
-    /// Ties — including an empty query, where every item scores the same
-    /// 0 — keep their original `items` order (see `recompute_filtered`).
-    /// A cache read (perf 11 — see the struct doc): no matching happens
-    /// here, only a walk of the stored result. The signature still
-    /// returns owned index `Vec`s (a handful of small clones) rather
-    /// than borrows purely to keep the pre-cache API shape; the cost
-    /// this existed to kill — the full fuzzy re-match per call — is
-    /// gone.
+    /// Every item whose title or category fuzzy-matches the current
+    /// query, best score plus usage bonus first, paired with the matched
+    /// char indices over `"{title} {category}"`. Ties — including an empty
+    /// query, where every item scores its bonus alone — keep their
+    /// original `items` order (see `recompute_filtered`). A cache read
+    /// (perf 11 — see the struct doc): no matching happens here, only a
+    /// walk of the stored result. The signature still returns owned index
+    /// `Vec`s (a handful of small clones) rather than borrows purely to
+    /// keep the pre-cache API shape for tests; `render` walks
+    /// [`PaletteState::rows`] instead, which borrows.
     pub fn filtered(&self) -> Vec<(&PaletteItem, Vec<usize>)> {
         self.filtered
             .iter()
             .map(|(i, indices)| (&self.items[*i], indices.clone()))
             .collect()
+    }
+
+    /// [`filtered`](Self::filtered) without the clones — the render's
+    /// per-frame walk: each row's item, its matched indices over
+    /// `"{title} {category}"`, and the title length the matcher scored
+    /// against (the lowered title's char count), which is what
+    /// [`split_label_indices`] must split at for the highlight to agree
+    /// with the alignment by construction.
+    pub fn rows(&self) -> impl Iterator<Item = (&PaletteItem, &[usize], usize)> {
+        self.filtered
+            .iter()
+            .map(|(i, indices)| (&self.items[*i], indices.as_slice(), self.title_len[*i]))
     }
 
     /// Move the selection by `delta` rows (arrow keys / ctrl+p / ctrl+n
@@ -857,7 +876,7 @@ pub fn render(
     // separate top-third anchor for spatial memory).
     let top = (viewport_height * crate::shell::dialog::MODAL_TOP_RATIO).max(0.0);
 
-    let results = state.filtered();
+    let row_count = state.filtered.len();
 
     // Fixed-height, scrollable viewport over the FULL filtered list (no
     // truncation) — `.id(..)` makes this a `Stateful<Div>`, required for
@@ -871,7 +890,7 @@ pub fn render(
         .id("palette-results")
         .w_full()
         .h(px(
-            (results.len().max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
+            (row_count.max(1) as f32 * ROW_HEIGHT).min(VISIBLE_ROWS as f32 * ROW_HEIGHT)
         ))
         .overflow_y_scroll()
         .track_scroll(scroll_handle)
@@ -881,7 +900,7 @@ pub fn render(
         // debug_bounds` and check a row's bounds actually fall inside it
         // — i.e. that scroll-follow, not just selection, moved.
         .debug_selector(|| "palette-list".to_string());
-    if results.is_empty() {
+    if row_count == 0 {
         list = list.child(
             div()
                 .px_2()
@@ -890,7 +909,7 @@ pub fn render(
                 .child("No matches"),
         );
     } else {
-        for (i, (item, indices)) in results.into_iter().enumerate() {
+        for (i, (item, indices, title_len)) in state.rows().enumerate() {
             let is_selected = i == state.selected();
             let mut row = h_flex()
                 .w_full()
@@ -913,16 +932,24 @@ pub fn render(
             let row = row.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 click(i, window, cx);
             });
-            // The indices are over `"{title} {category}"`, so each label
-            // paints only its own half (`split_label_indices`, shared
-            // with the keybindings and settings dialogs) — a category
+            // The indices are over `"{title} {category}"`, ascending, so
+            // each label paints only its own half: the title's are a
+            // prefix slice (no allocation) and the category's are rebased
+            // past the separating space — the same split
+            // `split_label_indices` makes for the dialogs, done in place
+            // here because this runs once per row per frame. A category
             // match glows in the category, not off the end of the title.
-            let title = item.title();
-            let (title_ix, cat_ix) = split_label_indices(&indices, title.chars().count());
+            let split = indices.partition_point(|&ix| ix < title_len);
+            let title_ix = &indices[..split];
+            let cat_ix: Vec<usize> = indices[split..]
+                .iter()
+                .filter(|&&ix| ix > title_len)
+                .map(|&ix| ix - title_len - 1)
+                .collect();
             let label = h_flex()
                 .gap_2()
                 .items_center()
-                .child(div().child(highlighted_title(&title, &title_ix, theme.primary)))
+                .child(div().child(highlighted_title(&item.title(), title_ix, theme.primary)))
                 .child(
                     div()
                         .text_color(theme.muted_foreground)
@@ -1798,5 +1825,68 @@ mod tests {
         let used = PaletteState::with_usage(items, &usage, NOW);
         assert_eq!(plain.filtered()[0].0.title(), "Alpha");
         assert_eq!(used.filtered()[0].0.title(), "Beta");
+    }
+
+    /// The bound where the usage cap and the category discount meet,
+    /// pinned as the ruling it is (review 2026-09-12): a maxed-out row
+    /// whose only hit is in its category leads an unused title prefix on a
+    /// SHORT query (`wor`: 17 + 18 against 31) — that is the brain-reading
+    /// point — and loses to it once the prefix run reaches five characters
+    /// (`works`: 29 + 18 against 51). At four they tie and registry order
+    /// holds. Move either constant and this is the test that says so.
+    #[test]
+    fn a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one() {
+        let items = vec![
+            action("focus", "Focus left", "Workspace", None),
+            action("next", "Workspace: next", "Tiling", None),
+        ];
+        let mut usage = PaletteUsage::new();
+        for _ in 0..20 {
+            usage.record("action:focus", NOW);
+        }
+        let mut state = PaletteState::with_usage(items, &usage, NOW);
+        state.set_query("wor");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Focus left", "Workspace: next"]);
+        state.set_query("works");
+        let titles: Vec<String> = state.filtered().iter().map(|(i, _)| i.title()).collect();
+        assert_eq!(titles, vec!["Workspace: next", "Focus left"]);
+    }
+
+    /// The backtrack must use the same discounted constants as the
+    /// forward pass: with the plain `RUN_BONUS` there, `ic` on
+    /// "Perf overlay" / "Diagnostics" keeps its score but paints the
+    /// title's `i` plus the category's `c` — a scattered highlight for a
+    /// contiguous category match (review 2026-09-12).
+    #[test]
+    fn a_contiguous_category_match_backtracks_to_one_run() {
+        let mut state =
+            PaletteState::new(vec![action("perf", "Perf overlay", "Diagnostics", None)]);
+        state.set_query("ic");
+        let filtered = state.filtered();
+        let title_len = "Perf overlay".chars().count();
+        let (title_ix, cat_ix) = split_label_indices(&filtered[0].1, title_len);
+        assert!(title_ix.is_empty(), "{title_ix:?}");
+        assert_eq!(cat_ix, vec![8, 9]);
+    }
+
+    /// `rows()` is the render's borrow-only walk of the cache: the same
+    /// order and indices `filtered()` hands out, plus each row's title
+    /// length so the render splits the highlight without recounting.
+    #[test]
+    fn rows_borrow_the_same_result_filtered_clones() {
+        let mut state = PaletteState::new(vec![
+            action("a", "Focus left", "Workspace", None),
+            action("b", "Framework tools", "Tiling", None),
+        ]);
+        state.set_query("work");
+        let cloned = state.filtered();
+        let rows: Vec<_> = state.rows().collect();
+        assert_eq!(rows.len(), cloned.len());
+        for ((item, indices), (row_item, row_indices, title_len)) in cloned.iter().zip(&rows) {
+            assert_eq!(*item, *row_item);
+            assert_eq!(indices, row_indices);
+            assert_eq!(*title_len, item.title().chars().count());
+        }
     }
 }

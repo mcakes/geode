@@ -88,6 +88,16 @@
 //! on first switch and persist" — spec §3.6), so a session restore leaves
 //! the *set* of touched workspaces exactly as the user left it, not just the
 //! non-empty ones.
+//!
+//! Two more top-level tables ride the same file, each written only when
+//! there is something to write and read back as "nothing" when absent:
+//! `[frame]` (Phase 4a §3.6 — the global scope, active grouping slot and
+//! as-of, see [`FrameRecord`]) and `[palette.usage]` (2026-09-12 — the
+//! command palette's per-row use count and last-used stamp, see
+//! [`crate::palette_usage::PaletteUsage`]; it lives here rather than in a
+//! file of its own because the user config dir is mtime-watched for every
+//! `*.toml` but this one, and a separate file would trigger a config
+//! reload on every palette dispatch).
 
 use std::collections::BTreeMap;
 use std::path::Path;

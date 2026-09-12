@@ -2,8 +2,8 @@
 //! and the bounded ranking bonus that turns those two numbers into the
 //! "brain-reading" order a trader expects — the command they reach for
 //! every morning at the top of an empty palette, and a habitual command
-//! leapfrogging a marginally better textual match on a typed query, but
-//! never a clearly better one.
+//! leapfrogging a marginally better textual match on a typed query — within
+//! the bound [`MAX_BONUS`] states.
 //!
 //! Pure, in the mould of `listfilter` and `vimnav`: no gpui, no clock, no
 //! I/O. Every method takes `now` as unix seconds so tests fix time
@@ -26,10 +26,15 @@ use std::collections::BTreeMap;
 pub const MAX_ENTRIES: usize = 256;
 
 /// The largest bonus any entry can earn: [`RECENCY_BONUS`]'s first bucket
-/// plus [`FREQUENCY_CAP`], i.e. two of the matcher's run bonuses — enough
-/// to outbid one extra matched pair, not a whole word start plus a run,
-/// so a well-used command edges past a marginally better textual match
-/// and never past a clearly better one.
+/// plus [`FREQUENCY_CAP`], i.e. two of the matcher's run bonuses. What
+/// that buys, against the palette's own scores (title prefix `10k + 1`
+/// for a `k`-char run, discounted category word start `6k − 1`): a bare
+/// scattered match never beats a contiguous run whatever its usage; a
+/// maxed-out row whose only hit is in its category leads an unused title
+/// prefix at `k ≤ 3`, ties it at `k = 4` and loses from `k = 5` on. That
+/// is the ruling (review 2026-09-12), pinned by `palette::tests::
+/// a_used_category_hit_leads_a_short_title_prefix_and_loses_to_a_long_one`
+/// — read it before moving this, [`RECENCY_BONUS`] or [`FREQUENCY_CAP`].
 pub const MAX_BONUS: u32 = RECENCY_BONUS[0] + FREQUENCY_CAP;
 const _: () = assert!(MAX_BONUS == 2 * crate::palette::RUN_BONUS);
 
@@ -149,8 +154,11 @@ impl PaletteUsage {
     /// Read a `[palette.usage]` table back, tolerantly: an entry that is
     /// not a table, or whose `count`/`last_used` is missing, not an
     /// integer, or negative, is dropped with a warning — never a reason
-    /// to fail the session file. Nothing is pruned here; a file with more
-    /// than [`MAX_ENTRIES`] entries is pruned by the next `record`.
+    /// to fail the session file. A file holding more than [`MAX_ENTRIES`]
+    /// entries (hand-edited, or written by a build with a larger cap) is
+    /// cut down to the cap here, once, keeping the most recent and then
+    /// the most used — rather than one entry per `record` on the UI
+    /// thread, an `O(n)` pass each, for as many dispatches as it was over.
     pub fn from_toml(table: &toml::Table, warnings: &mut Vec<String>) -> Self {
         let mut entries = BTreeMap::new();
         for (key, value) in table {
@@ -177,6 +185,18 @@ impl PaletteUsage {
                     last_used,
                 },
             );
+        }
+        if entries.len() > MAX_ENTRIES {
+            let mut ranked: Vec<(&String, &UseRecord)> = entries.iter().collect();
+            ranked.sort_by_key(|(key, record)| {
+                std::cmp::Reverse((record.last_used, record.count, std::cmp::Reverse(*key)))
+            });
+            let keep: std::collections::BTreeSet<String> = ranked
+                .into_iter()
+                .take(MAX_ENTRIES)
+                .map(|(key, _)| key.clone())
+                .collect();
+            entries.retain(|key, _| keep.contains(key));
         }
         PaletteUsage { entries }
     }
@@ -316,5 +336,31 @@ mod tests {
             })
         );
         assert_eq!(warnings.len(), 3, "{warnings:?}");
+    }
+
+    /// An oversize file (hand-edited, or written by a build with a larger
+    /// cap) is cut down once on load — by the least recent, then least
+    /// used — rather than one entry per `record` on the UI thread.
+    #[test]
+    fn an_oversize_file_is_pruned_once_on_load_keeping_the_most_recent() {
+        let mut usage = PaletteUsage::new();
+        for i in 0..(MAX_ENTRIES + 50) {
+            usage.entries.insert(
+                format!("k{i}"),
+                UseRecord {
+                    count: 1,
+                    last_used: NOW - i as u64,
+                },
+            );
+        }
+        let mut warnings = Vec::new();
+        let loaded = PaletteUsage::from_toml(&usage.to_toml(), &mut warnings);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(loaded.len(), MAX_ENTRIES);
+        assert!(loaded.get("k0").is_some(), "the most recent entry survives");
+        assert!(
+            loaded.get(&format!("k{}", MAX_ENTRIES + 49)).is_none(),
+            "the least recent entry is dropped"
+        );
     }
 }

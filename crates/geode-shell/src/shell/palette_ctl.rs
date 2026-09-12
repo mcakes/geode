@@ -131,14 +131,16 @@ impl ShellView {
     ) {
         // Every real choice counts as a use — the one exception is the
         // palette's own toggle row, which only ever closes the palette
-        // (see the arm below) and would otherwise climb the ranking for
-        // doing nothing.
-        if !matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle") {
+        // (the empty arm below) and would otherwise climb the ranking for
+        // doing nothing. Decided once here, for both the record and the
+        // dispatch.
+        let is_toggle = matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle");
+        if !is_toggle {
             self.palette_usage.record(&item.usage_key(), unix_now());
             self.palette_usage_version += 1;
         }
         match item {
-            PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
+            PaletteItem::Action(..) if is_toggle => {}
             PaletteItem::Action(id, ..) => self.dispatch(id, None, window, cx),
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox

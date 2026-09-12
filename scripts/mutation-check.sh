@@ -3170,9 +3170,20 @@ run_mutation "palette usage: recording past the cap prunes the lowest entry" \
 # use would climb it up the ranking for doing nothing.
 run_mutation "palette: the toggle row records no use" \
   crates/geode-shell/src/shell/palette_ctl.rs \
-  '        if !matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle") {' \
+  '        if !is_toggle {' \
   '        {' \
   geode-shell choosing_the_palette_toggle_row_records_nothing
+
+# The backtrack must use the same discounted constants as the forward
+# pass. Drifting it back to the plain RUN_BONUS keeps every SCORE right
+# and corrupts only the INDICES — `ic` on "Perf overlay" / "Diagnostics"
+# paints the title's `i` plus the category's `c` instead of the one run —
+# the indices-wrong-score-right hole a marker-only test cannot see.
+run_mutation "palette: the backtrack continues a run by the discounted bonus" \
+  crates/geode-shell/src/palette.rs \
+  '            Some(s) if s + run_at(j) + base == cell => j - 1,' \
+  '            Some(s) if s + RUN_BONUS + base == cell => j - 1,' \
+  geode-shell a_contiguous_category_match_backtracks_to_one_run
 
 # A palette dispatch that mutates nothing else (a theme row) must still
 # reach the session flush, or a restart forgets every use since the last
