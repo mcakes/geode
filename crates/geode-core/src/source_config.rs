@@ -18,8 +18,17 @@ use crate::schema::SchemaSpec;
 use std::path::Path;
 use std::time::Duration;
 
-const DEFAULT_POLL: Duration = Duration::from_secs(30);
-const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
+/// `pub` (4c §19.3): the Sources dialog's `fields` spells these back as
+/// text (`sources::spell_duration`) when a source omits the key, so the
+/// row shows the value that will actually apply rather than a blank.
+pub const DEFAULT_POLL: Duration = Duration::from_secs(30);
+pub const DEFAULT_PENDING_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// §19.3 (ruling 2026-09-12): a source with nothing to poll is idle, not
+/// broken — a warning, and skipped, so the dialog's `n` can create one
+/// and let the trader type the globs in afterwards. One line, so the
+/// mutation harness can flip its severity by anchoring on it.
+pub const IDLE_PATHS: &str = "no 'paths' — the source is idle until one is set";
 
 /// How a source decides a file is complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +104,19 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
     Some(Duration::from_secs(secs))
 }
 
+/// Is `pattern` a `batch_pattern` the reader would accept — a regex that
+/// compiles and names a `batch` capture? The one spelling of that rule,
+/// shared by the reader below and the Sources dialog's inline refusal
+/// (§19.3), so a pattern the dialog accepts is never one the reader would
+/// go on to drop with a warning.
+pub fn check_batch_pattern(pattern: &str) -> Result<(), String> {
+    match regex::Regex::new(pattern) {
+        Err(e) => Err(format!("batch_pattern does not compile: {e}")),
+        Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Ok(()),
+        Ok(_) => Err("batch_pattern needs a named `batch` capture, like (?P<batch>.+)".to_string()),
+    }
+}
+
 fn diag(severity: Severity, name: &str, m: impl std::fmt::Display) -> Diagnostic {
     Diagnostic {
         severity,
@@ -146,7 +168,12 @@ impl SourceSpec {
                 })
                 .unwrap_or_default();
             if paths.is_empty() {
-                diags.push(diag(Severity::Error, name, "missing or empty 'paths'"));
+                // §19.3 (ruling 2026-09-12): a source with nothing to poll
+                // is idle, not broken — a warning, and skipped, so the
+                // dialog's `n` can create one and let the trader type the
+                // globs in afterwards. One line, so the harness can flip
+                // its severity by anchoring on it.
+                diags.push(diag(Severity::Warning, name, IDLE_PATHS));
                 continue;
             }
 
@@ -211,23 +238,10 @@ impl SourceSpec {
 
             let batch_pattern = match table.get("batch_pattern").and_then(|v| v.as_str()) {
                 None => None,
-                Some(p) => match regex::Regex::new(p) {
-                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),
-                    Ok(_) => {
-                        diags.push(diag(
-                            Severity::Warning,
-                            name,
-                            "'batch_pattern' has no named `batch` capture; ignoring it \
-                             (every file's batch would be its whole stem)",
-                        ));
-                        None
-                    }
+                Some(p) => match check_batch_pattern(p) {
+                    Ok(()) => Some(p.to_string()),
                     Err(e) => {
-                        diags.push(diag(
-                            Severity::Warning,
-                            name,
-                            format!("'batch_pattern' does not compile: {e}; ignoring it"),
-                        ));
+                        diags.push(diag(Severity::Warning, name, format!("'{e}'; ignoring it")));
                         None
                     }
                 },
@@ -378,8 +392,11 @@ paths = ["/x/*.csv"]
         assert!(errors[1].contains("'b'") && errors[1].contains("nonesuch"));
     }
 
+    /// §19.3 (ruling 2026-09-12, superseding this test's old name): a
+    /// missing `paths` key and an explicit `paths = []` reach the same
+    /// branch — both are idle, both are warnings, neither is an error.
     #[test]
-    fn missing_or_empty_paths_is_an_error() {
+    fn missing_or_empty_paths_is_idle_not_an_error() {
         let (specs, diags) = parse(
             r#"
 [a]
@@ -390,14 +407,49 @@ paths = []
 "#,
         );
         assert!(specs.is_empty(), "{specs:?}");
+        assert!(
+            diags.iter().all(|d| d.severity != Severity::Error),
+            "{diags:?}"
+        );
         assert_eq!(
             diags
                 .iter()
-                .filter(|d| d.severity == Severity::Error)
+                .filter(|d| d.severity == Severity::Warning)
                 .count(),
             2,
             "{diags:?}"
         );
+    }
+
+    #[test]
+    fn empty_paths_is_a_warning_and_the_source_is_skipped() {
+        let doc = merge_docs(
+            "sources",
+            &[LayerDoc::builtin(
+                "sources",
+                "[idle]\ndataset = \"risk_snapshot\"\npaths = []\n",
+            )
+            .unwrap()],
+        );
+        let (specs, diags) = SourceSpec::from_doc(&doc, &schema());
+        assert!(
+            specs.is_empty(),
+            "an idle source never reaches the scheduler"
+        );
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].severity, Severity::Warning, "{diags:?}");
+        assert!(diags[0].message.contains("idle"), "{}", diags[0].message);
+    }
+
+    #[test]
+    fn check_batch_pattern_needs_a_compiling_regex_with_a_batch_capture() {
+        assert!(check_batch_pattern("(?P<batch>.+)").is_ok());
+        assert!(
+            check_batch_pattern("(.+")
+                .unwrap_err()
+                .contains("does not compile")
+        );
+        assert!(check_batch_pattern("(.+)").unwrap_err().contains("batch"));
     }
 
     #[test]
