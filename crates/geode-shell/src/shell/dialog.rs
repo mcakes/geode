@@ -485,18 +485,24 @@ pub fn open_shell_dialog_with_key<F>(
 ///
 /// Called at four seam classes and nowhere else — the tail of the modal
 /// branch in `ShellView::handle_key_down`, the tail of every mouse
-/// handler that can move a dialog's mode or query (both dialogs' row
-/// clicks, and the object dialog's two confirm-button closures, none of
-/// which pass through the key path at all), and
+/// handler that ends a dialog transition (a click never reaches the key
+/// path: both dialogs' row clicks and the object dialog's two
+/// confirm-button closures; `press_verb` is the audited exception, since
+/// it can only arm a `Confirm` and moves neither mode nor query), and
 /// [`open_shell_dialog_with_key`] — so a transition site is a pure
 /// mutation and cannot forget the gpui half. A no-op when no modal
 /// dialog with a mode is open; the filter-only dialogs (settings, picker,
-/// as-of) keep their own open-time focus (§16.4).
+/// as-of) keep their own open-time focus (§16.4). The two `if let` arms
+/// below are mutually exclusive by `close_modal`'s contract (it clears
+/// every dialog state together), so their order carries no meaning.
 ///
 /// The text write is guarded by a compare because `InputState::set_value`
 /// emits no `InputEvent::Change`: writing unconditionally would be
 /// harmless for the mirror but would move the caret on every keystroke.
-/// Focusing an already-focused handle is idempotent.
+/// The compare reads `InputState::text()`, a borrowed rope, rather than
+/// `value()`, which copies the whole text into a fresh string — this runs
+/// per keystroke, and PHILOSOPHY counts that churn as a defect. Focusing
+/// an already-focused handle is idempotent.
 pub(crate) fn sync_dialog_text(
     shell: &mut ShellView,
     window: &mut Window,
@@ -510,7 +516,7 @@ pub(crate) fn sync_dialog_text(
         return;
     };
     let input = shell.dialog_input.clone();
-    if input.read(cx).value().as_ref() != query {
+    if input.read(cx).text() != query {
         input.update(cx, |i, cx| i.set_value(query, window, cx));
     }
     match dialogmode::focus_target(mode, listening) {

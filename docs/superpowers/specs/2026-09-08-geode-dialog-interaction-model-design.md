@@ -444,11 +444,14 @@ the open dialog's *effective* mode and query and makes gpui match:
 
 **As-built correction (§16.6): this runs at four seam classes, not
 three** — the tail of the modal branch in `ShellView::handle_key_down`
-(after the dialog's `on_key` returns, claimed or not), the tail of each
-row-click handler that can move a dialog's mode or query, the object
-dialog's two confirm-button closures (`run_confirmed` is reachable by
-mouse, outside the key path), and `open_shell_dialog_with_key` (whose
-`focus_filter` parameter becomes the dialog's *initial mode*).
+(after the dialog's `on_key` returns, claimed or not), the tail of every
+mouse handler that ends a dialog transition — a click never reaches the
+key path — which is the three row-click handlers and the object dialog's
+two confirm-button closures (`run_confirmed` is reachable by mouse), with
+`press_verb` audited as the one exception because it can only arm a
+`Confirm`; and `open_shell_dialog_with_key`, which calls the sync
+unconditionally (`focus_filter` is unchanged and still serves the
+mode-less dialogs).
 Transition sites become pure mutations — `state.mode = DialogMode::Filter`,
 `draft.query.clear()` — and there is no second half to forget.
 
@@ -458,13 +461,14 @@ The object dialog carries two queries, the browse/naming one on
 `ObjectDialogState` and the edit one on `Draft`, mirrored one-way per
 stage (4c §18.6). That ruling becomes a getter,
 `ObjectDialogState::effective_query(&self) -> &str`, which the sync and the
-`Change` subscription both use; the subscription writes through a matching
-`set_effective_query`. A stale query in the other stage's slot is then
+`Change` subscription both use; the subscription writes through
+`set_query`, which already routes to the stage's own slot — the getter is
+its read half. A stale query in the other stage's slot is then
 unreachable rather than merely avoided.
 
 ### 16.3 What decides focus is pure
 
-`dialog::focus_target(mode, listening) -> FocusTarget { Input, Shell }` is
+`dialogmode::focus_target(mode, listening) -> FocusTarget { Input, Shell }` is
 the whole decision, in the pure core beside `escape_step`, unit-tested for
 every combination. `sync_dialog_text` only applies it.
 
@@ -490,8 +494,9 @@ shell in normal, shell while listening, text written only on difference).
 
 ### 16.6 As built
 
-Tasks 1–3 implemented this amendment (commits 5237c17, 8b62ae2, 9fedd06,
-296a5b8). §16.1's "exactly three places" is corrected in place above to
+Tasks 1–3 implemented this amendment (commits 5237c17, 9fedd06, 296a5b8;
+8b62ae2 between them is unrelated — a repair of two prompt tests main had
+left red). §16.1's "exactly three places" is corrected in place above to
 name four seam *classes*, not three — the true count once the object
 dialog's confirm buttons are counted honestly:
 
@@ -500,9 +505,11 @@ dialog's confirm buttons are counted honestly:
    not;
 2. `open_shell_dialog_with_key` (`shell/dialog.rs`), unconditionally, as
    the dialog's initial reconcile;
-3. every row-click handler that can move a dialog's own mode or query —
-   the keybinding dialog's one, the object dialog's two
-   (`on_row_clicked`, `on_edit_row_clicked`);
+3. every row-click handler — a click never reaches the key path, so the
+   handler is the transition's only tail: the keybinding dialog's one,
+   the object dialog's two (`on_row_clicked`, `on_edit_row_clicked`);
+   `press_verb` is the audited exception, because it can only arm a
+   `Confirm` and moves neither mode nor query;
 4. the object dialog's two confirm-button `on_click` closures (the "yes"
    and the Cancel button built in `confirm_row`) — `run_confirmed` is
    reachable by mouse from either button, and neither passes through
@@ -539,8 +546,9 @@ seam later. One new entry, `objectdialog: a mouse-confirmed delete
 leaves its filter text in the field`, covers seam class 4 above (anchored
 on the "yes" closure's sync call plus its preceding comment line, since
 the identical call recurs four times in the file and the Cancel
-closure's is indented identically). The two row-click syncs (seam class
-3) have no entries: no test can observe either today (the key-path
+closure's is indented identically). Two of seam class 3's three
+row-click syncs — the keybinding dialog's and the object dialog's browse
+click — have no entries: no test can observe either today (the key-path
 sync already covers every transition those clicks can drive), and an
 entry with no discriminating test behind it is one of the four ways the
 harness header says an entry can lie.

@@ -397,6 +397,15 @@ impl KeybindingsState {
     /// palette has no user override to reset"); an edit re-ranks the
     /// list and moves the selection off that row, so keeping it would
     /// leave a complaint pointing at nothing.
+    ///
+    /// Clearing `listening` here is reached from the `Change`
+    /// subscription, which is not one of `sync_dialog_text`'s seams — so
+    /// it relies on an invariant rather than a reconcile: no `Change` can
+    /// fire while a capture is listening, because the sync keeps the
+    /// `Input` blurred for the whole capture and `dialog::filter_row`
+    /// paints frozen text (not the live field) while the query is
+    /// frozen, so nothing can type into it. If either of those ever
+    /// changes, this line becomes a fourth, unreconciled seam.
     pub fn set_query(&mut self, query: String) {
         self.query = query;
         self.selected = 0;
