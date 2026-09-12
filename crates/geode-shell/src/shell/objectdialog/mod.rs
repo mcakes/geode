@@ -646,7 +646,7 @@ impl Confirm {
             Confirm::Delete => format!("Delete '{name}' from your config?"),
             Confirm::Revert => format!("Throw away your changes to '{name}'?"),
             Confirm::Fork => {
-                format!("Copy '{name}' to your config? It stops following the desk.")
+                format!("Copy '{name}' to your config?")
             }
             // User-owned: nothing underneath to fall back to, so the
             // scope's previous contents really are gone.
@@ -658,7 +658,7 @@ impl Confirm {
             // layer, exactly like `Fork`'s own consequence, and `r`
             // reverts it same as any other fork.
             Confirm::Overwrite { forks: true } => format!(
-                "Replace '{name}' with the frame's current scope? It stops following the desk — 'r' reverts."
+                "Replace '{name}' with the frame's current scope? 'r' reverts."
             ),
         }
     }
