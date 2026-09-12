@@ -4008,3 +4008,67 @@ fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
         "a desk view asks before forking"
     );
 }
+
+/// §17.1 rule 3 / §18.9.2 follow-up: a tick click is claimed and dropped
+/// while a confirm is armed, exactly as a bare letter is on the key path
+/// (`handle_edit_key`'s own `armed` block). `open_tree_edit_stage`'s
+/// fixture cannot arm `Confirm::Delete` — `tree` is desk-owned, so `d`
+/// there sets a notice pointing at `r` instead (see
+/// `arm_delete`'s `Layer::User` gate) — so this reuses
+/// `services_with_a_user_only_view`, the same fixture the neighbouring
+/// `deleting_a_user_layer_object_leaves_the_browse_list_before_the_watcher_could_fire`
+/// test arms `d` against, where the "mine" object IS the user's own.
+#[gpui::test]
+fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_a_user_only_view(),
+        dir.path(),
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("d");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Delete),
+        "d arms delete on an object the user layer itself defines"
+    );
+
+    let tick = cx
+        .debug_bounds("objectdialog-tick-npv")
+        .expect("npv paints a tick");
+    cx.simulate_mouse_down(
+        gpui::point(tick.origin.x + gpui::px(4.0), tick.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Delete),
+        "the armed delete must not be clobbered by a tick click behind it"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| {
+            d.list_items("columns")
+                .unwrap()
+                .iter()
+                .find(|i| i.name == "npv")
+                .unwrap()
+                .included
+        }),
+        "npv must still be included — the tick click did nothing, not even toggle it"
+    );
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert!(
+        !dir.path().join("view_presentation.toml").exists(),
+        "no write reaches disk from a tick click claimed by an armed confirm"
+    );
+}

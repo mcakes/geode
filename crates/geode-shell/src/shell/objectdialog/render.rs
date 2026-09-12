@@ -2824,6 +2824,21 @@ fn on_edit_row_clicked(
 /// `commit_or_confirm` — so every write and every refusal the key gives,
 /// the tick gives. Ends in [`dialog::sync_dialog_text`] like every mouse
 /// handler that mutates the draft (§17.1 rule 3).
+///
+/// **Claimed and dropped while a confirm is armed**, mirroring
+/// `handle_edit_key`'s own `armed` block: a stray keystroke other than
+/// enter/y/escape/n does nothing while a destructive question is on
+/// screen, but the row list — ticks included — keeps painting underneath
+/// the confirm row, since it is not itself replaced by one. Without this
+/// guard a tick click there would reach `Draft::toggle_selected` and
+/// `commit_or_confirm` regardless, either clobbering an armed
+/// Delete/Revert/Overwrite with a fresh `Confirm::Fork` or committing an
+/// unrelated write to disk while the question the trader is looking at
+/// is still unanswered — the mouse disagreeing with the key on the one
+/// thing that must never be ambiguous. So this returns before touching
+/// the draft at all — not even the cursor moves, the same "claimed and
+/// dropped" the key path gives a bare letter. Task 6's drop handler
+/// reaches the same row list and needs the identical guard.
 fn on_tick_clicked(
     shell: &mut ShellView,
     position: usize,
@@ -2838,6 +2853,9 @@ fn on_tick_clicked(
     let Some(draft) = draft_mut(shell) else {
         return;
     };
+    if draft.confirm.is_some() {
+        return;
+    }
     if position >= draft.visible_rows().len() {
         return;
     }

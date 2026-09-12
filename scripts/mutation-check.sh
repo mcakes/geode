@@ -6974,6 +6974,20 @@ run_mutation "objectdialog: a tick click toggles through space's path" \
     match Step::Inert {' \
   geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
 
+# Review finding on Task 5: a tick click must be claimed and dropped
+# while a confirm is armed, exactly as `handle_edit_key`'s bare-letter
+# case is — otherwise it can act on the object behind a pending
+# Delete/Revert/Fork. Mutated away, the guard never fires.
+run_mutation "objectdialog: a tick click is claimed and dropped while a confirm is armed" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if draft.confirm.is_some() {
+        return;
+    }' \
+  '    if false && draft.confirm.is_some() {
+        return;
+    }' \
+  geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
