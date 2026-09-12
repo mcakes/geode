@@ -372,6 +372,7 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         roster: crate::module::ModuleRoster::default(),
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),

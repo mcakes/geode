@@ -125,6 +125,7 @@ fn services_with_rec_roster() -> (
         roster,
         restored_tiles: crate::session::TileRecords::new(),
         restored_frame: None,
+        restored_palette_usage: crate::palette_usage::PaletteUsage::new(),
         log: None,
         action_tail: std::sync::Arc::new(std::sync::Mutex::new(
             crate::diagnostics::ActionTail::new(),

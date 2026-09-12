@@ -2027,8 +2027,8 @@ run_mutation "session: tile state round-trips" \
 
 run_mutation "session: a state-only change alone still flushes" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
-  '        if !self.session_dirty && !frame_dirty {' \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty {' \
   geode-shell \
   a_module_state_change_alone_flushes_once_with_the_new_state
 
@@ -3110,7 +3110,7 @@ run_mutation "session: [frame] restores as-of" \
 # highlight — the defect the screenshot of 2026-09-12 showed.
 run_mutation "palette: the alignment continues a run rather than restarting greedily" \
   crates/geode-shell/src/palette.rs \
-  '                    let cont = ends_at[prev].map(|s| s + RUN_BONUS);' \
+  '                    let cont = ends_at[prev].map(|s| s + run_at(j));' \
   '                    let cont: Option<u32> = None;' \
   geode-shell indices_prefer_a_later_contiguous_run_over_an_earlier_scattered_one
 
@@ -3129,6 +3129,59 @@ run_mutation "palette: selecting a saved scope loads it" \
   '                    if let Ok(true) = f.load_scope(&name) {' \
   '                    if let Ok(true) = f.load_scope("no-such-scope") {' \
   geode-shell a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it
+
+# 2026-09-12 palette ranking: the category joins the match text at a
+# discount. Without the discount a word-start run in a category (`work`
+# in "Workspace", 39) outbids the same letters mid-word in a title
+# ("Framework tools", 31), and the category stops being the
+# lower-preference field the design names it.
+run_mutation "palette: a category character earns less than a title character" \
+  crates/geode-shell/src/palette.rs \
+  '        score.div_ceil(CATEGORY_DIVISOR)' \
+  '        score' \
+  geode-shell a_mid_word_title_match_outranks_a_word_start_category_match
+
+# The usage bonus must actually reach the sort key — dropping it leaves
+# an empty query in bare registry order, the pre-feature behaviour.
+run_mutation "palette: the usage bonus is added to the match score" \
+  crates/geode-shell/src/palette.rs \
+  '                scored.push((i, score + self.bonus[i], indices));' \
+  '                scored.push((i, score, indices));' \
+  geode-shell an_empty_query_lists_used_items_first_by_bonus_then_registry_order
+
+# Recency must be bucketed by age, not flat: reading every record as
+# just-used leaves frequency alone to rank, and a command used once this
+# minute no longer outranks one used once a month ago.
+run_mutation "palette usage: the recency bonus falls with age" \
+  crates/geode-shell/src/palette_usage.rs \
+  '        RECENCY_BONUS[bucket] + self.count.saturating_sub(1).min(FREQUENCY_CAP)' \
+  '        RECENCY_BONUS[0] + self.count.saturating_sub(1).min(FREQUENCY_CAP)' \
+  geode-shell a_more_recent_use_earns_more_than_an_older_one_at_equal_count
+
+# The map is bounded: without the prune the session file grows with every
+# theme or scope a trader ever cycles through.
+run_mutation "palette usage: recording past the cap prunes the lowest entry" \
+  crates/geode-shell/src/palette_usage.rs \
+  '        while self.entries.len() > MAX_ENTRIES {' \
+  '        while self.entries.len() > usize::MAX {' \
+  geode-shell recording_past_the_cap_drops_the_lowest_bonus_entry
+
+# `palette::toggle`'s own row only closes the palette; counting it as a
+# use would climb it up the ranking for doing nothing.
+run_mutation "palette: the toggle row records no use" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if !matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle") {' \
+  '        {' \
+  geode-shell choosing_the_palette_toggle_row_records_nothing
+
+# A palette dispatch that mutates nothing else (a theme row) must still
+# reach the session flush, or a restart forgets every use since the last
+# layout change.
+run_mutation "palette usage: a usage change alone dirties the session flush" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {' \
+  '        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {' \
+  geode-shell a_palette_dispatch_reaches_the_session_flush
 
 run_mutation "bar: a keystroke sets the frame text" \
   crates/geode-shell/src/shell/mod.rs \

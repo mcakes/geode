@@ -282,10 +282,22 @@ fn bench_session(c: &mut Criterion) {
     let ws = realistic_workspaces();
     let no_tiles = session::TileRecords::new();
     group.bench_function("to_toml_9_workspaces", |b| {
-        b.iter(|| black_box(session::to_toml(black_box(&ws), black_box(&no_tiles), None)))
+        b.iter(|| {
+            black_box(session::to_toml(
+                black_box(&ws),
+                black_box(&no_tiles),
+                None,
+                &geode_shell::palette_usage::PaletteUsage::new(),
+            ))
+        })
     });
 
-    let table = session::to_toml(&ws, &no_tiles, None);
+    let table = session::to_toml(
+        &ws,
+        &no_tiles,
+        None,
+        &geode_shell::palette_usage::PaletteUsage::new(),
+    );
     group.bench_function("from_toml_9_workspaces", |b| {
         b.iter(|| {
             let restored = session::from_toml(black_box(&table)).expect("round-trip parses");

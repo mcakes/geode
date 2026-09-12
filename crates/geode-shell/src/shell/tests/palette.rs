@@ -1335,3 +1335,123 @@ fn a_saved_scope_appears_in_the_palette_and_selecting_it_loads_it(cx: &mut gpui:
         "loading the scope must bump the scope version exactly once"
     );
 }
+
+// -- usage ranking ------------------------------------------------------
+
+/// [`open_shell`] plus the downcast shell entity, for the tests below.
+fn open_ranked_shell(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+) -> (gpui::VisualTestContext, Entity<ShellView>) {
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    (cx, shell)
+}
+
+fn first_palette_title(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |shell, _| {
+        shell
+            .palette
+            .as_ref()
+            .and_then(PaletteState::selected_item)
+            .map(|item| item.title())
+    })
+}
+
+/// Dispatching a row from the palette records a use of it, and the next
+/// open lists it first on an empty query — the whole "brain-reading"
+/// loop, through the real key pipeline.
+#[gpui::test]
+fn a_palette_dispatch_is_recorded_and_ranks_first_on_the_next_open(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = open_ranked_shell(cx, test_services());
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert_ne!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical"),
+        "the fixture's registry order must not already lead with the row under test"
+    );
+    cx.simulate_input("rec: split vertical");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical")
+    );
+    cx.simulate_keystrokes("enter");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
+
+    let record = shell.read_with(&cx, |shell, _| {
+        shell
+            .palette_usage
+            .get("action:tile::add_rec_vertical")
+            .copied()
+    });
+    assert_eq!(record.map(|r| r.count), Some(1), "{record:?}");
+
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical"),
+        "the row just used must lead an empty query"
+    );
+}
+
+/// Closing the palette with `palette::toggle` itself (its own row, or
+/// `ctrl+k` again) is not a use of anything.
+#[gpui::test]
+fn choosing_the_palette_toggle_row_records_nothing(cx: &mut gpui::TestAppContext) {
+    let (mut cx, shell) = open_ranked_shell(cx, test_services());
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("toggle command palette");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Toggle command palette")
+    );
+    cx.simulate_keystrokes("enter");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette_usage.is_empty()));
+}
+
+/// A restored history (`ShellServices::restored_palette_usage`, from
+/// `session.toml`) ranks the very first open of a new process.
+#[gpui::test]
+fn restored_usage_ranks_the_first_open(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services
+        .restored_palette_usage
+        .record("action:tile::add_rec_vertical", 1_800_000_000);
+    let (mut cx, shell) = open_ranked_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Rec: Split Vertical")
+    );
+}
+
+/// A palette dispatch that mutates nothing else (a theme row) still
+/// dirties the session flush, and the flushed text carries the usage
+/// table — so a restart forgets nothing.
+#[gpui::test]
+fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let session_path = dir.path().join("session.toml");
+    let (mut cx, shell) =
+        open_ranked_shell(cx, super::session::test_services_with_session(session_path));
+
+    let clean = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    assert!(clean.is_none(), "a fresh shell has nothing to flush");
+
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("theme: gruvbox dark");
+    assert_eq!(
+        first_palette_title(&shell, &cx).as_deref(),
+        Some("Theme: Gruvbox Dark")
+    );
+    cx.simulate_keystrokes("enter");
+
+    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let (_, text) = pending.expect("a palette dispatch must dirty the session flush");
+    assert!(text.contains("[palette.usage"), "{text}");
+    assert!(text.contains("\"theme:Gruvbox Dark\""), "{text}");
+
+    let again = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    assert!(again.is_none(), "one dispatch flushes once");
+}

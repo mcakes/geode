@@ -20,6 +20,7 @@ pub mod listfilter;
 pub mod log_persist;
 pub mod module;
 pub mod palette;
+pub mod palette_usage;
 pub mod perf;
 pub mod reload;
 pub mod scopebar;

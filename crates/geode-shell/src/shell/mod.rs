@@ -111,6 +111,10 @@ pub struct ShellServices {
     /// fresh session (no file, or one with no `[frame]` table yet) and in
     /// every test setup that doesn't opt in.
     pub restored_frame: Option<crate::session::FrameRecord>,
+    /// The palette's usage history from `session.toml`'s `[palette.usage]`
+    /// table — empty for a fresh session and in every test setup that
+    /// doesn't opt in. `ShellView::new` takes it as the live history.
+    pub restored_palette_usage: crate::palette_usage::PaletteUsage,
     /// The `tracing` foundation (Phase 4b Task 2): the ring the
     /// diagnostics tile reads, the control `:level` writes through, and
     /// the levels `[log]` resolved to at startup. `None` in every test
@@ -360,6 +364,19 @@ pub struct ShellView {
     /// built once at palette-open, not per frame) and dropped on close —
     /// nothing about it survives being closed and reopened.
     palette: Option<PaletteState>,
+    /// How often and how recently each palette row was chosen
+    /// (`crate::palette_usage`): read once per palette open to rank the
+    /// rows (`PaletteState::with_usage`), written by every palette
+    /// dispatch but `palette::toggle`'s own row, and persisted as
+    /// `session.toml`'s `[palette.usage]` table through the same
+    /// coalesced flush the layout rides.
+    palette_usage: crate::palette_usage::PaletteUsage,
+    /// Bumped by every `palette_usage` mutation; `take_dirty_session_write`
+    /// compares it against `last_palette_usage_written`, the same shape
+    /// as `last_frame_versions_written`, so a palette dispatch that
+    /// mutates nothing else still reaches the flush.
+    palette_usage_version: u64,
+    last_palette_usage_written: u64,
     /// The open modal's state (Task 9, instant-modal redesign), or `None`
     /// when closed. Set only through [`dialog::open_shell_dialog`] (the one
     /// standard door — see that function's and `dialog`'s module doc), read
@@ -1290,6 +1307,9 @@ impl ShellView {
         // built. `clear_history` afterwards drops the undo entry
         // `set_scope` just pushed: a restored session must not start with
         // a phantom "undo" back to the empty scope nobody actually chose.
+        // The palette's usage history restored with the session, the same
+        // way as the frame record just below.
+        let palette_usage = services.restored_palette_usage.clone();
         if let Some(record) = services.restored_frame.clone() {
             frame.update(cx, |f, _cx| {
                 f.set_scope(record.scope);
@@ -1319,6 +1339,9 @@ impl ShellView {
             find_style,
             focus_handle,
             palette: None,
+            palette_usage,
+            palette_usage_version: 0,
+            last_palette_usage_written: 0,
             modal: None,
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),

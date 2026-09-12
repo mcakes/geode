@@ -9,7 +9,7 @@ use crate::session;
 
 // --- Task 3: session save/restore wiring ----------------------------
 
-fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
+pub(super) fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
     let mut services = test_services();
     services.session_path = Some(session_path);
     services
@@ -374,7 +374,12 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
     // through `session::from_toml`, exactly as `main.rs` restores a
     // real session file — must have its `state` handed to the
     // recorder's `create` as `Some(...)`.
-    let mut table = session::to_toml(&Workspaces::new(), &session::TileRecords::new(), None);
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::palette_usage::PaletteUsage::new(),
+    );
     let ws1: toml::Table = r#"
         focused = 1
         [node]

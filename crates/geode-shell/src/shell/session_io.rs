@@ -51,22 +51,29 @@ impl ShellView {
         let versions = self.frame.read(cx).versions();
         let frame_versions = (versions.scope, versions.grouping, versions.as_of);
         let frame_dirty = frame_versions != self.last_frame_versions_written;
+        let usage_dirty = self.palette_usage_version != self.last_palette_usage_written;
         // A module state change never sets `session_dirty` (that flag
         // tracks the layout only), so this compares the freshly-gathered
         // tiles (and the frame's own restorable versions) against what was
         // last written — either kind of change is still noticed here, on
         // the same tick, without dirtying the layout flag on every
         // keystroke inside a module or every scope edit.
-        if !self.session_dirty && !frame_dirty && tiles == self.last_tiles_written {
+        if !self.session_dirty && !frame_dirty && !usage_dirty && tiles == self.last_tiles_written {
             return None;
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
         let record = self.frame_record(cx);
-        match session::to_string_pretty(&self.services.workspaces, &tiles, Some(&record)) {
+        match session::to_string_pretty(
+            &self.services.workspaces,
+            &tiles,
+            Some(&record),
+            &self.palette_usage,
+        ) {
             Ok(text) => {
                 self.last_tiles_written = tiles;
                 self.last_frame_versions_written = frame_versions;
+                self.last_palette_usage_written = self.palette_usage_version;
                 Some((path, text))
             }
             Err(e) => {
@@ -99,6 +106,7 @@ impl ShellView {
             &self.services.workspaces,
             &self.current_tiles(cx),
             Some(&record),
+            &self.palette_usage,
         ) {
             tracing::warn!(target: "geode::session", "failed to save session: {e}");
         }

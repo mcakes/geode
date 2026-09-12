@@ -175,6 +175,7 @@ fn main() {
                 services.workspaces = restored.workspaces;
                 services.restored_tiles = restored.tiles;
                 services.restored_frame = restored.frame;
+                services.restored_palette_usage = restored.palette_usage;
             }
 
             // Best-effort flush on quit: `App::on_app_quit` exists at the
@@ -657,6 +658,7 @@ fn build_shell_services(
         roster,
         restored_tiles: std::collections::BTreeMap::new(),
         restored_frame: None,
+        restored_palette_usage: geode_shell::palette_usage::PaletteUsage::new(),
         log: Some(LogServices {
             ring: log_ring,
             control: log_control,

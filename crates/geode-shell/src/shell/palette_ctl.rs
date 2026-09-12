@@ -60,7 +60,11 @@ impl ShellView {
             &bindings,
             &saved,
         );
-        self.palette = Some(PaletteState::new(items));
+        self.palette = Some(PaletteState::with_usage(
+            items,
+            &self.palette_usage,
+            unix_now(),
+        ));
         // Fresh scroll state for a fresh palette session — a stale offset
         // left over from a previous open (a different query, a different
         // scroll position) must not carry over now that the results list
@@ -125,6 +129,14 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Every real choice counts as a use — the one exception is the
+        // palette's own toggle row, which only ever closes the palette
+        // (see the arm below) and would otherwise climb the ranking for
+        // doing nothing.
+        if !matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle") {
+            self.palette_usage.record(&item.usage_key(), unix_now());
+            self.palette_usage_version += 1;
+        }
         match item {
             PaletteItem::Action(id, ..) if id.0 == "palette::toggle" => {}
             PaletteItem::Action(id, ..) => self.dispatch(id, None, window, cx),
@@ -269,4 +281,13 @@ impl ShellView {
             }
         }
     }
+}
+
+/// The wall clock as unix seconds, for `palette_usage`'s `now` — read
+/// once per palette open and once per palette dispatch, never per frame.
+/// A clock before the epoch reads as 0 rather than panicking.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
