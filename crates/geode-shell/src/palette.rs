@@ -92,13 +92,23 @@ impl PaletteItem {
 /// order — `render`'s highlighting turns them into styled spans over the
 /// row title (see [`highlight_runs`]).
 ///
-/// Matching is greedy-leftmost (each query character claims the earliest
-/// remaining occurrence in `candidate`), and the score rewards, per
-/// matched character: a match at position 0 (prefix start), a match right
-/// after a separator (`' '`, `':'`, `'_'`, `'-'` — a "word start"), and
-/// membership in a run of consecutive matched characters (the run bonus
-/// grows with run length, so longer unbroken runs score more than the same
-/// number of scattered hits).
+/// Matching is an optimal alignment, not a greedy walk: every way of
+/// placing the query's characters, in order, over `candidate` is scored
+/// and the best-scoring placement is the one returned — so the indices
+/// ARE the alignment the score ranks by. The score rewards, per matched
+/// character: a match at position 0 (prefix start), a match right after a
+/// separator (`' '`, `':'`, `'_'`, `'-'` — a "word start"), and each pair
+/// of consecutive matched characters ([`RUN_BONUS`]), so one unbroken run
+/// scores more than the same letters split across runs or scattered.
+/// Between equally-scored placements the earliest wins, and a run is
+/// continued rather than restarted.
+///
+/// Why not greedy-leftmost (what this was until 2026-09-12): the settings
+/// dialog matches `ling` over the joined text "add tile tiling", and a
+/// greedy walk claimed the `l` of "tile" first, then scattered `i`, `n`,
+/// `g` across "tiling" — painting `Add ti[l]e` / `T[i]li[ng]` — while the
+/// whole query sat as one run in "tiling". Greedy also under-scored such
+/// rows, since the placement it scored was not the best one available.
 ///
 /// The indices are positions in `candidate.to_lowercase().chars()`. For
 /// every candidate this palette ever renders (plain-ASCII action titles
@@ -125,38 +135,110 @@ fn fuzzy_match_lowered(query: &str, candidate: &str) -> Option<(u32, Vec<usize>)
         return Some((0, Vec::new()));
     }
 
-    let cand: Vec<char> = candidate.chars().collect();
-    let mut cand_idx = 0usize;
-    let mut prev_matched: Option<usize> = None;
-    let mut consecutive_run: u32 = 0;
-    let mut score: u32 = 0;
-    let mut indices: Vec<usize> = Vec::new();
+    let q: Vec<char> = query.chars().collect();
+    let c: Vec<char> = candidate.chars().collect();
+    let (n, m) = (q.len(), c.len());
+    if n > m {
+        return None;
+    }
 
-    for qc in query.chars() {
-        let offset = cand[cand_idx..].iter().position(|&c| c == qc)?;
-        let idx = cand_idx + offset;
+    // Two row-major `n × m` tables (Smith–Waterman in the mould of fzf's
+    // v2 matcher, without its gap penalty):
+    //   ends_at[i][j]  best score with `q[..=i]` placed and `q[i]` AT `c[j]`
+    //   within [i][j]  best score with `q[..=i]` placed somewhere in `c[..=j]`
+    // `within` only advances on a strictly better cell, so among equal
+    // scores it remembers the earliest — which is what makes the
+    // backtrack below prefer the leftmost of two tied placements.
+    let mut ends_at: Vec<Option<u32>> = vec![None; n * m];
+    let mut within: Vec<Option<u32>> = vec![None; n * m];
+    for i in 0..n {
+        let mut best_so_far: Option<u32> = None;
+        let mut any = false;
+        for j in 0..m {
+            let mut cell = None;
+            if c[j] == q[i] && j >= i {
+                let base = char_base(&c, j);
+                if i == 0 {
+                    cell = Some(base);
+                } else {
+                    let prev = (i - 1) * m + (j - 1);
+                    let fresh = within[prev];
+                    let cont = ends_at[prev].map(|s| s + RUN_BONUS);
+                    cell = fresh.max(cont).map(|s| s + base);
+                }
+            }
+            ends_at[i * m + j] = cell;
+            if let Some(s) = cell
+                && best_so_far.is_none_or(|b| s > b)
+            {
+                best_so_far = Some(s);
+            }
+            within[i * m + j] = best_so_far;
+            any |= cell.is_some();
+        }
+        if !any {
+            return None;
+        }
+    }
 
-        let mut char_score: u32 = 1;
-        if idx == 0 {
-            char_score += 10;
-        }
-        if idx > 0 && matches!(cand[idx - 1], ' ' | ':' | '_' | '-') {
-            char_score += 8;
-        }
-        if prev_matched.is_some_and(|p| p + 1 == idx) {
-            consecutive_run += 1;
-            char_score += 5 + consecutive_run;
-        } else {
-            consecutive_run = 0;
-        }
+    let score = within[(n - 1) * m + (m - 1)]?;
 
-        score += char_score;
-        indices.push(idx);
-        prev_matched = Some(idx);
-        cand_idx = idx + 1;
+    // Backtrack from the earliest cell holding the final score, at each
+    // step continuing a run when that reproduces the cell's score (so a
+    // tie between "continue" and "restart" paints one run, not two) and
+    // otherwise jumping to the earliest cell of the previous row that
+    // carries `within`'s remembered best.
+    let mut indices = vec![0usize; n];
+    let mut j = (0..m).find(|&j| ends_at[(n - 1) * m + j] == Some(score))?;
+    indices[n - 1] = j;
+    for i in (1..n).rev() {
+        let cell = ends_at[i * m + j]?;
+        let base = char_base(&c, j);
+        let prev = (i - 1) * m + (j - 1);
+        j = match ends_at[prev] {
+            Some(s) if s + RUN_BONUS + base == cell => j - 1,
+            _ => {
+                let target = within[prev];
+                (0..j).find(|&jj| ends_at[(i - 1) * m + jj] == target)?
+            }
+        };
+        indices[i - 1] = j;
     }
 
     Some((score, indices))
+}
+
+/// The bonus for matching the candidate's first character.
+const PREFIX_BONUS: u32 = 10;
+
+/// The bonus for matching the first character after a separator.
+const WORD_START_BONUS: u32 = 8;
+
+/// The score every pair of consecutive matched characters adds — constant
+/// per pair, so a run of `k` matched characters earns `(k - 1) × RUN_BONUS`
+/// and one long run beats the same pairs split across shorter runs.
+///
+/// It must exceed [`WORD_START_BONUS`]: the alignment weighs "extend the
+/// run" against "restart at the next word start" cell by cell, and with
+/// the run bonus the smaller, `app` on "Apple Pie" would paint `Ap` + `P`
+/// rather than `App` — a contiguous region is the better match, and the
+/// highlight has to say so.
+const RUN_BONUS: u32 = 9;
+const _: () = assert!(RUN_BONUS > WORD_START_BONUS);
+
+/// A matched character's own score at `idx`, independent of what was
+/// matched around it: 1, plus [`PREFIX_BONUS`] for the candidate's first
+/// character, plus [`WORD_START_BONUS`] for the first character after a
+/// separator.
+fn char_base(cand: &[char], idx: usize) -> u32 {
+    let mut score = 1;
+    if idx == 0 {
+        score += PREFIX_BONUS;
+    }
+    if idx > 0 && matches!(cand[idx - 1], ' ' | ':' | '_' | '-') {
+        score += WORD_START_BONUS;
+    }
+    score
 }
 
 /// Merge [`fuzzy_match`]'s matched char indices into contiguous runs and
@@ -897,9 +979,45 @@ mod tests {
         // "supplier": s0 u1 p2 p3 l4 i5 e6 r7 — "spl" greedy-leftmost
         // matches s(0), then the first "p" at 2 (skipping "u"), then the
         // first "l" after that at 4 (skipping the second "p") — three
-        // indices with gaps, not one run.
+        // indices with gaps, not one run — but the alignment still
+        // prefers the "pl" run at 3-4 over the earlier, lonelier "p" at 2.
         let (_, indices) = fuzzy_match("spl", "supplier").unwrap();
-        assert_eq!(indices, vec![0, 2, 4]);
+        assert_eq!(indices, vec![0, 3, 4]);
+    }
+
+    #[test]
+    fn indices_prefer_a_later_contiguous_run_over_an_earlier_scattered_one() {
+        // The settings row "Add tile" / "Tiling" is matched over the
+        // joined text "add tile tiling" (a0 d1 d2 ' '3 t4 i5 l6 e7 ' '8
+        // t9 i10 l11 i12 n13 g14). A greedy-leftmost walk claims the `l`
+        // of "tile" (6) and then scatters i(10) n(13) g(14) across
+        // "tiling" — painting `Add ti[l]e` / `T[i]li[ng]` — when "tiling"
+        // holds the whole query as one run at 11..=14, which is what a
+        // trader typing `ling` means and expects to see highlighted.
+        let (score, indices) = fuzzy_match("ling", "add tile tiling").unwrap();
+        assert_eq!(indices, vec![11, 12, 13, 14]);
+        // And that alignment IS the score the row ranks by, not a
+        // separately-derived highlight: the same run scores at least
+        // what a lone "tiling" candidate scores for it.
+        let (alone, _) = fuzzy_match("ling", "tiling").unwrap();
+        assert!(
+            score >= alone,
+            "joined={score} should carry the run's own score {alone}"
+        );
+    }
+
+    #[test]
+    fn a_single_long_run_beats_the_same_pairs_split_across_runs() {
+        // "abcd" as one run (three consecutive pairs) against "abcd"
+        // split as "ab" + "cd" (two pairs) by a NON-separator — a `_`
+        // would hand `c` a word-start bonus and confound the comparison:
+        // the run bonus is per consecutive pair, so the unbroken run
+        // scores strictly higher.
+        let (one_run, ix1) = fuzzy_match("abcd", "abcd").unwrap();
+        let (two_runs, ix2) = fuzzy_match("abcd", "abxcd").unwrap();
+        assert_eq!(ix1, vec![0, 1, 2, 3]);
+        assert_eq!(ix2, vec![0, 1, 3, 4]);
+        assert!(one_run > two_runs, "one_run={one_run} two_runs={two_runs}");
     }
 
     #[test]

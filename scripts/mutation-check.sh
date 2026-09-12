@@ -3095,6 +3095,28 @@ run_mutation "session: [frame] restores as-of" \
   '            let _ = at;' \
   geode-shell a_frame_record_round_trips_through_session_toml_with_every_field
 
+# 2026-09-12 fuzzy alignment: the matcher scores every placement and
+# returns the best, so `ling` over "add tile tiling" lands on the one run
+# in "tiling" rather than the greedy `l` of "tile" plus scattered hits.
+# Dropping the "continue the run" candidate leaves every placement scoring
+# base only, and the leftmost tie-break paints exactly the old greedy
+# highlight — the defect the screenshot of 2026-09-12 showed.
+run_mutation "palette: the alignment continues a run rather than restarting greedily" \
+  crates/geode-shell/src/palette.rs \
+  '                    let cont = ends_at[prev].map(|s| s + RUN_BONUS);' \
+  '                    let cont: Option<u32> = None;' \
+  geode-shell indices_prefer_a_later_contiguous_run_over_an_earlier_scattered_one
+
+# Same seam, the other half: the run bonus must outbid a word start, or
+# `app` on "Apple Pie" paints `Ap` + `P`. Mutating the comparison to weigh
+# a restart above a continuation (the tie-break reversed) reaches it
+# without tripping the compile-time `RUN_BONUS > WORD_START_BONUS` assert.
+run_mutation "palette: extending a run outbids restarting at a word start" \
+  crates/geode-shell/src/palette.rs \
+  '                    cell = fresh.max(cont).map(|s| s + base);' \
+  '                    cell = fresh.or(cont).map(|s| s + base);' \
+  geode-shell indices_are_contiguous_for_a_prefix_match
+
 run_mutation "palette: selecting a saved scope loads it" \
   crates/geode-shell/src/shell/palette_ctl.rs \
   '                    if let Ok(true) = f.load_scope(&name) {' \
