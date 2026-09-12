@@ -1394,3 +1394,232 @@ browse list and on disk after `enter`), and `/` in the edit stage.
 Every behaviour above gets a mutation entry naming the test expected to
 catch it (`--anchors-only` before merge, as always). Visual changes
 are checked on a display against the artifact, not by test.
+
+### 18.6 As built
+
+- **Groupings' nine rows are the roster, not the config.**
+  `Domain::roster() -> Option<&'static [&'static str]>` answers
+  `Some(["1"..="9"])` for Groupings and `None` for Views/Scopes;
+  `derive_rows` seeds a placeholder row (`layer: None, summary:
+  "empty"`) for every rostered name *before* the layered-doc walk, so a
+  configured slot overwrites its placeholder in place and an
+  unconfigured one survives untouched. `ObjectRow.layer` is
+  `Option<Layer>` for exactly this reason — a row can now exist with no
+  layer at all — and every reader that used to compare it to a bare
+  `Layer` was rewritten to match on `Some`/`None`: `d` on an empty slot
+  says `"{name} is empty — tick a dimension to fill it"` rather than
+  falling into the generic "comes from the no layer" wording; `o`'s
+  fork disclosure and `d`'s delete gate both read `Some(Layer::User)`
+  instead of `Layer::User`. Ticking the first dimension in an empty
+  slot writes it straight to the user layer through the ordinary
+  batch, with no fork question, since nothing lies beneath an absent
+  layer to fork from.
+
+- **`check_object_name` (`geode-core::config`) is the one name rule.**
+  Trimmed, non-empty, not `config_version`, free of whitespace/`.`/`"`;
+  it returns the trimmed name so a caller cannot check one spelling and
+  write another. `Frame::save_scope` and the object dialog's `n` both
+  call it, so a name `:scope save` accepts is a name the dialog accepts
+  and vice versa — the two doors were never allowed to drift.
+
+- **Creating an object is `Stage::Naming`, committed on `enter`, one
+  keystroke wide.** `n` in browse swaps the filter row for a name field
+  (`dialog::name_row`) and clears the shared `Input` explicitly —
+  `begin_naming` only clears the mirrored `query`, and the `Input` is a
+  second buffer `set_value` cannot self-correct, so a leftover browse
+  filter (typed, then `escape`'d without clearing) would otherwise
+  survive into the name field verbatim; a fix round closed this after
+  it was caught reachable end to end (`/tr`, `escape`, `n` used to open
+  the name field already reading `tr`). `enter` validates through
+  `check_object_name`, refuses a name any layer already holds
+  (`'tree' already exists — open it instead`), and on success builds a
+  draft from the adapter's empty-object fields, marks it `is_new`,
+  writes it through `apply::commit_create` — **one `Doc` entry, `queue_
+  batch` at `Duration::ZERO`, never through `edits_for`** (the map
+  `commit_edit`/`commit_removal` build from the whole draft; a create
+  has no baseline to diff against, so it builds its own one-entry map
+  directly) — and opens the edit stage on it via `enter_edit_with`. The
+  header's `new` badge (`objectdialog-new-badge`) keys on `Draft::
+  is_new` **alone**, for the stage's entire life, not on `editing_row
+  (shell).is_none()`: `editing_row` derives from `services.config`,
+  which trails the zero-debounce flush by at least one executor tick,
+  so gating the badge on the row's absence would flicker it off the
+  instant the row derived while the object is still, correctly, "new"
+  for the rest of the session in that dialog. The same lag is why `d`/
+  `r` are silently withheld for that first tick (both gate on
+  `editing_row`) — documented in `actions()`'s own doc rather than
+  fixed, since there is nothing yet for either verb to act on. `n` is
+  inert on Groupings (`"the slots are fixed — open one to fill it"`),
+  gated on `domain.roster().is_some()` — the same predicate §18.4's
+  nine rows are built from, not a separate Groupings check. The create
+  gate throughout is `Domain::roster().is_some()` standing in for the
+  `Domain::writable()` Part 2b has not built yet; when it lands, the
+  `n`-suppression here and the footer hint that omits `n` for a fixed
+  roster should both move onto it. While naming, the browse list behind
+  the name field keeps ranking by the typed name (`set_query` mirrors
+  into `state.query`, not `Draft::query`, because `Stage::Naming` is
+  not `Stage::Edit`) — deliberate: a name close to an existing object's
+  stays visible as a near-collision warning while it is typed, not just
+  refused after the fact on `enter`.
+
+- **Views' column list is two `ListItem` blocks, `member` first.**
+  `ListItem.member` is definitional (`Destination::Doc`, forks a desk
+  view) where `ListItem.included` is presentation (hide/show, never
+  forks); Groupings sets `member: true` everywhere, since ticking
+  already *is* membership there. `space` on an available row promotes
+  it to the end of the member block; `x` demotes a member to the end of
+  the available block. `x`'s refusal is decided by the field's own
+  `dest`, never by scanning whether every row is currently a member: on
+  a `Destination::Doc` list (Groupings) it refuses `"space unticks
+  here"`; on an available (non-member) row of a `Destination::
+  Presentation` list (Views) it refuses `"not in the view — space adds
+  it"`. This is why `x` reads as Views-only in practice without being a
+  domain check anywhere — a future `Doc`-backed list with its own
+  member/available split would need no new case here, only its `dest`
+  set correctly. `ListItem.kind: Option<String>` carries the
+  `[[columns]]` `kind` a first-time write of a promoted column needs
+  (`"dimension"`/`"measure"`, from `view_column_kind` for an existing
+  member or `schema_role_kind` for an available one) — without it, a
+  promoted column's kind defaulted to `"measure"` regardless of its
+  real role, silently summing a dimension. **Derived dimensions, `Key`
+  and `Attribute` columns are not offered in the available block at
+  all**: none has an honest name+kind `[[columns]]` spelling the loader
+  and compiler resolve (a derived dimension's value comes only from a
+  `case` expression over `view.grouping`, never from `view.columns`;
+  `Key`/`Attribute` have no `ColumnRole` mapping into `"dimension"`/
+  `"measure"`), and writing a dishonest kind is the exact defect class
+  this list exists to remove — `schema_role_kind` returns `None` for
+  both roles and the dimensions doc is never consulted for the
+  available block at all. A demoted column re-enters the available
+  block at its *end*, not back at its schema position — `remove_
+  selected` pushes it there rather than re-inserting it in place, so
+  repeated add/remove cycling does not restore original order.
+  Changing the dataset field rebuilds the available block from scratch
+  (`views::refresh_available`): members are retained untouched (even
+  ones the new dataset lacks, so the diagnostic can still name them),
+  the available block is repopulated from the newly chosen dataset, and
+  the cursor is re-found by identity (`Draft::selected_row()` before
+  the rebuild, `Draft::follow` after) rather than clamped by index —
+  the general, identity-based primitive, though at `refresh_available`'s
+  one call site (always the `dataset` field, always `rows()`'s first
+  element, always first in row-ordered `visible_rows()` once §18.3's
+  row-order painting landed) an index clamp and `follow` are provably
+  equivalent, which is why **this one call has no mutation entry**: any
+  mutation of the `follow` call is unavoidably `SURVIVED` there, and the
+  harness's own header calls a `SURVIVED` entry with no discriminating
+  test worse than no entry at all. `x` can empty a view's column set
+  entirely — unlike `space`'s forward step, which refuses to empty an
+  `OrderedList` field, `remove_selected` has no such guard, and a
+  column-less view is a valid (if useless) object to the reader — a
+  deliberate asymmetry, not an oversight.
+
+- **The edit stage filters through the same `listfilter::rank` browse
+  already used**, per §18.3, but with two shapes browse does not need.
+  `Draft` carries its own `query: String`; `ObjectDialogState::
+  set_query` mirrors the shared `Input` **one-way per stage** — into
+  `Draft::query` inside `Stage::Edit`, into `state.query` everywhere
+  else — never both, because one `Input` serves two independent filter
+  spaces and a two-way mirror let the edit stage's filter leak into the
+  browse query underneath it (caught in review: leaving the edit stage
+  with a query typed re-entered browse with that same text silently
+  applied). Every verb — `space`, `x`, `shift+j`/`shift+k` — resolves
+  through `Draft::selected_row()`/`Draft::visible_rows()`, which index
+  the *filtered* list, and a reorder that skips hidden neighbours says
+  so (`"moved past 2 hidden"`) via `Draft::move_item`'s `Option<usize>`
+  skip count. **The edit stage's visible rows are ranked for matching
+  but painted in row order, not score order** — `Draft::visible_rows`
+  sorts `rank()`'s output by each match's row index before returning it
+  — because row order is the only signal separating a list's member
+  block from its available block (or a grouping chain's own sequence),
+  and fuzzy-score reordering would scramble that signal the moment a
+  query narrowed the list. Browse keeps score order, since a browse row
+  carries no such structural meaning. This is why the two `visible_
+  rows` (the free `render`-adjacent one for browse, `Draft`'s own
+  method for the edit stage) are not the same function despite the
+  similar name.
+
+- **Chrome:** `ShellModal.title_extra` (`Option<TitleExtraBuilder>`,
+  `dialog::set_title_extra`) puts a builder-supplied element between
+  the modal's title and its close button; the object dialog's builder
+  paints a crumb (`render::crumb_text` — a count in Browse/Naming,
+  `ctrl+{slot}` in a Groupings edit, empty otherwise) followed by the
+  mode pill, which no longer paints as its own row above the filter for
+  *either* modal dialog — the keybinding dialog's pill moved into the
+  title row too, under the same shared slot, and `build_edit` gained a
+  pill for the first time (it never painted one before this task; the
+  edit stage previously showed no mode indicator at all while browse
+  did). `dialog::badge` is the one classification pill — bordered,
+  mono, small — every layer/overridden/drifted/destination marker now
+  renders through. The frozen filter's placeholder (`"press / to
+  filter"`) does not simply key on "frozen and empty": `FrozenFilter
+  { query, slash_filters }` adds the second field because a frozen,
+  empty query is not always one `/` away from filtering — the
+  keybinding dialog freezes its filter while *listening* for a capture,
+  where `press_while_listening` swallows `/` as the binding rather than
+  opening the filter, and the placeholder used to lie about that
+  (painting "press / to filter" underneath a footer simultaneously
+  saying "Listening…"). §18.1's "frozen and empty" trigger is corrected
+  here to "frozen, empty, **and `/` reachable**"; the keybinding dialog
+  passes `slash_filters: state.listening.is_none()`, the object
+  dialog's two call sites (no capture state) pass `true` unconditionally,
+  and the three live-`Input` filter rows (settings, palette-style
+  picker, as-of selector) are untouched (`None`, unaffected either way).
+  Section headers are not separate list children: each rides on the
+  first *visible* item of its member/available block, folded into that
+  row's own element (`v_flex().child(header).child(row)`), so the
+  list's child count still equals `visible_rows().len()` at every
+  filtered or unfiltered position and `ScrollHandle::scroll_to_item`
+  (which indexes children positionally) keeps landing on the row it
+  means to. The first attempt at a covering mutation entry for this
+  shipped `SURVIVED` and honestly said so — no existing assertion
+  distinguishes "header folded into the row" from "header as its own
+  child before the row" except which DOM index a scroll target lands
+  on — and was replaced before merge with a dedicated cursor-in-view
+  test on a >10-row list (`shift+g` to the true last row, asserting its
+  bounds fall inside the list's own viewport rather than scrolled past
+  either edge), which does catch the mutation. **A maintainer must not
+  emit a section header as a sibling `list.child()` call** — it is a
+  silent off-by-one against every following `scroll_to_item` index, not
+  a visual-only regression.
+
+- **The display check against the 2026-09-09 artifact could not be
+  completed in the implementation sandbox.** No window ever painted —
+  the sandbox has no window-server interaction available to this
+  session (`osascript`/System Events automation both refused) — so
+  none of §18.1's visual claims (badge styling, grip/tick glyphs,
+  section-header typography, the crumb's exact placement) were checked
+  pixel-for-pixel against the mock. Every behavioural claim in this
+  section is instead verified against window-test assertions and direct
+  code reading. **This is pending on the user's own display** before
+  Part 2b starts.
+
+- **Harness:** `zsh scripts/mutation-check.sh --changed=main` on HEAD
+  `1c35a74` — 104 entries in files this plan changed, all `caught`, 0
+  `SURVIVED`, 411 entries in unchanged files skipped, tree clean
+  afterwards. `--anchors-only` reports 515 anchors, 0 stale, 0
+  ambiguous.
+
+- **Deferred minors** (full detail in the plan's ledger,
+  `.superpowers/sdd/2026-09-10-phase-4c-part-2-refinement/progress.md`):
+  no window test that `d` on a configured user-only slot returns it to
+  `empty` (true today by `derive_rows`' seed-before-walk, but untested
+  as its own behaviour); `check_object_name`'s mutation coverage is its
+  `config_version` clause only; `commit_create`'s unreachable
+  `ObjectWrite::Remove` arm (`Destination::Doc` never removes) wants a
+  one-line comment; a dataset switch queues a redundant same-bytes
+  `view_presentation.toml` write alongside the real `views.toml` fork;
+  no test/entry for the `Key`/`Attribute` exclusion in
+  `schema_role_kind`; no `scroll_to_item` call after `space`/`x` moves
+  the cursor across the member/available boundary; Scopes' `o` action
+  does not gate on `editing_row` the way `d`/`r` do (a freshly created
+  scope's action bar offers "Overwrite from frame" before the object is
+  a row at all — harmless, since `arm_overwrite` already handles a
+  `None` row, but asymmetric); `Draft::visible_rows`/`selected_row`/
+  `follow` allocate a fresh `Vec` per keystroke; two `mod.rs` doc
+  comments still justify row-order filtering by "`[ ]` rows are
+  indistinguishable," stale now that the grip glyph tells member and
+  available rows apart (the row-order *decision* itself still stands,
+  independent of that stale justification); and
+  `crates/geode-shell/src/shell/tests/objectdialog.rs` has grown to
+  roughly 3,000 lines, a candidate for a seam split alongside the
+  crate's other oversized test files.
