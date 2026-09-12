@@ -742,7 +742,7 @@ pub struct Draft {
     /// replaces the action bar while armed, so the row list above it never
     /// changes length.
     pub confirm: Option<Confirm>,
-    /// The chain field is open (§18.7, Groupings only — `i` in the edit
+    /// The chain field is open (§18.8, Groupings only — `i` in the edit
     /// stage). While it is, `query` holds the chain being typed rather
     /// than a filter — the shared `Input` mirrors into it exactly as a
     /// filter does, so there is no second text buffer — and
@@ -845,7 +845,7 @@ impl Draft {
     /// `sort_by_key` afterwards restores row order among the survivors,
     /// discarding nothing but the score-derived ordering.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
-        // §18.7: with the chain field open, `query` is the chain being
+        // §18.8: with the chain field open, `query` is the chain being
         // typed and the rows are its completions — see
         // [`Draft::chain_entry`].
         if self.chain_entry {

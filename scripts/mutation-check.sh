@@ -6602,7 +6602,7 @@ run_mutation "dialog: the sync writes the Input from the query" \
   geode-shell \
   focus_and_text_follow_the_pure_state_through_every_transition
 
-# ---- Groupings: digit jump and the chain field (§18.7, 2026-09-12) ----
+# ---- Groupings: digit jump and the chain field (§18.8, 2026-09-12) ----
 
 # `0` names no slot (`ctrl+0` CLEARS the frame's slot). Widening the range
 # makes a bare `0` dispatch a jump to a slot "0" that `GroupingSlots` never

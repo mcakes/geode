@@ -2744,7 +2744,7 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("slots"), "{notice}");
 }
 
-// ---- Groupings: digit jump and chain entry (§18.7) -----------------------
+// ---- Groupings: digit jump and chain entry (§18.8) -----------------------
 
 /// A bare digit in the Groupings browse list opens that slot's edit
 /// stage in one keystroke — the slots are numbered, and the number is
@@ -2920,7 +2920,7 @@ fn dialog_input_text(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) ->
     })
 }
 
-/// The whole chain-field flow on a real window (§18.7): `i` opens the
+/// The whole chain-field flow on a real window (§18.8): `i` opens the
 /// field seeded with the slot's chain and hands it the keys, the row
 /// list below becomes the completions for the segment being typed,
 /// `tab` accepts the highlighted one, and `enter` makes the typed names

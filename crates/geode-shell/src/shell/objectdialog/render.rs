@@ -210,7 +210,7 @@ pub fn open(
                     .debug_selector(|| "objectdialog-crumb".to_string())
                     .child(crumb_text(shell)),
             )
-            // §18.7: the chain field is open in `Filter` (that is what
+            // §18.8: the chain field is open in `Filter` (that is what
             // gives it the keys), but "filter" is the wrong word for a
             // field whose text is the value — the pill says `chain`.
             .children(state.map(|s| {
@@ -398,7 +398,7 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                     state.begin_naming();
                 }
             }
-            // §18.7: a bare digit names a slot on the one domain whose
+            // §18.8: a bare digit names a slot on the one domain whose
             // objects are numbered; elsewhere it is dropped below.
             NormalCommand::Digit(n) if state.domain == Domain::Groupings => {
                 jump_to_slot(shell, n, cx);
@@ -691,7 +691,7 @@ fn enter_edit_stage(
     cx.notify();
 }
 
-/// A bare `1`–`9` on the Groupings dialog (§18.7): open that slot's edit
+/// A bare `1`–`9` on the Groupings dialog (§18.8): open that slot's edit
 /// stage, from the browse list or from another slot's edit stage alike.
 /// The slot number IS the object's name (`groupings.rs`'s own doc), so
 /// the digit maps straight onto [`enter_edit_stage`] with no lookup — an
@@ -783,7 +783,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         return true;
     }
 
-    // ---- Chain field (§18.7) -------------------------------------------
+    // ---- Chain field (§18.8) -------------------------------------------
     //
     // Checked before filter mode, which it shares a focused `Input` with:
     // the field is open only in `Filter` (that is what gives it the keys),
@@ -995,7 +995,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // Scopes row: pressing `space` right after would immediately say
         // "nothing on this row changes with space" — two verbs
         // disagreeing about the same row in the same breath.
-        // §18.7: `i` opens the chain field on Groupings — the one domain
+        // §18.8: `i` opens the chain field on Groupings — the one domain
         // whose whole object is a single typed line. `begin_chain_entry`
         // seeds `query`; `Filter` is what hands the shared `Input` the
         // keys, through `dialog::sync_dialog_text` on this handler's
@@ -1017,7 +1017,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             shell.object_dialog_scroll.scroll_to_item(0);
         }
         NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
-        // §18.7: from one slot's edit stage a digit jumps straight to
+        // §18.8: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
         // letter would be — the edit stage's rule for a key that did
         // nothing.
@@ -1062,7 +1062,7 @@ fn edit_commit_notice(shell: &mut ShellView) {
     set_notice(shell, notice.to_string());
 }
 
-/// The chain field's keys (§18.7), while it is open: `escape` closes it
+/// The chain field's keys (§18.8), while it is open: `escape` closes it
 /// with nothing applied; `tab` completes the highlighted candidate;
 /// `enter` applies the typed chain — [`Draft::apply_chain`] refuses with
 /// the field left open, or closes it — and a `Step::Changed` then rides
@@ -1976,7 +1976,7 @@ fn build(
                         action.push(chip("n"));
                         action.push(sep("new ·"));
                     }
-                    // §18.7: a digit opens that slot — Groupings only,
+                    // §18.8: a digit opens that slot — Groupings only,
                     // the one domain whose objects are numbered.
                     if state.domain == Domain::Groupings {
                         action.push(chip("1"));
@@ -2090,7 +2090,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Built before the theme is borrowed, because both halves of it want
     // `cx` mutably and `cx.theme()` holds it immutably for the rest of
     // this function.
-    // §18.7: no verbs at all while the chain field is open. The keyboard
+    // §18.8: no verbs at all while the chain field is open. The keyboard
     // cannot reach `d`/`r` there (every printable key is text), and a
     // CLICKED one would arm a confirm over a live, focused value field —
     // every keystroke then claimed and dropped with the caret still
@@ -2379,7 +2379,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             ],
         )
     } else if draft.chain_entry {
-        // §18.7: the chain field's own vocabulary — never filter mode's,
+        // §18.8: the chain field's own vocabulary — never filter mode's,
         // even though the `Input` is focused the same way, because
         // `enter` and `tab` mean different things here.
         (
@@ -2435,7 +2435,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             motion.push(sep("reorder"));
         }
         let mut action = Vec::new();
-        // §18.7: Groupings' two extra verbs, advertised only where they
+        // §18.8: Groupings' two extra verbs, advertised only where they
         // work — the same rule that keeps `n` off Groupings' browse
         // footer and `x` off every non-Views edit footer.
         if state.domain == Domain::Groupings {
@@ -2492,7 +2492,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         query: draft.query.as_str(),
         slash_filters: true,
     });
-    // §18.7: while the chain field is open it takes the filter row's
+    // §18.8: while the chain field is open it takes the filter row's
     // place — the same shared `Input`, labelled for what its text now
     // is, exactly as browse's naming stage swaps in `name_row`.
     let filter = if draft.chain_entry {

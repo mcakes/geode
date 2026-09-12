@@ -190,7 +190,7 @@ fn completed_names(text: &str) -> Vec<String> {
     parse_chain(head)
 }
 
-/// [`Draft::visible_rows`] while the chain field is open (§18.7): the
+/// [`Draft::visible_rows`] while the chain field is open (§18.8): the
 /// `dimensions` items whose name matches the trailing segment, minus
 /// every name already typed before it, in row (schema) order — never a
 /// field header, since a header is nothing `tab` could complete to.
@@ -211,7 +211,7 @@ pub fn chain_candidates(draft: &Draft) -> Vec<crate::listfilter::Ranked> {
 }
 
 impl Draft {
-    /// `i` (§18.7): open the chain field, seeded with the slot's current
+    /// `i` (§18.8): open the chain field, seeded with the slot's current
     /// chain in the spelling every other surface uses, so appending is a
     /// separator and a name away. Pure — the mode switch that gives the
     /// shared `Input` the keys is the handler's, and the sync writes the
@@ -578,7 +578,7 @@ mod tests {
         assert!(draft.diagnostics[0].message.contains("10"));
     }
 
-    // ---- Chain entry (§18.7) -------------------------------------------
+    // ---- Chain entry (§18.8) -------------------------------------------
 
     /// Three pickable dimensions, so a chain can be reordered, extended
     /// and completed against more than one candidate. `desk` is not a

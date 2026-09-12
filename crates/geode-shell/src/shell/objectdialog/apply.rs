@@ -668,7 +668,7 @@ fn apply_in_memory(
 /// `services.config` is already that.
 ///
 /// This exists for one reader, [`super::render::enter_edit_stage`], and
-/// closes a hole the digit jump (§18.7) made two keystrokes wide: a
+/// closes a hole the digit jump (§18.8) made two keystrokes wide: a
 /// draft derived from `services.config` inside the [`WRITE_DEBOUNCE`]
 /// window paints the object as it stood BEFORE the tick just made,
 /// because the flush has not reached memory yet — and that stale draft

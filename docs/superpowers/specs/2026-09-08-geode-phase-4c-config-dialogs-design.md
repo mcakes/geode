@@ -1716,7 +1716,7 @@ are checked on a display against the artifact, not by test.
   arms keep theirs: an add can land the cursor one row past the
   viewport's bottom.
 
-### 18.7 Groupings: digit jump and the chain field (2026-09-12)
+## 18.8 Amendment — Groupings: digit jump and the chain field (2026-09-12)
 
 Two additions to the Groupings dialog alone, from a user request the
 same day ("we should just be able to hit the number for a slot", and a

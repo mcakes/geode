@@ -744,7 +744,7 @@ pub(crate) fn mode_pill(mode: DialogMode, cx: &App) -> AnyElement {
 }
 
 /// The pill the object dialog wears while its chain field is open
-/// (Phase 4c §18.7). The field runs in `DialogMode::Filter` — that is
+/// (Phase 4c §18.8). The field runs in `DialogMode::Filter` — that is
 /// what hands the shared `Input` the keys — but its text is a *value*
 /// being typed, not a query narrowing a list, and a pill reading
 /// `filter` over it would say the wrong thing about what `enter` does.
