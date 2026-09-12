@@ -1905,16 +1905,37 @@ run_mutation "groupings: an unknown column drops the slot" \
   geode-core \
   an_unknown_column_is_an_error_for_that_slot_only
 
-# The Groupings dialog's vocabulary is the compiler's (`carries_all`): a
-# column some DECLARED grain carries. Dropping the grain test offers every
-# declared column — a measure, a categorical attribute — and a slot naming
-# one would fail to compile.
+# The grouping vocabulary is the compiler's (`carries_all`): a column some
+# DECLARED grain carries, spelled out once in `DatasetSpec::groupable_columns`
+# for the Groupings dialog and the blotter's `:group` completion. Dropping
+# the grain test offers every declared column — a measure, a categorical
+# attribute — and a slot naming one would fail to compile.
 run_mutation "groupable_columns: only a column some declared grain carries is groupable" \
+  crates/geode-core/src/schema/mod.rs \
+  '            .filter(|c| grains.iter().any(|g| self.carries(*g, &c.name)))' \
+  '            .filter(|_| true)' \
+  geode-core \
+  groupable_columns_are_the_declared_columns_some_declared_grain_carries
+
+# A derived dimension is only groupable over a groupable base column: the
+# compiler resolves it through `dims.base_column` and refuses one over an
+# attribute no grain carries.
+run_mutation "groupable_columns: a derived dimension over an ungroupable column is not offered" \
   crates/geode-shell/src/shell/mod.rs \
-  '            if !grains.iter().any(|g| dataset.carries(*g, &column.name)) {' \
-  '            if false {' \
+  '        .filter(|dim| base_groupable(&dim.from))' \
+  '        .filter(|_| true)' \
   geode-shell \
   groupable_columns_are_every_carried_dimension_key_included_plus_derived
+
+# A non-interned grouping column is selected as VARCHAR whatever its
+# storage type — the snapshot reads a grouping column as text and nothing
+# else, so a raw DOUBLE strike level would paint blank.
+run_mutation "compile: a non-interned grouping column is selected as varchar" \
+  crates/geode-data/src/query/compile.rs \
+  '            selects.push(format!("s.\"{g}\"::{ty} as \"{g}\""));' \
+  '            selects.push(format!("s.\"{g}\" as \"{g}\""));' \
+  geode-data \
+  grouping_by_a_numeric_carried_dimension_produces_a_level_with_its_values
 
 # The dialog must read the grouping vocabulary, not the picker's: the
 # picker's list has no key columns (`position_ref`) and no numeric
@@ -2822,12 +2843,12 @@ run_mutation "delegate: move_column refills the window it already had" \
 
 run_mutation "tile: completions offer dataset dimensions, not just displayed columns" \
   crates/geode-blotter/src/tile.rs \
-  '                        ds.columns
-                            .iter()
-                            .filter(|c| names.contains(c.name.as_str()))
-                            .map(|c| c.name.clone())
-                            .collect()' \
-  '                        Vec::new()' \
+  '                    Some(ds) => ds
+                        .groupable_columns()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),' \
+  '                    Some(_) => Vec::new(),' \
   geode-blotter \
   completions_offer_dataset_dimensions_not_just_displayed_columns
 

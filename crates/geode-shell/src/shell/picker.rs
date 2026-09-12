@@ -1254,9 +1254,12 @@ grain = "underlying"
     /// The grouping vocabulary is the compiler's, not the picker's: every
     /// declared column some declared grain `carries` — a grain's key
     /// columns and every carried dimension, categorical or not — plus every
-    /// derived dimension. A categorical *attribute* (`expiry`) is pickable
-    /// but no grain carries it as a dimension, so grouping by it would
-    /// fail to compile and it is not offered; a key column is the reverse.
+    /// derived dimension whose base column is itself groupable. A
+    /// categorical *attribute* (`expiry`) is pickable but no grain carries
+    /// it as a dimension, so grouping by it would fail to compile and it
+    /// is not offered — nor is a derived dimension over it (`bucket`),
+    /// which the compiler resolves through `dims.base_column` to the same
+    /// refusal; a key column is the reverse.
     #[test]
     fn groupable_columns_are_every_carried_dimension_key_included_plus_derived() {
         let datasets = format!(
@@ -1266,7 +1269,8 @@ grain = "underlying"
             ("datasets", &datasets),
             (
                 "dimensions",
-                "desk = { from = \"book\", values = { BK000 = \"Flow\" } }",
+                "desk = { from = \"book\", values = { BK000 = \"Flow\" } }\n\
+                 bucket = { from = \"expiry\", values = { \"2026-12\" = \"Q4\" } }",
             ),
         ]);
         let g = super::super::groupable_columns(&config);

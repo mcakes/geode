@@ -305,14 +305,16 @@ pub fn pickable_columns(config: &Config) -> Vec<Pickable> {
 
 /// Every column a grouping slot may name, in schema order — the query
 /// compiler's own vocabulary (`carries_all` in `geode-data`'s `compile`),
-/// not the picker's: for each dataset, every declared column some
-/// *declared* grain (`DatasetSpec::grains()`, the grains a measure or
-/// attribute gives a table to) `carries` as a dimension — a grain's key
-/// columns (`position_ref`, `instrument_ref`) and every carried
-/// dimension, categorical or not (a numeric strike included) — then every
-/// derived dimension, role `"derived"`. `role` is `"key"` for a
-/// `ColumnRole::Key` column and `"dimension"` otherwise. First-seen
-/// order across datasets, exactly as [`pickable_columns`].
+/// not the picker's: for each dataset, [`DatasetSpec::groupable_columns`]
+/// — every declared column some *declared* grain carries as a dimension:
+/// a grain's key columns (`position_ref`, `instrument_ref`) and every
+/// carried dimension, categorical or not (a numeric strike included) —
+/// then every derived dimension whose base column (`from`) is itself in
+/// that set, role `"derived"`, since the compiler resolves a derived
+/// dimension through `dims.base_column` and refuses one over a column no
+/// grain carries. `role` is `"key"` for a `ColumnRole::Key` column and
+/// `"dimension"` otherwise. First-seen order across datasets, exactly as
+/// [`pickable_columns`].
 ///
 /// This is deliberately neither a superset nor a subset of the picker's
 /// list: a categorical attribute is pickable (its ENUM dictionary is
@@ -332,33 +334,33 @@ pub fn groupable_columns(config: &Config) -> Vec<Pickable> {
 
     let mut out: Vec<Pickable> = Vec::new();
     for dataset in &schema.datasets {
-        let grains = dataset.grains();
-        for column in &dataset.columns {
-            if !grains.iter().any(|g| dataset.carries(*g, &column.name)) {
-                continue;
-            }
-            if let Some(p) = out.iter_mut().find(|p| p.column == column.name) {
+        for column in dataset.groupable_columns() {
+            if let Some(p) = out.iter_mut().find(|p| p.column == column) {
                 p.datasets.push(dataset.name.clone());
                 continue;
             }
-            let role = match column.role {
-                ColumnRole::Key => "key",
+            let role = match dataset.column(column).map(|c| c.role) {
+                Some(ColumnRole::Key) => "key",
                 _ => "dimension",
             };
             out.push(Pickable {
-                column: column.name.clone(),
+                column: column.to_string(),
                 role,
                 datasets: vec![dataset.name.clone()],
             });
         }
     }
-    for dim in dims.all() {
-        out.push(Pickable {
+    let base_groupable = |from: &str| out.iter().any(|p| p.column == from);
+    let derived: Vec<Pickable> = dims
+        .all()
+        .filter(|dim| base_groupable(&dim.from))
+        .map(|dim| Pickable {
             column: dim.name.clone(),
             role: "derived",
             datasets: Vec::new(),
-        });
-    }
+        })
+        .collect();
+    out.extend(derived);
     out
 }
 

@@ -1722,8 +1722,9 @@ grain = "underlying"
     /// carried exactly like a string one: the compiler's vocabulary is
     /// "what some declared grain carries", not "what has an ENUM
     /// dictionary", so `role = "dimension"` on an `f64` column produces a
-    /// grouping level whose values come back as numbers. Pins the schema
-    /// side too: with the old categorical default (dimension ⇒
+    /// grouping level per distinct value, selected as TEXT (the varchar
+    /// cast below is what the blotter's tree cell can read). Pins the
+    /// schema side too: with the old categorical default (dimension ⇒
     /// categorical, no type check) `apply_schema` would have sent this
     /// column for ENUM interning.
     #[test]
@@ -1792,26 +1793,34 @@ grain = "instrument"
             usize::MAX,
         )
         .unwrap_or_else(|e| panic!("a strike grouping must compile: {e}"));
-        let mut rows = run(&store, &q, &["row_depth", "strike", "vega"]);
-        rows.sort();
+        // The load-bearing fact for the blotter: a non-interned grouping
+        // column is selected as VARCHAR, whatever its storage type, because
+        // the snapshot reads a grouping column as text (`Snapshot::text_in`
+        // downcasts to a string or dictionary array and nothing else) — a
+        // raw DOUBLE here would paint every strike level blank. `run`'s
+        // f64-first read would coerce "4200.0" back to a number and hide
+        // that, so the column is read as text, strictly.
+        assert!(
+            q.sql.contains("s.\"strike\"::varchar as \"strike\""),
+            "the strike level must be selected as text:\n{}",
+            q.sql
+        );
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let mut rows: Vec<(i64, Option<String>, Option<f64>)> = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                Ok((r.get("row_depth")?, r.get("strike")?, r.get("vega")?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(
             rows,
             vec![
-                vec![
-                    "Some(0.0)".to_string(),
-                    "None".to_string(),
-                    "Some(35.0)".to_string()
-                ],
-                vec![
-                    "Some(1.0)".to_string(),
-                    "Some(4200.0)".to_string(),
-                    "Some(30.0)".to_string()
-                ],
-                vec![
-                    "Some(1.0)".to_string(),
-                    "Some(4500.0)".to_string(),
-                    "Some(5.0)".to_string()
-                ],
+                (0, None, Some(35.0)),
+                (1, Some("4200.0".to_string()), Some(30.0)),
+                (1, Some("4500.0".to_string()), Some(5.0)),
             ],
             "one level per distinct strike, summed, under a grand total"
         );

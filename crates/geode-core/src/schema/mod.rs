@@ -79,6 +79,24 @@ impl DatasetSpec {
         out
     }
 
+    /// Every declared column a view or a grouping slot may group by, in
+    /// schema order: the ones some *declared* grain ([`Self::grains`] —
+    /// the grains a measure or attribute gives a table to) [`Self::carries`]
+    /// as a dimension. That is a grain's key columns and every carried
+    /// dimension, categorical or not; never an attribute or a measure. A
+    /// dataset declaring no grain has no table to scan and offers nothing.
+    /// This is the query compiler's own rule (`carries_all` over
+    /// `finest_carrying`), and the one place it is spelled out — the
+    /// Groupings dialog and the blotter's `:group` completion both read it.
+    pub fn groupable_columns(&self) -> Vec<&str> {
+        let grains = self.grains();
+        self.columns
+            .iter()
+            .filter(|c| grains.iter().any(|g| self.carries(*g, &c.name)))
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+
     /// Carried dimensions this grain's table stores as payload columns.
     pub fn carried_dimensions_at(&self, grain: Grain) -> Vec<&ColumnSpec> {
         self.columns
@@ -675,6 +693,46 @@ grain = "underlying"
             ds.carries(Grain::Position, "trade_ref"),
             "still a dimension"
         );
+    }
+
+    /// The grouping vocabulary is "a declared column some declared grain
+    /// carries": keys and carried dimensions, categorical or not, in
+    /// schema order; a categorical attribute (`expiry`) and a measure are
+    /// not offered, since no grain carries either as a dimension.
+    #[test]
+    fn groupable_columns_are_the_declared_columns_some_declared_grain_carries() {
+        let text = format!(
+            "{CARRIED}\n[risk.columns.strike]\ntype = \"f64\"\nrole = \"dimension\"\ngrain = \"instrument\"\n"
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc(&text));
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("risk").unwrap();
+        assert_eq!(
+            ds.groupable_columns(),
+            vec![
+                "book",
+                "lhu",
+                "position_ref",
+                "counterparty",
+                "instrument_ref",
+                "underlying_ref",
+                "currency",
+                "strike"
+            ]
+        );
+    }
+
+    /// No declared grain means no table the compiler could scan
+    /// (`finest_carrying` is over declared grains), so nothing is
+    /// groupable — even though `book` is in every grain's dimension key.
+    #[test]
+    fn a_dataset_declaring_no_grain_has_no_groupable_columns() {
+        let (schema, _) = SchemaSpec::from_doc(&doc(
+            "[bare.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+        ));
+        let ds = schema.dataset("bare").unwrap();
+        assert!(ds.grains().is_empty());
+        assert!(ds.groupable_columns().is_empty());
     }
 
     /// A numeric dimension (a strike a desk groups by) defaults to NOT
