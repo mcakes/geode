@@ -145,6 +145,10 @@ context = "blotter && mode == normal"
 "shift+g" = "blotter::bottom"
 "ctrl+d" = "blotter::page_down"
 "ctrl+u" = "blotter::page_up"
+"ctrl+f" = "blotter::page_down_full"
+"ctrl+b" = "blotter::page_up_full"
+"pagedown" = "blotter::page_down_full"
+"pageup" = "blotter::page_up_full"
 "home" = "blotter::first_col"
 "end" = "blotter::last_col"
 "z o" = "blotter::expand"
@@ -169,6 +173,10 @@ context = "blotter && mode == visual"
 "shift+g" = "blotter::bottom"
 "ctrl+d" = "blotter::page_down"
 "ctrl+u" = "blotter::page_up"
+"ctrl+f" = "blotter::page_down_full"
+"ctrl+b" = "blotter::page_up_full"
+"pagedown" = "blotter::page_down_full"
+"pageup" = "blotter::page_up_full"
 "y" = "blotter::yank"
 "v" = "blotter::escape"
 "escape" = "blotter::escape"
@@ -182,6 +190,10 @@ context = "diagnostics"
 "shift+g" = "diagnostics::bottom"
 "ctrl+d" = "diagnostics::page_down"
 "ctrl+u" = "diagnostics::page_up"
+"ctrl+f" = "diagnostics::page_down_full"
+"ctrl+b" = "diagnostics::page_up_full"
+"pagedown" = "diagnostics::page_down_full"
+"pageup" = "diagnostics::page_up_full"
 "[" = "diagnostics::prev_section"
 "]" = "diagnostics::next_section"
 "z o" = "diagnostics::expand"
@@ -212,6 +224,8 @@ pub const BLOTTER_ACTION_DEFS: &[(&str, &str)] = &[
     ("blotter::bottom", "Cursor to bottom"),
     ("blotter::page_down", "Half page down"),
     ("blotter::page_up", "Half page up"),
+    ("blotter::page_down_full", "Page down"),
+    ("blotter::page_up_full", "Page up"),
     ("blotter::first_col", "First column"),
     ("blotter::last_col", "Last column"),
     ("blotter::expand", "Expand node"),
@@ -237,6 +251,8 @@ pub const BLOTTER_ACTIONS: &[&str] = &[
     "blotter::bottom",
     "blotter::page_down",
     "blotter::page_up",
+    "blotter::page_down_full",
+    "blotter::page_up_full",
     "blotter::first_col",
     "blotter::last_col",
     "blotter::expand",
@@ -270,6 +286,8 @@ pub const DIAGNOSTICS_ACTION_DEFS: &[(&str, &str)] = &[
     ("diagnostics::bottom", "Cursor to bottom"),
     ("diagnostics::page_down", "Half page down"),
     ("diagnostics::page_up", "Half page up"),
+    ("diagnostics::page_down_full", "Page down"),
+    ("diagnostics::page_up_full", "Page up"),
     ("diagnostics::next_section", "Next section"),
     ("diagnostics::prev_section", "Previous section"),
     ("diagnostics::expand", "Expand"),
@@ -284,6 +302,8 @@ pub const DIAGNOSTICS_ACTIONS: &[&str] = &[
     "diagnostics::bottom",
     "diagnostics::page_down",
     "diagnostics::page_up",
+    "diagnostics::page_down_full",
+    "diagnostics::page_up_full",
     "diagnostics::next_section",
     "diagnostics::prev_section",
     "diagnostics::expand",

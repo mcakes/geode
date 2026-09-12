@@ -4902,6 +4902,22 @@ run_mutation "diagnostics module: MIN-4 — page_down/page_up drop the count mul
             "page_up" => self.move_cursor(-5, cx),' \
   geode-diagnostics a_count_prefix_multiplies_page_down
 
+run_mutation "diagnostics module: ctrl+f/ctrl+b page by ten, not by five" \
+  crates/geode-diagnostics/src/tile.rs \
+  '            "page_down_full" => self.move_cursor(10 * n, cx),
+            "page_up_full" => self.move_cursor(-10 * n, cx),' \
+  '            "page_down_full" => self.move_cursor(5 * n, cx),
+            "page_up_full" => self.move_cursor(-5 * n, cx),' \
+  geode-diagnostics ctrl_f_and_ctrl_b_page_by_ten
+
+run_mutation "blotter: ctrl+b moves back ten, not forward" \
+  crates/geode-blotter/src/tile.rs \
+  '                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(-10),' \
+  '                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(10),' \
+  geode-blotter motions_expansion_and_yank
+
 run_mutation "diagnostics module: MIN-5 — set_visible(false) unwatches but never notifies" \
   crates/geode-diagnostics/src/tile.rs \
   '            self.diagnostics.update(cx, |d, cx| {

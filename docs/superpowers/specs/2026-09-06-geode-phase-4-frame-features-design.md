@@ -1176,8 +1176,8 @@ The tile observes `Diagnostics`, `Frame` (for `RequeryStats` and as-of)
 and reads the ring.
 
 Five sections, switched by `:section <name>` or `[` / `]`, each a
-list in the mono face with `j`/`k`/`gg`/`G`/`ctrl+d`/`ctrl+u` and `/`
-filtering, rebuilt only when the observed version changes:
+list in the mono face with `j`/`k`/`gg`/`G`/`ctrl+d`/`ctrl+u`/`ctrl+f`/`ctrl+b`
+(±5 and ±10, `vimnav`'s shared step sizes) and `/` filtering, rebuilt only when the observed version changes:
 
 - **sources** — name, path, priority, readiness rule, health with
   detail, since, last poll, next poll. Sorted worst first.

@@ -52,6 +52,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("blotter::bottom", "Cursor to bottom"),
     ("blotter::page_down", "Half page down"),
     ("blotter::page_up", "Half page up"),
+    ("blotter::page_down_full", "Page down"),
+    ("blotter::page_up_full", "Page up"),
     ("blotter::first_col", "First column"),
     ("blotter::last_col", "Last column"),
     ("blotter::expand", "Expand node"),
@@ -571,14 +573,22 @@ impl BlotterTile {
         };
         let grouping_len = self.last_grouping.len();
         match name {
-            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" => {
+            // The step sizes are `vimnav`'s own convention, shared with
+            // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
+            // (and `pagedown`/`pageup`) ±10 — fixed offsets, not vim's
+            // viewport-relative scroll, since the count prefix already
+            // multiplies them.
+            "down" | "up" | "top" | "bottom" | "page_down" | "page_up" | "page_down_full"
+            | "page_up_full" => {
                 let cmd = match name {
                     "down" => NavCommand::Move(1),
                     "up" => NavCommand::Move(-1),
                     "top" => NavCommand::Top,
                     "bottom" => NavCommand::Bottom,
                     "page_down" => NavCommand::Move(5),
-                    _ => NavCommand::Move(-5),
+                    "page_up" => NavCommand::Move(-5),
+                    "page_down_full" => NavCommand::Move(10),
+                    _ => NavCommand::Move(-10),
                 };
                 self.with_delegate(cx, |d| {
                     let len = d.shown.len();
@@ -1872,6 +1882,18 @@ mod tests {
             2
         );
         act(&mut cx, "blotter::up", None);
+        // `ctrl+f`/`ctrl+b`: the ±10 step every dialog list has. Ten
+        // outruns this snapshot, so it clamps to the last row, and
+        // `ctrl+b` from there lands on row 0 — not on row -8.
+        let row = |cx: &mut gpui::VisualTestContext| {
+            h.tile
+                .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
+        };
+        assert!(act(&mut cx, "blotter::page_down_full", None));
+        assert_eq!(row(&mut cx), 2, "ctrl+f clamps to the last row");
+        assert!(act(&mut cx, "blotter::page_up_full", None));
+        assert_eq!(row(&mut cx), 0, "ctrl+b clamps to the first row");
+        act(&mut cx, "blotter::down", Some(1));
         act(&mut cx, "blotter::expand", None);
         let rows = h
             .tile

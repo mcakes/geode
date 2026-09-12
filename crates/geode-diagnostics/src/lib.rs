@@ -39,6 +39,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("diagnostics::bottom", "Cursor to bottom"),
     ("diagnostics::page_down", "Half page down"),
     ("diagnostics::page_up", "Half page up"),
+    ("diagnostics::page_down_full", "Page down"),
+    ("diagnostics::page_up_full", "Page up"),
     ("diagnostics::next_section", "Next section"),
     ("diagnostics::prev_section", "Previous section"),
     ("diagnostics::expand", "Expand"),

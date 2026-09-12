@@ -668,10 +668,13 @@ request time, which over-fetches only for expanded nodes hidden under a
 collapsed ancestor — bounded and harmless.
 
 **Cursor.** `(visible_row, column)`. Row motion is `vimnav::apply` over
-the flattened length: `j`/`k`, `gg`/`G`, `ctrl+d`/`ctrl+u` as the
+the flattened length: `j`/`k`, `gg`/`G`, `ctrl+d`/`ctrl+u` (±5),
+`ctrl+f`/`ctrl+b` and their `pagedown`/`pageup` aliases (±10) as the
 existing vocabulary defines, each multiplied by the engine's count
 prefix (§3.3): `5j` moves five, `12G` goes to row 12, `3ctrl+d` pages
-three times. `h`/`l` move the column, also counted; `home`/`end` go to
+three times. The two step sizes are `vimnav`'s own fixed offsets, the
+same ones every dialog list moves by — a general navigation convention
+(user ruling 2026-09-11), not a per-surface choice. `h`/`l` move the column, also counted; `home`/`end` go to
 the first and last. The cursor's *path* is remembered across requery so a
 new snapshot puts the cursor back on the same node, falling back to a
 clamped index when the node is gone.

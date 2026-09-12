@@ -540,6 +540,10 @@ impl DiagnosticsTile {
             // instead of 15.
             "page_down" => self.move_cursor(5 * n, cx),
             "page_up" => self.move_cursor(-5 * n, cx),
+            // `ctrl+f`/`ctrl+b`: `vimnav`'s ±10 step, the same fixed
+            // offset every dialog list uses, counted like `ctrl+d`.
+            "page_down_full" => self.move_cursor(10 * n, cx),
+            "page_up_full" => self.move_cursor(-10 * n, cx),
             "next_section" => self.cycle_section(true, cx),
             "prev_section" => self.cycle_section(false, cx),
             "expand" => self.set_collapsed_at_cursor(false, cx),
@@ -1624,6 +1628,39 @@ mod tests {
         });
         let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
         assert_eq!(cursor, 15, "3 ctrl+d must move 5 * 3 = 15 rows");
+    }
+
+    /// `ctrl+f`/`ctrl+b` (`page_down_full`/`page_up_full`) are the
+    /// ±10 step every dialog list already has (`vimnav`'s convention),
+    /// counted the same way `ctrl+d` is: `2 ctrl+f` moves 20, `ctrl+b`
+    /// brings back 10.
+    #[gpui::test]
+    fn ctrl_f_and_ctrl_b_page_by_ten(cx: &mut gpui::TestAppContext) {
+        let (h, mut vcx) = open(cx);
+        h.diagnostics.update(&mut vcx, |d, cx| {
+            for i in 0..30 {
+                d.note_health(
+                    &format!("src{i}"),
+                    Health::Ok,
+                    "".into(),
+                    SystemTime::UNIX_EPOCH,
+                );
+            }
+            cx.notify();
+        });
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        h.tile.update(&mut vcx, |t, cx| {
+            t.dispatch(&ActionId("diagnostics::page_down_full".into()), Some(2), cx);
+        });
+        let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+        assert_eq!(cursor, 20, "2 ctrl+f must move 10 * 2 = 20 rows");
+        h.tile.update(&mut vcx, |t, cx| {
+            t.dispatch(&ActionId("diagnostics::page_up_full".into()), None, cx);
+        });
+        let cursor = h.tile.read_with(&vcx, |t, _| t.cursor());
+        assert_eq!(cursor, 10, "ctrl+b must move back 10 rows");
     }
 
     /// MIN-11: a tile carrying a filter shows a "filtered" indicator in
