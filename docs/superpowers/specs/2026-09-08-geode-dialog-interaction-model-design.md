@@ -581,3 +581,93 @@ through `set_query` while `listening` is `Some`. And the sync's `value()`
 comparison allocates the whole field's text on every keystroke at the
 pinned gpui-component rev (`SharedString::new(self.text.to_string())`);
 a cheaper read may exist there, unexplored.
+
+## 17. Amendment — mouse parity (2026-09-12)
+
+Approved 2026-09-12 from a user request the same day: "Dialogs need to
+get mouse friendlier. In general, when in normal mode, clicking on the
+filter text field should enter filter mode. On Key Bindings, clicking a
+row should immediately enter capture mode, not requiring a second click.
+On Edit Views, clicking on a row should enter the edit specific view
+screen, and on that screen, we should be able to use the mouse to
+reorder rows and show/hide columns. Similar should apply to Edit Scopes
+and Edit Groupings."
+
+The modal model (§2) made letters verbs and put the keyboard first; it
+did not say what the mouse does on a modal surface, and what shipped was
+the filter-first dialogs' mouse behaviour carried over unchanged: a
+click selects, and acting is a second, deliberate keystroke or button.
+That rule served a surface whose only mouse-reachable act was "commit
+the highlighted row", and it left a trader with a mouse in hand one
+step short of everything — a second click to capture, `enter` to open,
+no way to reorder or hide at all.
+
+### 17.1 The rules
+
+Three rules, each applying to every modal dialog (§3) and to none of the
+filter-only ones (§10 stands: the palette, settings, the picker and the
+as-of selector are untouched, and they never freeze their filter row):
+
+1. **A click on the frozen filter row enters filter mode.** The frozen
+   row (`dialog::filter_row`'s `FrozenFilter` branch) is what every
+   modal dialog paints in normal mode — static text where the `Input`
+   would be. A mouse-down on it is an unambiguous "I want to type a
+   query", so it is the mouse form of `/`: `mode = DialogMode::Filter`,
+   a pure mutation, reconciled by the sync. While the keybinding dialog
+   is *listening* for a capture — the one frozen state where `/` is not
+   the filter's key (`FrozenFilter::slash_filters == false`) — the click
+   cancels the capture first and then enters filter mode, because a
+   click on a text field is never a keystroke to bind. The live-`Input`
+   branches (filter mode, the naming row, the chain field) are already
+   focused and need nothing.
+
+2. **A row click does what `enter` would.** A single click on a row is
+   the mouse form of moving the cursor there and pressing `enter`, on
+   every modal surface whose `enter` opens something:
+   - the keybinding dialog: select the row and start listening at once
+     (`click_selects_or_listens` becomes `click_listens`; a click on a
+     different row mid-capture retargets the capture, a click on the
+     same row restarts it with the partial sequence dropped);
+   - the object dialog's browse stage: select the row and open its edit
+     stage through the one door, `enter_edit_stage` — on Groupings that
+     lands in the chain field (4c §18.8), because the door decides, not
+     the click. While the naming row is open (`Stage::Naming`) a click
+     only selects, as today: a typed name must not be discarded by a
+     stray click, and `enter` there creates rather than opens.
+   The edit stage's own rows are the subject of 4c §18.9, since `enter`
+   has no meaning there and the mouse gains verbs the keyboard has under
+   other keys (`space`, `shift+j`/`shift+k`, `x`, `tab`).
+
+3. **Every mouse handler that ends a transition is a sync seam.** §16.1's
+   four seam classes become five: the new class is *every mouse handler
+   that mutates a dialog's mode, query, stage or draft*, and it is the
+   same rule as class 3 stated for the handlers this amendment adds (the
+   frozen-row click, the browse click's open, the edit stage's tick
+   click, drop and completion click). Each is a pure mutation followed
+   by `dialog::sync_dialog_text` on the handler's return, and nothing
+   else. `press_verb` stays the audited exception for the reason §16.6
+   records.
+
+### 17.2 What does not change
+
+- Filter mode's own mouse behaviour: a click on a row while filtering
+  still follows the current mode for focus (the field keeps the caret),
+  and now also opens or captures per rule 2.
+- The escape ladder (§5), the vocabulary (§4), the pill.
+- No mouse verb has a meaning its keyboard twin lacks. The mouse gets
+  parity, never a private capability — the charter's "every action must
+  be keyboard-reachable" is the direction that holds.
+
+### 17.3 Tests and harness
+
+Window tests (`shell/tests/keybindings_dialog.rs`,
+`shell/tests/objectdialog.rs`): a mouse-down on the frozen row of each
+dialog leaves the pill reading `filter` with the `Input` focused; a
+mouse-down on the keybinding dialog's frozen row while listening cancels
+the capture and enters filter mode; a single click on a keybinding row
+that is not the selected one starts listening on it; a single click on
+a Views browse row opens `Stage::Edit` on that object, on a Groupings
+row opens the chain field, and while naming only selects. Pure tests for
+`click_listens`. Harness entries for the frozen-row transition (mutated
+back to select-only), the browse click's open (mutated back to
+select-only), and `click_listens` (mutated back to the two-click rule).

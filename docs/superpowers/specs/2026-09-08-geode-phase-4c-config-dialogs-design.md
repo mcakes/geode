@@ -2019,3 +2019,127 @@ gates, the re-entry guard, the separator set, the typed order, the
 completed-name exclusion, the duplicate refusal, the handler's dispatch
 order, the pill, the row, the pending-batch fold, the inert guard and
 the withdrawn action bar.
+
+## 18.9 Amendment — the edit stage with a mouse (2026-09-12)
+
+The interaction model's §17 (mouse parity, same day) gives every modal
+dialog three rules: the frozen filter row is clickable, a row click does
+what `enter` would, and every mouse handler that ends a transition is a
+sync seam. This section is what those rules mean inside the object
+dialog's *edit* stage, where `enter` has no meaning and the mouse gains
+the verbs the keyboard already has under `space`, `shift+j`/`shift+k`,
+`x` and `tab`. Three decisions were taken at the design review
+(2026-09-12), each recorded with the alternative it rejected.
+
+### 18.9.1 Mechanism: gpui's own drag and drop
+
+Reordering rides gpui's native drag-and-drop — each list row is a
+stateful element with `on_drag` (the payload names the row), `on_drop`
+(the row is the target), `can_drop` (only this dialog's payload) and a
+`drag_over` style (the target row's top border in `primary`) — with a
+small `Render` entity as the ghost, painting the dragged name in the
+row's own type. gpui owns the threshold (`DRAG_THRESHOLD`, 2 px), the
+ghost's tracking, hit-testing and the scrolled list. The alternative,
+a second hand-rolled drag machine in the mould of `shell/drag.rs`'s
+`TileDrag` — a catcher overlay, a threshold, a ghost painted in
+`render` — was rejected: it exists there because a tile drag applies
+nothing until its drop *and* must survive a workspace switch mid-drag,
+neither of which a list row inside a modal needs.
+
+**The payload is by name, never by index.** `RowDrag { field: String,
+own: bool, name: String }` — the field's key, which of the two blocks
+the row came from (`EditRow::Item` or `EditRow::Available`, §18.7.1's
+variant distinction carried onto the wire), and the item's name, which
+is unique within a list. The keyboard stays live during a drag, so a
+keystroke can reorder or remove between the grab and the drop; a payload
+resolved by name at drop time then lands on the row the trader picked
+up or on nothing (`Step::Inert`), never on whichever column now holds
+the grabbed index.
+
+### 18.9.2 The rows
+
+Every `Item`/`Available` row already paints a grip (`⋮`, own items
+only) and a tick (`✓`/`·`). Both become live:
+
+- **The tick is the toggle.** Clicking it moves the cursor to that row
+  and takes exactly the path `space` does — `Draft::toggle_selected`,
+  then `maybe_refresh_available`, `revalidate`, `commit_or_confirm` —
+  so a hidden column shows, a shown one hides (a `Presentation` write),
+  an available column is added to the end of the members list (a `Doc`
+  write), and every refusal `space` gives (`must keep at least one
+  entry`, with `refuse_step`'s `d`/`r` hint) the tick gives too. The
+  tick's mouse-down stops propagation so the row's own select does not
+  double-fire, but the cursor still lands on the row: toggling with the
+  mouse leaves the keyboard where the eye is, as `space` would.
+  *Rejected:* a click anywhere on the row toggling, checkbox-list
+  style, with a drag past the threshold turning it into a reorder — a
+  short drag that never crosses 2 px would toggle by accident, and a
+  2 px threshold is a twitch.
+
+- **The row body selects; dragging it reorders.** Mouse-down on the
+  rest of the row keeps today's cursor move (`on_edit_row_clicked`);
+  a drag past the threshold starts a `RowDrag`. Field rows (`Dataset`,
+  `Slot`, Scopes' two `Text` rows) are neither drag sources nor drop
+  targets, and in the chain field (§18.8) rows are completions and carry
+  no tick, grip, drag or drop.
+
+### 18.9.3 Drop semantics: `Draft::drop_row(src, dst) -> Step`
+
+One pure method decides every drop, resolving `src` from the payload
+and `dst` from the target row by name, and it is the only place the
+cases are enumerated. "Drop on a row" means **take that row's index**:
+the source is removed from wherever it was and inserted at the index
+the target row held in the members list, so dragging downward lands
+after the target's old position and upward lands before — the ordinary
+list-reorder contract, and the one a filtered list makes honest: under
+a filter the target is a *visible* row the trader pointed at, so unlike
+`shift+j`/`shift+k` there is no hidden-rows count to report.
+
+| `src` → `dst` | Result |
+|---|---|
+| Item → Item, same field | reorder: `items.remove(src)`, `items.insert(dst_index)`; `Changed` (a `Presentation` write on Views, `Doc` on Groupings — `writes_by_destination` already decides) |
+| Available → Item | add at index: out of the catalogue, `included = true`, inserted at `dst_index`; `Changed` (`Doc`) — `space`'s add, placed rather than appended |
+| Item → Available | remove: the same act and the same refusals as `x` (`Draft::remove_selected`'s `space unticks here` where the list has no catalogue); the catalogue is unordered, so the target index is ignored; `Changed` (`Doc`) |
+| Available → Available | `Inert` — "the catalogue has no order", said in the footer |
+| same row, or different fields, or a name that no longer resolves | `Inert`, no write, no notice beyond the stale-name case's "that row is gone" |
+
+After `Changed` the cursor follows the dropped item by identity
+(`Draft::follow`) and the viewport scrolls to it; then `revalidate` and
+`commit_or_confirm`, so a desk-owned view still asks before a `Doc`
+write forks it, and the write joins the same batch behind the same
+debounce a keystroke's would. *Rejected:* reorder within the members
+list only, with add and remove left to the tick and `x`. One gesture
+that covers reorder, add and remove is what a trader with a mouse
+expects of two blocks painted one above the other, and the pure method
+costs two more arms.
+
+### 18.9.4 Browse and the chain field
+
+- **Browse:** a click opens (§17 rule 2), through `enter_edit_stage`.
+  On Groupings that lands in the chain field per §18.8's ruling; on
+  Scopes it opens the two read-only rows with `o` on the action bar,
+  which already has a button.
+- **The chain field:** clicking a completion row is the mouse form of
+  `tab` — `selected` moves to that row and `Draft::complete_chain` runs
+  unchanged, so the trailing segment is replaced and the next opened
+  with ` / `. The mode stays `Filter`; the sync writes the new text into
+  the field and keeps it focused. *Rejected:* leaving the completion
+  list keyboard-only, which would have made the one Groupings surface a
+  click lands in the one surface a click could do nothing on.
+
+### 18.9.5 Tests and harness
+
+Pure tests for `drop_row`: reorder downward lands after the target's
+old position and upward before; add-at-index places rather than
+appends; remove mirrors `x` including its two refusals; the same row,
+catalogue-to-catalogue and a stale name are inert with no write; the
+cursor follows the dropped item. Window tests: the tick click on a
+shown column hides it and queues a `Presentation` write; the tick click
+on an available column adds it; the completion click appends to the
+chain field with the field still focused; the shell-level drop handler
+(`on_row_dropped`) reorders and queues the write. The gpui gesture
+itself — `on_drag` through `on_drop` — cannot be driven from
+`TestAppContext`, so the wiring is a display-check item alongside
+§18.6's, and the handler is tested one call below it. Harness entries
+for every `drop_row` arm, the tick path (mutated to a bare select), the
+completion click, and the name-not-index resolution.
