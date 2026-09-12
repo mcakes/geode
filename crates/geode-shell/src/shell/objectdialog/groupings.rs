@@ -297,6 +297,16 @@ impl Draft {
             .filter(|i| i.included)
             .map(|i| i.name.clone())
             .collect();
+        // Decided before the list is touched, and the list is touched
+        // only on a change: rewriting it as "typed names, then the rest"
+        // would re-sort an order `shift+j`/`shift+k` had put an unticked
+        // item into, leaving the draft dirty under an answer of "inert".
+        if before == names {
+            self.chain_entry = false;
+            self.query.clear();
+            self.selected = 0;
+            return Step::Inert;
+        }
         let mut rest = std::mem::take(items);
         let mut out = Vec::with_capacity(rest.len());
         for name in &names {
@@ -316,11 +326,7 @@ impl Draft {
         self.chain_entry = false;
         self.query.clear();
         self.selected = 0;
-        if before == names {
-            Step::Inert
-        } else {
-            Step::Changed
-        }
+        Step::Changed
     }
 }
 
@@ -769,6 +775,31 @@ mod tests {
         assert_eq!(draft.apply_chain(), Step::Inert);
         assert!(!draft.chain_entry);
         assert!(!draft.is_dirty());
+    }
+
+    /// An inert apply must not touch the list either: `shift+k` can put
+    /// an unticked item above a ticked one (every Groupings row is a
+    /// member, so `MoveItem` is live on all of them), and typing the same
+    /// chain back would otherwise re-sort the list into "typed names
+    /// first" — a dirty draft the handler was just told was inert
+    /// (the review's Minor 4).
+    #[test]
+    fn an_inert_apply_leaves_a_non_canonical_list_order_alone() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        // Onto `lhu` (rows: Slot, Dimensions, book, lhu, desk) and above
+        // `book`; then treat that order as the saved one.
+        draft.selected = 3;
+        assert_eq!(draft.move_item(-1), Some(0));
+        draft.mark_saved();
+        assert_eq!(ticked(&draft)[0].0, "lhu");
+        assert!(!draft.is_dirty());
+
+        draft.begin_chain_entry();
+        assert_eq!(draft.query, "book");
+        assert_eq!(draft.apply_chain(), Step::Inert);
+        assert!(!draft.is_dirty(), "inert means nothing moved");
+        assert_eq!(ticked(&draft)[0].0, "lhu", "the list order is untouched");
     }
 
     /// `escape` drops the text and the field; the chain is as it was.

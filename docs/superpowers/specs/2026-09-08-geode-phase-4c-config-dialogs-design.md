@@ -1731,9 +1731,8 @@ own regroup chord). In the Groupings browse list it opens that slot's
 edit stage in one keystroke, unfilled slot or not; in another slot's
 edit stage it jumps straight across, with no `escape` first. The open
 slot's own digit answers `already editing slot N` rather than re-entering
-the stage: re-entry rebuilds the draft from `services.config`, which can
-be a `WRITE_DEBOUNCE` behind the last tick, so the stage would visibly
-lose an edit that is in fact queued. Every other domain drops the digit
+the stage — there is nothing to re-enter, and a key that appears inert
+is a defect. Every other domain drops the digit
 in browse (as it drops every key browse has no verb for) and names it in
 the edit stage (`3 is not a verb here`, the edit stage's rule). Filter
 mode is untouched: a digit typed there is text. Both footers advertise
@@ -1751,15 +1750,16 @@ spelling so appending is a separator and a name away. The design:
   `dimensions` items whose name matches the segment after the last
   separator, minus every name already typed before it, in row (schema)
   order — never a field header, since a header is nothing `tab` could
-  complete to. The highlighted row is the completion; `j`/`k`, the
-  arrows and the `ctrl` steps move it as in filter mode.
+  complete to. The highlighted row is the completion; the arrows and
+  the `ctrl` steps move it as in filter mode (`j`/`k` are text here, as
+  they are in any focused field).
 - **`/` and whitespace both separate** (user amendment, 2026-09-12),
   runs of either count as one, so `book lhu desk` and `book / lhu /
   desk` are the same chain. `tab` replaces the trailing segment with
   the highlighted candidate and opens the next with the canonical
   ` / `; the caret lands at the end because `InputState::set_value`
-  puts it there on a single-line input (pinned checkout, `state.rs`
-  `reset_selection`).
+  puts it there on a single-line input (pinned checkout,
+  `crates/base/src/input/base/state.rs`, `reset_selection`).
 - **`enter` applies.** The typed names become the chain in typed order
   — ticked and first, every other item after, unticked — and the field
   closes; a `Step::Changed` then rides exactly the path a tick does
@@ -1774,7 +1774,9 @@ spelling so appending is a separator and a name away. The design:
 - **`escape` cancels**: text dropped, field closed, chain untouched,
   stage still `Edit`. It is the field's own rung, ahead of the ladder,
   because a field whose text is a value must not walk `LeaveFilter` and
-  leave the chain sitting in the filter.
+  leave the chain sitting in the filter. An edit-stage filter that was
+  applied before `i` is dropped with it — `i` overwrote `query` with the
+  seed, and the filter had no meaning while the field was open.
 
 **State shape.** `Draft::chain_entry: bool` beside `confirm`, not a
 `Stage` — the escape ladder and the browse cursor restore key on
@@ -1797,7 +1799,36 @@ of the filter-mode branch, since the two share a focused `Input` and
 membership carries `kind` and a member/available split the one-line
 grammar cannot spell, and nobody asked. The chain field does not open
 on `enter` — `i` is the reserved key and `enter` keeps its notice.
-Eleven harness entries guard the digit range, both domain gates, the
-re-entry guard, the separator set, the typed order, the completed-name
-exclusion, the duplicate refusal, the handler's dispatch order, the pill
-and the row.
+
+**The independent review (2026-09-12) found one Major, fixed before
+merge, and the smaller items below.** The Major: the edit stage derived
+its draft from `services.config`, which inside the `WRITE_DEBOUNCE`
+window is the object as it stood *before* the last tick (the flush has
+not reached memory), and nothing rebuilds an open draft when `promote`
+applies — so a draft built then both hid the tick and, on its own next
+tick, rendered the whole object without it and wrote that. `escape` +
+`enter` re-entry always had this hole; the digit jump made it two bare
+keystrokes wide (`3`, tick, `4`, `3`). `enter_edit_stage` — the one door
+— now derives from `apply::config_with_pending`, the live documents with
+the pending batch folded in (the same fold `apply_in_memory` does, minus
+the apply and the write), so a draft agrees with the batch by
+construction and the flush changes nothing it does not already show. The
+"already editing" guard stays, now purely as the honest answer to an
+inert key. Also fixed: the action bar is withdrawn while the field is
+open (a *clicked* `d`/`r` used to arm a confirm over a live, focused
+value field — unreachable from the keyboard, so the mouse disagreed with
+the keys); an inert apply no longer rewrites the list (typing the same
+chain back used to re-sort an order `shift+k` had put an unticked item
+into, leaving the draft dirty under an answer of "inert" — the list is
+now touched only on a change); every transition out of the field resets
+the viewport, since the row list changes length with the cursor on row
+0; `shift+tab` in the field gets the same notice a bare `tab` with
+nothing to complete does, rather than a silent claim. Recorded as
+display-pending, like §18.6: completion rows still paint the
+`dimensions` section header (folded onto the first candidate), the grip
+and the tick, so a ticked-but-not-yet-typed name shows as a ticked
+completion. Fourteen harness entries guard the digit range, both domain
+gates, the re-entry guard, the separator set, the typed order, the
+completed-name exclusion, the duplicate refusal, the handler's dispatch
+order, the pill, the row, the pending-batch fold, the inert guard and
+the withdrawn action bar.

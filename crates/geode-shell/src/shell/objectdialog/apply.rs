@@ -663,6 +663,35 @@ fn apply_in_memory(
     shell.apply_reload(config, cx);
 }
 
+/// The live config with the pending batch folded in — what memory WILL
+/// hold once the debounce closes — or `None` when nothing is pending and
+/// `services.config` is already that.
+///
+/// This exists for one reader, [`super::render::enter_edit_stage`], and
+/// closes a hole the digit jump (§18.7) made two keystrokes wide: a
+/// draft derived from `services.config` inside the [`WRITE_DEBOUNCE`]
+/// window paints the object as it stood BEFORE the tick just made,
+/// because the flush has not reached memory yet — and that stale draft
+/// then outlives the flush (nothing rebuilds an open draft when
+/// [`promote`] applies), so its next tick renders the whole object
+/// without the earlier one and writes that. Deriving from the folded
+/// documents instead makes the draft agree with the batch by
+/// construction; the flush, when it comes, changes nothing the draft does
+/// not already show.
+///
+/// The same fold [`apply_in_memory`] does, minus the apply: no
+/// `apply_reload`, no fan-out, no write — the batch keeps its own timer
+/// and its own debounce semantics. `Config::from_docs` over every layered
+/// document is the whole cost, the one `promote` pays on every flush.
+pub(crate) fn config_with_pending(shell: &ShellView) -> Option<Config> {
+    let pending = shell.pending_config_write.as_ref()?;
+    let mut docs = shell.services.config.all_docs();
+    for ((doc, object), value) in &pending.edits {
+        docs = docs_with_object(docs, &pending.user_dir, doc, object, value.clone());
+    }
+    Some(Config::from_docs(docs))
+}
+
 /// Fold `edits` into the pending batch and schedule the flush that will
 /// apply and write it, after `delay`.
 ///

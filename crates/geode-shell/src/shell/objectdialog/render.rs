@@ -670,10 +670,21 @@ fn enter_edit_stage(
     new: Option<Draft>,
     cx: &mut Context<ShellView>,
 ) {
+    // Derive from the config WITH the pending batch folded in, never from
+    // `services.config` alone: inside the write debounce the latter is
+    // the object as it stood before the last tick, and a draft built
+    // from it both hides that tick and, outliving the flush, writes the
+    // object without it on the next one (`apply::config_with_pending`'s
+    // own doc has the trace). This is the one door, so the digit jump,
+    // `enter` from browse and `escape`-then-`enter` are all covered.
+    let folded = apply::config_with_pending(shell);
     if let Some(state) = shell.object_dialog.as_mut() {
         match new {
             Some(draft) => state.enter_edit_with(draft),
-            None => state.enter_edit(&shell.services.config, name),
+            None => match folded.as_ref() {
+                Some(config) => state.enter_edit(config, name),
+                None => state.enter_edit(&shell.services.config, name),
+            },
         }
     }
     shell.object_dialog_scroll.scroll_to_item(0);
@@ -1001,6 +1012,9 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 draft.begin_chain_entry();
                 state.mode = DialogMode::Filter;
             }
+            // The row list just became the (shorter) completion list
+            // with the cursor on row 0; the viewport follows.
+            shell.object_dialog_scroll.scroll_to_item(0);
         }
         NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
         // §18.7: from one slot's edit stage a digit jumps straight to
@@ -1063,6 +1077,10 @@ fn edit_commit_notice(shell: &mut ShellView) {
 /// this handler's return (spec §16.1), the same way every other
 /// transition in this dialog is settled.
 fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+    // The list changes length on every transition out of the field (the
+    // completions give way to the full row list) with the cursor put back
+    // on row 0, so the viewport follows each time — the `ClearQuery`
+    // rung's own reasoning, for the same reason.
     if ks.key == "escape" {
         if let Some(state) = shell.object_dialog.as_mut()
             && let Some(draft) = state.draft.as_mut()
@@ -1070,6 +1088,7 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
             draft.cancel_chain_entry();
             state.mode = DialogMode::Normal;
         }
+        shell.object_dialog_scroll.scroll_to_item(0);
         cx.notify();
         return true;
     }
@@ -1081,6 +1100,7 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
                 }
+                shell.object_dialog_scroll.scroll_to_item(0);
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
             }
@@ -1088,6 +1108,7 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
                 }
+                shell.object_dialog_scroll.scroll_to_item(0);
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
             None => {}
@@ -1096,9 +1117,11 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
         return true;
     }
     if ks.key == "tab" {
+        // Claimed whatever the modifiers — `shift+tab` included — and a
+        // claimed key that does nothing says so, this stage's own rule.
         if bare && draft_mut(shell).is_some_and(Draft::complete_chain) {
             shell.object_dialog_scroll.scroll_to_item(0);
-        } else if bare {
+        } else {
             set_notice(shell, "nothing to complete here".to_string());
         }
         cx.notify();
@@ -2067,9 +2090,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Built before the theme is borrowed, because both halves of it want
     // `cx` mutably and `cx.theme()` holds it immutably for the rest of
     // this function.
-    let action_block = match draft.confirm {
-        Some(confirm) => confirm_row(confirm, &draft.name, entity, cx),
-        None => action_bar(shell, entity, cx),
+    // §18.7: no verbs at all while the chain field is open. The keyboard
+    // cannot reach `d`/`r` there (every printable key is text), and a
+    // CLICKED one would arm a confirm over a live, focused value field —
+    // every keystroke then claimed and dropped with the caret still
+    // blinking, and `y` leaving the field's `Filter` mode behind in
+    // browse. Withdrawing the bar is what makes the mouse agree with
+    // the keys. A `confirm` cannot be armed here for the same reason,
+    // so that arm is unreachable with the field open.
+    let action_block = match (draft.chain_entry, draft.confirm) {
+        (true, _) => div().into_any_element(),
+        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, None) => action_bar(shell, entity, cx),
     };
     let theme = cx.theme();
     let chip_fg = theme.muted_foreground;

@@ -2850,6 +2850,69 @@ fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("already"), "{notice}");
 }
 
+/// The review's Major: a digit jump away from a slot and back inside the
+/// write debounce used to rebuild the slot's draft from `services.config`,
+/// which the flush had not reached yet — the tick just made vanished from
+/// the screen, and the stale draft then outlived the flush, so the NEXT
+/// tick rendered the whole object without it and wrote that. The edit
+/// stage now derives from the config with the pending batch folded in
+/// (`apply::config_with_pending`), at the one door every entry goes
+/// through, so the same holds for `escape` + `enter` re-entry.
+#[gpui::test]
+fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // Slot 1 is empty: ticking `book` queues a user-layer write with no
+    // fork to confirm.
+    cx.simulate_keystrokes("1 j j space");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
+
+    cx.simulate_keystrokes("2 1");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "1".to_string()
+        }
+    );
+    let ticked = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        edit_draft(shell, cx, |d| {
+            d.list_items("dimensions")
+                .unwrap()
+                .iter()
+                .filter(|i| i.included)
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        ticked(&shell, &cx),
+        vec!["book".to_string()],
+        "the queued tick is on screen, not a debounce behind"
+    );
+
+    // And the stale-draft overwrite that followed: ticking `lhu` from
+    // the re-entered stage must keep `book`.
+    cx.simulate_keystrokes("j j j space");
+    cx.run_until_parked();
+    assert_eq!(
+        ticked(&shell, &cx),
+        vec!["book".to_string(), "lhu".to_string()]
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
+    assert!(
+        written.contains("1 = [\"book\", \"lhu\"]"),
+        "both ticks reach the file: {written}"
+    );
+}
+
 /// The text the shared dialog `Input` currently holds.
 fn dialog_input_text(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> String {
     shell.read_with(cx, |shell, cx| {
@@ -2894,6 +2957,13 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
         "the pill says chain"
     );
     assert!(cx.debug_bounds("dialog-mode-pill-filter").is_none());
+    // No mouse verb while the field is open: a clicked `d`/`r` would arm
+    // a confirm over a live, focused value field, which the keyboard can
+    // never do (the review's Minor 3).
+    assert!(
+        cx.debug_bounds("objectdialog-actions").is_none(),
+        "the action bar is withdrawn while the chain field is open"
+    );
 
     cx.simulate_input(" l");
     cx.run_until_parked();

@@ -6716,6 +6716,43 @@ run_mutation "objectdialog: the chain field paints as the filter row" \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
+# The review's Major. Deriving the edit stage from `services.config`
+# alone is exactly the old code: inside the debounce the draft hides the
+# last tick and, outliving the flush, writes the object without it on the
+# next one. Every single-entry fixture stays green — the stale window is
+# only reachable by leaving and re-entering a slot inside 250 ms.
+run_mutation "objectdialog: the edit stage ignores the pending batch" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let folded = apply::config_with_pending(shell);' \
+  '    let folded = apply::config_with_pending(shell).filter(|_| false);' \
+  geode-shell \
+  jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick
+
+# An inert apply must not touch the list. Skipping the early return makes
+# the same chain typed back re-sort the list "typed names first" and
+# report `Changed` for it — a write of an unchanged value at best, and a
+# dirty draft under an answer of "inert" at worst.
+run_mutation "groupings: an unchanged chain is applied anyway" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '        if before == names {' \
+  '        if false {' \
+  geode-shell \
+  applying_the_unchanged_chain_is_inert_and_closes_the_field
+
+# The action bar has to be withdrawn while the chain field is open, or a
+# clicked `d`/`r` arms a confirm over a live, focused value field. The
+# keyboard tests cannot see it (no key reaches those verbs there); only
+# the painted-bar assertion can.
+run_mutation "objectdialog: the action bar stays up under the chain field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        (true, _) => div().into_any_element(),
+        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, None) => action_bar(shell, entity, cx),' \
+  '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (_, None) => action_bar(shell, entity, cx),' \
+  geode-shell \
+  i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
