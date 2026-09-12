@@ -1715,3 +1715,89 @@ are checked on a display against the artifact, not by test.
   see is a lie — and two entries over the rule replace it. `space`'s
   arms keep theirs: an add can land the cursor one row past the
   viewport's bottom.
+
+### 18.7 Groupings: digit jump and the chain field (2026-09-12)
+
+Two additions to the Groupings dialog alone, from a user request the
+same day ("we should just be able to hit the number for a slot", and a
+faster way than the chooser "to quickly type something like `book / lhu
+/ positions`"). Both are built and window-tested; the display check is
+pending on a real window, as §18.6's is.
+
+**A bare digit opens that slot.** `NormalCommand::Digit(1..=9)` joins
+`dialogmode`'s vocabulary — never `0` (no slot `0` exists; `ctrl+0` is
+`frame::slot_clear`) and never a modified digit (`ctrl+3` is the frame's
+own regroup chord). In the Groupings browse list it opens that slot's
+edit stage in one keystroke, unfilled slot or not; in another slot's
+edit stage it jumps straight across, with no `escape` first. The open
+slot's own digit answers `already editing slot N` rather than re-entering
+the stage: re-entry rebuilds the draft from `services.config`, which can
+be a `WRITE_DEBOUNCE` behind the last tick, so the stage would visibly
+lose an edit that is in fact queued. Every other domain drops the digit
+in browse (as it drops every key browse has no verb for) and names it in
+the edit stage (`3 is not a verb here`, the edit stage's rule). Filter
+mode is untouched: a digit typed there is text. Both footers advertise
+`1`–`9` on Groupings only.
+
+**`i` opens the chain field.** `NormalCommand::EditText` — reserved
+since §3.1 for "a `Text` edited in place behind `i`" and until now a
+notice on every draft — opens, on Groupings only, a field in the filter
+row's place: the shared `Input`, labelled `slot N · chain`, seeded with
+the slot's current chain in `GroupingSlots::label_of`'s own `book / lhu`
+spelling so appending is a separator and a name away. The design:
+
+- **The row list is the completion list.** While the field is open,
+  `Draft::visible_rows` is `groupings::chain_candidates`: the
+  `dimensions` items whose name matches the segment after the last
+  separator, minus every name already typed before it, in row (schema)
+  order — never a field header, since a header is nothing `tab` could
+  complete to. The highlighted row is the completion; `j`/`k`, the
+  arrows and the `ctrl` steps move it as in filter mode.
+- **`/` and whitespace both separate** (user amendment, 2026-09-12),
+  runs of either count as one, so `book lhu desk` and `book / lhu /
+  desk` are the same chain. `tab` replaces the trailing segment with
+  the highlighted candidate and opens the next with the canonical
+  ` / `; the caret lands at the end because `InputState::set_value`
+  puts it there on a single-line input (pinned checkout, `state.rs`
+  `reset_selection`).
+- **`enter` applies.** The typed names become the chain in typed order
+  — ticked and first, every other item after, unticked — and the field
+  closes; a `Step::Changed` then rides exactly the path a tick does
+  (`revalidate`, `commit_or_confirm`), so a desk-owned slot still asks
+  before forking and the write joins the same batch behind the same
+  debounce. `Step::Refused` keeps the field open with the text intact
+  and says why — an empty chain (§3.3's "must keep at least one entry"
+  refusal, since the config model has no empty chain), a name twice
+  (`'book' is listed twice`), or a name no dataset carries. `Step::Inert`
+  (the same chain typed back) closes the field with nothing queued;
+  closing is the visible answer.
+- **`escape` cancels**: text dropped, field closed, chain untouched,
+  stage still `Edit`. It is the field's own rung, ahead of the ladder,
+  because a field whose text is a value must not walk `LeaveFilter` and
+  leave the chain sitting in the filter.
+
+**State shape.** `Draft::chain_entry: bool` beside `confirm`, not a
+`Stage` — the escape ladder and the browse cursor restore key on
+`Stage::Edit`, and both must still read `Edit` here. The chain text is
+`Draft::query`: the field runs in `DialogMode::Filter`, which is what
+hands the shared `Input` the keys through `dialog::sync_dialog_text`
+(§16), and the `Change` subscription's one-way mirror into
+`Draft::query` then holds the chain the way it holds a filter — no
+second text buffer, and every transition (open, complete, apply, cancel)
+stays a pure mutation of `chain_entry`/`query`/`mode` that the sync
+settles on the handler's return. `handle_chain_key` is dispatched ahead
+of the filter-mode branch, since the two share a focused `Input` and
+`enter`/`tab`/`escape` mean different things in each. The pill reads
+`chain` (`dialog::chain_pill`, the `primary` "you are typing" pair —
+`filter` would misdescribe what `enter` does), through the same
+`title_extra` slot §18.1 gave the mode pill; `mode_pill` and
+`chain_pill` share one `state_pill`.
+
+**Deliberately not built.** Views' column list gets no chain field: its
+membership carries `kind` and a member/available split the one-line
+grammar cannot spell, and nobody asked. The chain field does not open
+on `enter` — `i` is the reserved key and `enter` keeps its notice.
+Eleven harness entries guard the digit range, both domain gates, the
+re-entry guard, the separator set, the typed order, the completed-name
+exclusion, the duplicate refusal, the handler's dispatch order, the pill
+and the row.
