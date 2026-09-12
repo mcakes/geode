@@ -1978,6 +1978,36 @@ run_mutation "field chords: a dispatched chord reflects the frame's text back in
   geode-shell \
   a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it
 
+# ---- overlays return focus to the field they opened from (ruling 2026-09-12)
+
+run_mutation "overlay focus: the dialog door records whether the field held focus" \
+  crates/geode-shell/src/shell/dialog.rs \
+  '    view.overlay_return_to_filter = view.filter_field_focused(window, cx);' \
+  '    view.overlay_return_to_filter = false;' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
+run_mutation "overlay focus: closing an overlay returns focus to the field when recorded" \
+  crates/geode-shell/src/shell/mod.rs \
+  '        if std::mem::take(&mut self.overlay_return_to_filter) {' \
+  '        if !std::mem::take(&mut self.overlay_return_to_filter) && false {' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
+run_mutation "overlay focus: the palette's open arm records whether the field held focus" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        self.overlay_return_to_filter = self.filter_field_focused(window, cx);' \
+  '        self.overlay_return_to_filter = false;' \
+  geode-shell \
+  the_palette_opened_from_the_field_returns_focus_to_it_on_escape
+
+run_mutation "overlay focus: closing a palette that was not open leaves focus alone" \
+  crates/geode-shell/src/shell/palette_ctl.rs \
+  '        if self.palette.take().is_none() {' \
+  '        if self.palette.take().is_none() && false {' \
+  geode-shell \
+  a_dialog_opened_from_the_field_returns_focus_to_it_when_closed
+
 # Re-anchored 2026-09-08 (add-tile): the bare
 # `o.content.set_visible(false, cx);` line matched the FIRST of two
 # occurrences — MAJ-2's vanished-occupant loop, which the MAJ-2 entry

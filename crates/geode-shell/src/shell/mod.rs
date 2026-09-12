@@ -570,6 +570,19 @@ pub struct ShellView {
     /// whole bug) — a fix that waited for the next keystroke to run would
     /// never run at all.
     pending_focus_restore: bool,
+    /// Did the scope bar's text field hold focus when the current overlay
+    /// (palette or modal) opened? Recorded by `toggle_palette`'s open arm
+    /// and `dialog::open_shell_dialog_with_key`, consumed by
+    /// `close_palette` and `close_modal`, which return focus to the field
+    /// instead of the shell root (user ruling 2026-09-12: a dialog
+    /// launched from the field hands focus back to it). The palette's
+    /// enter arm closes the palette *before* dispatching, so a dialog an
+    /// item opens sees the field focused again and records it afresh —
+    /// palette → dialog → escape lands back in the field with no chain
+    /// bookkeeping. The overlays are mutually exclusive (the door closes
+    /// the palette; the modal branch of `handle_key_down` never lets the
+    /// toggle through), so one flag serves both.
+    overlay_return_to_filter: bool,
     /// The in-flight divider drag, or `None` when no drag is active
     /// (drag-splitters task). Set by a strip's mouse-down, advanced by the
     /// full-window drag catcher's mouse-moves (live re-layout via the pure
@@ -1360,6 +1373,7 @@ impl ShellView {
             last_tiles_written: crate::session::TileRecords::new(),
             last_frame_versions_written: (0, 0, 0),
             pending_focus_restore: false,
+            overlay_return_to_filter: false,
             divider_drag: None,
             tile_drag: None,
             filter_input,
@@ -1419,8 +1433,35 @@ impl ShellView {
         self.picker = None;
         self.as_of_dialog = None;
         self.object_dialog = None;
-        self.focus_handle.focus(window, cx);
+        self.return_focus_from_overlay(window, cx);
         cx.notify();
+    }
+
+    /// Where focus goes when an overlay closes: back to the scope bar's
+    /// text field if it was focused when the overlay opened
+    /// (`overlay_return_to_filter`, consumed here), the shell root
+    /// otherwise. The one door both `close_modal` and `close_palette` use.
+    pub(super) fn return_focus_from_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if std::mem::take(&mut self.overlay_return_to_filter) {
+            self.filter_input
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+        } else {
+            self.focus_handle.focus(window, cx);
+        }
+    }
+
+    /// Does the scope bar's text field hold keyboard focus right now?
+    pub(super) fn filter_field_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.filter_input
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window)
     }
 
     /// Fired by the `cx.observe_in(&frame, ..)` set up in `new` whenever

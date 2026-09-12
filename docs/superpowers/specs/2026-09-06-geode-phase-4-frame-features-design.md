@@ -741,7 +741,10 @@ it behind the typing — and dispatched; an unbind swallows it; anything
 else falls through to the field. A chord that changes the frame's text
 while the field keeps focus (`mod+z`) is reflected back into the field.
 The per-tile command line keeps only its palette-toggle exception, and
-a modal dialog still owns the keyboard outright.
+a modal dialog still owns the keyboard outright — but an overlay (the
+palette or any modal) opened while the field held focus returns focus
+to the field when it closes, not to the shell root (second ruling of
+2026-09-12); opened from the root it returns to the root as before.
 
 As built: `mod+/`, `mod+p`, `mod+t`, `mod+z` and `mod+shift+z` ship
 exactly as bound above. `frame::live`, `frame::as_of_undo` and
