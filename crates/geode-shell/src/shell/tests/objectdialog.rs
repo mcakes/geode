@@ -1756,9 +1756,14 @@ fn services_with_slot_3(dims: &[&str]) -> ShellServices {
     let mut services = test_services();
     let datasets = LayerDoc::builtin(
         "datasets",
+        // The position-grain measure declares the grain the three
+        // dimension columns are carried by: `groupable_columns` (the
+        // Groupings dialog's vocabulary) offers nothing from a dataset
+        // with no grain to scan, exactly as the compiler would refuse it.
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
          [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     )
     .unwrap();
     let quoted: Vec<String> = dims.iter().map(|d| format!("\"{d}\"")).collect();
@@ -2125,7 +2130,8 @@ fn services_with_a_saved_scope() -> ShellServices {
     let datasets = LayerDoc::builtin(
         "datasets",
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     )
     .unwrap();
     let scopes =
@@ -2279,7 +2285,8 @@ fn services_with_a_user_owned_scope() -> ShellServices {
     let datasets = LayerDoc::builtin(
         "datasets",
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     )
     .unwrap();
     let user = LayerDoc {
@@ -2414,7 +2421,8 @@ fn services_with_a_scope_the_app_itself_wrote() -> ShellServices {
     let datasets = LayerDoc::builtin(
         "datasets",
         "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+         [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
     )
     .unwrap();
     let scopes = LayerDoc::builtin(

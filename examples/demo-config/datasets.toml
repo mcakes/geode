@@ -67,10 +67,14 @@ role = "dimension"
 textual = true
 source_name = "Counterparty"
 
-# Instrument reference attributes.
+# Instrument reference data a desk groups by. A numeric dimension: carried
+# by the instrument grain like `currency` below, so a slot or view may group
+# by it, but never categorical (only a utf8 column can be an ENUM) and so
+# never in the dimension picker — the Groupings dialog offers it, `mod+p`
+# does not.
 [risk_snapshot.columns.strike]
 type = "f64"
-role = "attribute"
+role = "dimension"
 grain = "instrument"
 source_name = "Strike"
 

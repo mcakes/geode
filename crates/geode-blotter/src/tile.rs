@@ -1018,18 +1018,14 @@ impl BlotterTile {
             Some(v) => {
                 let schema = self.schema.borrow();
                 match schema.dataset(&v.dataset) {
-                    Some(ds) => {
-                        let mut names: std::collections::HashSet<&str> =
-                            std::collections::HashSet::new();
-                        for g in ds.grains() {
-                            names.extend(ds.dimensions_at(g));
-                        }
-                        ds.columns
-                            .iter()
-                            .filter(|c| names.contains(c.name.as_str()))
-                            .map(|c| c.name.clone())
-                            .collect()
-                    }
+                    // The compiler's own grouping vocabulary, spelled out
+                    // once in `DatasetSpec::groupable_columns` (the
+                    // Groupings dialog reads the same method).
+                    Some(ds) => ds
+                        .groupable_columns()
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect(),
                     None => Vec::new(),
                 }
             }
