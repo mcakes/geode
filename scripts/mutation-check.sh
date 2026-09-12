@@ -7567,8 +7567,8 @@ run_mutation "views reader: column diagnostics carry the column index" \
 # §19.5: an index off the end lands on the field, never on a phantom row.
 run_mutation "objectdialog: row_for_path bounds the item index" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                (FieldKind::OrderedList { items, .. }, Some(item)) if item < items.len() => {' \
-  '                (FieldKind::OrderedList { items, .. }, Some(item)) if item <= items.len() => {' \
+  '                    if item < items.len() {' \
+  '                    if item <= items.len() {' \
   geode-shell \
   row_for_path_matches_a_field_by_key_and_a_list_item_by_index
 
@@ -7579,6 +7579,29 @@ run_mutation "objectdialog: row_for_path is scoped to this object" \
   '        let rest = path.strip_prefix(&format!("{doc}.")).and_then(|r| r.split_once('"'"'.'"'"')).map(|(_, r)| r)?;' \
   geode-shell \
   row_for_path_matches_a_field_by_key_and_a_list_item_by_index
+
+# §19.5, review round 1 Important-2: a diagnostic's index is a position
+# in `Draft::source`'s own array (the reader's file order), not a raw
+# index into `items` — the latter can be reordered by a presentation.
+# Without the name lookup, a reordered draft flags the wrong column.
+run_mutation "objectdialog: row_for_path resolves a list index by name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    let item = self
+                        .resolve_list_index(&field.key, raw_index, items)
+                        .unwrap_or(raw_index);' \
+  '                    let item = raw_index;' \
+  geode-shell \
+  row_for_path_resolves_a_reordered_list_index_by_name
+
+# §19.5, review round 1 Minor-4: two diagnostics on one row must show the
+# WORSE severity — without the promotion, a Warning recorded first would
+# never be overtaken by a later Error on the same row.
+run_mutation "objectdialog: flagged_rows promotes to the worse severity" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                    *s = Severity::Error' \
+  '                    *s = Severity::Warning' \
+  geode-shell \
+  flagged_rows_promotes_a_warning_to_error_on_the_same_row
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

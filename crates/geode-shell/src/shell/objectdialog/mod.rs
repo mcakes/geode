@@ -1771,8 +1771,10 @@ impl Draft {
     /// path that is not this object's or names no row — those stay on the
     /// header. The grammar is `<doc>.<object>.<field>[.<index>[...]]`: a
     /// field matches by `key`; a list field's next segment, when it is an
-    /// index into `items`, matches that item (never an available row — the
-    /// object has no diagnostic about a column it does not have).
+    /// index into the array, resolves through [`Self::resolve_list_index`]
+    /// to the item that array position currently names (never an
+    /// available row — the object has no diagnostic about a column it
+    /// does not have).
     pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
         let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
         self.fields.iter().enumerate().find_map(|(i, field)| {
@@ -1781,17 +1783,55 @@ impl Draft {
             } else {
                 rest.strip_prefix(&format!("{}.", field.key))?
             };
-            let index = after
+            let raw_index = after
                 .split('.')
                 .next()
                 .and_then(|s| s.parse::<usize>().ok());
-            match (&field.kind, index) {
-                (FieldKind::OrderedList { items, .. }, Some(item)) if item < items.len() => {
-                    Some(EditRow::Item { field: i, item })
+            match (&field.kind, raw_index) {
+                (FieldKind::OrderedList { items, .. }, Some(raw_index)) => {
+                    let item = self
+                        .resolve_list_index(&field.key, raw_index, items)
+                        .unwrap_or(raw_index);
+                    if item < items.len() {
+                        Some(EditRow::Item { field: i, item })
+                    } else {
+                        Some(EditRow::Field(i))
+                    }
                 }
                 _ => Some(EditRow::Field(i)),
             }
         })
+    }
+
+    /// A reader's diagnostic index is the position in `Draft::source`'s
+    /// OWN array for this field — for Views that is `views.toml`'s
+    /// definitional column order (`views::columns_for` reads
+    /// `draft.source["columns"]` the same way to write the file back),
+    /// which is unrelated to `items`' order once `ViewPresentation::
+    /// apply` has permuted it by a trader's personal drag order, or once
+    /// the source has since dropped a column `items` still remembers
+    /// (review round 1's Important-2 finding: without this indirection,
+    /// a reordered or shortened presentation makes `row_for_path` flag
+    /// the wrong column entirely). Resolved by NAME — `source[key][raw_
+    /// index]`'s own `name`, whether that entry is a table (Views'
+    /// `[[columns]]`) or a bare string (a hypothetical future list shaped
+    /// like Groupings' own array-of-strings, `dimensions` in this crate,
+    /// though that field's diagnostics never carry an index today: see
+    /// `groupings.rs`'s own doc on why) — found in `items` by NAME, never
+    /// by position, since `items`' order is exactly what may have moved.
+    /// `None` when `source[key]` has no entry at that index, or that
+    /// entry's name is no longer among `items` at all; the caller falls
+    /// back to the raw index in either case (harmless for Groupings,
+    /// whose `source` is always empty — its object is a bare array, not
+    /// a table, so `Domain::draft` never populates one).
+    fn resolve_list_index(&self, key: &str, index: usize, items: &[ListItem]) -> Option<usize> {
+        let entry = self.source.get(key)?.as_array()?.get(index)?;
+        let name = match entry {
+            toml::Value::Table(t) => t.get("name")?.as_str()?,
+            toml::Value::String(s) => s.as_str(),
+            _ => return None,
+        };
+        items.iter().position(|i| i.name == name)
     }
 
     /// Every row a current diagnostic lands on, with the worst severity
@@ -4325,5 +4365,109 @@ mod tests {
         );
         assert_eq!(draft.row_for_path("views", "views.other.dataset"), None);
         assert_eq!(draft.row_for_path("views", "sources.tree.dataset"), None);
+    }
+
+    /// §19.5, review round 1's Important-2 finding: a reader's diagnostic
+    /// index is a position in `Draft::source`'s own array — for Views,
+    /// `views.toml`'s definitional column order, the same order
+    /// `views::columns_for` reads to write the file back — which is NOT
+    /// `items`' order once `ViewPresentation::apply` (or a fresh drag)
+    /// has permuted `items` into the trader's personal presentation. This
+    /// fixture: `source.columns` is `[npv, delta]` (npv first, as
+    /// `views.toml` itself declares them), but `items` has been reordered
+    /// to `[delta, npv]`. A diagnostic path index of `1` names
+    /// `source.columns[1]`, which is `delta` — resolving it by name to
+    /// delta's CURRENT position in `items` (`0`) is the fix; resolving it
+    /// as a raw index into `items` (the pre-fix behaviour) would instead
+    /// land on `items[1]`, which is `npv` — the wrong column entirely.
+    #[test]
+    fn row_for_path_resolves_a_reordered_list_index_by_name() {
+        let mut source = toml::Table::new();
+        source.insert(
+            "columns".to_string(),
+            toml::Value::Array(vec![
+                toml::Value::Table(toml::Table::from_iter([(
+                    "name".to_string(),
+                    toml::Value::String("npv".to_string()),
+                )])),
+                toml::Value::Table(toml::Table::from_iter([(
+                    "name".to_string(),
+                    toml::Value::String("delta".to_string()),
+                )])),
+            ]),
+        );
+        let draft = Draft::new_object(
+            "tree",
+            vec![Field {
+                key: "columns".into(),
+                label: "Columns".into(),
+                kind: FieldKind::OrderedList {
+                    items: vec![
+                        ListItem {
+                            name: "delta".into(),
+                            included: true,
+                            width: None,
+                            kind: None,
+                        },
+                        ListItem {
+                            name: "npv".into(),
+                            included: true,
+                            width: None,
+                            kind: None,
+                        },
+                    ],
+                    available: None,
+                },
+                dest: Destination::Doc,
+                layer: None,
+            }],
+            source,
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.1.format.precision"),
+            Some(EditRow::Item { field: 0, item: 0 }),
+            "source index 1 (delta) resolves to delta's current position \
+             in items (0), not to whatever now sits at raw index 1 (npv)"
+        );
+    }
+
+    /// §19.5, review round 1's Minor-4: two diagnostics on the same row —
+    /// a Warning and an Error — must show the WORSE of the two, since the
+    /// glyph is one colour per row and a trader must never see a mild
+    /// warning colour when an error is also standing on that row.
+    #[test]
+    fn flagged_rows_promotes_a_warning_to_error_on_the_same_row() {
+        let mut draft = Draft::new_object(
+            "tree",
+            vec![Field {
+                key: "dataset".into(),
+                label: "Dataset".into(),
+                kind: FieldKind::Text("risk".into()),
+                dest: Destination::Doc,
+                layer: None,
+            }],
+            toml::Table::new(),
+        );
+        draft.diagnostics = vec![
+            Diagnostic {
+                severity: Severity::Warning,
+                layer: None,
+                file: None,
+                message: "a warning on dataset".into(),
+                path: Some("views.tree.dataset".into()),
+            },
+            Diagnostic {
+                severity: Severity::Error,
+                layer: None,
+                file: None,
+                message: "an error on dataset too".into(),
+                path: Some("views.tree.dataset".into()),
+            },
+        ];
+        assert_eq!(
+            draft.flagged_rows("views"),
+            vec![(EditRow::Field(0), Severity::Error)],
+            "the row's severity is the worse of the two, regardless of order"
+        );
     }
 }

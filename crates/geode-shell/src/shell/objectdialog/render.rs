@@ -2635,9 +2635,27 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         // does anything. `None` (no field open at all) is the ordinary
         // click-to-edit path.
         let open = draft.text_entry.map(|t| t.completions);
-        let row_el = element
+        // The glyph and label share ONE child so the row still has
+        // exactly two children under `justify_between` — a third direct
+        // child splits the row's free space into two gaps and floats the
+        // label toward the middle of the row on every row of every
+        // domain, flagged or not (review round 1's Important finding).
+        // Carries its own selector so a window test can compare a
+        // flagged row's label position against an unflagged one's —
+        // there is otherwise no way to address just the label, since the
+        // row's own selector spans the whole row (glyph, label and value
+        // together) and would read the same width whichever child ate
+        // the bug.
+        let label_selector = format!("objectdialog-label-{selector}");
+        let label_block = h_flex()
+            .gap_1()
+            .items_center()
+            .debug_selector(move || label_selector.clone())
             .child(glyph)
             .child(label)
+            .into_any_element();
+        let row_el = element
+            .child(label_block)
             .child(value)
             .debug_selector(move || selector.clone())
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {

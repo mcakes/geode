@@ -4734,13 +4734,17 @@ fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::Test
 
 /// §19.5: a reader diagnostic that names a column lands on that column's
 /// row as a glyph, and its header line is prefixed with the row's label;
-/// an object-level one stays on the header alone.
+/// an object-level one — here, a join missing `dataset`, whose path
+/// (`views.tree.joins`) names a key no `Field` owns and so cannot
+/// resolve to any row — stays on the header alone, with no glyph
+/// anywhere and no prefix on its own header line.
 #[gpui::test]
 fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
     let views = LayerDoc::builtin(
         "views",
-        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n\
+         [[tree.joins]]\non = [\"book\"]\n",
     )
     .unwrap();
     let datasets = LayerDoc::builtin(
@@ -4769,11 +4773,147 @@ fn a_column_diagnostic_flags_its_row(cx: &mut gpui::TestAppContext) {
         cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
             .is_none()
     );
+    // Review round 1's Important-1 finding: the glyph used to be a THIRD
+    // direct child of the row under `justify_between`, which splits the
+    // row's free space into two gaps and floats the label toward the
+    // row's centre — on every row, flagged or not, since neither the
+    // glyph nor the label carries `flex_1()`. Comparing the flagged
+    // row's label origin against the unflagged row's is what would have
+    // caught that: with the bug, delta's label (flagged, three children)
+    // sits at a different x than npv's (unflagged, two children); fixed,
+    // both labels start at the same x regardless of the glyph's content.
+    let delta_row = cx
+        .debug_bounds("objectdialog-item-delta")
+        .expect("delta's row is painted");
+    let delta_label = cx
+        .debug_bounds("objectdialog-label-objectdialog-item-delta")
+        .expect("delta's label is painted");
+    let npv_row = cx
+        .debug_bounds("objectdialog-item-npv")
+        .expect("npv's row is painted");
+    let npv_label = cx
+        .debug_bounds("objectdialog-label-objectdialog-item-npv")
+        .expect("npv's label is painted");
+    assert_eq!(
+        delta_label.origin.x, npv_label.origin.x,
+        "a flagged row's label starts at the same x as an unflagged row's"
+    );
+    // The label must start near the row's own left edge — under the bug
+    // (glyph as a third `justify_between` child) it floated toward the
+    // 640px row's centre instead. `40.` is generous (row padding + the
+    // 12px glyph + its gap is well under half the row's width) without
+    // being so loose it would pass under the centring bug too.
+    for (row, label, name) in [
+        (delta_row, delta_label, "delta"),
+        (npv_row, npv_label, "npv"),
+    ] {
+        let offset = label.origin.x - row.origin.x;
+        assert!(
+            offset < px(40.),
+            "{name}'s label starts {offset:?} from its row's left edge, not near it"
+        );
+    }
     let diags = edit_draft(&shell, &cx, |d| d.diagnostics.clone());
     assert!(
         diags
             .iter()
             .any(|d| d.path.as_deref() == Some("views.tree.columns.1.format.precision")),
         "{diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.path.as_deref() == Some("views.tree.joins")),
+        "the join diagnostic is present: {diags:?}"
+    );
+    // The header line's prefix is exactly what `render.rs`'s header block
+    // computes: `row_for_path` resolved to a row, then `row_label`'d.
+    // Checked through the same two calls rather than by reading painted
+    // text — every header line shares the `objectdialog-diagnostic`
+    // selector, so `debug_bounds` cannot tell one line's text from
+    // another's.
+    let (matched_prefix, unmatched_row, flagged_count) = edit_draft(&shell, &cx, |d| {
+        let matched_prefix = d
+            .diagnostics
+            .iter()
+            .find(|x| x.path.as_deref() == Some("views.tree.columns.1.format.precision"))
+            .and_then(|x| x.path.as_deref())
+            .and_then(|p| d.row_for_path("views", p))
+            .map(|row| d.row_label(row));
+        let unmatched_row = d
+            .diagnostics
+            .iter()
+            .find(|x| x.path.as_deref() == Some("views.tree.joins"))
+            .and_then(|x| x.path.as_deref())
+            .and_then(|p| d.row_for_path("views", p));
+        (matched_prefix, unmatched_row, d.flagged_rows("views").len())
+    });
+    assert_eq!(
+        matched_prefix.as_deref(),
+        Some("delta"),
+        "the format diagnostic's header line is prefixed \"delta: \""
+    );
+    assert_eq!(
+        unmatched_row, None,
+        "the join diagnostic resolves to no row — its header line gets no prefix"
+    );
+    assert_eq!(
+        flagged_count, 1,
+        "only delta's row is flagged; the join diagnostic paints no glyph anywhere"
+    );
+}
+
+/// Review round 1's Important-2 finding: `views.toml` declares `npv`
+/// first and `delta` second (so the reader's diagnostic index — a
+/// position in THAT order — names `delta` at index 1), but a
+/// `view_presentation.toml` `order` flips them to `delta` first for the
+/// edit stage's `items`. The glyph must still land on `delta` — the
+/// column the diagnostic actually names — not on whatever the raw index
+/// now happens to point at in the reordered `items` (`npv`, the bug this
+/// finding describes).
+#[gpui::test]
+fn a_column_diagnostic_survives_a_reordered_presentation(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n[[tree.columns]]\nname = \"delta\"\nformat = { precision = 99 }\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.npv]\ntype = \"f64\"\nrole = \"dimension\"\n[risk.columns.delta]\ntype = \"f64\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let presentation = LayerDoc::builtin(
+        "view_presentation",
+        "[tree]\norder = [\"delta\", \"npv\"]\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+            presentation,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (_shell, mut cx) = dialog_test_shell_with(cx, services, "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // `items` is now `[delta, npv]` (the presentation's order), so a
+    // pre-fix raw-index lookup of `columns.1` would have landed on
+    // `npv` — this is the assertion that would have failed before the
+    // fix.
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-delta")
+            .is_some(),
+        "the glyph stays on delta even though the presentation moved it to the front"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-diag-objectdialog-item-npv")
+            .is_none(),
+        "npv must never be flagged for a diagnostic that names delta"
     );
 }
