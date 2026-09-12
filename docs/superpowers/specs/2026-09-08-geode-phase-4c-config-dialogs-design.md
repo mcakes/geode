@@ -2359,20 +2359,20 @@ recorded in this plan's task-8 report.
 Approved 2026-09-12, before Part 2b starts. Part 2b is the rest of
 Phase 4c: the two adapters Part 2a left (`Sources`, `Schema`), the
 committed-edit vocabulary both §8.2's rename ruling and §8.3's Sources
-constraint were waiting on, the unmet width item from §16, and the two
+constraint were waiting on, and the two
 provenance features every "Part 2" note above named — drift (§5.2) and
 per-field diagnostics (§8.5) — with `ShellEvent::ReloadRejected` riding
 along as §16's "Deferred" paragraph asked. Renames stay unbuilt (§8.2's
 ruling stands: nobody has asked for one, and the vocabulary landing here
-does not by itself make a rename safe to offer). One branch, eight tasks
+does not by itself make a rename safe to offer). One branch, seven tasks
 (§19.7).
 
 Three rulings taken during the design, each recorded where it applies:
 a Sources write reaches the running data service through the
-*existing* restart-required stripe, not a live restart (§19.3); a
-column's width is typed on the member row, not stepped on a sub-row
-(§19.2); and an empty `paths` is an idle source, not a broken one
-(§19.3).
+*existing* restart-required stripe, not a live restart (§19.3); width
+is not built here at all but with the rest of a column's presentation
+in Part 2c (§19.2, §20); and an empty `paths` is an idle source, not a
+broken one (§19.3).
 
 ### 19.1 Committed text entry: `i` on any `Text` or `Number` row
 
@@ -2448,33 +2448,19 @@ refuses it through `writable()` (§19.4) as it refuses every other verb.
 A display-only `Text` on a writable domain — Groupings' `slot`, Scopes'
 two summaries — refuses with the notice it gives today.
 
-### 19.2 Width: typed on the member row
+### 19.2 Width: moved to Part 2c
 
-§16's unmet item 2. §3.3 sketched a `Number` sub-row under each shown
-member; that sketch predates §19.1, and stepping a width ten pixels at
-a time under a doubled row count was never a good gesture. Ruled
-(2026-09-12): **the member row paints its width inline and `i` on it
-types the width.** No sub-row, so the member block's row count, the
-`j`/`k` walk and `shift+j`/`shift+k` reordering are all unchanged, and
-`space` stays the tick.
-
-- The label reads `npv · 120 px`, or `npv · auto` when no width is
-  set. `row_label` includes it, so the filter matches what is painted
-  (the edit stage's own rule, §18.3).
-- `i` on an `EditRow::Item` whose list carries widths (Views' `columns`
-  — `ListItem.width` exists; Groupings' items have none and refuse with
-  a notice) opens the field seeded with the current number or empty. The
-  scaffold (not `parse_text` — a width is the list kind's own rule, on
-  every domain that has one) accepts an integer in `20..=2000`, or
-  `auto`/empty to clear; anything else is refused with the range named.
-- `dest` is `Presentation`: the write goes to `view_presentation.toml`'s
-  `width` map and never forks. `Draft::writes_by_destination` already
-  routes an item's width there; what was missing was only a way to
-  change it.
-- The blotter reads `presentation.width` already, so a typed width
-  reaches the tile on the next flush with nothing new on that side. A
-  header drag writing the width back is still not built (§16's item
-  said so and still does); it belongs to the blotter, not this dialog.
+§16's unmet item 2 was designed here on 2026-09-12 as "typed on the
+member row" (`i` on a member opens the field on its width), and the
+mockup "Geode Text Entry" shows that form. **Withdrawn the same day, by
+ruling**, before any of it was built: the user asked for the rest of a
+column's presentation to be editable too — scale, decimals, thousands,
+negative, label, and a *shared, named* colour — and width is one
+sibling of those, not a special case. Building it inline first and then
+again inside the column stage that holds its siblings would build it
+twice. Width therefore ships with Part 2c (§20), in that stage, and
+Part 2b has no width task. `i` on a `Number` row (§19.1) stays, since
+Sources' `stable polls` is a `Number`.
 
 ### 19.3 Sources
 
@@ -2633,16 +2619,15 @@ One branch, in this order, each task resting on the one before:
 
 1. Text entry generalised from the chain field; `i` on `Text` and
    `Number`; `Domain::parse_text`.
-2. Width typed on the member row.
-3. `Domain::writable()`, `Field.layer`, the Schema domain and its
+2. `Domain::writable()`, `Field.layer`, the Schema domain and its
    action.
-4. The sources reader's empty-paths ruling, then the Sources domain and
+3. The sources reader's empty-paths ruling, then the Sources domain and
    its action.
-5. Readers fill `Diagnostic.path`; the draft matches rows.
-6. `ShellEvent::ReloadRejected`; the bridge's presentation diagnostics
+4. Readers fill `Diagnostic.path`; the draft matches rows.
+5. `ShellEvent::ReloadRejected`; the bridge's presentation diagnostics
    on reload.
-7. Drift.
-8. Docs (`CLAUDE.md`, this section reconciled as "as built"), harness
+6. Drift.
+7. Docs (`CLAUDE.md`, this section reconciled as "as built"), harness
    entries reviewed as a set, full harness.
 
 Tests follow the crate's pattern: pure-core unit tests per adapter and
@@ -2652,10 +2637,70 @@ the full harness at branch end. Harness entries, one per behaviour:
 `parse_text` refusing a bad duration and a bad regex; the `;`
 separator; `stable polls` written only under `stable_mtime`; the
 idle-source warning severity; `writable()` gating each Schema verb;
-`Field.layer` from `explain`; a width outside the range refused and
-`auto` clearing; a path matching a list item by index; an unmatched
+`Field.layer` from `explain`; a path matching a list item by index; an unmatched
 diagnostic staying on the header; `drifted` false without an entry and
 true on a changed shadow; the overrides entry riding the fork's own
 batch; `r` and `d` removing it; `ReloadRejected` emitted only on the
 rejected branch. Display checks stay pending on the user's screen, as
 §18.6's are.
+
+## 20. Part 2c — direction only (2026-09-12)
+
+Not yet designed; recorded so the session that designs it starts from
+the rulings already taken rather than rediscovering them. Part 2c is
+**column presentation and shared colours**: a nested *column stage*
+under a Views member row (`enter` on a member) holding every
+presentation field the model already has — `label`, `width`, `scale`
+(`none`/`k`/`M`, the header already paints `npv (k)`), `precision`,
+`thousands`, `negative` — plus a named, shared colour; the user overlay
+(`view_presentation.toml`) grows to carry the same format keys per
+column so a trader's own scale or decimals merge *over* the desk's view
+without forking it (the rule §4.1 already applies to width); and a
+dialog of its own for the shared colours, on a doc of its own, read by
+the blotter now and by charting later.
+
+**The colour model, agreed in principle (user, 2026-09-12).** A shared
+colour is a **hue angle on a canonical wheel plus a tone**, and each
+theme is a transformation of that wheel: every bundled theme sets
+twelve base hues (`base.red`/`yellow`/`green`/`cyan`/`blue`/`magenta`,
+each with a `.light` tone), placed at canonical angles 0/60/120/180/
+240/300, and a definition's hue is interpolated between the theme's two
+nearest anchors **in OKLCH**, not HSL (HSL midpoints across hues lose
+lightness and chroma; the OKLab conversion is ~40 lines of pure
+arithmetic in `geode-core`, no dependency). `hue = 240` is exactly the
+theme's blue; `hue = 210` is a third of the way from its cyan to its
+blue in that theme's own saturation and lightness. A `token` form stays
+for the semantic colours a theme already names (`chart.bullish`,
+`chart.bearish`, `danger`), so sign colouring and a shared colour share
+one vocabulary. **No literal hex**: a hex is theme-blind, and a
+theme-blind colour is the failure this model exists to remove. Sketch:
+
+```toml
+[delta]
+hue = 240
+
+[gamma]
+hue = 210
+tone = "light"
+
+[pnl]
+token = "chart.bullish"
+```
+
+Known strains, to be met by checks rather than rules: a theme whose
+neighbouring anchors sit close together folds that arc, so definitions
+apart on the canonical wheel can coincide there — extend the
+theme-authoring checks to report each theme's smallest inter-anchor arc
+and each generated hue's contrast against the theme background; and
+distinguishability is per theme, so the colour dialog should paint a
+swatch strip in the active theme beside each definition.
+
+**Open for the design session:** the name of the thing ("colour
+family" was the user's placeholder and is not final); whether a
+column's colour paints the header, the values, or both; whether a
+shared colour can combine with `sign` on one column; how a resolved
+colour reaches modules (the `UiSettings` gpui global is the
+shell→module pattern, and colours are genuinely app-wide and
+module-visible, which is the bar CLAUDE.md sets for widening it); and
+how the overlay's per-column keys are spelled next to the existing
+`order`/`hidden`/`width`.
