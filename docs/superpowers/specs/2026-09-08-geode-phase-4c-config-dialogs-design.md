@@ -2478,7 +2478,27 @@ category Config, no default binding — §10). Every field is
 | `poll_interval`, `pending_timeout` | `Text` | The reader's own `45s` / `5m` / `2h`; `parse_text` refuses what `parse_duration` cannot read. An absent key shows the reader's default and is written explicitly on the object's first edit, since a write renders the whole object. |
 | `batch_pattern` | `Text` | Empty means none. `parse_text` refuses a regex that does not compile or has no `batch` capture — the reader's two diagnostics for it, made inline refusals. |
 
-The browse summary is `<dataset> · <n> path(s) · <priority>`.
+**The browse list is every dataset-and-source pair, flat (user ruling
+2026-09-12).** A dataset-first tree (dataset → source → arguments) was
+proposed and declined: it costs a page hop per level, and a flat list is
+what filter mode is good at, even a long one. So a row reads
+`<dataset> · <name>` — the dataset painted first and dimmed, the source
+name after it — sorted by dataset then name, with the summary
+`<n> path(s) · <priority>`; `enter` opens the arguments directly. The
+dataset is part of the row's searchable text, so `/risk` narrows to one
+feed's sources. Mechanically, `ObjectRow` gains `prefix: Option<String>`
+(painted before the name, included in `searchable_text`, the primary
+sort key when present); Sources is its only filler and every other
+domain leaves it `None`, so nothing else's row changes. The object's
+identity is still the source name — the doc key — and a dataset with
+several sources (the federation case of Phase 2 §5.1) is several rows.
+`n` seeds the new source's `dataset` from the row under the cursor
+rather than the schema's first, and seeds the name field with that
+dataset's name when no source holds it yet, since the first feed of a
+dataset is usually called after it; the trader can type over either.
+No roster: a dataset with no source is the diagnostics tile's business,
+not a placeholder row here.
+
 `validate` runs `SourceSpec::from_doc` over the rendered draft, as
 Views runs its reader, plus the one cross-check the reader cannot make
 (the dataset exists in the schema). Sources opens in the chooser, not a
@@ -2492,7 +2512,7 @@ Ruled: **a source with no paths is idle, not broken** — the reader
 downgrades "missing or empty 'paths'" to a warning and still skips the
 source (it has nothing to poll), a desk file with a typo still shows the
 warning in the diagnostics tile, and `n` writes
-`{ dataset = <first sorted>, paths = [] }` at zero debounce through
+`{ dataset = <the cursor row's>, paths = [] }` at zero debounce through
 `commit_create`, opening the stage with the warning on the `paths` row
 (§19.5) for the trader to type the globs into. The scheduler needs no
 change: a skipped source never reaches it.
@@ -2636,7 +2656,9 @@ that reaches a transition, `--changed` mutation after every task and
 the full harness at branch end. Harness entries, one per behaviour:
 `parse_text` refusing a bad duration and a bad regex; the `;`
 separator; `stable polls` written only under `stable_mtime`; the
-idle-source warning severity; `writable()` gating each Schema verb;
+idle-source warning severity; the browse row's dataset prefix and sort;
+`n` seeding the dataset from the cursor row; `writable()` gating each
+Schema verb;
 `Field.layer` from `explain`; a path matching a list item by index; an unmatched
 diagnostic staying on the header; `drifted` false without an entry and
 true on a changed shadow; the overrides entry riding the fork's own
