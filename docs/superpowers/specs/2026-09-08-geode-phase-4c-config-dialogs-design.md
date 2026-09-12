@@ -1949,6 +1949,22 @@ spelling so appending is a separator and a name away. The design:
   applied before `i` is dropped with it — `i` overwrote `query` with the
   seed, and the filter had no meaning while the field was open.
 
+**The field is the landing, not a verb (user ruling 2026-09-12, "let's
+have the type-a-chain mode be the default, rather than filter mode").**
+Opening a Groupings slot — by `enter`, by a digit, or by a click — lands
+in the chain field: seeded, focused, completions below. The rule is one
+line in `ObjectDialogState::enter_edit`, keyed on the domain, so every
+door into the stage agrees (`enter_edit_with` is `n`'s door and Groupings
+has no `n`). `escape` then walks field → chooser → browse, one visible
+rung at a time — the chooser (tick, `shift+j`/`shift+k`) is one `escape`
+behind the field and `i` reopens the field from it, so nothing the
+chooser could do is lost. `enter` still applies and closes the field
+into the chooser, so the fork question and the applied chain are seen
+before leaving. The one consequence: while the field is open a digit is
+text, so jumping slot to slot from a freshly opened slot is `escape` then
+the digit. The pre-existing Groupings window tests gained exactly that
+`escape` after each `enter`/digit.
+
 **State shape.** `Draft::chain_entry: bool` beside `confirm`, not a
 `Stage` — the escape ladder and the browse cursor restore key on
 `Stage::Edit`, and both must still read `Edit` here. The chain text is

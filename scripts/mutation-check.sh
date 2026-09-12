@@ -3939,17 +3939,22 @@ run_mutation "config: check_object_name refuses config_version" \
 # `cancel_naming` sets the exact same `self.mode = DialogMode::Normal;` at
 # the same indent, and the bare-line anchor stopped being unique the
 # moment that sibling method existed.
+#
+# Re-anchored again for §18.8 (2026-09-12): the mode is now a two-armed
+# `if` keyed on the domain, and the mutation keeps Groupings' `Filter`
+# arm — a slot still opens in its chain field, so every Groupings test
+# stays green — while letting every other domain inherit whatever mode
+# browse was in, which is exactly the old defect.
 run_mutation "objectdialog: the edit stage inherits the browse filter's mode" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        self.stage = Stage::Edit {
-            object: object.to_string(),
-        };
-        self.query.clear();
-        self.mode = DialogMode::Normal;' \
-  '        self.stage = Stage::Edit {
-            object: object.to_string(),
-        };
-        self.query.clear();' \
+  '        self.mode = if opens_in_chain_field {
+            DialogMode::Filter
+        } else {
+            DialogMode::Normal
+        };' \
+  '        if opens_in_chain_field {
+            self.mode = DialogMode::Filter;
+        }' \
   geode-shell \
   an_object_opened_from_filter_mode_still_escapes_back_a_stage
 
@@ -6793,6 +6798,20 @@ run_mutation "objectdialog: the action bar stays up under the chain field" \
         (_, None) => action_bar(shell, entity, cx),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
+# The landing is keyed on the domain (§18.8, user ruling 2026-09-12).
+# Inverting it opens Views' and Scopes' edit stages in a chain field that
+# has no list to complete against, and lands Groupings in the chooser —
+# every Groupings test that `escape`s first still passes (an `escape` in
+# the chooser merely steps back to browse and the next keystrokes act
+# there, which most fixtures would notice, but only the one asserting
+# BOTH domains' landings names the rule).
+run_mutation "objectdialog: the chain-field landing ignores the domain" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        let opens_in_chain_field = self.domain == Domain::Groupings;' \
+  '        let opens_in_chain_field = self.domain != Domain::Groupings;' \
+  geode-shell \
+  a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

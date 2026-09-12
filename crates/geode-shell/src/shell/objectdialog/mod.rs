@@ -1630,12 +1630,14 @@ impl ObjectDialogState {
     ///   draft's own `query` is separately guaranteed empty here too,
     ///   defensively, though every constructor already starts it that
     ///   way;
-    /// - the **mode goes back to `Normal`**, because `enter` opens an
-    ///   object from filter mode too, and a stage left in `Filter` sends
-    ///   the next `escape` down the `LeaveFilter` rung — which the edit
-    ///   handler does not claim, so the shell's modal branch closes the
-    ///   whole dialog instead of stepping back to the list, without ever
-    ///   asking.
+    /// - the **mode is set explicitly**, never inherited, because `enter`
+    ///   opens an object from filter mode too, and a stage left in
+    ///   `Filter` with no field of its own sends the next `escape` down
+    ///   the `LeaveFilter` rung — which the edit handler does not claim,
+    ///   so the shell's modal branch closes the whole dialog instead of
+    ///   stepping back to the list, without ever asking. `Normal` for
+    ///   every domain but Groupings; `Filter` there, because a slot opens
+    ///   IN its chain field (§18.8) and that field owns `escape`.
     ///
     /// Both are pure, and that is now the whole transition: the shared
     /// `Input` is emptied and blurred to match by `dialog::
@@ -1653,12 +1655,27 @@ impl ObjectDialogState {
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
+        // §18.8 (user ruling 2026-09-12): a Groupings slot opens IN its
+        // chain field — the typed line is the primary way to set a
+        // chain, and the chooser is one `escape` behind it. `Filter` is
+        // what hands the shared `Input` the keys through the sync, and
+        // `begin_chain_entry` is what seeds the text it writes there.
+        // Every other domain still opens in normal mode, for the reason
+        // the paragraph above gives.
+        let opens_in_chain_field = self.domain == Domain::Groupings;
+        if opens_in_chain_field {
+            draft.begin_chain_entry();
+        }
         self.draft = Some(draft);
         self.stage = Stage::Edit {
             object: object.to_string(),
         };
         self.query.clear();
-        self.mode = DialogMode::Normal;
+        self.mode = if opens_in_chain_field {
+            DialogMode::Filter
+        } else {
+            DialogMode::Normal
+        };
         self.selected = 0;
         self.notice = None;
     }
@@ -2183,6 +2200,35 @@ mod tests {
         assert_eq!(state.query, "tr");
         assert_eq!(state.selected, 0);
         assert!(state.notice.is_none());
+    }
+
+    /// §18.8 (user ruling 2026-09-12): a Groupings slot opens IN the
+    /// chain field — `chain_entry` set, the text seeded, the mode at
+    /// `Filter` so the sync hands the field the keys — where every other
+    /// domain still opens in normal mode with no field at all.
+    #[test]
+    fn a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not() {
+        let config = config_from(&[
+            (Layer::Desk, "groupings", "3 = [\"book\"]\n"),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n",
+            ),
+        ]);
+        let mut state = ObjectDialogState::new(Domain::Groupings);
+        state.enter_edit(&config, "3");
+        let draft = state.draft.as_ref().unwrap();
+        assert!(draft.chain_entry);
+        assert_eq!(state.mode, DialogMode::Filter);
+        assert_eq!(state.effective_query(), "book", "seeded with the chain");
+
+        let mut state = ObjectDialogState::new(Domain::Views);
+        state.enter_edit(&config, "tree");
+        let draft = state.draft.as_ref().unwrap();
+        assert!(!draft.chain_entry);
+        assert_eq!(state.mode, DialogMode::Normal);
+        assert_eq!(state.effective_query(), "");
     }
 
     /// `effective_query` is the read half of `set_query`'s one-way
