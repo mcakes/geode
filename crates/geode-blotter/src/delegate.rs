@@ -615,24 +615,50 @@ impl TableDelegate for BlotterDelegate {
     fn perform_sort(
         &mut self,
         col_ix: usize,
-        sort: ColumnSort,
-        _window: &mut Window,
+        _sort: ColumnSort,
+        window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        // A header click is gpui-component's own asc/desc/clear cycle; it
-        // never reaches an absolute order (`S` and `:sort … abs` do).
-        self.sort = match sort {
-            ColumnSort::Default => None,
-            ColumnSort::Ascending => Some(SortSpec {
-                column: col_ix,
-                order: SortOrder::Asc,
-            }),
-            ColumnSort::Descending => Some(SortSpec {
-                column: col_ix,
-                order: SortOrder::Desc,
-            }),
-        };
+        // The tree column paints no sort icon (`column()` hands it
+        // `sort: None`) and the component returns early on that, so this
+        // is unreachable for it today; the guard keeps the hook honest
+        // should the component ever call through anyway, matching the
+        // keyboard path's own `col == 0` refusal.
+        if self
+            .plan
+            .as_ref()
+            .and_then(|p| p.columns.get(col_ix))
+            .is_none_or(|c| c.kind == ColumnKind::Tree)
+        {
+            return;
+        }
+        // gpui-component proposes the next of ITS three states, computed
+        // from the arrow it cached for this column; the blotter has five
+        // (spec §6.3), so the proposal is ignored and the click steps the
+        // delegate's own cycle from the delegate's own state. The
+        // component's cache (`col_groups`: the arrow, and the header name
+        // the drag preview shows — the painted label itself is read live
+        // through `render_th`) is now stale, and only `refresh` re-reads
+        // `column()` — deferred, because `TableState` is the entity
+        // currently on the stack. gpui drains effects FIFO and paints only
+        // once the queue is empty, so no frame shows the component's
+        // proposed arrow. The closure relies on the `cx.notify()` below
+        // (and the component's own, after this hook returns) for the
+        // repaint; it does not notify itself. The row highlight follows
+        // the cursor the way `sync_cursor` does after a keyboard sort:
+        // `reflatten` keeps the cursor by path, so its row index moves.
+        let current = self.sort.filter(|s| s.column == col_ix).map(|s| s.order);
+        let next = SortOrder::click_cycle(current, self.is_measure(col_ix));
+        self.sort = next.map(|order| SortSpec {
+            column: col_ix,
+            order,
+        });
         self.reflatten();
+        cx.defer_in(window, |table, _, cx| {
+            table.refresh(cx);
+            let row = table.delegate().cursor.row;
+            table.set_selected_row(row, cx);
+        });
         cx.notify();
     }
 

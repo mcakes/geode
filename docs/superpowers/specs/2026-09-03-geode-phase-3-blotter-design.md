@@ -769,11 +769,14 @@ not choose, and `S` is inert on a text column, which has no magnitude.
 `:sort delta01 desc` (completed, §3.4) covers a column that is
 off-screen — `:sort delta01 abs`, `abs asc` and `abs desc` spell the
 absolute orders, a bare `abs` meaning `abs desc` — and a header click
-does the same by mouse through gpui-component's own click cycle
-(cleared → descending → ascending → cleared, desc first), which never
-reaches an absolute order: it reads only the arrow's direction, so a
-click from `abs desc` goes to signed ascending and from `abs asc`
-clears. All three set the same
+does the same by mouse: a header click walks cleared → desc → asc →
+abs desc → abs asc → cleared on a measure (user ruling 2026-09-12;
+desc first because that is where gpui-component's own three-state
+click cycle started before the blotter took it over — the delegate
+ignores the component's proposal and steps its own cycle, then
+refreshes the table so the cached arrow and drag-preview name follow;
+the painted label is read live) and
+cleared → desc → asc → cleared on a text column. All three set the same
 tile-local sort, shown as an arrow in the column header; an absolute
 sort also appends `|x|` to the header label, since the arrow only
 knows a direction. It is applied inside flatten to each sibling range:
