@@ -2365,13 +2365,18 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         };
         let entity_for_row = entity.clone();
         let clicked = position;
+        let chain = draft.chain_entry;
         let row_el = element
             .child(label)
             .child(value)
             .debug_selector(move || selector.clone())
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                 entity_for_row.update(cx, |shell, cx| {
-                    on_edit_row_clicked(shell, clicked, window, cx);
+                    if chain {
+                        on_completion_clicked(shell, clicked, window, cx);
+                    } else {
+                        on_edit_row_clicked(shell, clicked, window, cx);
+                    }
                 });
             });
         // §18.9.1: a list row is both a drag source and a drop target;
@@ -2930,6 +2935,44 @@ fn on_tick_clicked(
         }
         Step::Refused(reason) => refuse_step(shell, reason),
         Step::Inert => set_notice(shell, "nothing on this row changes with a tick".to_string()),
+    }
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// §18.9.4: a click on a completion row while the chain field is open —
+/// the mouse form of `tab`. The cursor moves to the row and
+/// `Draft::complete_chain` runs unchanged; the mode stays `Filter`, so
+/// the sync writes the new text into the field and keeps it focused.
+///
+/// No armed-confirm guard, unlike [`on_tick_clicked`] and
+/// `on_row_dropped`: the chain field and an armed confirm can never
+/// coexist by construction — the action bar (where `d`/`r`/`o` arm one)
+/// is withdrawn while `chain_entry`, and `i` itself is dropped while a
+/// confirm is armed — so there is nothing here for a stray click to
+/// clobber.
+fn on_completion_clicked(
+    shell: &mut ShellView,
+    position: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    let completed = draft_mut(shell).is_some_and(|draft| {
+        if position >= draft.visible_rows().len() {
+            return false;
+        }
+        draft.selected = position;
+        draft.complete_chain()
+    });
+    if completed {
+        shell.object_dialog_scroll.scroll_to_item(0);
+    } else {
+        set_notice(shell, "nothing to complete here".to_string());
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();

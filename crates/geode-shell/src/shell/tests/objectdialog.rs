@@ -4212,6 +4212,49 @@ fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContex
     );
 }
 
+/// §18.9.4: clicking a completion row is the mouse form of `tab` — the
+/// trailing segment is replaced by that row and the next opened with
+/// ` / `; the field stays focused and the pill still reads `chain`.
+#[gpui::test]
+fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    // Open a fresh segment so `lhu` is offered.
+    cx.simulate_input(" / ");
+    cx.run_until_parked();
+    let row = cx
+        .debug_bounds("objectdialog-item-lhu")
+        .expect("lhu is a completion");
+    cx.simulate_mouse_down(
+        gpui::point(row.origin.x + gpui::px(40.0), row.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "book / lhu / "
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.chain_entry),
+        "the field is still open"
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "book / lhu / ",
+        "the sync wrote the completion into the field"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-chain").is_some());
+}
+
 /// [`services_with_a_desk_view`]'s desk, with a SECOND measure the view
 /// does not carry, so `tree`'s available block has two rows rather than
 /// one.

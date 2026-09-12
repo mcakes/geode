@@ -7042,6 +7042,18 @@ run_mutation "objectdialog: a row dropped on itself is silent" \
   '        Step::Inert if false && src == dst => {}' \
   geode-shell a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order
 
+# ---- Mouse parity Task 7 (§18.9.4): a completion row click completes --
+
+# §18.9.4: a completion click completes. Mutated to a bare select, the
+# click moves the highlight and the field's text is unchanged.
+run_mutation "objectdialog: a completion row click completes the chain" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        draft.selected = position;
+        draft.complete_chain()' \
+  '        draft.selected = position;
+        true' \
+  geode-shell clicking_a_completion_row_completes_the_chain
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
