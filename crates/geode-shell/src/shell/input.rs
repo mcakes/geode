@@ -507,18 +507,19 @@ impl ShellView {
                     convert_keystroke(&event.keystroke)
                         .is_some_and(|ks| handler(self, &ks, window, cx))
                 });
-                // The first of `dialog::sync_dialog_text`'s three seams
-                // (spec §16.1): the handler above is a pure mutation of
-                // the dialog's own `mode`/`query`, and this is what makes
-                // gpui agree with it. Claimed or not: the rule is
-                // "reconcile after the handler", never "after a claim" —
-                // an unclaimed key that had moved the pure state would
-                // otherwise leave focus and the field behind it, and
-                // whether a given key claims is not this seam's business.
-                // Guarded by `self.modal.is_some()` because the
-                // unclaimed-`escape` branch below closes the modal, and
-                // `close_modal` owns focus once the dialog is gone; and
-                // placed ahead of both exits so neither path can skip it.
+                // The key-path seam of `dialog::sync_dialog_text`'s four
+                // seam classes (spec §16.1/§16.6): the handler above is
+                // a pure mutation of the dialog's own `mode`/`query`,
+                // and this is what makes gpui agree with it. Claimed or
+                // not: the rule is "reconcile after the handler", never
+                // "after a claim" — an unclaimed key that had moved the
+                // pure state would otherwise leave focus and the field
+                // behind it, and whether a given key claims is not this
+                // seam's business. Guarded by `self.modal.is_some()`
+                // because the unclaimed-`escape` branch below closes the
+                // modal, and `close_modal` owns focus once the dialog is
+                // gone; and placed ahead of both exits so neither path
+                // can skip it.
                 if self.modal.is_some() {
                     dialog::sync_dialog_text(self, window, cx);
                 }

@@ -1547,7 +1547,11 @@ are checked on a display against the artifact, not by test.
   spaces and a two-way mirror let the edit stage's filter leak into the
   browse query underneath it (caught in review: leaving the edit stage
   with a query typed re-entered browse with that same text silently
-  applied). Every verb — `space`, `x`, `shift+j`/`shift+k` — resolves
+  applied). The read half of this mirror is now a getter,
+  `effective_query`, added by the 2026-09-11 dialog-text-sync amendment
+  (interaction-model spec §16.2) for `dialog::sync_dialog_text` to read
+  alongside the `Change` subscription — `set_query` is unchanged and
+  stays the only writer. Every verb — `space`, `x`, `shift+j`/`shift+k` — resolves
   through `Draft::selected_row()`/`Draft::visible_rows()`, which index
   the *filtered* list, and a reorder that skips hidden neighbours says
   so (`"moved past 2 hidden"`) via `Draft::move_item`'s `Option<usize>`

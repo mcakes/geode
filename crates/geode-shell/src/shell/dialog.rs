@@ -468,8 +468,9 @@ pub fn open_shell_dialog_with_key<F>(
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
-    // The third of [`sync_dialog_text`]'s three seams (spec §16.1): a
-    // no-op for the mode-less dialogs the `focus_filter` branch above
+    // The open-door seam of [`sync_dialog_text`]'s four seam classes
+    // (spec §16.1/§16.6): a no-op for the mode-less dialogs the
+    // `focus_filter` branch above
     // just served, and the *initial* focus for a modal one — both
     // `keybindings_view::open` and `objectdialog::open` set their state
     // before calling this door, so the sync sees the mode they open in.
@@ -482,12 +483,13 @@ pub fn open_shell_dialog_with_key<F>(
 /// focus goes where [`crate::dialogmode::focus_target`] says, and the
 /// shared `Input` holds the dialog's effective query.
 ///
-/// Called at three seams and nowhere else — the tail of the modal branch
-/// in `ShellView::handle_key_down`, the tail of every mouse handler that
-/// mutates a dialog's own state (both dialogs' row clicks, and the object
-/// dialog's two confirm-button closures, none of which pass through the
-/// key path at all), and [`open_shell_dialog_with_key`] — so a transition
-/// site is a pure mutation and cannot forget the gpui half. A no-op when no modal
+/// Called at four seam classes and nowhere else — the tail of the modal
+/// branch in `ShellView::handle_key_down`, the tail of every mouse
+/// handler that can move a dialog's mode or query (both dialogs' row
+/// clicks, and the object dialog's two confirm-button closures, none of
+/// which pass through the key path at all), and
+/// [`open_shell_dialog_with_key`] — so a transition site is a pure
+/// mutation and cannot forget the gpui half. A no-op when no modal
 /// dialog with a mode is open; the filter-only dialogs (settings, picker,
 /// as-of) keep their own open-time focus (§16.4).
 ///

@@ -442,10 +442,13 @@ the open dialog's *effective* mode and query and makes gpui match:
   effective query; nothing when they already agree, so a keystroke the
   subscription has just mirrored costs a string compare and no write.
 
-It runs in exactly three places: the tail of the modal branch in
-`ShellView::handle_key_down` (after the dialog's `on_key` returns, claimed
-or not), the tail of each row-click handler, and `open_shell_dialog_with_key`
-(whose `focus_filter` parameter becomes the dialog's *initial mode*).
+**As-built correction (§16.6): this runs at four seam classes, not
+three** — the tail of the modal branch in `ShellView::handle_key_down`
+(after the dialog's `on_key` returns, claimed or not), the tail of each
+row-click handler that can move a dialog's mode or query, the object
+dialog's two confirm-button closures (`run_confirmed` is reachable by
+mouse, outside the key path), and `open_shell_dialog_with_key` (whose
+`focus_filter` parameter becomes the dialog's *initial mode*).
 Transition sites become pure mutations — `state.mode = DialogMode::Filter`,
 `draft.query.clear()` — and there is no second half to forget.
 
@@ -484,3 +487,89 @@ the sync reproduces every behaviour the hand-written sites had; one new
 window test per removed site class is not needed — the point is that the
 class is gone. Mutation entries: one per reconcile rule (focus in filter,
 shell in normal, shell while listening, text written only on difference).
+
+### 16.6 As built
+
+Tasks 1–3 implemented this amendment (commits 5237c17, 8b62ae2, 9fedd06,
+296a5b8). §16.1's "exactly three places" is corrected in place above to
+name four seam *classes*, not three — the true count once the object
+dialog's confirm buttons are counted honestly:
+
+1. the tail of the modal branch in `ShellView::handle_key_down`
+   (`shell/input.rs`), after the dialog's `on_key` returns, claimed or
+   not;
+2. `open_shell_dialog_with_key` (`shell/dialog.rs`), unconditionally, as
+   the dialog's initial reconcile;
+3. every row-click handler that can move a dialog's own mode or query —
+   the keybinding dialog's one, the object dialog's two
+   (`on_row_clicked`, `on_edit_row_clicked`);
+4. the object dialog's two confirm-button `on_click` closures (the "yes"
+   and the Cancel button built in `confirm_row`) — `run_confirmed` is
+   reachable by mouse from either button, and neither passes through
+   `handle_key_down` at all, so this class is the one the "three seams"
+   count originally missed.
+
+`press_verb` deliberately carries no sync of its own: arming a confirm
+(`d`/`r`/`o`) mutates `ObjectDialogState::confirm`, not `mode` or
+`query`, so there is nothing for a reconcile to do there — the seam list
+above is "handlers that can move mode or query", not "every mouse
+handler that mutates a dialog's own state" (§16.1's own prose is
+corrected to say so).
+
+`ObjectDialogState::effective_query` (Task 1, §16.2) is the *read* half
+of the one-way mirror 4c §18.6 already had; `set_query` remains the
+*write* half, called from the `Change` subscription exactly as before.
+Neither Task 2 nor Task 3 changed which stage's query the subscription
+writes into — only what reads it back.
+
+**Re-anchoring.** `keybindings: leaving filter mode clears the query`
+was **not** re-anchored, contrary to this plan's own premise: it anchors
+on `state.mode = DialogMode::Normal;`, the surviving pure line, not on
+the `shell.focus_handle.focus(..)` call Task 2 deleted beneath it, so
+the deletion left the anchor unique and live. `objectdialog: n empties a
+leftover browse filter before naming` was re-anchored onto
+`begin_naming`'s own `self.query.clear();` (carrying the two preceding
+lines, since that clear alone recurs in four other transitions in the
+file) once the render-side `set_value`/focus pair it used to pair with
+was gone. `objectdialog: an edit-stage click takes the keyboard off the
+filter` was re-anchored onto `on_edit_row_clicked`'s
+`dialog::sync_dialog_text` call, mutated back to the old unconditional
+`shell.focus_handle.focus(..)` blur it replaced — the same defect, one
+seam later. One new entry, `objectdialog: a mouse-confirmed delete
+leaves its filter text in the field`, covers seam class 4 above (anchored
+on the "yes" closure's sync call plus its preceding comment line, since
+the identical call recurs four times in the file and the Cancel
+closure's is indented identically). The two row-click syncs (seam class
+3) have no entries: no test can observe either today (the key-path
+sync already covers every transition those clicks can drive), and an
+entry with no discriminating test behind it is one of the four ways the
+harness header says an entry can lie.
+
+**One behaviour change, ruled a fix (2026-09-11).** Confirming a delete
+or revert with the mouse while filtering used to force focus to the
+shell root under a pill still reading `filter`, with the just-cleared
+query's stale text left sitting in the field — a one-switch disagreement
+between mode and focus with nothing to clear it until the trader pressed
+a key. It now leaves the dialog in filter mode, with an empty, focused
+field over the unfiltered browse list — the sync's ordinary behaviour
+for a `Filter`-mode transition, applied to a mouse-driven one for the
+first time. No test asserted the old behaviour; the ruling treats it as
+the class of defect this amendment exists to remove, not as a
+regression to preserve.
+
+**Incidental.** Eight functions in `objectdialog/render.rs`
+(`handle_browse_key`, `handle_naming_key`, `handle_edit_key`,
+`create_from_name`, `open_selected`, `enter_edit_stage`, `leave_edit`,
+`run_confirmed`) lost a `Window` parameter that only their deleted
+focus/`set_value` calls had needed — a future transition site added to
+any of them has no handle in scope with which to hand-write the old
+pairing, which is the point.
+
+**Deferred minors**, recorded rather than fixed: `KeybindingsState::
+set_query` clears `listening` as a side effect of the `Change`
+subscription, which is not a sync seam and is unreachable in practice —
+a capture in progress blurs the `Input`, so nothing routes a keystroke
+through `set_query` while `listening` is `Some`. And the sync's `value()`
+comparison allocates the whole field's text on every keystroke at the
+pinned gpui-component rev (`SharedString::new(self.text.to_string())`);
+a cheaper read may exist there, unexplored.

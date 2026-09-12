@@ -45,9 +45,8 @@
 //! [`open`]: that parameter is for a dialog with no mode). Before that
 //! one owner, each transition hand-wrote its own empty-string
 //! `set_value` and focus call beside the mutation, and a site that had
-//! one and not the
-//! other was a mode and a focus disagreeing — the defect class this
-//! section names.
+//! one and not the other was a mode and a focus disagreeing — the
+//! defect class this section names.
 //!
 //! ## Three stages, one routing shape
 //!
@@ -2489,6 +2488,7 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
 /// does and by the same means — [`dialog::sync_dialog_text`], which a
 /// click needs of its own because it never passes through the key path
 /// (spec §16.1).
+///
 /// Before §18.3 the edit stage could not be in [`DialogMode::Filter`] at
 /// all, so this handler focused the shell unconditionally; now that `/`
 /// reaches here, doing so would leave the pill reading `filter` and the

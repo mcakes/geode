@@ -890,9 +890,10 @@ fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
 /// list against freshly derived rows — rows are never cached, see the
 /// module doc). The gpui-facing wrapper around the pure
 /// [`click_selects_or_listens`], and it moves focus the same way
-/// [`handle_key`] does — through [`dialog::sync_dialog_text`], the third
-/// of that function's three seams (spec §16.1), which a click needs
-/// because it never passes through the key path at all. A click that
+/// [`handle_key`] does — through [`dialog::sync_dialog_text`], the
+/// row-click seam of that function's four seam classes (spec
+/// §16.1/§16.6), which a click needs because it never passes through
+/// the key path at all. A click that
 /// starts listening therefore blurs the filter so the capture sees raw
 /// keystrokes, and one that only selects hands focus back to whichever
 /// surface the current mode owns — the filter in [`DialogMode::Filter`]
