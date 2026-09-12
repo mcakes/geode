@@ -501,7 +501,8 @@ pub struct ShellView {
     /// **Focused or blurred is per-dialog state, not a constant.** A
     /// focused `Input` consumes bare letters as text before any raw key
     /// listener sees them, so every surface that wants letters as verbs
-    /// must blur this field first. Three states, all live today:
+    /// must blur this field first. Three states, of which the first is
+    /// now history and the other two are live:
     ///
     /// - the settings dialog was filter-first — it opened with this
     ///   focused (`open_shell_dialog_with_key`'s `focus_filter: true`)

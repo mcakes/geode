@@ -153,7 +153,8 @@ pub struct ShellModal {
     /// What a dialog paints in the title row between the title and the
     /// close button (§18.1): a count crumb, the mode pill. Built per
     /// frame like `build`, and for the same `&ShellView` reason. `None`
-    /// for a dialog with nothing to say there (settings).
+    /// for a dialog with nothing to say there (the picker, the as-of
+    /// selector).
     pub title_extra: Option<TitleExtraBuilder>,
     /// This modal's optional key-handling seam (Part B) — see
     /// [`ModalKeyHandler`]'s own doc comment. Both shipped dialogs (the
@@ -476,9 +477,10 @@ pub fn open_shell_dialog_with_key<F>(
     // The open-door seam of [`sync_dialog_text`]'s five seam classes
     // (spec §16.1/§16.6, folded to five by §17.3): a no-op for the
     // mode-less dialogs the `focus_filter` branch above
-    // just served, and the *initial* focus for a modal one — both
-    // `keybindings_view::open` and `objectdialog::open` set their state
-    // before calling this door, so the sync sees the mode they open in.
+    // just served, and the *initial* focus for a modal one —
+    // `keybindings_view::open`, `objectdialog::open` and
+    // `settings_view::open` all set their state before calling this
+    // door, so the sync sees the mode they open in.
     sync_dialog_text(view, window, cx);
 
     cx.notify();

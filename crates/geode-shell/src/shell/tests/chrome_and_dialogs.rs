@@ -538,7 +538,9 @@ fn the_settings_dialog_opens_in_normal_mode_and_letters_do_not_type(cx: &mut gpu
     );
     assert!(
         shell.read_with(&cx, |s, _| s.modal.is_some()),
-        "and a stray letter is claimed and dropped, never passed to the shell"
+        "and the dialog is still open (a sanity check — the modal branch \
+         returns whether or not the key was claimed, so this cannot tell \
+         Drop from PassThrough; `route`'s own pure test pins that)"
     );
 }
 
@@ -793,21 +795,32 @@ fn clicking_the_settings_frozen_filter_row_enters_filter_mode(cx: &mut gpui::Tes
         dialog_filter_is_focused(&shell, &mut cx),
         "the sync handed the keyboard to the Input"
     );
-    cx.simulate_input("j");
+    // A real keystroke, not `simulate_input`: the claim is that `j` now
+    // goes through dispatch to the focused field rather than to `route`
+    // as a motion, and only key dispatch can show that.
+    cx.simulate_keystrokes("j");
     cx.run_until_parked();
     assert_eq!(
         shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().query.clone()),
         "j",
         "and typing now filters rather than moving"
     );
+    assert_eq!(
+        shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().selected),
+        0,
+        "the j was text, not a motion"
+    );
 }
 
-/// A row click is a sync seam (§16.1 class 3): it must hand focus back to
-/// whichever surface the current mode owns. In normal mode that is the
-/// shell root — a click that focused the filter would silently defeat
-/// normal mode; in filter mode it is the field, so typing keeps
-/// filtering. Both halves in one test so a handler hardcoded either
-/// way is caught.
+/// A row click is a sync seam (§16.1 class 3) and must leave focus with
+/// whichever surface the current mode owns: the shell root in normal
+/// mode, the field in filter mode. Honest scope: on this dialog the
+/// click changes neither mode nor query and a mouse-down on a plain row
+/// moves gpui focus nowhere, so the sync in `on_row_clicked` is
+/// unobservable here (see its doc comment) — this test is green with or
+/// without it. What it does catch is a handler that hardcodes a focus
+/// move either way (the pre-modal handler focused the filter
+/// unconditionally, which would silently defeat normal mode).
 #[gpui::test]
 fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
@@ -1028,8 +1041,13 @@ fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::Tes
     assert!(open, "enter must not close the dialog");
 }
 
+/// Escape from a fresh dialog (normal mode, empty query) is the ladder's
+/// last rung: it closes. Focus is already on the shell root in normal
+/// mode, so the focus assertion here is a sanity check, not a restore —
+/// the filter-mode close path (`/`, then the full ladder) is what
+/// `settings_escape_walks_the_ladder_one_rung_at_a_time` covers.
 #[gpui::test]
-fn escape_closes_the_settings_dialog_and_restores_shell_focus(cx: &mut gpui::TestAppContext) {
+fn escape_closes_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("escape");
     shell.read_with(&cx, |shell, _| {
@@ -1038,7 +1056,7 @@ fn escape_closes_the_settings_dialog_and_restores_shell_focus(cx: &mut gpui::Tes
     });
     assert!(
         cx.update(|window, cx| shell.read(cx).focus_handle.is_focused(window)),
-        "focus lands back on the shell root"
+        "the shell root holds focus after the close"
     );
 }
 

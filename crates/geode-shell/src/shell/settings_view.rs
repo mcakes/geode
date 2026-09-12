@@ -772,10 +772,13 @@ fn handle_key(
 /// cycles that row's value forward. Ends in [`dialog::sync_dialog_text`],
 /// the row-click seam of that function's seam classes (spec §16.1/§17.1
 /// rule 3): a click never passes through the key path, so this is its
-/// transition's only tail, and focus must land back on whichever surface
-/// the current mode owns — the shell root in normal mode (a click that
-/// focused the filter would silently defeat normal mode), the field in
-/// filter mode so typing keeps filtering.
+/// transition's only tail. On this dialog the sync is rule-3 uniformity
+/// rather than a load-bearing move — [`click_selects_or_steps`] changes
+/// neither mode nor query, and a mouse-down on a plain row moves gpui
+/// focus nowhere, so there is nothing for the sync to correct today. It
+/// is here so that a future click that DOES change the mode (a
+/// mouse-parity verb, say) cannot forget the gpui half, and so a reader
+/// auditing the seam classes finds every row click ending the same way.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: SettingId,
@@ -802,8 +805,8 @@ fn on_row_clicked(
 }
 
 /// The [`dialog::ShellModal::build`] closure body: the shared filter row
-/// (`dialog::filter_row`, never frozen — this dialog has no listening
-/// state to freeze it for) over a scrollable row list (title + muted
+/// (`dialog::filter_row`, frozen throughout normal mode — see the
+/// `frozen_query` note at the end of this function) over a scrollable row list (title + muted
 /// category on the left, with fuzzy-match highlighting; the current value
 /// label on the right in the mono data face) plus a footer hint. `entity`
 /// is the `Entity<ShellView>` every row's click handler captures to reach
@@ -1339,7 +1342,8 @@ mod tests {
         assert_eq!(
             route(n, true, &ks("v", Modifiers::CTRL)),
             Drop,
-            "a shell chord never reaches the shell through an open modal"
+            "a chord normal mode does not name is dropped like any other \
+             unclaimed key (the modal branch would stop it regardless)"
         );
     }
 

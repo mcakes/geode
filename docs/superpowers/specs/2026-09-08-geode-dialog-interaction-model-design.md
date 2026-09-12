@@ -214,7 +214,8 @@ which exist or are cheap:
 ## 10. What is untouched
 
 - The palette, settings, the picker and the as-of selector: no change of
-  any kind.
+  any kind. (Settings has since gone modal — §18, 2026-09-12; the other
+  three stand.)
 - `[ui] find_style` and `crate::vimfind`: still the blotter's setting,
   still unread by dialogs. This design does not restore the vim *find
   session* model — `/` here enters the same fuzzy filter that ships
@@ -234,7 +235,8 @@ which exist or are cheap:
 2. **Two kinds of dialog in one app.** A user who learns the config
    dialogs will press `j` in settings and type a `j` into its filter.
    The mode indicator makes the difference visible before the keystroke
-   rather than after.
+   rather than after. (Resolved the other way on 2026-09-12: §18 made
+   settings modal, so `j` moves there too.)
 3. **`space` as toggle.** It is free in normal mode and universal for
    checkbox lists, but it is also the key most likely to be pressed by
    someone who thinks they are still typing. The mode indicator is the
@@ -474,9 +476,10 @@ every combination. `sync_dialog_text` only applies it.
 
 ### 16.4 Untouched
 
-The filter-only dialogs — settings, picker, as-of — never blur and have no
-mode; they keep focusing the `Input` on open and are not routed through the
-sync. `init_reclaimed_keybindings` is unchanged. The `Change` subscription
+The filter-only dialogs — picker, as-of, and settings until §18 made it
+modal on 2026-09-12 (it now has a third arm in the sync) — never blur and
+have no mode; they keep focusing the `Input` on open and are not routed
+through the sync. `init_reclaimed_keybindings` is unchanged. The `Change` subscription
 keeps its per-dialog routing.
 
 ### 16.5 Tests and harness
@@ -605,8 +608,9 @@ no way to reorder or hide at all.
 ### 17.1 The rules
 
 Three rules, each applying to every modal dialog (§3) and to none of the
-filter-only ones (§10 stands: the palette, settings, the picker and the
-as-of selector are untouched, and they never freeze their filter row):
+filter-only ones (§10 stands: the palette, the picker and the as-of
+selector are untouched, and they never freeze their filter row; settings
+joined the modal side in §18 and these rules apply to it as §18.2 says):
 
 1. **A click on the frozen filter row enters filter mode.** The frozen
    row (`dialog::filter_row`'s `FrozenFilter` branch) is what every

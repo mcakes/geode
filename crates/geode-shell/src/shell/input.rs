@@ -609,7 +609,8 @@ impl ShellView {
                     // (`Window::dispatch_keystroke`: it runs only when the
                     // key event still `propagate`s after every listener),
                     // and the dialogs' shared filter field is focused
-                    // whenever a list dialog is open — so without this,
+                    // whenever a list dialog is in filter mode (or is one
+                    // of the filter-only dialogs) — so without this,
                     // `enter` (`key_char = "\n"`) would land in the filter
                     // right after the dialog acted on it, and the
                     // resulting `InputEvent::Change` would reset the very
