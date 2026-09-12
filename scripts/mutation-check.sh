@@ -7453,6 +7453,19 @@ run_mutation "objectdialog: begin_text_entry seeds the query from the row" \
   geode-shell \
   begin_text_entry_seeds_the_query_from_a_number_row
 
+# Review round 1's Important: while a plain field is open, `query` is the
+# value being typed into IT, not a filter over the rows below — feeding
+# it back into `rank` reproduces the original defect (a seeded `Number`
+# like "3" matches no row label, so the list under the field paints
+# empty, and the cursor is left indexing a position the real,
+# still-narrowed list disagrees with).
+run_mutation "objectdialog: a plain text field leaves the rows unfiltered" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                crate::listfilter::rank(&labels, "")' \
+  '                crate::listfilter::rank(&labels, &self.query)' \
+  geode-shell \
+  a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -1131,10 +1131,14 @@ fn open_text_field(shell: &mut ShellView) {
 /// transition in this dialog is settled.
 fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     let completions = draft_mut(shell).is_some_and(|d| d.chain_entry());
-    // The list changes length on every transition out of the field (the
-    // completions, where there are any, give way to the full row list)
-    // with the cursor put back on row 0, so the viewport follows each
-    // time — the `ClearQuery` rung's own reasoning, for the same reason.
+    // The chain field's list changes length on every transition out of
+    // it (the completions give way to the full row list) with the
+    // cursor put back on row 0, so the viewport follows — the
+    // `ClearQuery` rung's own reasoning. A plain field's row list is the
+    // same length and order throughout (`Draft::visible_rows`, §19.1),
+    // and `Draft::cancel_text_entry` leaves `selected` on the row that
+    // was open, so the viewport should follow the CURSOR there, the same
+    // way applying does, not jump to row 0.
     if ks.key == "escape" {
         if let Some(state) = shell.object_dialog.as_mut()
             && let Some(draft) = state.draft.as_mut()
@@ -1142,7 +1146,11 @@ fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             draft.cancel_text_entry();
             state.mode = DialogMode::Normal;
         }
-        shell.object_dialog_scroll.scroll_to_item(0);
+        if completions {
+            shell.object_dialog_scroll.scroll_to_item(0);
+        } else {
+            scroll_to_cursor(shell);
+        }
         cx.notify();
         return true;
     }
@@ -2359,12 +2367,15 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 // grip at all, so both are withdrawn outright here rather
                 // than painted as an inert placeholder — there is no
                 // second list for a spacer to keep aligned with once the
-                // whole column is gone. A plain value field (§19.1) never
-                // reaches this branch at all — its own row is the object
-                // header, not a list row — but the withdrawal still reads
-                // "is any field open" rather than "is the chain field
-                // open" so a future item-level text field withdraws the
-                // same way without a second condition to remember.
+                // whole column is gone. This branch only ever reaches an
+                // item row (the tick/grip belong to the object's own
+                // list, per this comment's opening line) — a plain value
+                // field never opens on one (§19.1 only opens it on a
+                // `Field` row) — but the withdrawal still reads "is any
+                // field open" rather than "is the chain field open", so
+                // a future item-level text field (a column's width, Part
+                // 2c) withdraws the same way without a second condition
+                // to remember.
                 let grip_and_tick = if draft.text_entry.is_some() {
                     None
                 } else {

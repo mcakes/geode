@@ -922,11 +922,27 @@ impl Draft {
     /// `sort_by_key` afterwards restores row order among the survivors,
     /// discarding nothing but the score-derived ordering.
     pub fn visible_rows(&self) -> Vec<crate::listfilter::Ranked> {
-        // §18.8: with the chain field open, `query` is the chain being
-        // typed and the rows are its completions — see
-        // [`Draft::chain_entry`].
-        if self.chain_entry() {
-            return groupings::chain_candidates(self);
+        // §19.1: while any field is open, `query` is the value being
+        // typed into IT, not a filter over the rows — so the rows below
+        // must not be narrowed by it. The chain field (§18.8) is the one
+        // case where the rows really are a search: its own `query` is
+        // the chain being typed and the rows are its completions. A
+        // plain field's rows stay every edit row, unfiltered and in row
+        // order, so the trader sees the row they are editing highlighted
+        // in place (spec §19.1: "the rows below stay the edit rows with
+        // the edited one highlighted"). An edit-stage filter that was
+        // applied before `i` is lost the moment the field opens (the
+        // seed overwrites `query`) — the same rule the chain field
+        // already has (§18.8) — so there is nothing left to apply here
+        // even if this branch tried to.
+        if let Some(entry) = self.text_entry {
+            return if entry.completions {
+                groupings::chain_candidates(self)
+            } else {
+                let labels: Vec<String> =
+                    self.rows().into_iter().map(|r| self.row_label(r)).collect();
+                crate::listfilter::rank(&labels, "")
+            };
         }
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
         let mut ranked = crate::listfilter::rank(&labels, &self.query);
@@ -1079,6 +1095,13 @@ impl Draft {
     /// (`Domain::text_editable`), checked by the caller before this —
     /// Groupings' `slot` and Scopes' two summaries are `Text` rows that
     /// must stay read-only, and the draft has no domain to ask.
+    ///
+    /// `follow(row)` after setting `text_entry`, not before: once the
+    /// field is open, [`Draft::visible_rows`] answers with every row
+    /// unfiltered rather than the query-filtered list `selected` indexed
+    /// a moment ago, so `row`'s position there can differ from
+    /// `self.selected`'s old value — that is exactly what leaves the
+    /// edited row unhighlighted if this is skipped.
     pub fn begin_text_entry(&mut self) -> Step {
         let Some(row @ EditRow::Field(index)) = self.selected_row() else {
             return Step::Inert;
@@ -1093,6 +1116,7 @@ impl Draft {
             row,
             completions: false,
         });
+        self.follow(row);
         Step::Changed
     }
 
@@ -1100,10 +1124,24 @@ impl Draft {
     /// value is exactly as it was — nothing here was applied. The chain
     /// field's cancel is this same function (`groupings.rs` re-exports
     /// it under its old name).
+    ///
+    /// A plain field leaves `selected` on the row it was editing
+    /// (`follow(row)`, against the now-unfiltered list `text_entry`
+    /// being cleared restores) — the same place [`Draft::apply_text_entry`]
+    /// leaves it, so cancelling and applying agree about where the
+    /// cursor ends up. The chain field keeps its own `selected = 0`: its
+    /// rows go from completions to the full edit-row list, a change
+    /// nothing sensible to "follow" survives.
     pub fn cancel_text_entry(&mut self) {
-        self.text_entry = None;
+        let entry = self.text_entry.take();
         self.query.clear();
-        self.selected = 0;
+        match entry {
+            Some(TextEntry {
+                completions: false,
+                row,
+            }) => self.follow(row),
+            _ => self.selected = 0,
+        }
     }
 
     /// `enter` in a plain text field: the typed text becomes the row's
@@ -3933,5 +3971,97 @@ mod tests {
         assert_eq!(draft.text_entry, None);
         assert!(draft.query.is_empty());
         assert_eq!(draft.fields[1].kind, FieldKind::Text("30s".to_string()));
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "cancel leaves the cursor on the row it was editing, same as apply"
+        );
+    }
+
+    /// Review round 1's Important: `query` inside an open plain field is
+    /// the value being typed, not a filter, so [`Draft::visible_rows`]
+    /// must not narrow the rows by it — narrowing would paint an empty
+    /// list the moment a seeded `Number` (`"3"`) matches no row label,
+    /// and would leave `selected` indexing a position the unfiltered
+    /// list disagrees with. A filter applied before `i` is opened is
+    /// lost with it (the seed overwrites `query`), the same rule the
+    /// chain field already has — this test's `draft.query = "interval"`
+    /// beforehand is there to prove exactly that: opening the field on
+    /// the one row that filter left visible must still show every row
+    /// underneath, not the one-row filtered list frozen in place.
+    #[test]
+    fn a_plain_field_leaves_the_rows_unfiltered_and_the_edited_row_selected() {
+        let mut draft = Draft::new_object(
+            "x",
+            vec![
+                Field {
+                    key: "polls".to_string(),
+                    label: "Stable polls".to_string(),
+                    kind: FieldKind::Number {
+                        value: 3,
+                        min: 1,
+                        max: 100,
+                    },
+                    dest: Destination::Doc,
+                },
+                Field {
+                    key: "interval".to_string(),
+                    label: "Poll interval".to_string(),
+                    kind: FieldKind::Text("30s".to_string()),
+                    dest: Destination::Doc,
+                },
+                Field {
+                    key: "on".to_string(),
+                    label: "On".to_string(),
+                    kind: FieldKind::Bool(true),
+                    dest: Destination::Doc,
+                },
+            ],
+            toml::Table::new(),
+        );
+        draft.query = "interval".to_string();
+        draft.selected = 0;
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "the pre-existing filter's only surviving row"
+        );
+
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "every edit row, not just the ones the old filter matched"
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "the row being edited is the one highlighted"
+        );
+
+        draft.cancel_text_entry();
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "still unfiltered after closing — the old filter does not come back"
+        );
+        assert_eq!(
+            draft.selected_row(),
+            Some(EditRow::Field(1)),
+            "cancel leaves the cursor where the field left it"
+        );
+
+        // Applying agrees: reopening and typing a valid value still
+        // leaves the row list unfiltered and the cursor on that row.
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        draft.query = "45s".to_string();
+        let ok = |_: &str, t: &str| Ok(t.to_string());
+        assert_eq!(draft.apply_text_entry(&ok), Step::Changed);
+        assert_eq!(
+            draft.visible_rows().len(),
+            draft.rows().len(),
+            "unchanged after applying too"
+        );
+        assert_eq!(draft.selected_row(), Some(EditRow::Field(1)));
     }
 }
