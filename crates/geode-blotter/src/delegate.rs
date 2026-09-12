@@ -132,11 +132,19 @@ impl BlotterDelegate {
     /// rather than rebuilt per call.
     fn ensure_numbers(&mut self) {
         let window = self.cache.window();
-        let stamp = (window.clone(), self.cursor.row, self.line_numbers);
+        let mode = self.line_numbers;
+        let cursor = self.cursor.row;
+        // Only `rel` reads the cursor, so only `rel` stamps it: an `on`
+        // gutter must not rebuild identical strings on every `j`/`k`
+        // (review Minor 1).
+        let stamped_cursor = match mode {
+            LineNumbers::Relative => cursor,
+            _ => usize::MAX,
+        };
+        let stamp = (window.clone(), stamped_cursor, mode);
         if self.numbers_stamp.as_ref() == Some(&stamp) {
             return;
         }
-        let (cursor, mode) = (self.cursor.row, self.line_numbers);
         self.numbers.clear();
         self.numbers.extend(window.map(|row| {
             gutter_number(mode, row, cursor)
@@ -691,6 +699,12 @@ impl TableDelegate for BlotterDelegate {
             // rebuilt only when `ensure_numbers`'s stamp changes.
             if self.line_numbers != LineNumbers::Off {
                 let (fg, muted) = (theme.foreground, theme.muted_foreground);
+                // The off branch's `pl(indent)` replaces the root's
+                // `px_1` left padding (a depth-0 row sits flush); the
+                // gutter must start flush too, or the tree text loses
+                // that padding's worth of the room `column()` widened
+                // by (review Minor 2).
+                el = el.pl(px(0.));
                 self.ensure_numbers();
                 let text = row_ix
                     .checked_sub(self.cache.window().start)

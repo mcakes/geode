@@ -4930,7 +4930,15 @@ run_mutation "line numbers: relative is a distance, not a signed offset" \
   '        LineNumbers::Relative => Some(row.saturating_sub(cursor)),' \
   geode-shell relative_is_the_distance_from_the_cursor_in_both_directions
 
-run_mutation "blotter gutter: a cursor move re-derives the numbers (stamp compares the cursor)" \
+run_mutation "blotter gutter: a rel cursor move re-derives the numbers (stamp carries the cursor)" \
+  crates/geode-blotter/src/delegate.rs \
+  '            LineNumbers::Relative => cursor,
+            _ => usize::MAX,' \
+  '            LineNumbers::Relative => usize::MAX,
+            _ => usize::MAX,' \
+  geode-blotter the_gutter_follows_the_mode_and_the_cursor
+
+run_mutation "blotter gutter: the stamp compares, not merely exists" \
   crates/geode-blotter/src/delegate.rs \
   '        if self.numbers_stamp.as_ref() == Some(&stamp) {' \
   '        if self.numbers_stamp.is_some() {' \
