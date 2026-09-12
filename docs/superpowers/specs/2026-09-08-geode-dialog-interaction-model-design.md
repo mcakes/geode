@@ -650,9 +650,13 @@ as-of selector are untouched, and they never freeze their filter row):
 
 ### 17.2 What does not change
 
-- Filter mode's own mouse behaviour: a click on a row while filtering
-  still follows the current mode for focus (the field keeps the caret),
-  and now also opens or captures per rule 2.
+- Filter mode's own mouse behaviour, per dialog — the two dialogs do
+  not agree, and rule 2's own `listening` >> `mode` precedence
+  (`dialogmode::focus_target`) is why: on the object dialog a filtered
+  click still follows the current mode for focus (the field keeps the
+  caret) and also opens the row's edit stage; on the keybinding dialog
+  a filtered click *captures* — capture outranks mode, so the click
+  takes the keys off the field exactly as `enter` would.
 - The escape ladder (§5), the vocabulary (§4), the pill.
 - No mouse verb has a meaning its keyboard twin lacks. The mouse gets
   parity, never a private capability — the charter's "every action must
@@ -744,7 +748,20 @@ transition — the frozen-row click above, both dialogs' row clicks
 above, and (4c §18.9, see §18.9.6) the edit stage's tick click, row
 drop and chain-field completion click. `press_verb` remains the one
 audited exception, since it only ever arms a `Confirm` and moves
-neither mode nor query.
+neither mode nor query. Reaching the sync at the end of a mouse handler
+is conditional on getting past that handler's own guards, though — the
+tick and drop handlers each open with a notice-clear and an
+armed-confirm early return (§18.9.6's "Ruling 2") that returns before
+the sync, mutating nothing the sync would have read; that is a claimed-
+and-dropped click, not a class the sync forgot.
+
+One consequence worth noting on a dialog Rule 3 does not otherwise
+touch: the keybinding dialog's `d`/`r` verbs are keyboard-only, and
+Rule 2's `click_listens` above means a click on a row there always
+enters capture — so `d` typed right after such a click is a keystroke
+being *bound*, not the delete verb. `escape` cancels the capture and
+nothing is written until `enter`; this is §17.2 rule 2 working as
+designed, not a gap this rule closes.
 
 **Verification.** `cargo test -p geode-shell` was green after every task
 in the range (culminating at 1148 lib tests plus the `keymap_integration`

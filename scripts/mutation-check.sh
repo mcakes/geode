@@ -6990,6 +6990,22 @@ run_mutation "objectdialog: a tick click is claimed and dropped while a confirm 
     if position >= draft.visible_rows().len() {' \
   geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
 
+# Review finding: the tick's own mouse-down must stop propagation, or the
+# same click falls through to the row's on_mouse_down (on_edit_row_clicked,
+# which carries no confirm guard) and moves the cursor to the tick's row.
+# Mutated away, the tick click still does nothing to the OBJECT while a
+# confirm is armed (on_tick_clicked's own guard still holds), but it now
+# also moves `draft.selected` — the half of the behaviour only this entry
+# covers.
+run_mutation "objectdialog: the tick's click does not stop propagation" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            cx.stop_propagation();
+                            entity_for_tick.update(cx, |shell, cx| {' \
+  '.on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            entity_for_tick.update(cx, |shell, cx| {' \
+  geode-shell a_tick_click_does_nothing_while_a_confirm_is_armed
+
 # ---- Mouse parity Task 6 (§18.9.1, §18.9.3): dragging a row --------------
 
 # §18.9.1: the payload is by NAME. Mutated to ignore the source and act

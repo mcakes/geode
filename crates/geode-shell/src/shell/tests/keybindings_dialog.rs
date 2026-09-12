@@ -800,7 +800,9 @@ fn cancelling_a_capture_restores_focus_to_the_mode_that_started_it(cx: &mut gpui
 /// same, so a click in normal mode leaves the filter exactly as blurred
 /// as it already was.
 #[gpui::test]
-fn a_selecting_click_in_normal_mode_leaves_the_filter_blurred(cx: &mut gpui::TestAppContext) {
+fn a_click_in_normal_mode_leaves_the_filter_blurred_because_it_captures(
+    cx: &mut gpui::TestAppContext,
+) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
     cx.update(|window, cx| {
         let _ = window.draw(cx);

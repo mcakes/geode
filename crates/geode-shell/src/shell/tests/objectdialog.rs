@@ -4037,6 +4037,8 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
         "d arms delete on an object the user layer itself defines"
     );
 
+    let selected_before = edit_draft(&shell, &cx, |d| d.selected);
+
     let tick = cx
         .debug_bounds("objectdialog-tick-npv")
         .expect("npv paints a tick");
@@ -4051,6 +4053,12 @@ fn a_tick_click_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppCont
         edit_draft(&shell, &cx, |d| d.confirm),
         Some(objectdialog::Confirm::Delete),
         "the armed delete must not be clobbered by a tick click behind it"
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        selected_before,
+        "the tick's stop_propagation must keep the click from falling through \
+         to on_edit_row_clicked, which would move the cursor to npv's row"
     );
     assert!(
         edit_draft(&shell, &cx, |d| {

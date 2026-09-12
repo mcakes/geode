@@ -2198,6 +2198,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             continue;
         };
         let is_selected = position == draft.selected;
+        // Every row carries the same 2px top border, transparent unless
+        // `drag_over` recolours it — reserving the space up front means a
+        // hover only repaints the colour, never reflows the rows below it.
         let mut element = h_flex()
             .w_full()
             .items_center()
@@ -2205,7 +2208,9 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
             .gap_3()
             .px_2()
             .py_1()
-            .rounded(px(4.));
+            .rounded(px(4.))
+            .border_t_2()
+            .border_color(gpui::transparent_black());
         if is_selected {
             element = element.bg(theme.selection).text_color(theme.primary);
         }
@@ -2290,58 +2295,58 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 // grip nor the tick is part of what the filter ranked
                 // (`Draft::row_label`); only the name itself is
                 // highlighted.
-                let grip = if own {
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .w(px(11.))
-                        .child("⋮")
-                        .into_any_element()
+                //
+                // In the chain field (§18.8) the rows are completions, not
+                // list members: §18.9.2 says such a row carries no tick or
+                // grip at all, so both are withdrawn outright here rather
+                // than painted as an inert placeholder — there is no
+                // second list for a spacer to keep aligned with once the
+                // whole column is gone.
+                let grip_and_tick = if draft.chain_entry {
+                    None
                 } else {
-                    div().w(px(11.)).into_any_element()
-                };
-                // §18.9.2: the tick is the toggle. Its mouse-down stops
-                // propagation so the row's own select does not double-
-                // fire; the handler moves the cursor here itself and then
-                // walks `space`'s path, so the mouse and the key cannot
-                // disagree.
-                let entity_for_tick = entity.clone();
-                let tick_position = position;
-                let tick_name = entry.name.clone();
-                let mut tick = div()
-                    .id(gpui::SharedString::from(format!(
-                        "objectdialog-tick-{}",
-                        entry.name
-                    )))
-                    .font_family(crate::fonts::MONO)
-                    .w(px(13.))
-                    .text_color(if entry.included {
-                        theme.success
+                    let grip = if own {
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .w(px(11.))
+                            .child("⋮")
+                            .into_any_element()
                     } else {
-                        theme.muted_foreground
-                    })
-                    .debug_selector(move || format!("objectdialog-tick-{tick_name}"));
-                // In the chain field (§18.8) the rows are completions and
-                // the tick is a painted state, not a control (§18.9.2).
-                if !draft.chain_entry {
-                    tick = tick.cursor_pointer().on_mouse_down(
-                        MouseButton::Left,
-                        move |_event, window, cx| {
+                        div().w(px(11.)).into_any_element()
+                    };
+                    // §18.9.2: the tick is the toggle. Its mouse-down
+                    // stops propagation so the row's own select does not
+                    // double-fire; the handler moves the cursor here
+                    // itself and then walks `space`'s path, so the mouse
+                    // and the key cannot disagree.
+                    let entity_for_tick = entity.clone();
+                    let tick_position = position;
+                    let tick_id = format!("objectdialog-tick-{}", entry.name);
+                    let tick = div()
+                        .id(gpui::SharedString::from(tick_id.clone()))
+                        .font_family(crate::fonts::MONO)
+                        .w(px(13.))
+                        .text_color(if entry.included {
+                            theme.success
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .debug_selector(move || tick_id)
+                        .cursor_pointer()
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             cx.stop_propagation();
                             entity_for_tick.update(cx, |shell, cx| {
                                 on_tick_clicked(shell, tick_position, window, cx);
                             });
-                        },
-                    );
+                        })
+                        .child(if entry.included { "✓" } else { "·" })
+                        .into_any_element();
+                    Some((grip, tick))
+                };
+                let mut name_row = h_flex().pl_4().gap_1().items_center();
+                if let Some((grip, tick)) = grip_and_tick {
+                    name_row = name_row.child(grip).child(tick);
                 }
-                let tick = tick
-                    .child(if entry.included { "✓" } else { "·" })
-                    .into_any_element();
-                let mut name_row = h_flex()
-                    .pl_4()
-                    .gap_1()
-                    .items_center()
-                    .child(grip)
-                    .child(tick);
                 if !entry.included {
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
@@ -2427,8 +2432,11 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     // other dragged value passing over the modal must not
                     // land on a column list.
                     .can_drop(|value, _window, _cx| value.downcast_ref::<RowDrag>().is_some())
+                    // Only the colour changes here — the 2px top border
+                    // itself is reserved on every row unconditionally
+                    // above, so a hover never reflows the rows below it.
                     .drag_over::<RowDrag>(move |style, _drag, _window, cx| {
-                        style.border_t_2().border_color(cx.theme().primary)
+                        style.border_color(cx.theme().primary)
                     })
                     .on_drop(move |dropped: &RowDrag, window, cx| {
                         let dropped = dropped.clone();
@@ -2951,6 +2959,10 @@ fn on_tick_clicked(
 /// is withdrawn while `chain_entry`, and `i` itself is dropped while a
 /// confirm is armed — so there is nothing here for a stray click to
 /// clobber.
+///
+/// On a failed completion (`complete_chain` returns `false` — the typed
+/// segment matched nothing, say) `selected` stays on the clicked row,
+/// mirroring what a failed `tab` leaves behind.
 fn on_completion_clicked(
     shell: &mut ShellView,
     position: usize,

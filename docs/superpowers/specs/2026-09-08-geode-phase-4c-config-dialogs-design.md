@@ -2190,10 +2190,12 @@ not double-fire) and dispatches to `on_tick_clicked`, which parks the
 cursor on the row and then runs the identical `NormalCommand::Toggle`
 body `space` runs — `Draft::toggle_selected`, `maybe_refresh_available`,
 `revalidate`, `commit_or_confirm` on `Changed`, `refuse_step` on
-`Refused`, `set_notice` on `Inert`. Excluded while `draft.chain_entry`
-is set, since chain-field rows are completions with no tick to click.
-Window tests: `clicking_a_tick_hides_the_column_and_parks_the_cursor_
-there`, `clicking_an_available_rows_tick_adds_it`.
+`Refused`, `set_notice` on `Inert`. Withdrawn entirely — grip and tick
+both — while `draft.chain_entry` is set: §18.9.2 says a completion row
+carries no tick or grip, and the fix wave that closed the gap (below)
+removes the elements outright rather than leaving an inert glyph
+behind. Window tests: `clicking_a_tick_hides_the_column_and_parks_the_
+cursor_there`, `clicking_an_available_rows_tick_adds_it`.
 
 **Ruling 2** (Task 5, standing for every acting mouse handler): while
 `Draft::confirm` is armed the keyboard path drops every key but
@@ -2226,7 +2228,12 @@ handler: it applies Ruling 2's guard first, then dispatches `Draft::
 drop_row` — `Changed` runs `revalidate`/`scroll_to_cursor`/`commit_or_
 confirm`, `Refused` calls `set_notice`, `Inert` gives the two
 spec-quoted notices or silence — and ends in exactly one `dialog::sync_
-dialog_text` call. Window tests: `the_drop_handler_reorders_and_writes`,
+dialog_text` call. That "exactly one" is a property of the path that
+reaches the match, not of the function as a whole: Ruling 2's own
+guards (notice-clear only; three early returns in `on_tick_clicked`,
+two in `on_row_dropped`) return before the sync, having mutated nothing
+the sync reads — there is nothing for it to write back on a claimed-
+and-dropped click. Window tests: `the_drop_handler_reorders_and_writes`,
 `a_row_drop_does_nothing_while_a_confirm_is_armed`,
 `a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order` (whose
 second half also drops the same available row on itself, proving
@@ -2276,18 +2283,18 @@ pure draft.
 **Display-check list**, unverifiable without a real window and carried
 forward alongside §18.6's own pending items: the drag ghost's
 appearance and its lack of a width cap; the `drag_over` top border
-(2 px, `primary`), which shifts rows as the drag passes over them;
-cursor styles (`cursor_text()` on the frozen filter row, `cursor_
-pointer()` on the tick, `cursor_grab()` on a draggable row); the tick's
-hit area; and the tick glyph still being painted on chain-field
-completion rows, a pre-existing defect (§18.9.2 says such rows carry no
-tick) that this branch did not introduce and did not fix.
+itself now painting only a colour change against a border every row
+reserves at rest (fixed in the branch's final-review fix wave, below —
+the reflow this bullet used to name is gone, but the colour swap is
+still unverified without a window); cursor styles (`cursor_text()` on
+the frozen filter row, `cursor_pointer()` on the tick, `cursor_grab()`
+on a draggable row — and on Windows, `cursor_grab`'s `CursorStyle::
+OpenHand` is unmapped and falls back to the arrow, so the `⋮` grip is
+the only drag affordance there; expected, not a regression); and the
+tick's hit area.
 
 **Deferred minors**, recorded for the final reviewer to triage:
 
-- the tick glyph is still painted on chain-field completion rows
-  (pre-existing; §18.9.2 says such rows carry no tick) — display-check
-  item, listed above;
 - no test would notice a tick click double-firing the row's own click
   handler (both move the cursor to the same row, so the effect is
   unobservable today);
@@ -2299,19 +2306,43 @@ tick) that this branch did not introduce and did not fix.
   payload before the predicate runs — so it could instead refuse a
   cross-field payload and leave `drag_over` painting no border on a
   row the drop would refuse anyway;
-- `drag_over`'s `border_t_2()` shifts rows by 2px as the drag passes,
-  and `DragGhost` has no width cap — both plan-mandated, display-check
-  only (listed above);
-- `crates/geode-shell/src/shell/objectdialog/render.rs` is now 3,028
+- `crates/geode-shell/src/shell/objectdialog/render.rs` is now 3,100
   lines; a future element-wiring addition should split the edit-stage
   row builder into its own module (`objectdialog/editrow.rs`) rather
   than growing `build_edit` again;
 - no window test covers the completion click's "nothing to complete
   here" notice or a stale-index path (matches the precedent set by the
-  tick and drop handlers' own untested edge notices);
-- on a failed completion click `selected` stays moved to the clicked
-  row (mirrors `tab`'s own behaviour) — worth a doc line, not fixed
-  here.
+  tick and drop handlers' own untested edge notices).
+
+**Fixed in the branch's final-review fix wave** (all Minor, all in this
+section's own territory): the tick's `.debug_selector` id string was
+built twice (once for `.id()`, once again for the closure) — now built
+once and moved into both; the `drag_over` top border used to reflow
+every row below the hovered one by 2px, since only the hover painted
+`border_t_2()` at all — every row now reserves that 2px border,
+transparent at rest, so `drag_over` only ever changes its colour; the
+tick's own `cx.stop_propagation()` (this section's "The tick" paragraph
+above) had no covering test or harness entry, closed by asserting
+`draft.selected` is unmoved by a tick click that falls to an armed
+confirm's guard, and a new anchored entry deleting the
+`stop_propagation()` line; the grip and tick are now withdrawn outright
+— not merely non-interactive — on a chain-field completion row, per
+§18.9.2 (the wording in "The tick" paragraph above was corrected to
+match); and `on_completion_clicked`'s doc comment now says a failed
+completion leaves `selected` on the clicked row, mirroring `tab`.
+
+**One further consequence of this branch worth recording, on a
+different dialog:** the keybinding dialog's `d`/`r` verbs are
+keyboard-only (§17's normal-mode vocabulary), and Rule 2's
+`click_listens` (§17.4) means a mouse click on a row now *always*
+enters capture there — so on that dialog, `d` typed right after a
+click is a keystroke being *bound*, not the verb that deletes a
+binding. This is recoverable (`escape` cancels the capture, nothing is
+written until `enter` commits it) and is exactly the behaviour §17.2's
+rule 2 asks for, not a defect this wave introduces or fixes — recorded
+here because a maintainer reaching for `d`/`r` right after a mouse
+click on that dialog should know why it does not do what it does on
+the object dialog.
 
 **Verification.** `cargo test -p geode-shell` was green throughout
 (1140 after Task 4, 1148 after Task 7, plus the two integration

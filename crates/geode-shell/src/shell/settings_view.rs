@@ -332,11 +332,13 @@ pub fn filtered_position(
 }
 
 /// What a click on filtered position `clicked_ix` does to already-open
-/// dialog state: clicking any other row selects it (the click wins, same
-/// as keybindings' `click_listens`); clicking the
-/// already-selected row means "cycle this row's value forward" — returns
-/// `true` so the gpui caller ([`on_row_clicked`]) applies the step,
-/// keeping this function pure.
+/// dialog state: clicking any other row only selects it, a first click
+/// that does not yet act — this is the two-step rule the keybinding
+/// dialog's `click_listens` gave up (there, any click both selects AND
+/// starts listening in one step); clicking the already-selected row
+/// means "cycle this row's value forward" — returns `true` so the gpui
+/// caller ([`on_row_clicked`]) applies the step, keeping this function
+/// pure.
 pub fn click_selects_or_steps(state: &mut SettingsState, clicked_ix: usize) -> bool {
     if state.selected == clicked_ix {
         true
