@@ -774,7 +774,8 @@ abs desc → abs asc → cleared on a measure (user ruling 2026-09-12;
 desc first because that is where gpui-component's own three-state
 click cycle started before the blotter took it over — the delegate
 ignores the component's proposal and steps its own cycle, then
-refreshes the table so the cached arrow and label follow) and
+refreshes the table so the cached arrow and drag-preview name follow;
+the painted label is read live) and
 cleared → desc → asc → cleared on a text column. All three set the same
 tile-local sort, shown as an arrow in the column header; an absolute
 sort also appends `|x|` to the header label, since the arrow only

@@ -2417,6 +2417,13 @@ run_mutation "click cycle: a text column's click clears after asc instead of ent
   geode-blotter \
   a_header_click_on_a_text_column_skips_the_absolute_pair
 
+run_mutation "delegate: a header-click resort moves the component's highlight with the cursor" \
+  crates/geode-blotter/src/delegate.rs \
+  '            table.set_selected_row(row, cx);' \
+  '            let _ = row;' \
+  geode-blotter \
+  a_header_click_cycles_through_the_absolute_orders_too
+
 run_mutation "delegate: a header click steps the blotter's own cycle, not the component's proposal" \
   crates/geode-blotter/src/delegate.rs \
   '        let next = SortOrder::click_cycle(current, self.is_measure(col_ix));' \
