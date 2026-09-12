@@ -411,3 +411,76 @@ design above:
 Everything else — the pure `dialogmode` core, the escape ladder, the
 modal vocabulary, which surfaces are modal (§3), and §7's reclaim-count
 observation (as corrected) — was built as specified.
+
+## 16. Amendment — one owner for mode, focus and text (2026-09-11)
+
+Approved 2026-09-11 after the Phase 4c Part 2 refinement branch. Four of
+that branch's review findings, and at least two earlier ones (the
+keybinding dialog's first modal cut, `an_object_opened_from_filter_mode_
+still_escapes_back_a_stage`), were the same defect: a modal surface has
+three things that must agree at every transition — the pure `mode`, which
+gpui focus handle holds the keyboard, and the shared `Input`'s text against
+the mirrored `query` — and every transition site assembled its own subset
+by hand. The object dialog had 20 such sites across eight functions, the
+keybinding dialog ten more. The mirror is one-directional by construction:
+typing updates `query` through the `InputEvent::Change` subscription, but
+`InputState::set_value` emits no `Change`, so every clear had to be written
+twice, and the naming row's first cut forgot one of them.
+
+### 16.1 The rule
+
+**The pure state is the truth; gpui is reconciled to it after every
+mutation.** `mode` and `query` stay where they are — `KeybindingsState`,
+`ObjectDialogState`, `Draft` — so the pure cores remain testable without a
+window. One function, `dialog::sync_dialog_text(shell, window, cx)`, reads
+the open dialog's *effective* mode and query and makes gpui match:
+
+- focus: the shared `Input` in `DialogMode::Filter`; the shell root
+  otherwise — and the shell root whenever the keybinding dialog is
+  *listening* for a capture, whatever the mode says;
+- text: `set_value(query)` when the `Input`'s value differs from the
+  effective query; nothing when they already agree, so a keystroke the
+  subscription has just mirrored costs a string compare and no write.
+
+It runs in exactly three places: the tail of the modal branch in
+`ShellView::handle_key_down` (after the dialog's `on_key` returns, claimed
+or not), the tail of each row-click handler, and `open_shell_dialog_with_key`
+(whose `focus_filter` parameter becomes the dialog's *initial mode*).
+Transition sites become pure mutations — `state.mode = DialogMode::Filter`,
+`draft.query.clear()` — and there is no second half to forget.
+
+### 16.2 The effective query
+
+The object dialog carries two queries, the browse/naming one on
+`ObjectDialogState` and the edit one on `Draft`, mirrored one-way per
+stage (4c §18.6). That ruling becomes a getter,
+`ObjectDialogState::effective_query(&self) -> &str`, which the sync and the
+`Change` subscription both use; the subscription writes through a matching
+`set_effective_query`. A stale query in the other stage's slot is then
+unreachable rather than merely avoided.
+
+### 16.3 What decides focus is pure
+
+`dialog::focus_target(mode, listening) -> FocusTarget { Input, Shell }` is
+the whole decision, in the pure core beside `escape_step`, unit-tested for
+every combination. `sync_dialog_text` only applies it.
+
+### 16.4 Untouched
+
+The filter-only dialogs — settings, picker, as-of — never blur and have no
+mode; they keep focusing the `Input` on open and are not routed through the
+sync. `init_reclaimed_keybindings` is unchanged. The `Change` subscription
+keeps its per-dialog routing.
+
+### 16.5 Tests and harness
+
+Pure: `focus_target` over every `(mode, listening)` pair; `effective_query`
+per stage. Window: the four one-switch regressions already on the branch
+stay as they are (`an_object_opened_from_filter_mode_still_escapes_back_a_
+stage`, `n_opens_an_empty_name_field_even_after_a_browse_filter`,
+`slash_filters_the_edit_stage_and_escape_walks_the_full_ladder`,
+`clicking_an_edit_row_while_filtering_keeps_the_filter_focused`) and prove
+the sync reproduces every behaviour the hand-written sites had; one new
+window test per removed site class is not needed — the point is that the
+class is gone. Mutation entries: one per reconcile rule (focus in filter,
+shell in normal, shell while listening, text written only on difference).
