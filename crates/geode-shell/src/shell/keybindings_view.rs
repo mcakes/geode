@@ -899,7 +899,7 @@ fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
 /// module doc). The gpui-facing wrapper around the pure
 /// [`click_listens`], and it moves focus the same way [`handle_key`]
 /// does — through [`dialog::sync_dialog_text`], the row-click seam of
-/// that function's four seam classes (spec §16.1/§16.6), which a click
+/// that function's five seam classes (spec §16.1/§16.6/§17.1 rule 3), which a click
 /// needs because it never passes through the key path at all. Every
 /// click now starts listening (§17.1 rule 2), so this always blurs the
 /// filter to let the capture see raw keystrokes — focusing the filter

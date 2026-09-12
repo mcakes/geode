@@ -468,9 +468,9 @@ pub fn open_shell_dialog_with_key<F>(
         let handle = view.dialog_input.read(cx).focus_handle(cx);
         handle.focus(window, cx);
     }
-    // The open-door seam of [`sync_dialog_text`]'s four seam classes
-    // (spec §16.1/§16.6): a no-op for the mode-less dialogs the
-    // `focus_filter` branch above
+    // The open-door seam of [`sync_dialog_text`]'s five seam classes
+    // (spec §16.1/§16.6, folded to five by §17.3): a no-op for the
+    // mode-less dialogs the `focus_filter` branch above
     // just served, and the *initial* focus for a modal one — both
     // `keybindings_view::open` and `objectdialog::open` set their state
     // before calling this door, so the sync sees the mode they open in.
@@ -483,18 +483,25 @@ pub fn open_shell_dialog_with_key<F>(
 /// focus goes where [`crate::dialogmode::focus_target`] says, and the
 /// shared `Input` holds the dialog's effective query.
 ///
-/// Called at four seam classes and nowhere else — the tail of the modal
-/// branch in `ShellView::handle_key_down`, the tail of every mouse
-/// handler that ends a dialog transition (a click never reaches the key
-/// path: both dialogs' row clicks and the object dialog's two
-/// confirm-button closures; `press_verb` is the audited exception, since
-/// it can only arm a `Confirm` and moves neither mode nor query), and
-/// [`open_shell_dialog_with_key`] — so a transition site is a pure
-/// mutation and cannot forget the gpui half. A no-op when no modal
-/// dialog with a mode is open; the filter-only dialogs (settings, picker,
-/// as-of) keep their own open-time focus (§16.4). The two `if let` arms
-/// below are mutually exclusive by `close_modal`'s contract (it clears
-/// every dialog state together), so their order carries no meaning.
+/// Called at five seam classes and nowhere else (§16.6's four, plus the
+/// mouse-parity handlers §17.1 rule 3 adds to the second class) — the
+/// tail of the modal branch in `ShellView::handle_key_down`,
+/// [`open_shell_dialog_with_key`], the object dialog's two
+/// confirm-button closures, and every mouse handler that ends a dialog
+/// transition: the frozen filter row's click
+/// ([`enter_filter_by_mouse`]), both dialogs' browse/list row clicks
+/// (the keybinding dialog's, and the object dialog's `on_row_clicked` /
+/// `on_edit_row_clicked`), and, since §17's amendment, the object
+/// dialog's edit-stage mouse verbs — the tick click (`on_tick_clicked`),
+/// a row drop (`on_row_dropped`) and the chain field's completion click
+/// (`on_completion_clicked`). A click never reaches the key path, so
+/// each of these handlers is its transition's only tail; `press_verb`
+/// is the audited exception, since it can only arm a `Confirm` and
+/// moves neither mode nor query. A no-op when no modal dialog with a
+/// mode is open; the filter-only dialogs (settings, picker, as-of) keep
+/// their own open-time focus (§16.4). The two `if let` arms below are
+/// mutually exclusive by `close_modal`'s contract (it clears every
+/// dialog state together), so their order carries no meaning.
 ///
 /// The text write is guarded by a compare because `InputState::set_value`
 /// emits no `InputEvent::Change`: writing unconditionally would be
@@ -646,7 +653,7 @@ pub fn filter_row(
         // mouse-down anywhere on it is a pure `enter_filter_by_mouse` +
         // `sync_dialog_text`, the same shape every other mouse-driven
         // dialog transition in this crate takes (see `sync_dialog_text`'s
-        // own doc comment for the four seam classes). `cursor_text`
+        // own doc comment for the five seam classes). `cursor_text`
         // (gpui's I-beam) tells the eye the row is typeable before the
         // click, which a plain arrow cursor over static text would not.
         Some(frozen) => {

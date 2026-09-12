@@ -2143,3 +2143,182 @@ itself — `on_drag` through `on_drop` — cannot be driven from
 §18.6's, and the handler is tested one call below it. Harness entries
 for every `drop_row` arm, the tick path (mutated to a bare select), the
 completion click, and the name-not-index resolution.
+
+### 18.9.6 As built
+
+Implemented 2026-09-12, commits `9670d10`..`7cd010a` (`Draft::drop_row`,
+the pure core), `4cf319d`..`dc91066` (the tick), `cc8a877`, `4bda716`,
+`c49663b` (drag and drop), `92af48a` (the chain-field completion click)
+— all on branch `worktree-dialog-mouse-parity`. §17.4 covers the
+interaction-model rules this section specializes; `click_selects_or_
+listens` (interaction-model §17.1 rule 2) no longer exists anywhere in
+the codebase, and `FrozenFilter` gained the `entity` field, both recorded
+there rather than repeated here.
+
+**The pure core.** `RowDrag { field: String, own: bool, name: String }`
+carries a dragged row by name, never by index, so a keystroke between
+grab and drop cannot redirect the drop onto whatever column now holds
+the grabbed position. `Draft::row_drag`/`Draft::locate` build and resolve
+the payload; `Draft::drop_row(&mut self, src, dst) -> Step` is the one
+method enumerating every case exactly as §18.9.3's table specifies:
+Item→Item reorders at the target's old index, Available→Item adds at
+that index, Item→Available removes (the same act and refusals as `x`),
+Available→Available and any unresolvable pair are `Inert`. Pure tests:
+`a_drop_takes_the_target_rows_index`, `the_cursor_follows_the_dropped_
+item`, `dropping_an_available_row_onto_the_list_adds_it_at_that_index`,
+`dropping_an_item_onto_the_catalogue_removes_it`,
+`inert_drops_change_nothing`, `a_drop_onto_a_missing_catalogue_is_inert`
+(renamed from the brief's `..._is_refused_like_x` in review, since the
+code returns `Inert`, not a refusal), `row_drag_round_trips_through_
+locate`.
+
+**Ruling 1** (pre-flight scan, ahead of implementation): Item→Available
+with no catalogue returns `Step::Inert` rather than `x`'s
+`Refused("space unticks here")` — unreachable by drop since no
+catalogue row exists to drop onto, and `Draft::locate` says so before
+the per-case match runs; the spec's "same refusals as `x`" is satisfied
+for every reachable case. `a_drop_onto_a_missing_catalogue_is_inert`
+proves it, reading the list back unchanged rather than asserting only
+the `Step` (an Important review finding on the first cut, fixed in
+`7cd010a`).
+
+**The tick** (§18.9.2, commits `4cf319d`, `dc91066`). Each `Item`/
+`Available` row's tick is a stateful element (`.id("objectdialog-tick-
+{name}")`, a `debug_selector`, `cursor_pointer()`) with an
+`on_mouse_down` that stops propagation (so the row's own select does
+not double-fire) and dispatches to `on_tick_clicked`, which parks the
+cursor on the row and then runs the identical `NormalCommand::Toggle`
+body `space` runs — `Draft::toggle_selected`, `maybe_refresh_available`,
+`revalidate`, `commit_or_confirm` on `Changed`, `refuse_step` on
+`Refused`, `set_notice` on `Inert`. Excluded while `draft.chain_entry`
+is set, since chain-field rows are completions with no tick to click.
+Window tests: `clicking_a_tick_hides_the_column_and_parks_the_cursor_
+there`, `clicking_an_available_rows_tick_adds_it`.
+
+**Ruling 2** (Task 5, standing for every acting mouse handler): while
+`Draft::confirm` is armed the keyboard path drops every key but
+`enter`/`y`/`escape`/`n`; every mouse handler that ACTS on the draft
+must do the same — `on_tick_clicked` and `on_row_dropped`. The
+completion click needs no guard, since the chain field and an armed
+confirm are mutually exclusive by construction (the action bar that
+arms a confirm is withdrawn while `chain_entry`, and `i` is dropped
+while a confirm is armed). Browse's `on_row_clicked` is unreachable by
+a confirm, since confirm state exists only in the edit stage.
+`on_edit_row_clicked` (cursor move only) is deliberately left
+unguarded — a cursor-only click during a confirm has no effect the
+ruling cares about, since Delete/Revert/Overwrite/Fork act on the
+object or the pending batch, never on the cursor row (recorded as a
+deferred minor below, "final review to triage"). Guard tests:
+`a_tick_click_does_nothing_while_a_confirm_is_armed`,
+`a_row_drop_does_nothing_while_a_confirm_is_armed`.
+
+**Drag and drop** (§18.9.1/§18.9.3, commits `cc8a877`, `4bda716`,
+`c49663b`). Reordering rides gpui's own `on_drag`/`on_drop`/`can_drop`/
+`drag_over`, not a hand-rolled machine: each draggable row (any `Item`/
+`Available` row while `!draft.chain_entry`) gets
+`.id("objectdialog-drag-{field}-{own}-{name}")`, `.cursor_grab()`,
+`.on_drag` building a small `DragGhost` `Render` entity (the dragged
+name on `theme.popover`/`popover_foreground`), `.can_drop` accepting
+only a `RowDrag` payload, and `.drag_over::<RowDrag>` painting a
+`border_t_2()` in `theme.primary` on the target row. `pub(in crate::
+shell) fn on_row_dropped(shell, src, dst, window, cx)` is the shell-side
+handler: it applies Ruling 2's guard first, then dispatches `Draft::
+drop_row` — `Changed` runs `revalidate`/`scroll_to_cursor`/`commit_or_
+confirm`, `Refused` calls `set_notice`, `Inert` gives the two
+spec-quoted notices or silence — and ends in exactly one `dialog::sync_
+dialog_text` call. Window tests: `the_drop_handler_reorders_and_writes`,
+`a_row_drop_does_nothing_while_a_confirm_is_armed`,
+`a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order` (whose
+second half also drops the same available row on itself, proving
+Ruling 3's silence),
+`a_drop_whose_name_has_left_the_list_says_that_row_is_gone` (the last
+two, and Ruling 3 below, added in the review follow-up `c49663b` after
+an Important finding that neither spec-quoted notice had a covering
+test).
+
+**Ruling 3** (Task 6, review follow-up `c49663b`): an available row
+dropped on itself is silent (the same-row check runs first), then "the
+catalogue has no order" (catalogue-to-catalogue), then "that row is
+gone" (a stale name) — the spec lists the two notices without stating
+their precedence, and self-drop silence matches the `Item`-on-itself
+case's own silence. `Step::Inert if src == dst` is checked ahead of the
+catalogue-pair arm specifically because two identical `Available`
+payloads would otherwise also satisfy the catalogue-to-catalogue
+condition.
+
+**The simulated drag-gesture window test was deleted.** gpui's drag
+never arms under `TestAppContext`: three variants were tried and none
+started a drag — as written per the brief (mouse-down, a +6px move,
+`run_until_parked`); with an extra `window.draw(cx)` call inserted
+after the first move; and with a hover move immediately before the
+press, in case `Hitbox::is_hovered`'s keyboard/mouse tracking was
+swallowing the mouse-down. All three left `cx.has_active_drag()` false,
+so `on_drop` was never reached — exactly what §18.9.5 anticipated
+("the gpui gesture itself … cannot be driven from `TestAppContext`").
+The three attempts and the reason are recorded in `the_drop_handler_
+reorders_and_writes`'s own doc comment (`crates/geode-shell/src/shell/
+tests/objectdialog.rs`) rather than left for a future maintainer to
+re-derive; `on_row_dropped` is `pub(in crate::shell)` and is tested one
+call below the gesture, as the spec's own §18.9.5 wording put it.
+
+**The chain-field completion click** (§18.9.4, commit `92af48a`).
+`build_edit`'s row wiring branches on `draft.chain_entry`: while the
+chain field is open, a row's `on_mouse_down` calls
+`on_completion_clicked` instead of `on_edit_row_clicked`, parking the
+cursor on the clicked row and calling `Draft::complete_chain()` — the
+exact pair `tab`'s own `handle_chain_key` runs — then scrolling to item
+0 on success or setting "nothing to complete here" on failure. No
+confirm guard, per Ruling 2's carve-out above. Window test:
+`clicking_a_completion_row_completes_the_chain`, which also asserts the
+shared `Input`'s mirrored text and the `chain` mode pill, not just the
+pure draft.
+
+**Display-check list**, unverifiable without a real window and carried
+forward alongside §18.6's own pending items: the drag ghost's
+appearance and its lack of a width cap; the `drag_over` top border
+(2 px, `primary`), which shifts rows as the drag passes over them;
+cursor styles (`cursor_text()` on the frozen filter row, `cursor_
+pointer()` on the tick, `cursor_grab()` on a draggable row); the tick's
+hit area; and the tick glyph still being painted on chain-field
+completion rows, a pre-existing defect (§18.9.2 says such rows carry no
+tick) that this branch did not introduce and did not fix.
+
+**Deferred minors**, recorded for the final reviewer to triage:
+
+- the tick glyph is still painted on chain-field completion rows
+  (pre-existing; §18.9.2 says such rows carry no tick) — display-check
+  item, listed above;
+- no test would notice a tick click double-firing the row's own click
+  handler (both move the cursor to the same row, so the effect is
+  unobservable today);
+- `on_edit_row_clicked` still moves the cursor while a confirm is
+  armed (Ruling 2 stands: cursor-only, no act — the key path drops
+  movement keys too, but the mouse path does not; flagged for final
+  review rather than fixed here);
+- `can_drop` is tautological — gpui has already type-matched the
+  payload before the predicate runs — so it could instead refuse a
+  cross-field payload and leave `drag_over` painting no border on a
+  row the drop would refuse anyway;
+- `drag_over`'s `border_t_2()` shifts rows by 2px as the drag passes,
+  and `DragGhost` has no width cap — both plan-mandated, display-check
+  only (listed above);
+- `crates/geode-shell/src/shell/objectdialog/render.rs` is now 3,028
+  lines; a future element-wiring addition should split the edit-stage
+  row builder into its own module (`objectdialog/editrow.rs`) rather
+  than growing `build_edit` again;
+- no window test covers the completion click's "nothing to complete
+  here" notice or a stale-index path (matches the precedent set by the
+  tick and drop handlers' own untested edge notices);
+- on a failed completion click `selected` stays moved to the clicked
+  row (mirrors `tab`'s own behaviour) — worth a doc line, not fixed
+  here.
+
+**Verification.** `cargo test -p geode-shell` was green throughout
+(1140 after Task 4, 1148 after Task 7, plus the two integration
+binaries); `cargo fmt`, `cargo clippy -p geode-shell --all-targets --
+-D warnings` and `cargo check -p geode-shell --features test-support
+--all-targets` were clean after every commit; `zsh scripts/mutation-
+check.sh --anchors-only` held 0 stale/0 ambiguous throughout, rising
+from 562 (Task 3's final count) to 576 anchors across this section's
+commits. Whole-workspace verification for the finished branch is
+recorded in this plan's task-8 report.

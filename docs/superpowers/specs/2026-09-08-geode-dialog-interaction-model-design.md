@@ -671,3 +671,88 @@ row opens the chain field, and while naming only selects. Pure tests for
 `click_listens`. Harness entries for the frozen-row transition (mutated
 back to select-only), the browse click's open (mutated back to
 select-only), and `click_listens` (mutated back to the two-click rule).
+
+### 17.4 As built
+
+Implemented 2026-09-12 across the dialog-mouse-parity plan's commit range
+`64db372..92af48a` (`git log --oneline ae25ce3..HEAD` on branch
+`worktree-dialog-mouse-parity`); rule 3's edit-stage mouse verbs are 4c
+§18.9's own surface and their as-built lives at §18.9.6, cross-referenced
+below rather than duplicated.
+
+**Rule 1** (commit `64db372`): `FrozenFilter<'a>` gained a third field,
+`pub entity: Entity<ShellView>`, so the frozen row's mouse-down can reach
+the shell. `dialog::enter_filter_by_mouse(shell: &mut ShellView)` is the
+pure mutation — sets `mode = DialogMode::Filter` on whichever of
+`keybindings`/`object_dialog` is open, and on the keybinding dialog also
+clears `listening` first, since a click on a text field is never a
+keystroke to bind and `listening` outranks `mode` in
+`dialogmode::focus_target`. `filter_row`'s frozen branch got
+`.cursor_text()`, `.debug_selector(|| "dialog-filter-frozen")` and an
+`on_mouse_down` running the mutation then `sync_dialog_text`. Window
+tests: `clicking_the_browse_frozen_filter_row_enters_filter_mode`,
+`clicking_the_edit_frozen_filter_row_enters_filter_mode`,
+`clicking_the_frozen_filter_row_enters_filter_mode` and
+`clicking_the_frozen_filter_row_while_listening_cancels_the_capture`
+(both keybindings). Deferred minors: the frozen-row handler always
+`cx.notify()`s even when `enter_filter_by_mouse` is a no-op (unreachable
+today — only two callers, both already modal when the row can be
+frozen); the four window tests click at `row.origin + (20, 4)`, coupled
+to the row's own padding.
+
+**Rule 2** (commits `df25c21`, `5b42b4b` for the keybinding dialog;
+`37b369f`, `b6e3915` for the object dialog). `click_selects_or_listens`
+**no longer exists in the codebase** — it was replaced outright by
+`click_listens`, which always sets `state.selected` and
+`state.listening = Some(Vec::new())` in one step, matching what `enter`
+already did on a selected row; a click on a different row mid-capture
+retargets it, a click on the same row restarts it with any
+partially-typed sequence dropped. Pure test:
+`a_click_selects_and_listens_in_one_step`. Window test:
+`a_single_click_on_a_row_starts_listening`. The rename surfaced three
+stale doc/comment sites describing the retired two-click rule (the
+module's "Rebind capture" doc section, an inline comment on
+`setting_a_query_cancels_an_in_progress_capture`, and a window test's own
+doc comment) — all three fixed in the review follow-up `5b42b4b` rather
+than left to drift; `settings_view.rs`'s unrelated
+`click_selects_or_steps` (a real, still-current two-step rule on a
+different, filter-only surface) was left untouched apart from one
+comment's cross-reference by name.
+
+The object dialog's `on_row_clicked` now opens the clicked row through
+`enter_edit_stage` — on Groupings that lands in the chain field per
+§18.8 — unless `Stage::Naming` is open, where a click still only
+selects, since a typed name must not be discarded by a stray click and
+`enter` there creates rather than opens. Window tests:
+`clicking_a_browse_row_opens_its_edit_stage`,
+`clicking_a_groupings_row_lands_in_the_chain_field`,
+`clicking_a_browse_row_while_naming_only_selects` (the last one's typed
+probe text was tightened in a review follow-up, `b6e3915`, from the
+object's own name — which made the assertion pass regardless of whether
+the click actually left the query alone — to a genuine subsequence that
+differs from it). Deferred minor: `on_row_clicked`'s
+`scroll_to_item(ix)` is redundant on the open path, since
+`enter_edit_stage` scrolls to item 0 itself — plan-mandated code, left
+in as harmless.
+
+**Rule 3, the fifth seam class.** `dialog::sync_dialog_text`'s doc
+comment (`crates/geode-shell/src/shell/dialog.rs`) now names five seam
+classes rather than §16.6's four: the modal-branch tail in
+`handle_key_down`, `open_shell_dialog_with_key`, the object dialog's two
+confirm-button closures, and every mouse handler that ends a dialog
+transition — the frozen-row click above, both dialogs' row clicks
+above, and (4c §18.9, see §18.9.6) the edit stage's tick click, row
+drop and chain-field completion click. `press_verb` remains the one
+audited exception, since it only ever arms a `Confirm` and moves
+neither mode nor query.
+
+**Verification.** `cargo test -p geode-shell` was green after every task
+in the range (culminating at 1148 lib tests plus the `keymap_integration`
+and `tiling_integration` binaries, per the task-7 report); `cargo fmt`
+and `cargo clippy -p geode-shell --all-targets -- -D warnings` were
+clean after every commit; `zsh scripts/mutation-check.sh --anchors-only`
+reported 0 stale/0 ambiguous throughout, rising from 557 (the plan's
+starting count, before Task 1) to 576 anchors across the range as each
+task's entries landed. Whole-workspace verification (`cargo test
+--workspace`, workspace clippy, `--changed`) for the finished branch is
+recorded in this plan's task-8 report.
