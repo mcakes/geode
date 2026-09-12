@@ -57,7 +57,7 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::schema::SchemaSpec;
 
-use super::{Destination, Draft, Field, FieldKind, ListItem};
+use super::{Destination, Draft, Field, FieldKind, ListItem, Step};
 
 /// The config doc name (file stem), as `Config::layered_docs` keys it.
 pub const DOC: &str = "groupings";
@@ -162,6 +162,182 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     ]
 }
 
+/// The `dimensions` field's key — the one list the chain field edits.
+const DIMENSIONS: &str = "dimensions";
+
+/// A chain separator: `/`, as [`GroupingSlots::label_of`] spells the
+/// chain everywhere it is shown, or any whitespace (user ruling
+/// 2026-09-12), so `book lhu desk` is as good as `book / lhu / desk`.
+fn is_separator(c: char) -> bool {
+    c == '/' || c.is_whitespace()
+}
+
+/// The names a chain field's text spells, in typed order: split on
+/// [`is_separator`], with runs of separators counting as one and a
+/// leading or trailing one naming no segment.
+pub fn parse_chain(text: &str) -> Vec<String> {
+    text.split(is_separator)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The segment being typed — whatever follows the last separator, or the
+/// whole text when there is none. What the completion list ranks by.
+pub fn trailing_segment(text: &str) -> &str {
+    text.rsplit(is_separator).next().unwrap_or("")
+}
+
+/// The names typed *before* the trailing segment: the part of the chain
+/// already decided, which the completion list therefore stops offering.
+fn completed_names(text: &str) -> Vec<String> {
+    let head = &text[..text.len() - trailing_segment(text).len()];
+    parse_chain(head)
+}
+
+/// [`Draft::visible_rows`] while the chain field is open (§18.8): the
+/// `dimensions` items whose name matches the trailing segment, minus
+/// every name already typed before it, in row (schema) order — never a
+/// field header, since a header is nothing `tab` could complete to.
+pub fn chain_candidates(draft: &Draft) -> Vec<crate::listfilter::Ranked> {
+    let rows = draft.rows();
+    let labels: Vec<String> = rows.iter().map(|r| draft.row_label(*r)).collect();
+    let done = completed_names(&draft.query);
+    let mut ranked = crate::listfilter::rank(&labels, trailing_segment(&draft.query));
+    ranked.retain(|m| {
+        let is_dimension = matches!(
+            rows[m.row],
+            super::EditRow::Item { field, .. } if draft.fields[field].key == DIMENSIONS
+        );
+        is_dimension && !done.contains(&labels[m.row])
+    });
+    ranked.sort_by_key(|m| m.row);
+    ranked
+}
+
+impl Draft {
+    /// `i` (§18.8): open the chain field, seeded with the slot's current
+    /// chain in the spelling every other surface uses, so appending is a
+    /// separator and a name away. Pure — the mode switch that gives the
+    /// shared `Input` the keys is the handler's, and the sync writes the
+    /// field from `query` on its return (spec §16.1).
+    pub fn begin_chain_entry(&mut self) {
+        let names: Vec<String> = self
+            .list_items(DIMENSIONS)
+            .unwrap_or_default()
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect();
+        self.query = if names.is_empty() {
+            String::new()
+        } else {
+            GroupingSlots::label_of(&names)
+        };
+        self.chain_entry = true;
+        self.selected = 0;
+    }
+
+    /// `escape` in the chain field: drop the text and close it. The
+    /// chain is exactly as it was — nothing here was applied.
+    pub fn cancel_chain_entry(&mut self) {
+        self.chain_entry = false;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    /// `tab` in the chain field: replace the trailing segment with the
+    /// highlighted candidate and open the next segment with the
+    /// canonical ` / `. `false` when nothing is highlighted — every name
+    /// already typed, or a segment nothing matches — leaving the text
+    /// untouched.
+    pub fn complete_chain(&mut self) -> bool {
+        let rows = self.rows();
+        let Some(row) = self.visible_rows().get(self.selected).map(|m| m.row) else {
+            return false;
+        };
+        let mut names = completed_names(&self.query);
+        names.push(self.row_label(rows[row]));
+        self.query = format!("{} / ", GroupingSlots::label_of(&names));
+        self.selected = 0;
+        true
+    }
+
+    /// `enter` in the chain field: the typed names become the chain, in
+    /// typed order — ticked and first, every other item after, unticked
+    /// — and the field closes. [`Step::Refused`] keeps the field open
+    /// with the text intact, so a typo is fixed rather than retyped:
+    /// an empty chain (the state the config model cannot hold — the
+    /// same words `Draft::step_selected` refuses the last untick with),
+    /// a name twice, or a name no dataset carries as a dimension.
+    /// [`Step::Inert`] when the chain typed back is the one already
+    /// there: nothing to write, and the field still closes — closing is
+    /// the visible answer.
+    pub fn apply_chain(&mut self) -> Step {
+        let names = parse_chain(&self.query);
+        let Some(field) = self.fields.iter().position(|f| f.key == DIMENSIONS) else {
+            return Step::Inert;
+        };
+        let label = self.fields[field].label.clone();
+        if names.is_empty() {
+            return Step::Refused(format!("{label} must keep at least one entry"));
+        }
+        if let Some(twice) = names
+            .iter()
+            .enumerate()
+            .find(|(i, name)| names[..*i].contains(name))
+        {
+            return Step::Refused(format!("'{}' is listed twice", twice.1));
+        }
+        // Groupings has no catalogue (`available: None` — ticking IS
+        // membership, spec §18.7), so the chain is typed against `items`
+        // alone and the catalogue is deliberately not consulted.
+        let FieldKind::OrderedList { items, .. } = &mut self.fields[field].kind else {
+            return Step::Inert;
+        };
+        if let Some(unknown) = names.iter().find(|n| !items.iter().any(|i| &i.name == *n)) {
+            return Step::Refused(format!(
+                "'{unknown}' is not a dimension any dataset carries"
+            ));
+        }
+        let before: Vec<String> = items
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect();
+        // Decided before the list is touched, and the list is touched
+        // only on a change: rewriting it as "typed names, then the rest"
+        // would re-sort an order `shift+j`/`shift+k` had put an unticked
+        // item into, leaving the draft dirty under an answer of "inert".
+        if before == names {
+            self.chain_entry = false;
+            self.query.clear();
+            self.selected = 0;
+            return Step::Inert;
+        }
+        let mut rest = std::mem::take(items);
+        let mut out = Vec::with_capacity(rest.len());
+        for name in &names {
+            let pos = rest
+                .iter()
+                .position(|i| &i.name == name)
+                .expect("every typed name was checked against the list above");
+            let mut item = rest.remove(pos);
+            item.included = true;
+            out.push(item);
+        }
+        for mut item in rest {
+            item.included = false;
+            out.push(item);
+        }
+        *items = out;
+        self.chain_entry = false;
+        self.query.clear();
+        self.selected = 0;
+        Step::Changed
+    }
+}
+
 /// The draft rendered as `groupings.toml`'s own value for this slot: a
 /// bare array of the ticked names, in list order.
 ///
@@ -220,7 +396,7 @@ fn rendered_doc_table(draft: &Draft) -> toml::Table {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Domain, EditRow};
+    use super::super::{Domain, EditRow, Step};
     use super::*;
     use geode_core::config::ConfigSources;
 
@@ -413,6 +589,248 @@ mod tests {
             geode_core::config::Severity::Warning
         );
         assert!(draft.diagnostics[0].message.contains("10"));
+    }
+
+    // ---- Chain entry (§18.8) -------------------------------------------
+
+    /// Three pickable dimensions, so a chain can be reordered, extended
+    /// and completed against more than one candidate. `desk` is not a
+    /// built-in key column, so it has to name the grain that carries it
+    /// (Phase 4a's rule in `validate_dataset`) or the loader drops it.
+    fn config_with_three_dims(groupings: &str) -> Config {
+        let datasets = LayerDoc::builtin(
+            "datasets",
+            "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [risk.columns.desk]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\n\
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+        )
+        .unwrap();
+        let groupings = LayerDoc::builtin("groupings", groupings).unwrap();
+        Config::load(&ConfigSources {
+            builtin: vec![datasets, groupings],
+            desk: None,
+            user: None,
+        })
+    }
+
+    fn ticked(draft: &Draft) -> Vec<(String, bool)> {
+        draft
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .map(|i| (i.name.clone(), i.included))
+            .collect()
+    }
+
+    fn candidate_names(draft: &Draft) -> Vec<String> {
+        let rows = draft.rows();
+        draft
+            .visible_rows()
+            .iter()
+            .map(|m| draft.row_label(rows[m.row]))
+            .collect()
+    }
+
+    /// `/` and whitespace both separate (user ruling 2026-09-12: "might
+    /// want to allow space to be a separator too"), runs of either are
+    /// one separator, and a leading or trailing one names no segment.
+    #[test]
+    fn parse_chain_accepts_slash_and_space_separators() {
+        for text in [
+            "book / lhu",
+            "book lhu",
+            "book/lhu",
+            "  book  /  lhu  ",
+            "book // lhu",
+        ] {
+            assert_eq!(parse_chain(text), vec!["book", "lhu"], "{text:?}");
+        }
+        assert_eq!(parse_chain(""), Vec::<String>::new());
+        assert_eq!(parse_chain(" / "), Vec::<String>::new());
+    }
+
+    /// The segment the completion list ranks by is whatever follows the
+    /// last separator — empty right after one, so every remaining
+    /// candidate shows.
+    #[test]
+    fn the_trailing_segment_is_what_follows_the_last_separator() {
+        assert_eq!(trailing_segment("book / l"), "l");
+        assert_eq!(trailing_segment("book l"), "l");
+        assert_eq!(trailing_segment("book / "), "");
+        assert_eq!(trailing_segment("book"), "book");
+        assert_eq!(trailing_segment(""), "");
+    }
+
+    /// `i` seeds the field with the slot's current chain in the same
+    /// spelling the browse row and the blotter header use, so a trader
+    /// who wants to append types a separator and a name and nothing
+    /// else.
+    #[test]
+    fn beginning_chain_entry_seeds_the_current_chain() {
+        let config = config_with_three_dims("3 = [\"book\", \"lhu\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        assert!(!draft.chain_entry);
+        draft.begin_chain_entry();
+        assert!(draft.chain_entry);
+        assert_eq!(draft.query, "book / lhu");
+        assert_eq!(draft.selected, 0);
+    }
+
+    /// While the field is open the row list IS the completion list:
+    /// only item rows, ranked by the trailing segment, minus every name
+    /// already typed before it, in row order.
+    #[test]
+    fn chain_candidates_rank_the_trailing_segment_and_skip_completed_names() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = String::new();
+        assert_eq!(candidate_names(&draft), vec!["book", "lhu", "desk"]);
+        draft.query = "book / ".to_string();
+        assert_eq!(candidate_names(&draft), vec!["lhu", "desk"]);
+        draft.query = "book / d".to_string();
+        assert_eq!(candidate_names(&draft), vec!["desk"]);
+        draft.query = "book / zzz".to_string();
+        assert!(candidate_names(&draft).is_empty());
+    }
+
+    /// `tab` replaces the trailing segment with the highlighted
+    /// candidate and opens the next segment with the canonical ` / `.
+    #[test]
+    fn completing_replaces_the_trailing_segment_with_the_highlighted_candidate() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = "book d".to_string();
+        draft.selected = 0;
+        assert!(draft.complete_chain());
+        assert_eq!(draft.query, "book / desk / ");
+        // Nothing left to complete once every name is typed.
+        draft.query = "book / desk / lhu / ".to_string();
+        assert!(!draft.complete_chain());
+        assert_eq!(draft.query, "book / desk / lhu / ", "unchanged");
+    }
+
+    /// `enter` makes the typed names the chain, in typed order, and
+    /// closes the field.
+    #[test]
+    fn applying_a_chain_ticks_the_typed_names_in_typed_order() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = "desk lhu".to_string();
+        assert_eq!(draft.apply_chain(), Step::Changed);
+        assert_eq!(
+            ticked(&draft),
+            vec![
+                ("desk".to_string(), true),
+                ("lhu".to_string(), true),
+                ("book".to_string(), false)
+            ]
+        );
+        assert!(!draft.chain_entry);
+        assert_eq!(draft.query, "");
+        assert!(draft.is_dirty());
+    }
+
+    /// A name no dataset carries, or one typed twice, is refused with
+    /// the name in the reason — and the field stays open with the text
+    /// intact so the trader can fix it rather than retype it.
+    #[test]
+    fn applying_refuses_an_unknown_or_duplicated_name_and_stays_open() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = "book / npv".to_string();
+        let Step::Refused(reason) = draft.apply_chain() else {
+            panic!("an unknown name must be refused");
+        };
+        assert!(reason.contains("npv"), "{reason}");
+        assert!(draft.chain_entry);
+        assert_eq!(draft.query, "book / npv");
+        assert_eq!(ticked(&draft)[0], ("book".to_string(), true), "untouched");
+
+        draft.query = "book lhu book".to_string();
+        let Step::Refused(reason) = draft.apply_chain() else {
+            panic!("a duplicate must be refused");
+        };
+        assert!(
+            reason.contains("book") && reason.contains("twice"),
+            "{reason}"
+        );
+        assert!(draft.chain_entry);
+    }
+
+    /// An empty chain is the state the config model cannot hold
+    /// (`Draft::step_selected`'s own `Destination::Doc` rule), so it is
+    /// refused with the same words unticking the last dimension gets.
+    #[test]
+    fn applying_an_empty_chain_is_refused() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = " / ".to_string();
+        let Step::Refused(reason) = draft.apply_chain() else {
+            panic!("an empty chain must be refused");
+        };
+        assert!(reason.contains("at least one"), "{reason}");
+        assert!(draft.chain_entry);
+    }
+
+    /// The same chain typed back is nothing to write: inert, and the
+    /// field still closes — closing is the visible answer.
+    #[test]
+    fn applying_the_unchanged_chain_is_inert_and_closes_the_field() {
+        let config = config_with_three_dims("3 = [\"book\", \"lhu\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        assert_eq!(draft.apply_chain(), Step::Inert);
+        assert!(!draft.chain_entry);
+        assert!(!draft.is_dirty());
+    }
+
+    /// An inert apply must not touch the list either: `shift+k` can put
+    /// an unticked item above a ticked one (every Groupings row is a
+    /// member, so `MoveItem` is live on all of them), and typing the same
+    /// chain back would otherwise re-sort the list into "typed names
+    /// first" — a dirty draft the handler was just told was inert
+    /// (the review's Minor 4).
+    #[test]
+    fn an_inert_apply_leaves_a_non_canonical_list_order_alone() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        // Onto `lhu` (rows: Slot, Dimensions, book, lhu, desk) and above
+        // `book`; then treat that order as the saved one.
+        draft.selected = 3;
+        assert_eq!(draft.move_item(-1), Some(0));
+        draft.mark_saved();
+        assert_eq!(ticked(&draft)[0].0, "lhu");
+        assert!(!draft.is_dirty());
+
+        draft.begin_chain_entry();
+        assert_eq!(draft.query, "book");
+        assert_eq!(draft.apply_chain(), Step::Inert);
+        assert!(!draft.is_dirty(), "inert means nothing moved");
+        assert_eq!(ticked(&draft)[0].0, "lhu", "the list order is untouched");
+    }
+
+    /// `escape` drops the text and the field; the chain is as it was.
+    #[test]
+    fn cancelling_chain_entry_restores_the_rows_and_clears_the_text() {
+        let config = config_with_three_dims("3 = [\"book\"]\n");
+        let mut draft = Domain::Groupings.draft(&config, "3");
+        draft.begin_chain_entry();
+        draft.query = "desk".to_string();
+        draft.cancel_chain_entry();
+        assert!(!draft.chain_entry);
+        assert_eq!(draft.query, "");
+        assert_eq!(
+            candidate_names(&draft).len(),
+            5,
+            "Slot, Dimensions and three items"
+        );
+        assert!(!draft.is_dirty());
     }
 
     /// The shared walk every domain gets for free (`Domain::objects`,

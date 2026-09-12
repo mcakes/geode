@@ -6643,6 +6643,157 @@ run_mutation "dialog: the sync writes the Input from the query" \
   geode-shell \
   focus_and_text_follow_the_pure_state_through_every_transition
 
+# ---- Groupings: digit jump and the chain field (§18.8, 2026-09-12) ----
+
+# `0` names no slot (`ctrl+0` CLEARS the frame's slot). Widening the range
+# makes a bare `0` dispatch a jump to a slot "0" that `GroupingSlots` never
+# holds — an empty edit stage over an object the roster does not list.
+run_mutation "dialogmode: a bare 0 is a digit command" \
+  crates/geode-shell/src/dialogmode.rs \
+  "                (Some(c @ '1'..='9'), None) => Some(NormalCommand::Digit(c as u8 - b'0'))," \
+  "                (Some(c @ '0'..='9'), None) => Some(NormalCommand::Digit(c as u8 - b'0'))," \
+  geode-shell \
+  bare_digits_one_to_nine_are_a_command_and_zero_is_not
+
+# The browse jump is gated on the domain: inverting the gate sends a `3`
+# typed at the Views list into an edit stage for a view named "3" while
+# Groupings drops the very key its footer advertises.
+run_mutation "objectdialog: the browse digit jump ignores the domain" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            NormalCommand::Digit(n) if state.domain == Domain::Groupings => {' \
+  '            NormalCommand::Digit(n) if state.domain != Domain::Groupings => {' \
+  geode-shell \
+  a_digit_in_browse_opens_that_slot_on_groupings_only
+
+# The edit-stage jump has its own gate, spelled differently (an
+# `Option<Domain>` read off the state), so it is guarded separately.
+run_mutation "objectdialog: the edit-stage digit jump ignores the domain" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            if domain == Some(Domain::Groupings) {' \
+  '            if domain != Some(Domain::Groupings) {' \
+  geode-shell \
+  a_digit_in_the_edit_stage_jumps_to_that_slot
+
+# Re-entering the open slot rebuilds the draft from a config that can be a
+# debounce window behind the last tick — a visible loss of an edit that
+# is in fact queued. Dropping the guard keeps every stage assertion green
+# (the stage is `Edit { 3 }` either way); only the notice tells.
+run_mutation "objectdialog: the open slot's own digit re-enters the stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if already {' \
+  '    if false {' \
+  geode-shell \
+  a_digit_in_the_edit_stage_jumps_to_that_slot
+
+# Whitespace is a separator by user ruling (2026-09-12). Dropping it makes
+# `book lhu` one unknown name, refused — every `/`-spelled fixture stays
+# green.
+run_mutation "groupings: only / separates a chain" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  "    c == '/' || c.is_whitespace()" \
+  "    c == '/'" \
+  geode-shell \
+  parse_chain_accepts_slash_and_space_separators
+
+# The typed order IS the chain order (`GroupingSlots` groups by it).
+# Prepending instead of appending reverses it; every fixture that types
+# the chain back in its existing order, or types one name, stays green.
+run_mutation "groupings: an applied chain is reversed" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '            item.included = true;
+            out.push(item);' \
+  '            item.included = true;
+            out.insert(0, item);' \
+  geode-shell \
+  applying_a_chain_ticks_the_typed_names_in_typed_order
+
+# A name already typed is not offered again: dropping the exclusion puts
+# `book` back at the top of the completions after `book / `, so `tab`
+# completes to a duplicate `enter` then refuses.
+run_mutation "groupings: completions offer names already typed" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '        is_dimension && !done.contains(&labels[m.row])' \
+  '        is_dimension' \
+  geode-shell \
+  chain_candidates_rank_the_trailing_segment_and_skip_completed_names
+
+# A duplicate must be refused, not silently collapsed: without the check
+# the second `book` is looked up in a `rest` the first already removed it
+# from, and the `expect` below panics.
+run_mutation "groupings: a duplicated name is not refused" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '            .find(|(i, name)| names[..*i].contains(name))' \
+  '            .find(|(i, name)| names[..*i].contains(name) && false)' \
+  geode-shell \
+  applying_refuses_an_unknown_or_duplicated_name_and_stays_open
+
+# The chain handler must run AHEAD of filter mode — the two share a
+# focused `Input`, and filter mode's `enter` is a notice, its `tab` a
+# drop. Skipping the dispatch leaves the field open with `enter` saying
+# "read-only" and `tab` doing nothing; `i` itself still works.
+run_mutation "objectdialog: the chain field's keys fall through to filter mode" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if chain_entry {' \
+  '    if false {' \
+  geode-shell \
+  i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
+# The pill has to say `chain`, not `filter`, over a field whose text is a
+# value: `enter` applies it rather than opening a row. The mode really is
+# `Filter` underneath, so every mode assertion stays green.
+run_mutation "objectdialog: the chain field wears the filter pill" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                if s.draft.as_ref().is_some_and(|d| d.chain_entry) {' \
+  '                if false {' \
+  geode-shell \
+  i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
+# And the row itself: the labelled `name_row`, not a filter row with a
+# search icon over a chain.
+run_mutation "objectdialog: the chain field paints as the filter row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let filter = if draft.chain_entry {' \
+  '    let filter = if false {' \
+  geode-shell \
+  i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
+# The review's Major. Deriving the edit stage from `services.config`
+# alone is exactly the old code: inside the debounce the draft hides the
+# last tick and, outliving the flush, writes the object without it on the
+# next one. Every single-entry fixture stays green — the stale window is
+# only reachable by leaving and re-entering a slot inside 250 ms.
+run_mutation "objectdialog: the edit stage ignores the pending batch" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    let folded = apply::config_with_pending(shell);' \
+  '    let folded = apply::config_with_pending(shell).filter(|_| false);' \
+  geode-shell \
+  jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick
+
+# An inert apply must not touch the list. Skipping the early return makes
+# the same chain typed back re-sort the list "typed names first" and
+# report `Changed` for it — a write of an unchanged value at best, and a
+# dirty draft under an answer of "inert" at worst.
+run_mutation "groupings: an unchanged chain is applied anyway" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '        if before == names {' \
+  '        if false {' \
+  geode-shell \
+  applying_the_unchanged_chain_is_inert_and_closes_the_field
+
+# The action bar has to be withdrawn while the chain field is open, or a
+# clicked `d`/`r` arms a confirm over a live, focused value field. The
+# keyboard tests cannot see it (no key reaches those verbs there); only
+# the painted-bar assertion can.
+run_mutation "objectdialog: the action bar stays up under the chain field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        (true, _) => div().into_any_element(),
+        (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (false, None) => action_bar(shell, entity, cx),' \
+  '        (_, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
+        (_, None) => action_bar(shell, entity, cx),' \
+  geode-shell \
+  i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

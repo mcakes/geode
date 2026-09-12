@@ -2744,6 +2744,343 @@ fn n_is_inert_on_groupings_and_says_why(cx: &mut gpui::TestAppContext) {
     assert!(notice.contains("slots"), "{notice}");
 }
 
+// ---- Groupings: digit jump and chain entry (§18.8) -----------------------
+
+/// A bare digit in the Groupings browse list opens that slot's edit
+/// stage in one keystroke — the slots are numbered, and the number is
+/// the fastest way to name one. On every other domain the digit is
+/// claimed and dropped like any other key browse has no verb for, so a
+/// `3` typed at the Views list neither opens anything nor leaks to the
+/// shell as `ctrl+3`'s bare cousin.
+#[gpui::test]
+fn a_digit_in_browse_opens_that_slot_on_groupings_only(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()),
+        vec!["book".to_string()],
+        "the slot opened is the one the digit named"
+    );
+    let crumb = shell.read_with(&cx, |shell, _| objectdialog::render::crumb_text(shell));
+    assert_eq!(crumb, "ctrl+3");
+}
+
+/// The same digit typed at the Views list does nothing at all.
+#[gpui::test]
+fn a_digit_in_browse_is_dropped_on_a_domain_without_numbered_objects(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse
+    );
+    assert!(
+        shell.read_with(&cx, |s, _| s.object_dialog.is_some()),
+        "still open"
+    );
+}
+
+/// From one slot's edit stage a digit jumps straight to another's —
+/// no `escape`, no re-selection — and the same digit as the open slot
+/// says so rather than rebuilding the stage under the trader.
+#[gpui::test]
+fn a_digit_in_the_edit_stage_jumps_to_that_slot(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // Row 1 is selected on open.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "1".to_string()
+        }
+    );
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    assert!(edit_draft(&shell, &cx, |d| d
+        .list_items("dimensions")
+        .unwrap()[0]
+        .included));
+
+    cx.simulate_keystrokes("3");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        }
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("already"), "{notice}");
+}
+
+/// The review's Major: a digit jump away from a slot and back inside the
+/// write debounce used to rebuild the slot's draft from `services.config`,
+/// which the flush had not reached yet — the tick just made vanished from
+/// the screen, and the stale draft then outlived the flush, so the NEXT
+/// tick rendered the whole object without it and wrote that. The edit
+/// stage now derives from the config with the pending batch folded in
+/// (`apply::config_with_pending`), at the one door every entry goes
+/// through, so the same holds for `escape` + `enter` re-entry.
+#[gpui::test]
+fn jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    // Slot 1 is empty: ticking `book` queues a user-layer write with no
+    // fork to confirm.
+    cx.simulate_keystrokes("1 j j space");
+    cx.run_until_parked();
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_some()));
+
+    cx.simulate_keystrokes("2 1");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "1".to_string()
+        }
+    );
+    let ticked = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        edit_draft(shell, cx, |d| {
+            d.list_items("dimensions")
+                .unwrap()
+                .iter()
+                .filter(|i| i.included)
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(
+        ticked(&shell, &cx),
+        vec!["book".to_string()],
+        "the queued tick is on screen, not a debounce behind"
+    );
+
+    // And the stale-draft overwrite that followed: ticking `lhu` from
+    // the re-entered stage must keep `book`.
+    cx.simulate_keystrokes("j j j space");
+    cx.run_until_parked();
+    assert_eq!(
+        ticked(&shell, &cx),
+        vec!["book".to_string(), "lhu".to_string()]
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
+    assert!(
+        written.contains("1 = [\"book\", \"lhu\"]"),
+        "both ticks reach the file: {written}"
+    );
+}
+
+/// The text the shared dialog `Input` currently holds.
+fn dialog_input_text(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> String {
+    shell.read_with(cx, |shell, cx| {
+        shell.dialog_input.read(cx).text().to_string()
+    })
+}
+
+/// The whole chain-field flow on a real window (§18.8): `i` opens the
+/// field seeded with the slot's chain and hands it the keys, the row
+/// list below becomes the completions for the segment being typed,
+/// `tab` accepts the highlighted one, and `enter` makes the typed names
+/// the chain — queued on the same batch a tick would be, reaching the
+/// file behind the same debounce.
+#[gpui::test]
+fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("3 i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the field has the keys"
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "book",
+        "seeded with the chain"
+    );
+    assert!(
+        cx.debug_bounds("dialog-name-row").is_some(),
+        "the chain field, not the filter row"
+    );
+    assert!(
+        cx.debug_bounds("dialog-mode-pill-chain").is_some(),
+        "{:?}",
+        "the pill says chain"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-filter").is_none());
+    // No mouse verb while the field is open: a clicked `d`/`r` would arm
+    // a confirm over a live, focused value field, which the keyboard can
+    // never do (the review's Minor 3).
+    assert!(
+        cx.debug_bounds("objectdialog-actions").is_none(),
+        "the action bar is withdrawn while the chain field is open"
+    );
+
+    cx.simulate_input(" l");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-item-lhu").is_some(),
+        "the completion for `l`"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-item-book").is_none(),
+        "already typed, so no longer offered"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-slot").is_none(),
+        "no field rows while completing"
+    );
+
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(dialog_input_text(&shell, &cx), "book / lhu / ");
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(!dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .list_items("dimensions")
+            .unwrap()
+            .iter()
+            .filter(|i| i.included)
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()),
+        vec!["book".to_string(), "lhu".to_string()]
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-field-slot").is_some(),
+        "the field rows are back"
+    );
+    // Slot 3 is the builtin layer's, so the applied chain is a
+    // definitional change to an object the user does not own: the same
+    // fork question a tick or a `shift+j` on it would ask
+    // (`reordering_slot_3_and_pressing_ctrl_3_regroups_off_the_new_order`),
+    // answered the same way.
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "a desk slot asks before forking, from the chain field too"
+    );
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_none()));
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "queued once the fork is confirmed, like a tick"
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("groupings.toml")).unwrap();
+    assert!(written.contains("\"book\", \"lhu\""), "{written}");
+}
+
+/// A chain the adapter refuses leaves the field open with the text as
+/// typed and says what is wrong; `escape` then drops the text and
+/// closes the field with the chain untouched and nothing queued.
+#[gpui::test]
+fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_slot_3(&["book"]),
+        dir.path(),
+        "config::groupings",
+    );
+    cx.simulate_keystrokes("3 i");
+    cx.simulate_input(" npv");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("npv"), "{notice}");
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry), "still open");
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "book npv",
+        "the text is intact"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit {
+            object: "3".to_string()
+        },
+        "escape closed the field, not the stage"
+    );
+    assert_eq!(dialog_input_text(&shell, &cx), "");
+    assert!(!edit_draft(&shell, &cx, |d| d.is_dirty()));
+    assert!(shell.read_with(&cx, |s, _| s.pending_config_write.is_none()));
+}
+
+/// `i` is the chain field's key on Groupings alone. On Views it keeps
+/// the read-only notice `enter` gives — the edit stage has no text
+/// field there to open.
+#[gpui::test]
+fn i_on_views_still_gives_the_read_only_notice(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(dialog_state(&shell, &cx, |s| s.notice.is_some()));
+}
+
 // ---- Task 6: filtering the edit stage (§18.3) -------------------------
 
 /// `/` filters the edit stage's own rows, exactly as it does in browse:
