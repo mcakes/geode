@@ -210,16 +210,17 @@ pub fn open(
                     .debug_selector(|| "objectdialog-crumb".to_string())
                     .child(crumb_text(shell)),
             )
-            // §18.8: the chain field is open in `Filter` (that is what
-            // gives it the keys), but "filter" is the wrong word for a
-            // field whose text is the value — the pill says `chain`.
-            .children(state.map(|s| {
-                if s.draft.as_ref().is_some_and(|d| d.chain_entry) {
-                    dialog::chain_pill(cx)
-                } else {
-                    dialog::mode_pill(s.mode, cx)
-                }
-            }))
+            // §19.1: a value field runs in `Filter` (that is what gives
+            // it the keys), but "filter" is the wrong word for a field
+            // whose text is the value it will apply — the pill says
+            // `edit`, or `chain` for the chain field's own case.
+            .children(
+                state.map(|s| match s.draft.as_ref().and_then(|d| d.text_entry) {
+                    Some(entry) if entry.completions => dialog::chain_pill(cx),
+                    Some(_) => dialog::edit_pill(cx),
+                    None => dialog::mode_pill(s.mode, cx),
+                }),
+            )
             .into_any_element()
     });
 }
@@ -795,18 +796,20 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         return true;
     }
 
-    // ---- Chain field (§18.8) -------------------------------------------
+    // ---- Text field (§19.1) --------------------------------------------
     //
     // Checked before filter mode, which it shares a focused `Input` with:
     // the field is open only in `Filter` (that is what gives it the keys),
     // and every key filter mode would claim means something else here.
-    let chain_entry = shell
+    // The chain field (§18.8) is `handle_text_key`'s `completions: true`
+    // case, not a separate dispatch.
+    let text_entry = shell
         .object_dialog
         .as_ref()
         .and_then(|state| state.draft.as_ref())
-        .is_some_and(|draft| draft.chain_entry);
-    if chain_entry {
-        return handle_chain_key(shell, ks, cx);
+        .is_some_and(|draft| draft.text_entry.is_some());
+    if text_entry {
+        return handle_text_key(shell, ks, cx);
     }
 
     // ---- Filter mode (§18.3) ------------------------------------------
@@ -1001,19 +1004,14 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 state.mode = DialogMode::Filter;
             }
         }
-        // `enter` and `i` have no row to act on in any draft built so
-        // far: every field is a choice, a list, or (Groupings' `slot`,
-        // both of Scopes' rows) a read-only `Text` — and `space` only
-        // helps for the first two. Checked here rather than always
-        // pointing at `space`, because that used to be false on a
-        // Scopes row: pressing `space` right after would immediately say
-        // "nothing on this row changes with space" — two verbs
-        // disagreeing about the same row in the same breath.
-        // §18.8: `i` opens the chain field on Groupings — the one domain
-        // whose whole object is a single typed line. `begin_chain_entry`
-        // seeds `query`; `Filter` is what hands the shared `Input` the
-        // keys, through `dialog::sync_dialog_text` on this handler's
-        // return, which also writes the seed into the field.
+        // `enter` says whether `space` would do anything here
+        // (`edit_commit_notice`); `i` (§19.1) opens a value field on a
+        // `Number` or an editable `Text` row (`open_text_field`), or
+        // gives that same notice when the row has none. Groupings is the
+        // one domain where `i` reaches past a single row to the slot's
+        // whole object (§18.8) — the typed line is the primary way to
+        // set a chain — so it is checked first and given its own path
+        // through `begin_chain_entry` rather than `Draft::begin_text_entry`.
         NormalCommand::EditText
             if shell
                 .object_dialog
@@ -1030,7 +1028,8 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             // with the cursor on row 0; the viewport follows.
             shell.object_dialog_scroll.scroll_to_item(0);
         }
-        NormalCommand::Commit | NormalCommand::EditText => edit_commit_notice(shell),
+        NormalCommand::EditText => open_text_field(shell),
+        NormalCommand::Commit => edit_commit_notice(shell),
         // §18.8: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
         // letter would be — the edit stage's rule for a key that did
@@ -1076,30 +1075,71 @@ fn edit_commit_notice(shell: &mut ShellView) {
     set_notice(shell, notice.to_string());
 }
 
-/// The chain field's keys (§18.8), while it is open: `escape` closes it
-/// with nothing applied; `tab` completes the highlighted candidate;
-/// `enter` applies the typed chain — [`Draft::apply_chain`] refuses with
-/// the field left open, or closes it — and a `Step::Changed` then rides
+/// `i` off Groupings (§19.1): open the value field on the selected row,
+/// or say why not. A `Number` is always typeable; a `Text` only where
+/// the domain says so (`Domain::text_editable`) — a display-only `Text`
+/// gets the read-only notice `enter` gives, so the two verbs agree about
+/// the same row. Any other row gets `edit_commit_notice`'s answer.
+fn open_text_field(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let domain = state.domain;
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let editable = match draft.selected_row() {
+        Some(EditRow::Field(i)) => match &draft.fields[i].kind {
+            FieldKind::Number { .. } => true,
+            FieldKind::Text(_) => domain.text_editable(&draft.fields[i].key),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !editable {
+        edit_commit_notice(shell);
+        return;
+    }
+    if let Some(state) = shell.object_dialog.as_mut()
+        && let Some(draft) = state.draft.as_mut()
+        && draft.begin_text_entry() == Step::Changed
+    {
+        state.mode = DialogMode::Filter;
+    }
+}
+
+/// The value field's keys (§19.1), while one is open: `escape` closes it
+/// with nothing applied; `enter` applies the typed text — a `Number`
+/// parses and range-checks in [`Draft::apply_text_entry`] itself, a
+/// `Text` goes through the domain's `parse_text` — refusing with the
+/// field left open, or closing it, and a `Step::Changed` then rides
 /// exactly the path a tick does, [`revalidate`] and [`commit_or_confirm`],
-/// so a desk slot still asks before forking; navigation moves the
-/// highlight through [`listfilter::nav_command`] against the completion
-/// list; everything else is the focused `Input`'s to type (`false`).
+/// so a desk field still asks before forking; everything else is the
+/// focused `Input`'s to type (`false`).
+///
+/// The chain field (§18.8, Groupings' `i`) is this same field with
+/// `completions: true`: `tab` and the nav keys only mean anything there
+/// — a plain field has no completion list below it to move a highlight
+/// through, so those two branches are gated on `completions` and `enter`
+/// dispatches to [`Draft::apply_chain`] instead of
+/// [`Draft::apply_text_entry`].
 ///
 /// Closing the field — cancel, apply, or an inert apply — is a pure
-/// mutation of `chain_entry`, `query` and the mode; `dialog::
+/// mutation of `text_entry`, `query` and the mode; `dialog::
 /// sync_dialog_text` empties and blurs the shared `Input` from those on
 /// this handler's return (spec §16.1), the same way every other
 /// transition in this dialog is settled.
-fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+fn handle_text_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
+    let completions = draft_mut(shell).is_some_and(|d| d.chain_entry());
     // The list changes length on every transition out of the field (the
-    // completions give way to the full row list) with the cursor put back
-    // on row 0, so the viewport follows each time — the `ClearQuery`
-    // rung's own reasoning, for the same reason.
+    // completions, where there are any, give way to the full row list)
+    // with the cursor put back on row 0, so the viewport follows each
+    // time — the `ClearQuery` rung's own reasoning, for the same reason.
     if ks.key == "escape" {
         if let Some(state) = shell.object_dialog.as_mut()
             && let Some(draft) = state.draft.as_mut()
         {
-            draft.cancel_chain_entry();
+            draft.cancel_text_entry();
             state.mode = DialogMode::Normal;
         }
         shell.object_dialog_scroll.scroll_to_item(0);
@@ -1108,13 +1148,25 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
     }
     let bare = ks.mods == Modifiers::NONE;
     if bare && ks.key == "enter" {
-        let step = draft_mut(shell).map(Draft::apply_chain);
+        let domain = shell.object_dialog.as_ref().map(|state| state.domain);
+        let step = draft_mut(shell).map(|draft| {
+            if completions {
+                draft.apply_chain()
+            } else {
+                let domain = domain.expect("a draft implies an open dialog");
+                draft.apply_text_entry(&|key, text| domain.parse_text(key, text))
+            }
+        });
         match step {
             Some(Step::Changed) => {
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
                 }
-                shell.object_dialog_scroll.scroll_to_item(0);
+                if completions {
+                    shell.object_dialog_scroll.scroll_to_item(0);
+                } else {
+                    scroll_to_cursor(shell);
+                }
                 revalidate(shell);
                 commit_or_confirm(shell, cx);
             }
@@ -1122,7 +1174,9 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
                 if let Some(state) = shell.object_dialog.as_mut() {
                     state.mode = DialogMode::Normal;
                 }
-                shell.object_dialog_scroll.scroll_to_item(0);
+                if completions {
+                    shell.object_dialog_scroll.scroll_to_item(0);
+                }
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
             None => {}
@@ -1133,7 +1187,9 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
     if ks.key == "tab" {
         // Claimed whatever the modifiers — `shift+tab` included — and a
         // claimed key that does nothing says so, this stage's own rule.
-        if bare && draft_mut(shell).is_some_and(Draft::complete_chain) {
+        // Only the chain field has anything for it to complete; a plain
+        // field says so rather than silently eating the keystroke.
+        if completions && bare && draft_mut(shell).is_some_and(Draft::complete_chain) {
             shell.object_dialog_scroll.scroll_to_item(0);
         } else {
             set_notice(shell, "nothing to complete here".to_string());
@@ -1141,7 +1197,7 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
         cx.notify();
         return true;
     }
-    if let Some(cmd) = listfilter::nav_command(ks) {
+    if completions && let Some(cmd) = listfilter::nav_command(ks) {
         let selected = draft_mut(shell).map(|draft| {
             draft.selected = vimnav::apply(draft.selected, draft.visible_rows().len(), cmd);
             draft.selected
@@ -1152,6 +1208,8 @@ fn handle_chain_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shel
         cx.notify();
         return true;
     }
+    // A plain field: the arrows and ctrl-steps are the caret's, so they
+    // reach the focused `Input` (`false`), like every other key.
     false
 }
 
@@ -2108,7 +2166,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // Built before the theme is borrowed, because both halves of it want
     // `cx` mutably and `cx.theme()` holds it immutably for the rest of
     // this function.
-    // §18.8: no verbs at all while the chain field is open. The keyboard
+    // §19.1: no verbs at all while a value field is open. The keyboard
     // cannot reach `d`/`r` there (every printable key is text), and a
     // CLICKED one would arm a confirm over a live, focused value field —
     // every keystroke then claimed and dropped with the caret still
@@ -2116,7 +2174,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     // browse. Withdrawing the bar is what makes the mouse agree with
     // the keys. A `confirm` cannot be armed here for the same reason,
     // so that arm is unreachable with the field open.
-    let action_block = match (draft.chain_entry, draft.confirm) {
+    let action_block = match (draft.text_entry.is_some(), draft.confirm) {
         (true, _) => div().into_any_element(),
         (false, Some(confirm)) => confirm_row(confirm, &draft.name, entity, cx),
         (false, None) => action_bar(shell, entity, cx),
@@ -2301,8 +2359,13 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 // grip at all, so both are withdrawn outright here rather
                 // than painted as an inert placeholder — there is no
                 // second list for a spacer to keep aligned with once the
-                // whole column is gone.
-                let grip_and_tick = if draft.chain_entry {
+                // whole column is gone. A plain value field (§19.1) never
+                // reaches this branch at all — its own row is the object
+                // header, not a list row — but the withdrawal still reads
+                // "is any field open" rather than "is the chain field
+                // open" so a future item-level text field withdraws the
+                // same way without a second condition to remember.
+                let grip_and_tick = if draft.text_entry.is_some() {
                     None
                 } else {
                     let grip = if own {
@@ -2370,33 +2433,39 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         };
         let entity_for_row = entity.clone();
         let clicked = position;
-        let chain = draft.chain_entry;
+        // §19.1: while a field is open, the mouse agrees with the keys —
+        // a plain field owns the row list too (moving the cursor under
+        // it would leave `TextEntry.row` pointing at a row the trader is
+        // no longer on), so only the chain field's own completion click
+        // does anything. `None` (no field open at all) is the ordinary
+        // click-to-edit path.
+        let open = draft.text_entry.map(|t| t.completions);
         let row_el = element
             .child(label)
             .child(value)
             .debug_selector(move || selector.clone())
             .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                entity_for_row.update(cx, |shell, cx| {
-                    if chain {
-                        on_completion_clicked(shell, clicked, window, cx);
-                    } else {
-                        on_edit_row_clicked(shell, clicked, window, cx);
-                    }
+                entity_for_row.update(cx, |shell, cx| match open {
+                    Some(true) => on_completion_clicked(shell, clicked, window, cx),
+                    Some(false) => {}
+                    None => on_edit_row_clicked(shell, clicked, window, cx),
                 });
             });
         // §18.9.1: a list row is both a drag source and a drop target;
         // a field row (`Dataset`, `Slot`, Scopes' two `Text` rows) is
         // neither — which is `Draft::row_drag` returning `None`, not a
-        // second rule stated here — and in the chain field (§18.8) the
-        // rows are completions, so they carry no drag either, the same
-        // withdrawal the tick and the action bar make there.
+        // second rule stated here — and while any value field is open
+        // (§19.1) the rows carry no drag either, the same withdrawal
+        // the tick and the action bar make there.
         //
         // The branch is built into an `AnyElement` on both sides because
         // `.id()` turns the `Div` into a `Stateful<Div>`: the two arms
         // have different types and only the erased form can be one
         // value. (`list.child(..)` below already takes an `AnyElement`,
         // so nothing downstream notices.)
-        let row_el = match (!draft.chain_entry)
+        let row_el = match draft
+            .text_entry
+            .is_none()
             .then(|| draft.row_drag(edit_row))
             .flatten()
         {
@@ -2510,21 +2579,31 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 sep("leave it alone"),
             ],
         )
-    } else if draft.chain_entry {
-        // §18.8: the chain field's own vocabulary — never filter mode's,
+    } else if let Some(entry) = draft.text_entry {
+        // §19.1: a value field's own vocabulary — never filter mode's,
         // even though the `Input` is focused the same way, because
-        // `enter` and `tab` mean different things here.
-        (
-            vec![
-                sep("type a chain · book / lhu ·"),
-                chip("tab"),
-                sep("complete ·"),
-                chip("up"),
-                chip("down"),
-                sep("move"),
-            ],
-            vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
-        )
+        // `enter` means "apply this value" here rather than "narrow the
+        // list". The chain field (§18.8) is `completions: true` and
+        // additionally has `tab` to complete a segment and the nav keys
+        // to move the highlight; a plain field has neither.
+        if entry.completions {
+            (
+                vec![
+                    sep("type a chain · book / lhu ·"),
+                    chip("tab"),
+                    sep("complete ·"),
+                    chip("up"),
+                    chip("down"),
+                    sep("move"),
+                ],
+                vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
+            )
+        } else {
+            (
+                vec![sep("type a value")],
+                vec![chip("enter"), sep("apply ·"), chip("escape"), sep("cancel")],
+            )
+        }
     } else if state.mode == DialogMode::Filter {
         // §18.3: the same filter-mode hints browse paints, since the
         // vocabulary — type to narrow, the shared nav keys, `escape` back
@@ -2625,15 +2704,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         slash_filters: true,
         entity: entity.clone(),
     });
-    // §18.8: while the chain field is open it takes the filter row's
+    // §19.1: while a value field is open it takes the filter row's
     // place — the same shared `Input`, labelled for what its text now
-    // is, exactly as browse's naming stage swaps in `name_row`.
-    let filter = if draft.chain_entry {
-        dialog::name_row(
-            &shell.dialog_input,
-            &format!("slot {} · chain", draft.name),
-            cx,
-        )
+    // is, exactly as browse's naming stage swaps in `name_row`. The
+    // chain field (§18.8) keeps its own slot-and-chain label; a plain
+    // field names the object and the row it is editing.
+    let filter = if let Some(entry) = draft.text_entry {
+        let label = if entry.completions {
+            format!("slot {} · chain", draft.name)
+        } else {
+            let EditRow::Field(index) = entry.row else {
+                unreachable!("a plain text field only ever opens on a Field row")
+            };
+            format!("{} · {}", draft.name, draft.fields[index].label)
+        };
+        dialog::name_row(&shell.dialog_input, &label, cx)
     } else {
         dialog::filter_row(&shell.dialog_input, frozen_query, cx)
     };
@@ -2956,9 +3041,9 @@ fn on_tick_clicked(
 /// No armed-confirm guard, unlike [`on_tick_clicked`] and
 /// `on_row_dropped`: the chain field and an armed confirm can never
 /// coexist by construction — the action bar (where `d`/`r`/`o` arm one)
-/// is withdrawn while `chain_entry`, and `i` itself is dropped while a
-/// confirm is armed — so there is nothing here for a stray click to
-/// clobber.
+/// is withdrawn while any text field is open (`Draft::text_entry` is
+/// `Some`), and `i` itself is dropped while a confirm is armed — so
+/// there is nothing here for a stray click to clobber.
 ///
 /// On a failed completion (`complete_chain` returns `false` — the typed
 /// segment matched nothing, say) `selected` stays on the clicked row,

@@ -2946,7 +2946,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
     assert!(
-        edit_draft(&shell, &cx, |d| d.chain_entry),
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is open"
     );
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
@@ -2969,7 +2969,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // First escape: the chooser, with the chain untouched.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -2983,7 +2983,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // `i` reopens it; second escape from the chooser goes back a stage.
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
     assert_eq!(
@@ -2994,7 +2994,7 @@ fn opening_a_slot_lands_in_the_chain_field_and_escape_reaches_the_chooser(
     // By `enter` from the list, the same landing.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(dialog_filter_is_focused(&shell, &mut cx));
 }
 
@@ -3023,7 +3023,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
     // The field is open on arrival (§18.8); `i` is only the way BACK in.
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert!(
         dialog_filter_is_focused(&shell, &mut cx),
         "the field has the keys"
@@ -3072,7 +3072,7 @@ fn i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain(cx: &mut gpu
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(!dialog_filter_is_focused(&shell, &mut cx));
     assert_eq!(dialog_input_text(&shell, &cx), "");
@@ -3130,7 +3130,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
     cx.run_until_parked();
     let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
     assert!(notice.contains("npv"), "{notice}");
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry), "still open");
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()), "still open");
     assert!(dialog_filter_is_focused(&shell, &mut cx));
     assert_eq!(
         dialog_input_text(&shell, &cx),
@@ -3140,7 +3140,7 @@ fn a_refused_chain_keeps_the_field_open_and_escape_cancels_it(cx: &mut gpui::Tes
 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert_eq!(
         dialog_state(&shell, &cx, |s| s.stage.clone()),
@@ -3163,7 +3163,7 @@ fn i_on_views_still_gives_the_read_only_notice(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
     cx.simulate_keystrokes("i");
     cx.run_until_parked();
-    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(!edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
     assert!(dialog_state(&shell, &cx, |s| s.notice.is_some()));
 }
@@ -3892,7 +3892,7 @@ fn clicking_a_groupings_row_lands_in_the_chain_field(cx: &mut gpui::TestAppConte
         gpui::Modifiers::none(),
     );
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     assert_eq!(edit_draft(&shell, &cx, |d| d.query.clone()), "book / lhu");
     assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Filter);
 }
@@ -4234,7 +4234,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
     );
     cx.simulate_keystrokes("3");
     cx.run_until_parked();
-    assert!(edit_draft(&shell, &cx, |d| d.chain_entry));
+    assert!(edit_draft(&shell, &cx, |d| d.chain_entry()));
     // Open a fresh segment so `lhu` is offered.
     cx.simulate_input(" / ");
     cx.run_until_parked();
@@ -4252,7 +4252,7 @@ fn clicking_a_completion_row_completes_the_chain(cx: &mut gpui::TestAppContext) 
         "book / lhu / "
     );
     assert!(
-        edit_draft(&shell, &cx, |d| d.chain_entry),
+        edit_draft(&shell, &cx, |d| d.chain_entry()),
         "the field is still open"
     );
     assert_eq!(

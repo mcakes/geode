@@ -7065,24 +7065,28 @@ run_mutation "groupings: a duplicated name is not refused" \
   geode-shell \
   applying_refuses_an_unknown_or_duplicated_name_and_stays_open
 
-# The chain handler must run AHEAD of filter mode — the two share a
+# The text-field handler must run AHEAD of filter mode — the two share a
 # focused `Input`, and filter mode's `enter` is a notice, its `tab` a
 # drop. Skipping the dispatch leaves the field open with `enter` saying
-# "read-only" and `tab` doing nothing; `i` itself still works.
+# "read-only" and `tab` doing nothing; `i` itself still works. (§19.1
+# generalised this from the chain-only `chain_entry` flag to
+# `Draft::text_entry`; the chain field is now its `completions: true`
+# case, still exercised by this same window test.)
 run_mutation "objectdialog: the chain field's keys fall through to filter mode" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if chain_entry {' \
+  '    if text_entry {' \
   '    if false {' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
-# The pill has to say `chain`, not `filter`, over a field whose text is a
-# value: `enter` applies it rather than opening a row. The mode really is
-# `Filter` underneath, so every mode assertion stays green.
+# The pill has to say `chain`, not `edit` or `filter`, over the chain
+# field specifically: `enter` there applies a whole dimension chain
+# rather than one value. The mode really is `Filter` underneath, so
+# every mode assertion stays green.
 run_mutation "objectdialog: the chain field wears the filter pill" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                if s.draft.as_ref().is_some_and(|d| d.chain_entry) {' \
-  '                if false {' \
+  '                    Some(entry) if entry.completions => dialog::chain_pill(cx),' \
+  '                    Some(entry) if false && entry.completions => dialog::chain_pill(cx),' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7090,8 +7094,8 @@ run_mutation "objectdialog: the chain field wears the filter pill" \
 # search icon over a chain.
 run_mutation "objectdialog: the chain field paints as the filter row" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let filter = if draft.chain_entry {' \
-  '    let filter = if false {' \
+  '    let filter = if let Some(entry) = draft.text_entry {' \
+  '    let filter = if let Some(entry) = draft.text_entry.filter(|_| false) {' \
   geode-shell \
   i_opens_the_chain_field_tab_completes_and_enter_writes_the_chain
 
@@ -7423,6 +7427,31 @@ run_mutation "dialog: enter_filter_by_mouse ignores the settings dialog" \
   '    } else if let Some(state) = shell.settings.as_mut().filter(|_| false) {' \
   geode-shell \
   clicking_the_settings_frozen_filter_row_enters_filter_mode
+
+# §19.1: a Number typed outside its range is REFUSED, never clamped — a
+# clamp would apply a number the trader did not type.
+run_mutation "objectdialog: a typed number outside min..max is refused not clamped" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                Ok(n) if n < *min || n > *max => {' \
+  '                Ok(n) if false && (n < *min || n > *max) => {' \
+  geode-shell \
+  applying_a_number_parses_and_refuses_out_of_range_without_clamping
+
+# §19.1: the same text typed back closes the field with nothing queued.
+run_mutation "objectdialog: retyping the same text is inert and closes the field" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                Ok(parsed) if parsed == *text => Step::Inert,' \
+  '                Ok(parsed) if parsed == *text => Step::Changed,' \
+  geode-shell \
+  applying_text_goes_through_the_domains_parser_and_the_same_value_is_inert
+
+# §19.1: `i` seeds the field with the row's value, not an empty field.
+run_mutation "objectdialog: begin_text_entry seeds the query from the row" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        self.query = seed;' \
+  '        self.query = String::new();' \
+  geode-shell \
+  begin_text_entry_seeds_the_query_from_a_number_row
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

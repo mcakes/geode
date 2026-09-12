@@ -710,6 +710,22 @@ impl Confirm {
     }
 }
 
+/// A value field open in the filter row's place (§19.1): the shared
+/// `Input` seeded with a row's value, `enter` applying it down the tick's
+/// own path and `escape` cancelling. The chain field (§18.8) is the case
+/// with `completions: true` — the rows below are then
+/// [`groupings::chain_candidates`] rather than the edit rows.
+///
+/// `row` is an [`EditRow`], not a field index, so a future item-level
+/// text (a column's width, Part 2c) is one more arm and not a second
+/// mechanism; nothing in this plan opens it on anything but
+/// `EditRow::Field`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextEntry {
+    pub row: EditRow,
+    pub completions: bool,
+}
+
 /// One object being edited.
 ///
 /// The edit **buffer**, and what the edit stage actually paints: a
@@ -788,16 +804,15 @@ pub struct Draft {
     /// replaces the action bar while armed, so the row list above it never
     /// changes length.
     pub confirm: Option<Confirm>,
-    /// The chain field is open (§18.8, Groupings only — `i` in the edit
-    /// stage). While it is, `query` holds the chain being typed rather
-    /// than a filter — the shared `Input` mirrors into it exactly as a
-    /// filter does, so there is no second text buffer — and
-    /// [`Draft::visible_rows`] is the completion list
-    /// ([`groupings::chain_candidates`]) rather than the filtered rows.
-    /// A flag on the draft beside `confirm` rather than a `Stage` of its
-    /// own, because the stage is what the escape ladder and the browse
-    /// cursor restore key on, and both must still read `Edit` here.
-    pub chain_entry: bool,
+    /// A text field is open (§19.1). While it is, `query` holds the text
+    /// being typed rather than a filter — the shared `Input` mirrors into
+    /// it exactly as a filter does, so there is no second text buffer —
+    /// and, for the chain field's `completions: true`,
+    /// [`Draft::visible_rows`] is the completion list. A field on the
+    /// draft beside `confirm` rather than a `Stage`, because the stage is
+    /// what the escape ladder and the browse cursor restore key on, and
+    /// both must still read `Edit` here.
+    pub text_entry: Option<TextEntry>,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -910,7 +925,7 @@ impl Draft {
         // §18.8: with the chain field open, `query` is the chain being
         // typed and the rows are its completions — see
         // [`Draft::chain_entry`].
-        if self.chain_entry {
+        if self.chain_entry() {
             return groupings::chain_candidates(self);
         }
         let labels: Vec<String> = self.rows().into_iter().map(|r| self.row_label(r)).collect();
@@ -1045,6 +1060,105 @@ impl Draft {
     /// hitting (a fix applied to one copy and not the other).
     pub fn toggle_selected_back(&mut self) -> Step {
         self.step_selected(StepDirection::Backward)
+    }
+
+    /// Is the open text field the chain field — the one with a completion
+    /// list below it? `false` when no field is open at all.
+    pub fn chain_entry(&self) -> bool {
+        self.text_entry.is_some_and(|entry| entry.completions)
+    }
+
+    /// `i` on a `Text` or `Number` row (§19.1): open the field seeded with
+    /// the row's value, so appending is one keystroke away. Pure — the
+    /// mode switch that hands the shared `Input` the keys is the
+    /// handler's, and the sync writes the seed into the field on its
+    /// return. `Step::Inert` off any other row: the caller says which
+    /// verb (if any) that row has.
+    ///
+    /// Whether a `Text` row is *editable* is the domain's call
+    /// (`Domain::text_editable`), checked by the caller before this —
+    /// Groupings' `slot` and Scopes' two summaries are `Text` rows that
+    /// must stay read-only, and the draft has no domain to ask.
+    pub fn begin_text_entry(&mut self) -> Step {
+        let Some(row @ EditRow::Field(index)) = self.selected_row() else {
+            return Step::Inert;
+        };
+        let seed = match &self.fields[index].kind {
+            FieldKind::Text(text) => text.clone(),
+            FieldKind::Number { value, .. } => value.to_string(),
+            _ => return Step::Inert,
+        };
+        self.query = seed;
+        self.text_entry = Some(TextEntry {
+            row,
+            completions: false,
+        });
+        Step::Changed
+    }
+
+    /// `escape` in an open text field: drop the text and close it. The
+    /// value is exactly as it was — nothing here was applied. The chain
+    /// field's cancel is this same function (`groupings.rs` re-exports
+    /// it under its old name).
+    pub fn cancel_text_entry(&mut self) {
+        self.text_entry = None;
+        self.query.clear();
+        self.selected = 0;
+    }
+
+    /// `enter` in a plain text field: the typed text becomes the row's
+    /// value and the field closes. A `Number` parses in here — its rule
+    /// is the kind's own (a whole number inside `min..=max`, refused
+    /// rather than clamped, because a clamp would apply a number the
+    /// trader did not type). A `Text` goes through `parse_text` — the
+    /// adapter's door, `(key, text) -> Result<normalised, reason>` — so
+    /// a duration or a regex is refused with the field still open, the
+    /// chain field's own rule for a bad chain. The same value typed
+    /// back is [`Step::Inert`] and still closes the field: closing is
+    /// the visible answer.
+    ///
+    /// `selected` is kept, not reset to 0: the rows below never changed
+    /// (they are the edit rows, not a completion list), so the cursor
+    /// stays on the row just edited.
+    pub fn apply_text_entry(
+        &mut self,
+        parse_text: &dyn Fn(&str, &str) -> Result<String, String>,
+    ) -> Step {
+        let Some(TextEntry {
+            row: EditRow::Field(index),
+            completions: false,
+        }) = self.text_entry
+        else {
+            return Step::Inert;
+        };
+        let typed = self.query.trim().to_string();
+        let field = &mut self.fields[index];
+        let label = field.label.clone();
+        let outcome = match &mut field.kind {
+            FieldKind::Number { value, min, max } => match typed.parse::<i64>() {
+                Err(_) => return Step::Refused(format!("{label} must be a whole number")),
+                Ok(n) if n < *min || n > *max => {
+                    return Step::Refused(format!("{label} must be between {min} and {max}"));
+                }
+                Ok(n) if n == *value => Step::Inert,
+                Ok(n) => {
+                    *value = n;
+                    Step::Changed
+                }
+            },
+            FieldKind::Text(text) => match parse_text(&field.key, &typed) {
+                Err(reason) => return Step::Refused(reason),
+                Ok(parsed) if parsed == *text => Step::Inert,
+                Ok(parsed) => {
+                    *text = parsed;
+                    Step::Changed
+                }
+            },
+            _ => Step::Inert,
+        };
+        self.text_entry = None;
+        self.query.clear();
+        outcome
     }
 
     /// Shared body of [`Draft::toggle_selected`] and
@@ -1499,7 +1613,7 @@ impl Draft {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         }
     }
 }
@@ -1532,6 +1646,32 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 }
 
 impl Domain {
+    /// May `i` edit the `Text` row keyed `key` on this domain? `false`
+    /// everywhere until an adapter has an editable text — Groupings'
+    /// `slot` and Scopes' two summaries are display-only `Text`s and
+    /// must refuse. Sources (§19.3) is the first `true`.
+    pub fn text_editable(self, key: &str) -> bool {
+        match self {
+            Domain::Views | Domain::Groupings | Domain::Scopes => {
+                let _ = key;
+                false
+            }
+        }
+    }
+
+    /// The adapter's door for a committed `Text` (§19.1): normalise the
+    /// typed text, or refuse it with the reason the notice shows. Trims
+    /// by default; an adapter with a real grammar (a duration, a regex, a
+    /// path list) overrides its own keys.
+    pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
+        match self {
+            Domain::Views | Domain::Groupings | Domain::Scopes => {
+                let _ = key;
+                Ok(text.trim().to_string())
+            }
+        }
+    }
+
     /// The fields of `object`, derived fresh from `config` — never cached,
     /// for the same reason [`Domain::objects`] is not.
     ///
@@ -1568,7 +1708,7 @@ impl Domain {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -2353,9 +2493,10 @@ mod tests {
     }
 
     /// §18.8 (user ruling 2026-09-12): a Groupings slot opens IN the
-    /// chain field — `chain_entry` set, the text seeded, the mode at
-    /// `Filter` so the sync hands the field the keys — where every other
-    /// domain still opens in normal mode with no field at all.
+    /// chain field — `text_entry` set with `completions: true`, the text
+    /// seeded, the mode at `Filter` so the sync hands the field the keys
+    /// — where every other domain still opens in normal mode with no
+    /// field at all.
     #[test]
     fn a_groupings_slot_opens_in_the_chain_field_and_a_view_does_not() {
         let config = config_from(&[
@@ -2369,14 +2510,14 @@ mod tests {
         let mut state = ObjectDialogState::new(Domain::Groupings);
         state.enter_edit(&config, "3");
         let draft = state.draft.as_ref().unwrap();
-        assert!(draft.chain_entry);
+        assert!(draft.chain_entry());
         assert_eq!(state.mode, DialogMode::Filter);
         assert_eq!(state.effective_query(), "book", "seeded with the chain");
 
         let mut state = ObjectDialogState::new(Domain::Views);
         state.enter_edit(&config, "tree");
         let draft = state.draft.as_ref().unwrap();
-        assert!(!draft.chain_entry);
+        assert!(!draft.chain_entry());
         assert_eq!(state.mode, DialogMode::Normal);
         assert_eq!(state.effective_query(), "");
     }
@@ -2549,7 +2690,7 @@ mod tests {
             query: String::new(),
             diagnostics: Vec::new(),
             confirm: None,
-            chain_entry: false,
+            text_entry: None,
         }
     }
 
@@ -3655,5 +3796,142 @@ mod tests {
             vec!["banana".to_string(), "apple".to_string()],
             "list order must win over apple's higher fuzzy score"
         );
+    }
+
+    fn draft_with_number_and_text() -> Draft {
+        Draft::new_object(
+            "x",
+            vec![
+                Field {
+                    key: "polls".to_string(),
+                    label: "Stable polls".to_string(),
+                    kind: FieldKind::Number {
+                        value: 3,
+                        min: 1,
+                        max: 100,
+                    },
+                    dest: Destination::Doc,
+                },
+                Field {
+                    key: "interval".to_string(),
+                    label: "Poll interval".to_string(),
+                    kind: FieldKind::Text("30s".to_string()),
+                    dest: Destination::Doc,
+                },
+            ],
+            toml::Table::new(),
+        )
+    }
+
+    #[test]
+    fn begin_text_entry_seeds_the_query_from_a_number_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 0;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.query, "3");
+        assert_eq!(
+            draft.text_entry,
+            Some(TextEntry {
+                row: EditRow::Field(0),
+                completions: false
+            })
+        );
+        assert!(!draft.chain_entry(), "a plain field has no completion list");
+    }
+
+    #[test]
+    fn begin_text_entry_seeds_the_query_from_a_text_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.query, "30s");
+    }
+
+    #[test]
+    fn begin_text_entry_is_inert_off_a_text_or_number_row() {
+        let mut draft = Draft::new_object(
+            "x",
+            vec![Field {
+                key: "on".to_string(),
+                label: "On".to_string(),
+                kind: FieldKind::Bool(true),
+                dest: Destination::Doc,
+            }],
+            toml::Table::new(),
+        );
+        assert_eq!(draft.begin_text_entry(), Step::Inert);
+        assert_eq!(draft.text_entry, None);
+    }
+
+    #[test]
+    fn applying_a_number_parses_and_refuses_out_of_range_without_clamping() {
+        let ok = |_: &str, t: &str| Ok(t.to_string());
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 0;
+        draft.begin_text_entry();
+        draft.query = "abc".to_string();
+        assert!(
+            matches!(draft.apply_text_entry(&ok), Step::Refused(r) if r.contains("whole number"))
+        );
+        assert!(draft.text_entry.is_some(), "a refusal keeps the field open");
+        draft.query = "500".to_string();
+        assert!(matches!(draft.apply_text_entry(&ok), Step::Refused(r) if r.contains("1 and 100")));
+        draft.query = "42".to_string();
+        assert_eq!(draft.apply_text_entry(&ok), Step::Changed);
+        assert_eq!(draft.text_entry, None);
+        assert!(matches!(
+            draft.fields[0].kind,
+            FieldKind::Number { value: 42, .. }
+        ));
+        assert!(draft.query.is_empty());
+    }
+
+    #[test]
+    fn applying_text_goes_through_the_domains_parser_and_the_same_value_is_inert() {
+        let parse = |key: &str, t: &str| -> Result<String, String> {
+            if key == "interval" && t.ends_with('s') {
+                Ok(t.trim().to_string())
+            } else {
+                Err("unit needed".to_string())
+            }
+        };
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        draft.begin_text_entry();
+        // `t.ends_with('s')` is the fake parser's whole grammar, so the
+        // refused input must actually fail that check — "2 minutes"
+        // would pass it by accident (the word "minutes" itself ends in
+        // 's'), which is not what this assertion is testing.
+        draft.query = "2m".to_string();
+        assert_eq!(
+            draft.apply_text_entry(&parse),
+            Step::Refused("unit needed".to_string())
+        );
+        draft.query = " 30s ".to_string();
+        assert_eq!(
+            draft.apply_text_entry(&parse),
+            Step::Inert,
+            "the trimmed value is the one already there"
+        );
+        assert_eq!(
+            draft.text_entry, None,
+            "an inert apply still closes the field"
+        );
+        draft.begin_text_entry();
+        draft.query = "45s".to_string();
+        assert_eq!(draft.apply_text_entry(&parse), Step::Changed);
+        assert_eq!(draft.fields[1].kind, FieldKind::Text("45s".to_string()));
+    }
+
+    #[test]
+    fn cancelling_text_entry_drops_the_text_and_leaves_the_value() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        draft.begin_text_entry();
+        draft.query = "garbage".to_string();
+        draft.cancel_text_entry();
+        assert_eq!(draft.text_entry, None);
+        assert!(draft.query.is_empty());
+        assert_eq!(draft.fields[1].kind, FieldKind::Text("30s".to_string()));
     }
 }

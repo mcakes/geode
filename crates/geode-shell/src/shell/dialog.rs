@@ -808,6 +808,13 @@ pub(crate) fn chain_pill(cx: &App) -> AnyElement {
     state_pill("chain", true, cx)
 }
 
+/// The pill while a plain value field is open (§19.1): `edit`, the same
+/// `primary` "you are typing" pair `chain_pill` uses — `filter` would
+/// misdescribe what `enter` does. Selector `dialog-mode-pill-edit`.
+pub(crate) fn edit_pill(cx: &App) -> AnyElement {
+    state_pill("edit", true, cx)
+}
+
 /// The one pill both [`mode_pill`] and [`chain_pill`] paint: `typing`
 /// picks the `primary` pair (a focused text field owns the keys) over the
 /// muted resting pair. The label rides in the selector so a test can
