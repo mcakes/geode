@@ -1905,6 +1905,36 @@ run_mutation "groupings: an unknown column drops the slot" \
   geode-core \
   an_unknown_column_is_an_error_for_that_slot_only
 
+# The Groupings dialog's vocabulary is the compiler's (`carries_all`): a
+# column some DECLARED grain carries. Dropping the grain test offers every
+# declared column — a measure, a categorical attribute — and a slot naming
+# one would fail to compile.
+run_mutation "groupable_columns: only a column some declared grain carries is groupable" \
+  crates/geode-shell/src/shell/mod.rs \
+  '            if !grains.iter().any(|g| dataset.carries(*g, &column.name)) {' \
+  '            if false {' \
+  geode-shell \
+  groupable_columns_are_every_carried_dimension_key_included_plus_derived
+
+# The dialog must read the grouping vocabulary, not the picker's: the
+# picker's list has no key columns (`position_ref`) and no numeric
+# dimension, and offers attributes no grain can group by.
+run_mutation "groupings dialog: fields offers groupable_columns, not pickable_columns" \
+  crates/geode-shell/src/shell/objectdialog/groupings.rs \
+  '    for column in crate::shell::groupable_columns(config) {' \
+  '    for column in crate::shell::pickable_columns(config) {' \
+  geode-shell \
+  fields_offers_every_groupable_column_chain_first_then_the_rest
+
+# Only a utf8 column can be an ENUM; a dimension's categorical DEFAULT is
+# gated on the type, or an f64 dimension is sent for interning.
+run_mutation "schema: a non-string dimension does not default to categorical" \
+  crates/geode-core/src/schema/mod.rs \
+  '        matches!(role, ColumnRole::Dimension { .. }) && ty == ColumnType::Utf8;' \
+  '        matches!(role, ColumnRole::Dimension { .. });' \
+  geode-core \
+  a_non_string_dimension_defaults_to_uncategorical_without_a_diagnostic
+
 run_mutation "frame: an empty slot cannot be activated" \
   crates/geode-shell/src/frame.rs \
   '            && self.slots.get(n).is_none()' \
@@ -2959,8 +2989,8 @@ run_mutation "carried: a dependency violation degrades health" \
 
 run_mutation "categorical: defaults on for dimensions, off otherwise" \
   crates/geode-core/src/schema/mod.rs \
-  '    let categorical_default = matches!(role, ColumnRole::Dimension { .. });' \
-  '    let categorical_default = true;' \
+  '        matches!(role, ColumnRole::Dimension { .. }) && ty == ColumnType::Utf8;' \
+  '        true;' \
   geode-core categorical_defaults_true_for_dimensions_and_false_otherwise_and_attributes_may_opt_in
 
 run_mutation "categorical: interning follows the flag" \

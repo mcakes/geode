@@ -3,3 +3,4 @@ config_version = 1
 2 = ["book", "lhu"]
 3 = ["underlying_ref", "book", "position_ref"]
 4 = ["desk", "book"]
+5 = ["underlying_ref", "strike"]
