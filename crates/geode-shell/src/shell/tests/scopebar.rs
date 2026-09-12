@@ -328,3 +328,165 @@ fn dispatching_scope_name_loads_the_saved_scope(cx: &mut gpui::TestAppContext) {
         "dispatching scope::eu must load the saved scope"
     );
 }
+
+/// A chord typed into the focused text field still dispatches its shell
+/// binding (user ruling 2026-09-12: "when focused on a text field, key
+/// bindings with modifier keys should still work — `ctrl+k`, `ctrl+,`").
+/// A shift-only keystroke is typing, never a chord: `shift+d` is `D` in
+/// the field, not `workspace::duplicate_horizontal`.
+#[gpui::test]
+fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/"); // mod+/ under the default mod
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let tiles_before = shell.read_with(&vcx, |shell, _| {
+        shell.services.workspaces.active().tree().tiles().len()
+    });
+    vcx.simulate_keystrokes("shift-d");
+    assert_eq!(
+        shell.read_with(&vcx, |shell, _| {
+            shell.services.workspaces.active().tree().tiles().len()
+        }),
+        tiles_before,
+        "shift+d in the field is typing, not duplicate_horizontal"
+    );
+    assert!(filter_is_focused(&shell, &mut vcx));
+
+    vcx.simulate_keystrokes("ctrl-,");
+    assert!(
+        shell.read_with(&vcx, |shell, _| shell.modal.is_some()),
+        "ctrl+, from the focused field must open the settings dialog"
+    );
+    vcx.simulate_keystrokes("escape");
+    assert!(shell.read_with(&vcx, |shell, _| shell.modal.is_none()));
+
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-k");
+    assert!(
+        shell.read_with(&vcx, |shell, _| shell.palette.is_some()),
+        "ctrl+k from the focused field must open the palette"
+    );
+}
+
+/// While the text field has focus, the keyboard belongs to the field and
+/// the shell's chrome, not to the tile that happens to be focused in the
+/// layout: a chord bound in the focused occupant's own context does not
+/// reach it.
+#[gpui::test]
+fn a_chord_in_the_focused_tiles_own_context_does_not_fire_from_the_field(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (mut services, log) = services_with_recorder();
+    let module_doc = LayerDoc::builtin(
+        "keymap",
+        "[[bindings]]\ncontext = \"rec\"\n[bindings.keys]\n\"ctrl+g\" = \"rec::noop\"\n",
+    )
+    .unwrap();
+    services.keymap = test_keymap(&services.registry, &[module_doc]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.simulate_keystrokes("ctrl-v");
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+
+    // Sanity: from the tile, the chord reaches the occupant.
+    vcx.simulate_keystrokes("ctrl-g");
+    assert!(
+        log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "rec::noop"
+        )),
+        "{:?}",
+        log.borrow()
+    );
+    log.borrow_mut().clear();
+
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-g");
+    assert!(
+        !log.borrow().iter().any(|r| matches!(
+            r,
+            crate::module::recording::Recorded::Dispatch(_, a, _) if a.0 == "rec::noop"
+        )),
+        "a tile-context chord must not fire while the field is focused: {:?}",
+        log.borrow()
+    );
+    assert!(filter_is_focused(&shell, &mut vcx));
+}
+
+/// A chord that moves the frame's text while the field keeps focus —
+/// `mod+z` undoing the session's own typing — is reflected back into the
+/// field, so what the trader sees is what the frame holds.
+#[gpui::test]
+fn a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (window, mut vcx) = open_shell(cx, test_services());
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_input("sp");
+    let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
+    assert_eq!(
+        frame
+            .read_with(&vcx, |f, _| f.scope().text.clone())
+            .as_deref(),
+        Some("sp")
+    );
+    vcx.simulate_keystrokes("alt-z"); // mod+z under the default mod
+    assert_eq!(frame.read_with(&vcx, |f, _| f.scope().text.clone()), None);
+    assert!(filter_is_focused(&shell, &mut vcx));
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.filter_input.read(cx).value().to_string()),
+        "",
+        "the field must show the undone (empty) text, not the typed one"
+    );
+}
+
+/// An unbind in a higher layer governs the field's chords exactly as it
+/// governs the shell's: `"ctrl+k" = "none"` swallows the chord rather than
+/// letting the builtin palette toggle through.
+#[gpui::test]
+fn an_unbound_chord_typed_into_the_field_is_swallowed(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    let unbind = LayerDoc::builtin(
+        "keymap",
+        "[[bindings]]\n[bindings.keys]\n\"ctrl+k\" = \"none\"\n",
+    )
+    .unwrap();
+    services.keymap = test_keymap(&services.registry, &[unbind]);
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, _cx| window.activate_window());
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("alt-/");
+    assert!(filter_is_focused(&shell, &mut vcx));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&vcx, |shell, _| shell.palette.is_none()));
+    assert!(filter_is_focused(&shell, &mut vcx));
+}

@@ -1934,6 +1934,43 @@ run_mutation "hosting: a closed tile drops its occupant" \
   geode-shell \
   closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
 
+# ---- chords from the scope bar's text field (Phase 4 §3.11, ruling 2026-09-12)
+
+run_mutation "field chords: a modified keystroke in the focused field dispatches its shell binding" \
+  crates/geode-shell/src/shell/input.rs \
+  '                && ks.mods.is_chord()' \
+  '                && false' \
+  geode-shell \
+  a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
+
+run_mutation "field chords: shift alone is typing, not a chord" \
+  crates/geode-shell/src/keymap/keystroke.rs \
+  '        self.ctrl || self.alt || self.cmd' \
+  '        self.ctrl || self.alt || self.cmd || self.shift' \
+  geode-shell \
+  a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types
+
+run_mutation "field chords: resolved against the workspace context alone, never the focused tile's" \
+  crates/geode-shell/src/shell/input.rs \
+  '                let stack = [KeyContext::new("workspace")];' \
+  '                let stack = self.context_stack(cx);' \
+  geode-shell \
+  a_chord_in_the_focused_tiles_own_context_does_not_fire_from_the_field
+
+run_mutation "field chords: an unbind swallows the chord rather than falling through to the builtin" \
+  crates/geode-shell/src/shell/input.rs \
+  '                    if action.0 != UNBOUND_ACTION {' \
+  '                    if true {' \
+  geode-shell \
+  an_unbound_chord_typed_into_the_field_is_swallowed
+
+run_mutation "field chords: a dispatched chord reflects the frame's text back into the still-focused field" \
+  crates/geode-shell/src/shell/input.rs \
+  '                        self.reflect_frame_text_into_focused_field(window, cx);' \
+  '' \
+  geode-shell \
+  a_scope_undo_chord_from_the_field_reflects_the_frames_text_into_it
+
 # Re-anchored 2026-09-08 (add-tile): the bare
 # `o.content.set_visible(false, cx);` line matched the FIRST of two
 # occurrences — MAJ-2's vanished-occupant loop, which the MAJ-2 entry
