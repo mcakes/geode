@@ -3940,3 +3940,71 @@ fn clicking_a_browse_row_while_naming_only_selects(cx: &mut gpui::TestAppContext
         "the typed name survived, unreplaced by the row it selected"
     );
 }
+
+/// §18.9.2: the tick is the toggle. Clicking a shown column's tick hides
+/// it — a `Presentation` write, no fork question — and leaves the cursor
+/// on that row, as `space` would.
+#[gpui::test]
+fn clicking_a_tick_hides_the_column_and_parks_the_cursor_there(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let tick = cx
+        .debug_bounds("objectdialog-tick-npv")
+        .expect("npv paints a tick");
+    cx.simulate_mouse_down(
+        gpui::point(tick.origin.x + gpui::px(4.0), tick.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let included = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .find(|i| i.name == "npv")
+            .unwrap()
+            .included
+    });
+    assert!(!included, "npv is hidden");
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.row_label(d.selected_row().unwrap())),
+        "npv"
+    );
+    // The write is a Presentation one: after the debounce the user
+    // layer's view_presentation.toml names npv hidden.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    let text =
+        std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
+    assert!(text.contains("hidden = [\"npv\"]"), "{text}");
+}
+
+/// On an available row the tick adds — `space`'s add — which is a `Doc`
+/// write, so on a desk view it asks before forking rather than writing.
+#[gpui::test]
+fn clicking_an_available_rows_tick_adds_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let tick = cx
+        .debug_bounds("objectdialog-tick-delta01")
+        .expect("delta01 is available");
+    cx.simulate_mouse_down(
+        gpui::point(tick.origin.x + gpui::px(4.0), tick.origin.y + gpui::px(4.0)),
+        MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    cx.run_until_parked();
+    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["book", "npv", "delta01"]);
+    assert!(
+        edit_draft(&shell, &cx, |d| d.confirm.is_some()),
+        "a desk view asks before forking"
+    );
+}

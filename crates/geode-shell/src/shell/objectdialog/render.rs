@@ -2299,7 +2299,19 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 } else {
                     div().w(px(11.)).into_any_element()
                 };
-                let tick = div()
+                // §18.9.2: the tick is the toggle. Its mouse-down stops
+                // propagation so the row's own select does not double-
+                // fire; the handler moves the cursor here itself and then
+                // walks `space`'s path, so the mouse and the key cannot
+                // disagree.
+                let entity_for_tick = entity.clone();
+                let tick_position = position;
+                let tick_name = entry.name.clone();
+                let mut tick = div()
+                    .id(gpui::SharedString::from(format!(
+                        "objectdialog-tick-{}",
+                        entry.name
+                    )))
                     .font_family(crate::fonts::MONO)
                     .w(px(13.))
                     .text_color(if entry.included {
@@ -2307,6 +2319,21 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     } else {
                         theme.muted_foreground
                     })
+                    .debug_selector(move || format!("objectdialog-tick-{tick_name}"));
+                // In the chain field (§18.8) the rows are completions and
+                // the tick is a painted state, not a control (§18.9.2).
+                if !draft.chain_entry {
+                    tick = tick.cursor_pointer().on_mouse_down(
+                        MouseButton::Left,
+                        move |_event, window, cx| {
+                            cx.stop_propagation();
+                            entity_for_tick.update(cx, |shell, cx| {
+                                on_tick_clicked(shell, tick_position, window, cx);
+                            });
+                        },
+                    );
+                }
+                let tick = tick
                     .child(if entry.included { "✓" } else { "·" })
                     .into_any_element();
                 let mut name_row = h_flex()
@@ -2787,6 +2814,44 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
+}
+
+/// §18.9.2: a click on a row's tick. The cursor moves to the row first,
+/// then exactly `space`'s path runs — `Draft::toggle_selected`, the
+/// available-block refresh, revalidation, the scroll and
+/// `commit_or_confirm` — so every write and every refusal the key gives,
+/// the tick gives. Ends in [`dialog::sync_dialog_text`] like every mouse
+/// handler that mutates the draft (§17.1 rule 3).
+fn on_tick_clicked(
+    shell: &mut ShellView,
+    position: usize,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    if let Some(state) = shell.object_dialog.as_mut()
+        && state.notice.take().is_some()
+    {
+        cx.notify();
+    }
+    let Some(draft) = draft_mut(shell) else {
+        return;
+    };
+    if position >= draft.visible_rows().len() {
+        return;
+    }
+    draft.selected = position;
+    match draft.toggle_selected() {
+        Step::Changed => {
+            maybe_refresh_available(shell);
+            revalidate(shell);
+            scroll_to_cursor(shell);
+            commit_or_confirm(shell, cx);
+        }
+        Step::Refused(reason) => refuse_step(shell, reason),
+        Step::Inert => set_notice(shell, "nothing on this row changes with a tick".to_string()),
+    }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }

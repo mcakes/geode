@@ -6962,6 +6962,18 @@ run_mutation "objectdialog: locate resolves a drag payload by name" \
   '        let item = 0;' \
   geode-shell row_drag_round_trips_through_locate
 
+# ---- Mouse parity Task 5 (§18.9.2): the tick is the toggle -------------
+
+# §18.9.2: the tick toggles. Mutated to a bare select, a tick click moves
+# the cursor and changes nothing.
+run_mutation "objectdialog: a tick click toggles through space's path" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    draft.selected = position;
+    match draft.toggle_selected() {' \
+  '    draft.selected = position;
+    match Step::Inert {' \
+  geode-shell clicking_a_tick_hides_the_column_and_parks_the_cursor_there
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
