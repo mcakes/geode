@@ -451,13 +451,12 @@ fn ctrl_a_is_reclaimed_inside_the_filter_but_typing_still_works(cx: &mut gpui::T
     );
 }
 
-/// A real mouse click selects a different row (`debug_bounds` gives the
-/// row's real painted coordinates, same technique
-/// `mouse_down_on_a_tile_focuses_it` and the settings-panel click tests
-/// already use in this file) — then clicking that SAME, now-selected
-/// row again starts listening.
+/// §17.1 rule 2: a row click does what `enter` would. One click on a row
+/// that is not the selected one both selects it and starts listening —
+/// the second click the old rule required was one step short of
+/// everything a mouse user came for.
 #[gpui::test]
-fn click_selects_a_row_and_clicking_it_again_starts_listening(cx: &mut gpui::TestAppContext) {
+fn a_single_click_on_a_row_starts_listening(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -500,45 +499,36 @@ fn click_selects_a_row_and_clicking_it_again_starts_listening(cx: &mut gpui::Tes
     );
 
     cx.simulate_mouse_down(inside_row_1, MouseButton::Left, gpui::Modifiers::none());
+    let (selected, listening) = shell.read_with(&cx, |shell, _| {
+        let k = shell.keybindings.as_ref().unwrap();
+        (k.selected, k.listening.clone())
+    });
+    assert_eq!(selected, 1, "the click selected row 1");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.keybindings.as_ref().unwrap().selected),
-        1,
-        "clicking row 1 should have selected it"
-    );
-    assert!(
-        shell.read_with(&cx, |shell, _| shell
-            .keybindings
-            .as_ref()
-            .unwrap()
-            .listening
-            .is_none()),
-        "the first click on a different row must not start listening"
+        listening,
+        Some(Vec::new()),
+        "and started listening on it at once"
     );
 
+    // A click on a different row mid-capture retargets the capture.
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let row_1_bounds_again = cx
-        .debug_bounds("keybindings-row-1")
-        .expect("row 1 should still have painted bounds");
-    let inside_row_1_again = gpui::point(
-        row_1_bounds_again.origin.x + gpui::px(10.0),
-        row_1_bounds_again.origin.y + gpui::px(10.0),
-    );
+    let row_2 = cx.debug_bounds("keybindings-row-2").expect("row 2 painted");
     cx.simulate_mouse_down(
-        inside_row_1_again,
+        gpui::point(
+            row_2.origin.x + gpui::px(10.0),
+            row_2.origin.y + gpui::px(10.0),
+        ),
         MouseButton::Left,
         gpui::Modifiers::none(),
     );
-    assert!(
-        shell.read_with(&cx, |shell, _| shell
-            .keybindings
-            .as_ref()
-            .unwrap()
-            .listening
-            .is_some()),
-        "clicking the already-selected row again should start listening"
-    );
+    let (selected, listening) = shell.read_with(&cx, |shell, _| {
+        let k = shell.keybindings.as_ref().unwrap();
+        (k.selected, k.listening.clone())
+    });
+    assert_eq!(selected, 2);
+    assert_eq!(listening, Some(Vec::new()));
 }
 
 // --- The two-mode interaction model (spec

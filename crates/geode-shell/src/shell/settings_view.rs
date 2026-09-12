@@ -333,7 +333,7 @@ pub fn filtered_position(
 
 /// What a click on filtered position `clicked_ix` does to already-open
 /// dialog state: clicking any other row selects it (the click wins, same
-/// as keybindings' `click_selects_or_listens`); clicking the
+/// as keybindings' `click_listens`); clicking the
 /// already-selected row means "cycle this row's value forward" — returns
 /// `true` so the gpui caller ([`on_row_clicked`]) applies the step,
 /// keeping this function pure.

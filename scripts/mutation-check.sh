@@ -1880,6 +1880,21 @@ run_mutation "keybindings: r resets without acknowledging it" \
   geode-shell \
   r_acknowledges_the_write_it_spawned
 
+# §17.1 rule 2: one click captures. Mutated back to the two-click rule,
+# the first click on an unselected row only selects.
+run_mutation "keybindings: a single row click starts listening" \
+  crates/geode-shell/src/shell/keybindings_view.rs \
+  '    state.selected = clicked_ix;
+    state.listening = Some(Vec::new());' \
+  '    if state.selected == clicked_ix && state.listening.is_none() {
+        state.listening = Some(Vec::new());
+    } else {
+        state.selected = clicked_ix;
+        state.listening = None;
+    }' \
+  geode-shell \
+  a_single_click_on_a_row_starts_listening
+
 # ---- grouping slots and the frame (Phase 3 §4)
 
 run_mutation "groupings: an unknown column drops the slot" \

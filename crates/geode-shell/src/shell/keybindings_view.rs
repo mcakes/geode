@@ -391,8 +391,9 @@ impl KeybindingsState {
     /// subscription. Resets the selection to the top match (the
     /// palette's `set_query` semantics: after an edit the old index
     /// points at an unrelated row) and cancels any in-progress capture,
-    /// since typing is an external interruption to it exactly as a click
-    /// is ([`click_selects_or_listens`]).
+    /// since typing is an external interruption to it — unlike a click
+    /// ([`click_listens`]), which always starts a fresh capture rather
+    /// than cancelling one.
     /// A notice names the row a verb was pressed on ("Toggle command
     /// palette has no user override to reset"); an edit re-ranks the
     /// list and moves the selection off that row, so keeping it would
@@ -483,23 +484,15 @@ pub fn press_while_listening(pending: &mut Vec<Keystroke>, ks: &Keystroke) -> Ca
     CaptureOutcome::Continue
 }
 
-/// What a click on filtered position `clicked_ix` does to already-open
-/// dialog state (brief: "clicking the already-selected row starts
-/// listening"). Clicking any *other* row just selects it — and,
-/// symmetrically, cancels an in-progress capture on the previously
-/// selected row rather than leaving it dangling on a row that's no longer
-/// selected. Clicking the currently *listening* row again (an edge case
-/// the brief doesn't spell out) resolves the same way as clicking away:
-/// the click always changes something about the row it lands on, so the
-/// only case that leaves the dialog holding a `listening` state afterward
-/// is a fresh click on an already-selected, not-yet-listening row.
-pub fn click_selects_or_listens(state: &mut KeybindingsState, clicked_ix: usize) {
-    if state.selected == clicked_ix && state.listening.is_none() {
-        state.listening = Some(Vec::new());
-    } else {
-        state.selected = clicked_ix;
-        state.listening = None;
-    }
+/// §17.1 rule 2: a click on a row is the mouse form of moving the cursor
+/// there and pressing `enter` — it selects and starts listening in one
+/// step. A click on a different row mid-capture retargets the capture;
+/// a click on the same row restarts it with the partial sequence
+/// dropped. (Until 2026-09-12 the first click only selected and a
+/// second on the same row listened — one step short for a mouse user.)
+pub fn click_listens(state: &mut KeybindingsState, clicked_ix: usize) {
+    state.selected = clicked_ix;
+    state.listening = Some(Vec::new());
 }
 
 /// The text one row exposes to the filter: title and category — exactly
@@ -898,18 +891,14 @@ fn begin_capture(state: &mut KeybindingsState, visible_len: usize) {
 /// `clicked` (`ActionId`, resolved back to a position in the *filtered*
 /// list against freshly derived rows — rows are never cached, see the
 /// module doc). The gpui-facing wrapper around the pure
-/// [`click_selects_or_listens`], and it moves focus the same way
-/// [`handle_key`] does — through [`dialog::sync_dialog_text`], the
-/// row-click seam of that function's four seam classes (spec
-/// §16.1/§16.6), which a click needs because it never passes through
-/// the key path at all. A click that
-/// starts listening therefore blurs the filter so the capture sees raw
-/// keystrokes, and one that only selects hands focus back to whichever
-/// surface the current mode owns — the filter in [`DialogMode::Filter`]
-/// so typing keeps filtering, the shell root in [`DialogMode::Normal`] so
-/// the letters stay verbs. Focusing the filter unconditionally here (as
-/// this did before the dialog went modal) would let a mouse click
-/// silently defeat normal mode.
+/// [`click_listens`], and it moves focus the same way [`handle_key`]
+/// does — through [`dialog::sync_dialog_text`], the row-click seam of
+/// that function's four seam classes (spec §16.1/§16.6), which a click
+/// needs because it never passes through the key path at all. Every
+/// click now starts listening (§17.1 rule 2), so this always blurs the
+/// filter to let the capture see raw keystrokes — focusing the filter
+/// unconditionally here (as this did before the dialog went modal) would
+/// let a mouse click silently defeat normal mode.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &ActionId,
@@ -931,7 +920,7 @@ fn on_row_clicked(
     let Some(ix) = filtered_position(&visible, &rows, clicked) else {
         return;
     };
-    click_selects_or_listens(state, ix);
+    click_listens(state, ix);
     let selected = state.selected;
     shell.keybindings_scroll.scroll_to_item(selected);
     dialog::sync_dialog_text(shell, window, cx);
@@ -1826,41 +1815,27 @@ mod tests {
         assert_eq!(pending, vec![ctrl("enter"), ctrl("escape")]);
     }
 
-    // -- click_selects_or_listens ---------------------------------------
+    // -- click_listens ----------------------------------------------------
 
+    /// §17.1 rule 2: one click, capture at once — on any row, selected
+    /// or not, listening or not (a repeat click restarts the capture
+    /// with the partial sequence dropped).
     #[test]
-    fn clicking_the_selected_not_listening_row_starts_listening() {
+    fn a_click_selects_and_listens_in_one_step() {
         let mut state = KeybindingsState {
-            selected: 2,
+            selected: 0,
             ..Default::default()
         };
-        click_selects_or_listens(&mut state, 2);
-        assert_eq!(state.selected, 2);
+        click_listens(&mut state, 3);
+        assert_eq!(state.selected, 3);
         assert_eq!(state.listening, Some(Vec::new()));
-    }
-
-    #[test]
-    fn clicking_a_different_row_selects_it_and_cancels_any_capture() {
-        let mut state = KeybindingsState {
-            selected: 2,
-            listening: Some(vec![key("g")]),
-            ..Default::default()
-        };
-        click_selects_or_listens(&mut state, 5);
-        assert_eq!(state.selected, 5);
-        assert_eq!(state.listening, None);
-    }
-
-    #[test]
-    fn clicking_the_already_listening_row_again_cancels_listening() {
-        let mut state = KeybindingsState {
-            selected: 2,
-            listening: Some(vec![key("g")]),
-            ..Default::default()
-        };
-        click_selects_or_listens(&mut state, 2);
-        assert_eq!(state.selected, 2);
-        assert_eq!(state.listening, None);
+        state.listening = Some(vec![key("a")]);
+        click_listens(&mut state, 3);
+        assert_eq!(
+            state.listening,
+            Some(Vec::new()),
+            "a repeat click restarts the capture"
+        );
     }
 
     // -- is_same_key_recapture -------------------------------------------
