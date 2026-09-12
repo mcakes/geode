@@ -78,7 +78,7 @@ impl ShellView {
     /// Apply one resolved action id through the shell's one dispatch chain
     /// (spec: "one keymap, ours" — no parallel action-dispatch system).
     /// Workspace verbs go through `apply_workspace_action`; the shell's own
-    /// non-workspace actions (`palette::toggle`, `theme::toggle_mode`) are
+    /// non-workspace actions (`palette::toggle`, `settings::open`, …) are
     /// handled here when that leaves them unhandled. Shared by the normal
     /// keymap-matcher path and the palette's Enter-to-dispatch path, so
     /// both take exactly the same action to the same place.
@@ -124,9 +124,6 @@ impl ShellView {
             self.session_dirty = true;
         } else if action.0 == "palette::toggle" {
             self.toggle_palette(window, cx);
-        } else if action.0 == "theme::toggle_mode" {
-            self.services.theme.toggle_mode(cx);
-            self.persist_theme(cx);
         } else if action.0 == "settings::open" {
             // The settings dialog (settings-dialog rewrite: the keybinding
             // dialog's keyboard-driven row-list pattern, home-rolled —
@@ -323,9 +320,9 @@ impl ShellView {
     }
 
     /// The apply-then-persist seam every UI theme-change path calls right
-    /// after applying a change live through `ThemeService` (`theme::
-    /// toggle_mode` above, `dispatch_palette_item`'s `Theme` branch below,
-    /// and `settings_view::set_theme`) — one place that
+    /// after applying a change live through `ThemeService`
+    /// (`dispatch_palette_item`'s `Theme` branch below and
+    /// `settings_view::set_theme`) — one place that
     /// knows how to turn "the active theme just changed" into a write of
     /// `<user_dir>/app.toml`'s `[theme]` table (`theme::
     /// persist_to_user_config`), so a theme choice survives a restart via
@@ -338,7 +335,7 @@ impl ShellView {
     /// (PHILOSOPHY.md: "nothing may stall the render thread"), the same
     /// reasoning `session::write_atomic` already gets in this file's own
     /// watcher loop (see `new`'s doc comment). Only the cheap part — reading
-    /// `user_dir`/`active_name`/`active_mode` off `self` — happens here, on
+    /// `user_dir`/`active_name` off `self` — happens here, on
     /// the UI thread; the actual read-modify-write runs inside a task handed
     /// to `cx.background_executor()`, fire-and-forget (`.detach()`): theme
     /// changes are infrequent (a user action, not a hot path like key-repeat),
@@ -373,10 +370,9 @@ impl ShellView {
             return;
         };
         let name = self.services.theme.active_name().to_string();
-        let mode = self.services.theme.active_mode();
         cx.background_executor()
             .spawn(async move {
-                if let Err(e) = theme::persist_to_user_config(&dir, &name, mode) {
+                if let Err(e) = theme::persist_to_user_config(&dir, &name) {
                     tracing::warn!(target: "geode::theme", "{e}");
                 }
             })

@@ -3,13 +3,14 @@
 
 use super::*;
 
-/// End-to-end: a real `mod+shift+t` keystroke, dispatched through gpui's
-/// own key-event pipeline, flips the active theme's mode. Exercises the
-/// same wiring as `ctrl_v_keystroke_splits_the_active_workspace` above,
-/// but through the `theme::toggle_mode` branch of `handle_key_down`
-/// added in Task 5.
+/// End-to-end: a theme picked from the palette by real keystrokes —
+/// open, type its full name, `enter` — is applied through
+/// `dispatch_palette_item`'s `Theme` arm. Exercises the same wiring as
+/// `ctrl_v_keystroke_splits_the_active_workspace` above, through the
+/// one keyboard path a theme change has now that `mod+shift+t` and its
+/// light/dark toggle are retired (user ruling 2026-09-12).
 #[gpui::test]
-fn mod_shift_t_keystroke_toggles_the_theme_mode(cx: &mut gpui::TestAppContext) {
+fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -35,22 +36,37 @@ fn mod_shift_t_keystroke_toggles_the_theme_mode(cx: &mut gpui::TestAppContext) {
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let before = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
-    });
+    assert_ne!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "sanity: the pick must change something"
+    );
 
-    cx.simulate_keystrokes("alt-shift-t");
+    cx.simulate_keystrokes("ctrl-k");
+    assert!(shell.read_with(&cx, |shell, _| shell.palette.is_some()));
+    cx.simulate_input("Gruvbox Light");
+    cx.simulate_keystrokes("enter");
 
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
 
-    let after = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
-    });
-    assert_ne!(
-        before, after,
-        "alt-shift-t (mod+shift+t = theme::toggle_mode) should have changed the active theme"
+    assert_eq!(
+        shell.read_with(&cx, |shell, _| shell
+            .services
+            .theme
+            .active_name()
+            .to_string()),
+        "Gruvbox Light",
+        "the top-ranked row for a theme's full name is that theme, and enter applies it"
+    );
+    assert!(
+        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+        "enter closes the palette"
     );
 }
 

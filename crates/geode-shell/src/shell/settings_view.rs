@@ -30,8 +30,9 @@
 //! tile under **Tiling**. (A Dark mode row used to sit beside Theme; it
 //! was retired 2026-09-12 because every bundled theme name already
 //! carries its mode — `Molokai Dark`, `Gruvbox Light` — so the row only
-//! ever restated the Theme row's own value. `mod+shift+t` and `[theme]
-//! mode` are untouched.) Each row
+//! ever restated the Theme row's own value; the whole light/dark axis —
+//! `mod+shift+t`, `[theme] mode` — went with it the same day, see
+//! `theme.rs`'s "No light/dark mode".) Each row
 //! is one enumerated setting — an ordered list of value labels plus the
 //! index of the currently-active one — and editing is *stepping*:
 //! `tab`/`shift+tab` step the selected row's value forward/back (wrapping
@@ -387,15 +388,14 @@ fn apply_setting(
     }
 }
 
-/// Apply `name` at the theme's currently active mode via
-/// `ThemeService::apply`, then persist it (`ShellView::persist_theme`) —
+/// Apply `name` via `ThemeService::apply`, then persist it
+/// (`ShellView::persist_theme`) —
 /// the core both [`set_theme`] (the `Entity`-taking seam `shell::mod`'s
 /// tests drive) and [`apply_setting`] (this dialog's own stepping, which
 /// already holds `&mut ShellView` mid-key-dispatch and must not reenter
 /// the entity) share.
 fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
-    let mode = shell.services.theme.active_mode();
-    shell.services.theme.apply(name, mode, cx);
+    shell.services.theme.apply(name, cx);
     shell.persist_theme(cx);
     cx.notify();
 }
