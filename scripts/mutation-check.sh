@@ -7016,6 +7016,32 @@ run_mutation "objectdialog: a drop is claimed and dropped while a confirm is arm
     let resolves' \
   geode-shell a_row_drop_does_nothing_while_a_confirm_is_armed
 
+# §18.9.3: a catalogue-to-catalogue drop SAYS there is no order there.
+# Mutated silent, the gesture is indistinguishable from a missed drop.
+run_mutation "objectdialog: a catalogue-to-catalogue drop says so" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            set_notice(shell, "the catalogue has no order".to_string());' \
+  '            let _ = shell;' \
+  geode-shell a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order
+
+# §18.9.1: a payload whose name left the list mid-drag says so rather
+# than landing silently on nothing. Mutated silent, it is invisible.
+run_mutation "objectdialog: a drop on a name that is gone says so" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        Step::Inert if !resolves => set_notice(shell, "that row is gone".to_string()),' \
+  '        Step::Inert if !resolves => {}' \
+  geode-shell a_drop_whose_name_has_left_the_list_says_that_row_is_gone
+
+# Controller ruling M5: a row dropped on ITSELF is silent from either
+# block, which is why it is decided before the catalogue arm. Mutated
+# away, an available row put back where it was says "the catalogue has
+# no order".
+run_mutation "objectdialog: a row dropped on itself is silent" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        Step::Inert if src == dst => {}' \
+  '        Step::Inert if false && src == dst => {}' \
+  geode-shell a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

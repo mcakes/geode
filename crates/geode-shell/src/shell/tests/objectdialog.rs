@@ -4211,3 +4211,206 @@ fn a_row_drop_does_nothing_while_a_confirm_is_armed(cx: &mut gpui::TestAppContex
         "no write reaches disk from a drop claimed by an armed confirm"
     );
 }
+
+/// [`services_with_a_desk_view`]'s desk, with a SECOND measure the view
+/// does not carry, so `tree`'s available block has two rows rather than
+/// one.
+///
+/// A catalogue-to-catalogue drop needs two DISTINCT `Available`
+/// payloads, which the shared fixture (one spare column, `delta01`)
+/// cannot produce: dropping its only available row on itself is a
+/// self-drop, which is silent by ruling and so would test the opposite
+/// of what this arm says. The dataset is restated by name rather than by
+/// index into `desk_view_docs()` so a doc added there cannot silently
+/// make this fixture overwrite the wrong one.
+fn services_with_two_available_columns() -> ShellServices {
+    let mut services = test_services();
+    let mut layered = desk_view_docs();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk_snapshot.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk_snapshot.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+         [risk_snapshot.columns.delta01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+         [risk_snapshot.columns.gamma01]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    )
+    .unwrap();
+    let slot = layered
+        .iter()
+        .position(|doc| doc.name == "datasets")
+        .expect("the desk fixture has a datasets doc");
+    layered[slot] = datasets;
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: layered,
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The two `Available` payloads of `tree`'s column list, plus the shell
+/// its edit stage is open on.
+fn open_tree_edit_stage_with_two_available(
+    cx: &mut gpui::TestAppContext,
+    dir: &std::path::Path,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_two_available_columns(),
+        dir,
+        "config::views",
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    (shell, cx)
+}
+
+/// The columns of `tree`'s list and its catalogue, as the draft stands.
+fn columns_and_available(
+    shell: &Entity<ShellView>,
+    cx: &gpui::VisualTestContext,
+) -> (Vec<String>, Vec<String>) {
+    edit_draft(shell, cx, |d| {
+        let items = d
+            .list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect();
+        let available = d
+            .available_items("columns")
+            .unwrap_or_default()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect();
+        (items, available)
+    })
+}
+
+/// §18.9.3: a drop from the catalogue onto the catalogue says so — the
+/// catalogue is unordered by construction (§18.7.2), so there is nothing
+/// for the gesture to have done, and a trader who just dragged one
+/// available column onto another would otherwise have no way to tell
+/// that from the app having missed the drop.
+///
+/// The second half is the controller's M5 ruling: the same gesture ONTO
+/// ITSELF is a grab that went nowhere and stays silent, which is also
+/// why it has to be decided before the catalogue arm — two identical
+/// available payloads satisfy that arm's `!src.own && !dst.own` test
+/// too.
+#[gpui::test]
+fn a_catalogue_to_catalogue_drop_says_the_catalogue_has_no_order(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage_with_two_available(cx, dir.path());
+    let (delta, gamma) = edit_draft(&shell, &cx, |d| {
+        let rows = d.rows();
+        let find = |name: &str| {
+            rows.iter()
+                .copied()
+                .find(|r| {
+                    matches!(r, objectdialog::EditRow::Available { .. }) && d.row_label(*r) == name
+                })
+                .unwrap_or_else(|| panic!("{name} should be an available row"))
+        };
+        (
+            d.row_drag(find("delta01")).unwrap(),
+            d.row_drag(find("gamma01")).unwrap(),
+        )
+    });
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &delta, &gamma, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("the catalogue has no order".to_string())
+    );
+    assert_eq!(
+        columns_and_available(&shell, &cx),
+        (
+            vec!["book".to_string(), "npv".to_string()],
+            vec!["delta01".to_string(), "gamma01".to_string()]
+        ),
+        "and neither list moved"
+    );
+
+    // M5: the same row on itself is silent — and clears the notice the
+    // previous drop left, the way every handler here starts.
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &delta, &delta, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        None,
+        "a row put back where it was says nothing at all"
+    );
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert!(
+        !dir.path().join("view_presentation.toml").exists(),
+        "and no inert drop writes"
+    );
+}
+
+/// §18.9.1: the payload is resolved by name at drop time, so a name that
+/// left the list between the grab and the drop lands on nothing — and
+/// says so, because a drag that visibly ended over a row and changed
+/// nothing is the one inert case a trader would read as a bug rather
+/// than as their own gesture.
+///
+/// The stale payload is hand-built rather than staged through a real
+/// removal: `RowDrag` is what crosses the wire, and a name that no row
+/// carries is exactly what a mid-drag removal leaves in flight.
+#[gpui::test]
+fn a_drop_whose_name_has_left_the_list_says_that_row_is_gone(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    let dst = edit_draft(&shell, &cx, |d| {
+        let book = d
+            .rows()
+            .iter()
+            .copied()
+            .find(|r| d.row_label(*r) == "book")
+            .unwrap();
+        d.row_drag(book).unwrap()
+    });
+    let gone = objectdialog::RowDrag {
+        field: "columns".to_string(),
+        own: true,
+        name: "gone".to_string(),
+    };
+
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            objectdialog::render::on_row_dropped(shell, &gone, &dst, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()),
+        Some("that row is gone".to_string())
+    );
+    let names: Vec<String> = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect()
+    });
+    assert_eq!(names, ["book", "npv"], "and the list is untouched");
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    assert!(
+        !dir.path().join("view_presentation.toml").exists(),
+        "a drop that resolved to nothing writes nothing"
+    );
+}

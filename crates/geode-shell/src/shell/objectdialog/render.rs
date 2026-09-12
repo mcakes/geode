@@ -2396,21 +2396,27 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 // payload that arrives at `on_drop` is the dragged row's
                 // own, built by whichever row started the gesture.
                 let target = payload.clone();
-                let ghost_name = gpui::SharedString::from(payload.name.clone());
                 row_el
-                    // `own` is part of the id because the same name can
-                    // appear in both blocks across a drag's lifetime (a
-                    // demoted column keeps its name), and two siblings
-                    // sharing an id would share gpui's per-element state.
+                    // The id carries everything that identifies the row,
+                    // because gpui keys per-element state (the pending
+                    // mouse-down a drag starts from) on it: the field, so
+                    // two lists in one draft cannot collide; `own`, so a
+                    // name cannot collide with itself across the two
+                    // blocks (a demoted column keeps its name); and the
+                    // name, which is unique within a block.
                     .id(gpui::SharedString::from(format!(
-                        "objectdialog-drag-{}-{}",
-                        payload.own, payload.name
+                        "objectdialog-drag-{}-{}-{}",
+                        payload.field, payload.own, payload.name
                     )))
                     .cursor_grab()
-                    .on_drag(payload, move |_drag, _offset, _window, cx| {
-                        cx.new(|_| DragGhost {
-                            name: ghost_name.clone(),
-                        })
+                    // The ghost's name comes off the dragged value the
+                    // constructor is handed, not a captured copy: a
+                    // capture would clone a `String` per list row per
+                    // frame for a ghost that exists only once a gesture
+                    // actually starts.
+                    .on_drag(payload, move |drag: &RowDrag, _offset, _window, cx| {
+                        let name = gpui::SharedString::from(drag.name.clone());
+                        cx.new(|_| DragGhost { name })
                     })
                     // Only this dialog's own payload: a tile drag or any
                     // other dragged value passing over the modal must not
@@ -2969,7 +2975,9 @@ impl gpui::Render for DragGhost {
 /// Inert drops say nothing, with two exceptions — the pair a trader
 /// could otherwise read as the app having failed: a
 /// catalogue-to-catalogue drop (there is no order there to change) and a
-/// payload whose name has left the list mid-drag. `resolves` is read
+/// payload whose name has left the list mid-drag. A row dropped on
+/// ITSELF is neither, and is checked first so that the commonest inert
+/// gesture of all stays silent from either block. `resolves` is read
 /// BEFORE the drop, because `drop_row` mutates the very lists the answer
 /// depends on.
 ///
@@ -3017,6 +3025,12 @@ pub(in crate::shell) fn on_row_dropped(
             commit_or_confirm(shell, cx);
         }
         Step::Refused(reason) => set_notice(shell, reason),
+        // A row dropped back on itself is a grab that went nowhere, and
+        // it is silent from EITHER block: said first, ahead of the
+        // catalogue arm, because two identical available payloads
+        // satisfy that arm's test too and "the catalogue has no order"
+        // is no answer to a trader who simply put a row back down.
+        Step::Inert if src == dst => {}
         Step::Inert if !src.own && !dst.own => {
             set_notice(shell, "the catalogue has no order".to_string());
         }
