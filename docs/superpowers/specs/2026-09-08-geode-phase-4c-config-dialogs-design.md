@@ -1715,3 +1715,71 @@ are checked on a display against the artifact, not by test.
   see is a lie — and two entries over the rule replace it. `space`'s
   arms keep theirs: an add can land the cursor one row past the
   viewport's bottom.
+
+## 18.7 Amendment — membership is a list, not a flag (2026-09-12)
+
+Approved 2026-09-12 after the architectural review that followed the
+Part 2 refinement. §18.2 introduced Views' available block as a `member`
+flag on `ListItem` plus an ordering rule — every member before every
+non-member — that four mutators maintained by hand (`space`'s add, `x`'s
+remove, `shift+j`'s boundary check, `refresh_available`'s retain), three
+write-side functions re-derived with a filter (`doc_table`, `doc_baseline`,
+`presentation_table`), `membership_changed` filtered again, the render
+loop found block boundaries by comparing neighbours' flags, and
+`field_value` counted with two more filters. The kind-less column, the
+boundary crossing and the two untested filters of that branch's reviews
+were all that shape.
+
+### 18.7.1 The model
+
+```rust
+FieldKind::OrderedList { items: Vec<ListItem>, available: Vec<ListItem> }
+// ListItem { name, included, width, kind } — no `member`
+EditRow::{ Field(usize), Item { field, item }, Available { field, item } }
+```
+
+`items` is the object's own ordered list — a view's columns, a slot's
+dimension chain — and the only list that is ordered, written, counted
+or reorderable. `available` is what the trader may add: the chosen
+dataset's other columns for Views (`kind` filled from the schema role,
+Key/Attribute/derived still excluded per §18.6); empty for Groupings,
+whose unticked dimensions stay in `items` because ticking IS membership
+there. The rows paint `Field`, then `items`, then `available`, and the
+third `EditRow` variant is what makes every consumer state what an
+available row means — the compiler refuses a match that forgets it.
+
+### 18.7.2 The verbs
+
+- `space` on `Available` moves the item to the end of `items`, shown;
+  on `Item` it toggles `included` as before (with the Doc-list "must
+  keep one" refusal unchanged).
+- `x` on `Item` in a list with an `available` block moves the item to
+  the end of `available`, unshown; on `Available` it refuses ("not in
+  the view — space adds it"); on a Groupings `Item` it refuses ("space
+  unticks here") — the per-domain rule of §18.6, now read off whether
+  the list HAS an available block rather than off `dest`.
+- `shift+j`/`shift+k` move within `items` only; an `Available` row is
+  inert with a notice. The available block is not reorderable, which
+  also retires the same-bytes presentation write §18.6 deferred.
+- Cursor rules of §18.6 (the 2026-09-11 rulings: `space` leaves the
+  cursor on the next available row, `x` on the row that was next)
+  are unchanged.
+- `refresh_available` replaces `available` wholesale; `items` untouched.
+
+### 18.7.3 What goes away
+
+`membership_changed` compares `items`' names, no filter. `columns_for`,
+`doc_baseline` and `presentation_table` take `items`, no filter. The
+render paints one section header per non-empty list (`items` under
+`COLUMNS`/`DIMENSIONS`, `available` under `AVAILABLE`), no
+neighbour-comparison. `field_value` counts `items.len()`.
+
+### 18.7.4 Tests and harness
+
+Behaviour is unchanged: every existing window test passes unmodified.
+Pure tests that asserted on the flag are rewritten to the two-list
+shape. The five harness entries anchored on flag lines are re-anchored
+onto the structural line that now carries each behaviour, still caught
+by their named tests; an entry whose behaviour is now unrepresentable
+(the boundary crossing) is retired with a note rather than kept on a
+line that can no longer lie.
