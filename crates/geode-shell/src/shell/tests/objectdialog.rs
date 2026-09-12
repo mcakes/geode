@@ -3177,3 +3177,84 @@ fn an_unfiltered_short_list_is_not_clipped_by_the_lists_height(cx: &mut gpui::Te
         "opening a short, unfiltered list",
     );
 }
+
+// ---------------------------------------------------------------------
+// §16.1: the confirm buttons are the fourth way out of a stage, and the
+// only one that reaches `run_confirmed` without passing through the key
+// path — so they carry the sync themselves.
+// ---------------------------------------------------------------------
+
+/// Answering a destructive question **with the mouse** while the edit
+/// stage is filtering has to leave the shared field agreeing with the
+/// stage it lands in.
+///
+/// It is the one route to an armed confirm from `DialogMode::Filter` at
+/// all: while a confirm is armed `handle_edit_key` swallows every
+/// keystroke, `/` included, so the keyboard can only arm one from normal
+/// mode — but the action bar's buttons are live in either mode
+/// (`press_verb`). Confirming then walks all the way back to browse
+/// through `leave_edit`, which clears the query and — deliberately —
+/// leaves the mode alone, so the trader is still filtering. Nothing on
+/// that path goes near `ShellView::handle_key_down`, so without
+/// `dialog::sync_dialog_text` at the end of the button's own closure the
+/// browse list would come back unfiltered under a field still showing
+/// the edit stage's query: a filter that is painted, focused, and no
+/// longer applied to anything.
+#[gpui::test]
+fn confirming_with_the_mouse_while_filtering_empties_the_field(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_views(), dir.path(), "config::views");
+    // `tree` is the first row and the user layer owns it, so its edit
+    // stage offers `d`.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("/");
+    cx.run_until_parked();
+    cx.simulate_input("d");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.query.clone()),
+        "d",
+        "the edit stage is filtering by its own query"
+    );
+
+    click_selector(&mut cx, "objectdialog-action-d");
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "the mouse armed the delete without leaving filter mode"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Filter,
+        "arming with the mouse must not change the mode"
+    );
+
+    click_selector(&mut cx, "objectdialog-confirm-yes");
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Browse,
+        "a confirmed delete goes back to the list"
+    );
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.dialog_input.read(cx).value().to_string()),
+        "",
+        "and the field it was filtering with is emptied to match the \
+         query `leave_edit` cleared"
+    );
+    assert!(
+        dialog_filter_is_focused(&shell, &mut cx),
+        "the mode is still `Filter`, so the filter still owns the keys"
+    );
+}
+
+/// Click the centre of whatever `selector` painted, and let the frame
+/// settle. `debug_bounds` takes a `&'static str`, so the selectors are
+/// spelled out at each call site rather than formatted.
+fn click_selector(cx: &mut gpui::VisualTestContext, selector: &'static str) {
+    let bounds = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} should have painted"));
+    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}

@@ -1501,14 +1501,19 @@ impl ObjectDialogState {
     ///   whole dialog instead of stepping back to the list, without ever
     ///   asking.
     ///
-    /// Neither is worth anything on its own: the shared `Input` has to be
-    /// emptied and blurred to match, and a mode and a focus that disagree
-    /// is the one thing this dialog's "one switch" exists to prevent —
-    /// that disagreement is exactly the defect this method's own second
-    /// half was fixed for. The blur needs a `Window`, which this file
-    /// may not name, so the two halves cannot live in one function; they
-    /// live in one *door* instead, and this method is visible only inside
-    /// this module's subtree so nothing else can reach half of it.
+    /// Both are pure, and that is now the whole transition: the shared
+    /// `Input` is emptied and blurred to match by `dialog::
+    /// sync_dialog_text` (spec §16.1), which reads the mode and
+    /// [`Self::effective_query`] after the handler returns rather than
+    /// being hand-written beside each mutation. A mode and a focus that
+    /// disagree is the one thing this dialog's "one switch" exists to
+    /// prevent — the defect this method's own second half was once fixed
+    /// for, and the reason that half has one owner now instead of a
+    /// copy at every site. The blur still needs a `Window`, which this
+    /// file may not name; what changed is that no caller has to remember
+    /// it. This method stays visible only inside this module's subtree
+    /// so [`render::enter_edit_stage`] remains the one door onto the
+    /// stage change itself.
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
         draft.query.clear();
@@ -1534,7 +1539,7 @@ impl ObjectDialogState {
     /// Visible only inside this subtree for the same reason
     /// [`Self::enter_edit`] is: [`render::enter_edit_stage`] is the one
     /// door onto either, and a caller reaching this directly would skip
-    /// the `Input` clear and focus blur that door's other half does.
+    /// the scroll reset and the frame request that door also owns.
     pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, mut draft: Draft) {
         // Same defensive clear `enter_edit` gives its own freshly-derived
         // draft — see that method's doc.
@@ -1553,6 +1558,11 @@ impl ObjectDialogState {
     /// the caller, which puts it back on the object just edited — by
     /// name, since the unfiltered list is a different list from the one
     /// the object was opened from.
+    ///
+    /// No mode is set here, and none needs to be: see
+    /// [`render::leave_edit`], the one caller, for which modes can
+    /// actually stand at this point and why the sync is left to settle
+    /// the field and the focus from whichever one does.
     ///
     /// `query` is cleared here too, belt-and-braces: `set_query`'s
     /// one-way mirror (§18.3) should already have kept it empty for the
@@ -1616,6 +1626,13 @@ impl ObjectDialogState {
     /// The shared `Input` holds the name exactly as it holds a query —
     /// `set_query` mirrors it into `query` — so there is no second text
     /// buffer to keep in step.
+    ///
+    /// Pure, like every transition here: `DialogMode::Filter` is what
+    /// gives the field the keys (through `dialogmode::focus_target`, via
+    /// `dialog::sync_dialog_text`), and clearing `query` is what empties
+    /// it — the sync writes the field from [`Self::effective_query`], so
+    /// a browse filter left standing would be written straight back into
+    /// the name field the trader is about to type into.
     pub fn begin_naming(&mut self) {
         self.stage = Stage::Naming;
         self.query.clear();
@@ -1624,6 +1641,9 @@ impl ObjectDialogState {
     }
 
     /// `escape` from [`Stage::Naming`]: back to browse, nothing written.
+    /// Pure, and complete on its own — `Browse`, `Normal`, an empty
+    /// `query` — so `dialog::sync_dialog_text` empties the field and
+    /// hands the keys back to the shell root with nothing else to say.
     pub fn cancel_naming(&mut self) {
         self.stage = Stage::Browse;
         self.query.clear();

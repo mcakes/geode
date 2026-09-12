@@ -17,16 +17,37 @@
 //! ## The one switch: normal mode is a blurred filter
 //!
 //! This dialog opens in [`DialogMode::Normal`] with
-//! `ShellView::dialog_input` **blurred** (`focus_filter: false`), because
-//! a focused gpui-component `Input` consumes bare letters as text before
-//! any raw key listener sees them — which is the whole reason `j`/`k` can
-//! move here at all, and the reason the edit stage's `d`/`r` verbs are
-//! reachable. `/` focuses the field and enters [`DialogMode::Filter`];
-//! `escape` blurs it again. While the field is blurred the query paints
-//! as static muted text rather than a live caret
-//! ([`dialog::filter_row`]'s `frozen` argument): a caret in a field that
-//! is not receiving the keys is the single most misleading thing a modal
-//! surface can show.
+//! `ShellView::dialog_input` **blurred**, because a focused
+//! gpui-component `Input` consumes bare letters as text before any raw
+//! key listener sees them — which is the whole reason `j`/`k` can move
+//! here at all, and the reason the edit stage's `d`/`r` verbs are
+//! reachable. `/` enters [`DialogMode::Filter`] and the field takes the
+//! keys; `escape` goes back to `Normal` and it gives them up. While the
+//! field is blurred the query paints as static muted text rather than a
+//! live caret ([`dialog::filter_row`]'s `frozen` argument): a caret in a
+//! field that is not receiving the keys is the single most misleading
+//! thing a modal surface can show.
+//!
+//! **No site in this file moves focus or writes that field** (spec
+//! §16.1). Every transition here — `/`, `escape`'s rungs, `n`, opening
+//! and leaving the edit stage — is a pure mutation of
+//! [`ObjectDialogState`]'s `mode`, `stage` and query, and
+//! [`dialog::sync_dialog_text`] reconciles gpui to it afterwards: focus
+//! goes where [`dialogmode::focus_target`] says, and the shared `Input`
+//! is written from [`ObjectDialogState::effective_query`] — the open
+//! stage's own query, so the browse list's and the draft's can never be
+//! painted into each other's stage. It runs at the tail of the modal
+//! branch in `ShellView::handle_key_down` (claimed or not), at the end of
+//! each of this file's two row-click handlers and both confirm-button
+//! closures — the paths that never reach the key handler at all — and
+//! inside [`dialog::open_shell_dialog_with_key`], which is where this
+//! dialog's opening blur comes from (hence `focus_filter: false` in
+//! [`open`]: that parameter is for a dialog with no mode). Before that
+//! one owner, each transition hand-wrote its own empty-string
+//! `set_value` and focus call beside the mutation, and a site that had
+//! one and not the
+//! other was a mode and a focus disagreeing — the defect class this
+//! section names.
 //!
 //! ## Three stages, one routing shape
 //!
@@ -95,7 +116,7 @@ use std::rc::Rc;
 
 use geode_core::config::{Layer, check_object_name};
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, Focusable as _, MouseButton, Window, div, px};
+use gpui::{AnyElement, App, Context, Entity, MouseButton, Window, div, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
@@ -164,9 +185,14 @@ pub fn open(
         domain.title(),
         move |shell, window, cx| build(shell, &entity, window, cx),
         Some(Rc::new(handle_key)),
-        // `false`: normal mode. A focused filter would eat every bare
-        // letter as text before [`handle_key`] could read it as a motion
-        // or as one of the edit stage's verbs.
+        // `false`: `focus_filter` is for a dialog with no mode, and this
+        // one has one. Its initial focus comes from that door's own
+        // `dialog::sync_dialog_text` call (spec §16.1) — which is why
+        // `view.object_dialog` is set *above*, before the door runs: the
+        // sync reads the `DialogMode::Normal` this dialog opens in and
+        // parks the keys on the shell root, so a bare letter reaches
+        // [`handle_key`] as a motion or as one of the edit stage's verbs
+        // rather than being eaten as text by a focused filter.
         false,
     );
     // §18.1: the crumb plus the pill, sharing the same title-row slot
@@ -216,13 +242,13 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
 fn handle_key(
     shell: &mut ShellView,
     ks: &Keystroke,
-    window: &mut Window,
+    _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
     match shell.object_dialog.as_ref().map(|s| &s.stage) {
-        Some(Stage::Edit { .. }) => handle_edit_key(shell, ks, window, cx),
-        Some(Stage::Naming) => handle_naming_key(shell, ks, window, cx),
-        _ => handle_browse_key(shell, ks, window, cx),
+        Some(Stage::Edit { .. }) => handle_edit_key(shell, ks, cx),
+        Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
+        _ => handle_browse_key(shell, ks, cx),
     }
 }
 
@@ -255,14 +281,8 @@ fn handle_key(
 ///    own text insertion. The one other `false` is the ladder's last
 ///    rung, which is how the shell's modal branch gets to close the
 ///    dialog.
-fn handle_browse_key(
-    shell: &mut ShellView,
-    ks: &Keystroke,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) -> bool {
+fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     let rows = derive_rows(shell);
-    let input = shell.dialog_input.clone();
     let Some(state) = shell.object_dialog.as_mut() else {
         return false;
     };
@@ -307,10 +327,11 @@ fn handle_browse_key(
                     // would sit above the top of the screen with only the
                     // index having moved.
                     shell.object_dialog_scroll.scroll_to_item(0);
-                    // The `Input` owns the text; clearing only the
-                    // mirrored copy would leave the old query waiting in
+                    // Clearing the pure query is the whole rung:
+                    // `dialog::sync_dialog_text` empties the shared
+                    // `Input` from it on this handler's return (spec
+                    // §16.1), so the old query cannot be left waiting in
                     // the field for the next `/`.
-                    input.update(cx, |i, cx| i.set_value("", window, cx));
                     cx.notify();
                     return true;
                 }
@@ -338,13 +359,14 @@ fn handle_browse_key(
                 shell.object_dialog_scroll.scroll_to_item(selected);
             }
             NormalCommand::EnterFilter => {
+                // The one switch, thrown the other way — a pure mutation:
+                // `dialog::sync_dialog_text` gives the filter focus on
+                // this handler's return, and printable keys become text
+                // again.
                 state.mode = DialogMode::Filter;
-                // The one switch, thrown the other way: the filter takes
-                // focus and printable keys become text again.
-                input.read(cx).focus_handle(cx).focus(window, cx);
             }
             NormalCommand::Commit => {
-                open_selected(shell, window, cx);
+                open_selected(shell, cx);
                 return true;
             }
             // `n`: the naming stage (§18.2), unless the domain's own
@@ -355,18 +377,17 @@ fn handle_browse_key(
                 if state.domain.roster().is_some() {
                     state.notice = Some("the slots are fixed — open one to fill it".to_string());
                 } else {
+                    // `begin_naming` is the whole transition: it clears
+                    // `query` and sets `DialogMode::Filter`, and
+                    // `dialog::sync_dialog_text` empties the shared
+                    // `Input` and focuses it to match on this handler's
+                    // return. That clear is what keeps a stale browse
+                    // filter (typed, then `escape`'d back to normal mode
+                    // without clearing it) out of the name field — the
+                    // sync writes the field from `effective_query`, so
+                    // whatever `query` still held would otherwise be
+                    // written straight back into it.
                     state.begin_naming();
-                    // The `Input` owns the text; `begin_naming` clears
-                    // only the mirrored `query`, and a stale browse
-                    // filter left in the field (typed, then `escape`'d
-                    // back to normal mode without clearing it) would
-                    // otherwise sit there — visible, focused, and no
-                    // longer synced to `state.query` at all, since
-                    // `set_value` does not emit the `Change` event that
-                    // would re-mirror it. Same pairing as the
-                    // `ClearQuery` rung above.
-                    input.update(cx, |i, cx| i.set_value("", window, cx));
-                    input.read(cx).focus_handle(cx).focus(window, cx);
                 }
             }
             // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
@@ -385,9 +406,9 @@ fn handle_browse_key(
         // The ladder's first rung, which must be claimed (`true`):
         // falling through would close the whole dialog on the escape that
         // was only meant to leave the search. The query stays applied;
-        // blurring is what makes the letters motions again.
+        // the blur `dialog::sync_dialog_text` performs on this handler's
+        // return is what makes the letters motions again.
         state.mode = DialogMode::Normal;
-        shell.focus_handle.focus(window, cx);
         cx.notify();
         return true;
     }
@@ -399,7 +420,7 @@ fn handle_browse_key(
         // keybinding dialog's own `enter` branch is what this mirrors,
         // and a routing difference between the two dialogs is a
         // difference somebody eventually has to debug.
-        open_selected(shell, window, cx);
+        open_selected(shell, cx);
         return true;
     }
 
@@ -433,29 +454,25 @@ fn handle_browse_key(
 /// nothing written; `enter` checks the name and creates; everything
 /// else is the focused `Input`'s to type. The name is `state.query` —
 /// mirrored from the field by the same subscription a filter uses.
-fn handle_naming_key(
-    shell: &mut ShellView,
-    ks: &Keystroke,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) -> bool {
-    let input = shell.dialog_input.clone();
+fn handle_naming_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     if let Some(state) = shell.object_dialog.as_mut()
         && state.notice.take().is_some()
     {
         cx.notify();
     }
     if ks.key == "escape" {
+        // `cancel_naming` is the whole transition — `Stage::Browse`,
+        // `DialogMode::Normal`, an empty `query` — and
+        // `dialog::sync_dialog_text` empties the field and blurs it to
+        // match on this handler's return (spec §16.1).
         if let Some(state) = shell.object_dialog.as_mut() {
             state.cancel_naming();
         }
-        input.update(cx, |i, cx| i.set_value("", window, cx));
-        shell.focus_handle.focus(window, cx);
         cx.notify();
         return true;
     }
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        create_from_name(shell, window, cx);
+        create_from_name(shell, cx);
         return true;
     }
     if ks.key == "tab" {
@@ -471,7 +488,7 @@ fn handle_naming_key(
 /// as every layer of the domain's own doc) — creating over a desk object
 /// would be a fork the trader did not ask for, and creating over an
 /// orphaned overlay entry would silently inherit it.
-fn create_from_name(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
@@ -521,7 +538,7 @@ fn create_from_name(shell: &mut ShellView, window: &mut Window, cx: &mut Context
         scopes::overwrite_with(&mut draft, &scope);
         draft.diagnostics = domain.validate(&draft, &shell.services.config);
     }
-    enter_edit_stage(shell, &name, Some(draft), window, cx);
+    enter_edit_stage(shell, &name, Some(draft), cx);
     if let Some(notice) = apply::commit_create(shell, cx) {
         set_notice(shell, notice);
     }
@@ -543,9 +560,12 @@ fn derive_rows(shell: &ShellView) -> Vec<ObjectRow> {
 /// Selection logic for a real mouse click on the row for `clicked`
 /// (resolved back to a position in the *filtered* list against freshly
 /// derived rows). It moves focus the same way [`handle_key`] does — to
-/// whichever surface the current mode owns — because focusing the filter
-/// unconditionally here would let a mouse click silently defeat normal
-/// mode, and the next keystroke would type instead of act.
+/// whichever surface the current mode owns — through
+/// [`dialog::sync_dialog_text`] (spec §16.1), which a mouse handler
+/// needs of its own because a click never passes through the key path at
+/// all. Focusing the filter unconditionally here
+/// would let a mouse click silently defeat normal mode, and the next
+/// keystroke would type instead of act.
 fn on_row_clicked(
     shell: &mut ShellView,
     clicked: &str,
@@ -553,7 +573,6 @@ fn on_row_clicked(
     cx: &mut Context<ShellView>,
 ) {
     let rows = derive_rows(shell);
-    let input = shell.dialog_input.clone();
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
@@ -566,13 +585,8 @@ fn on_row_clicked(
         return;
     };
     state.selected = ix;
-    let filter_mode = state.mode == DialogMode::Filter;
     shell.object_dialog_scroll.scroll_to_item(ix);
-    if filter_mode {
-        input.read(cx).focus_handle(cx).focus(window, cx);
-    } else {
-        shell.focus_handle.focus(window, cx);
-    }
+    dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }
 
@@ -582,10 +596,12 @@ fn on_row_clicked(
 ///
 /// Resolves the row through the same filtered walk everything else here
 /// uses, so what opens is the row the user is looking at even mid-filter.
-/// The shared `Input` is emptied along with the mirrored query (see this
-/// module's own "Three stages" note) and focus goes back to the shell,
-/// which is what makes the edit stage's letters verbs.
-fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+/// The browse query is dropped with the stage change (see this module's
+/// own "Three stages" note) and the mode goes back to `Normal`, which is
+/// what makes the edit stage's letters verbs — the shared `Input` is
+/// emptied and blurred to match by [`dialog::sync_dialog_text`], never
+/// here.
+fn open_selected(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let rows = derive_rows(shell);
     let name = shell.object_dialog.as_ref().and_then(|state| {
         let visible = super::visible_rows(state, &rows);
@@ -602,21 +618,24 @@ fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
         cx.notify();
         return;
     };
-    enter_edit_stage(shell, &name, None, window, cx);
+    enter_edit_stage(shell, &name, None, cx);
 }
 
 /// **The one door into the edit stage.** Every way in goes through here —
 /// `enter` from either browse mode, and (§18.2) `n`'s committed name.
 ///
-/// It exists because the transition has two halves that are worthless
-/// apart: setting the mode and dropping the query, and emptying the
-/// shared `Input`/moving focus off it to match. Setting one without the
-/// other is not a cosmetic slip — it is the defect this task shipped and
-/// fixed (`an_object_opened_from_filter_mode_still_escapes_back_a_stage`):
-/// a stage whose mode and focus disagree sends the next `escape` down a
+/// It is a **pure mutation** (spec §16.1): it sets the mode and drops the
+/// query, and nothing here touches gpui focus or the shared `Input`'s
+/// text — [`dialog::sync_dialog_text`] reconciles both to the new state,
+/// on the return of whichever key handler or click reached this. That
+/// pairing used to be hand-written at each of this file's transitions,
+/// and one site missing its half is not a cosmetic slip — it is the
+/// defect that shipped and was fixed as
+/// `an_object_opened_from_filter_mode_still_escapes_back_a_stage`: a
+/// stage whose mode and focus disagree sends the next `escape` down a
 /// rung the edit handler does not claim, and the shell closes the whole
 /// dialog out from under the object being edited instead of stepping
-/// back to the list.
+/// back to the list. One owner is what makes that unreachable.
 ///
 /// `new` is `None` for [`open_selected`]'s existing object — the pure
 /// half goes through [`ObjectDialogState::enter_edit`], which derives the
@@ -627,15 +646,14 @@ fn open_selected(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
 /// on, rather than a fresh derivation from a config that has not been
 /// written to yet.
 ///
-/// So the halves are not offered separately: both pure-core methods are
-/// visible only inside this module's subtree and their docs point here,
-/// and this is the only function in that subtree that calls either. A new
-/// call site gets both halves or neither.
+/// So the two ways in are not offered separately: both pure-core methods
+/// are visible only inside this module's subtree and their docs point
+/// here, and this is the only function in that subtree that calls either.
+/// A new call site gets the whole transition or none of it.
 fn enter_edit_stage(
     shell: &mut ShellView,
     name: &str,
     new: Option<Draft>,
-    window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
     if let Some(state) = shell.object_dialog.as_mut() {
@@ -644,12 +662,6 @@ fn enter_edit_stage(
             None => state.enter_edit(&shell.services.config, name),
         }
     }
-    // The `Input` owns the text; clearing only the mirrored query would
-    // leave the old one waiting in the field for the next `/`.
-    let input = shell.dialog_input.clone();
-    input.update(cx, |i, cx| i.set_value("", window, cx));
-    // And the blur, which is what makes the edit stage's letters verbs.
-    shell.focus_handle.focus(window, cx);
     shell.object_dialog_scroll.scroll_to_item(0);
     cx.notify();
 }
@@ -690,12 +702,7 @@ fn enter_edit_stage(
 /// a test can reach the commit gate with an injected diagnostic still
 /// standing (`an_edit_the_reader_rejects_does_not_join_the_batch` depends
 /// on exactly that).
-fn handle_edit_key(
-    shell: &mut ShellView,
-    ks: &Keystroke,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) -> bool {
+fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     // The same notice door `handle_browse_key` opens with, for the same
     // reason: a notice reports on the keystroke that produced it.
     if let Some(state) = shell.object_dialog.as_mut()
@@ -713,7 +720,7 @@ fn handle_edit_key(
         let bare = ks.mods == Modifiers::NONE;
         if bare && matches!(ks.key.as_str(), "enter" | "y") {
             disarm_confirm(shell);
-            run_confirmed(shell, confirm, window, cx);
+            run_confirmed(shell, confirm, cx);
         } else if ks.key == "escape" || (bare && ks.key == "n") {
             cancel_confirm(shell);
         }
@@ -723,8 +730,6 @@ fn handle_edit_key(
         cx.notify();
         return true;
     }
-
-    let input = shell.dialog_input.clone();
 
     // ---- Filter mode (§18.3) ------------------------------------------
     //
@@ -738,11 +743,12 @@ fn handle_edit_key(
     if filtering {
         if ks.key == "escape" {
             // `LeaveFilter`: back to normal, keeping the query applied —
-            // leaving a search leaves you on the match.
+            // leaving a search leaves you on the match. The blur that
+            // makes the letters verbs again is
+            // `dialog::sync_dialog_text`'s, on this handler's return.
             if let Some(state) = shell.object_dialog.as_mut() {
                 state.mode = DialogMode::Normal;
             }
-            shell.focus_handle.focus(window, cx);
             cx.notify();
             return true;
         }
@@ -791,9 +797,11 @@ fn handle_edit_key(
                     draft.selected = 0;
                 }
                 shell.object_dialog_scroll.scroll_to_item(0);
-                // The `Input` owns the text; clearing only the mirrored
-                // `query` would leave the old one waiting in the field.
-                input.update(cx, |i, cx| i.set_value("", window, cx));
+                // Clearing the draft's own query is the whole rung: the
+                // shared `Input` is emptied from it by
+                // `dialog::sync_dialog_text`, which reads
+                // `effective_query` and so takes the draft's copy while
+                // this stage is open (spec §16.2).
                 cx.notify();
                 return true;
             }
@@ -806,7 +814,7 @@ fn handle_edit_key(
                 // fork the user has not confirmed was taken back off the
                 // draft when they declined it. Leaving abandons exactly
                 // nothing.
-                leave_edit(shell, window, cx);
+                leave_edit(shell, cx);
                 return true;
             }
             // `LeaveFilter` is unreachable at this match — the
@@ -902,11 +910,12 @@ fn handle_edit_key(
             ),
         },
         NormalCommand::EnterFilter => {
-            // §18.3: the same switch browse's own `/` throws.
+            // §18.3: the same switch browse's own `/` throws, and the
+            // same pure mutation — `dialog::sync_dialog_text` gives the
+            // filter focus on this handler's return.
             if let Some(state) = shell.object_dialog.as_mut() {
                 state.mode = DialogMode::Filter;
             }
-            input.read(cx).focus_handle(cx).focus(window, cx);
         }
         // `enter` and `i` have no row to act on in any draft built so
         // far: every field is a choice, a list, or (Groupings' `slot`,
@@ -1159,7 +1168,21 @@ fn revalidate(shell: &mut ShellView) {
 /// Back to the browse list, with the cursor put back on the object just
 /// edited — by name, because the list it returns to is unfiltered and so
 /// is a different list from the one the object was opened out of.
-fn leave_edit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+///
+/// Pure, and — alone among this file's stage transitions — it sets **no**
+/// mode, because neither way in has one to change. The `PreviousStage`
+/// rung is reachable only from normal mode with an empty query
+/// (`dialogmode::escape_step` hands out `LeaveFilter` and `ClearQuery`
+/// first), so the keys are already on the shell root; and
+/// [`run_confirmed`]'s delete/revert arm answers a question the trader
+/// armed in whichever mode they were in — a confirm button clicked while
+/// filtering (see [`press_verb`]) keeps them filtering, which is the
+/// honest outcome rather than a blur that would leave the pill reading
+/// `filter` over a dead field. Either way `dialog::sync_dialog_text`
+/// reconciles the field and the focus to the mode that stands, which is
+/// why this needs no `Window` of its own — it clears the query and
+/// nothing else about the keyboard.
+fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
         Some(Stage::Edit { object }) => object.clone(),
         _ => String::new(),
@@ -1178,7 +1201,6 @@ fn leave_edit(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Shell
         .map(|state| state.selected)
         .unwrap_or(0);
     shell.object_dialog_scroll.scroll_to_item(selected);
-    shell.focus_handle.focus(window, cx);
     cx.notify();
 }
 
@@ -1361,12 +1383,7 @@ fn arm_overwrite(shell: &mut ShellView) {
 /// it behind would strand a table naming a view that no longer exists,
 /// which is exactly the stale entry `ViewPresentationSpec::apply` warns
 /// about at startup and nowhere else.
-fn run_confirmed(
-    shell: &mut ShellView,
-    confirm: Confirm,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) {
+fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<ShellView>) {
     let domain = match shell.object_dialog.as_ref() {
         Some(state) => state.domain,
         None => return,
@@ -1466,7 +1483,7 @@ fn run_confirmed(
                         "reverted"
                     };
                     let outcome = apply::commit_removal(shell, keys, cx);
-                    leave_edit(shell, window, cx);
+                    leave_edit(shell, cx);
                     match outcome {
                         // The removal joined the batch; the flush (no
                         // debounce of its own) is already under way, so
@@ -2382,40 +2399,67 @@ fn confirm_row(
                 .child(confirm.prompt(name)),
         )
         .child(
-            Button::new("objectdialog-confirm-yes")
-                .small()
-                .danger()
-                .label(match confirm {
-                    Confirm::Delete => "Delete",
-                    Confirm::Revert => "Revert",
-                    Confirm::Fork => "Copy to user layer",
-                    Confirm::Overwrite { .. } => "Overwrite",
-                })
-                .on_click(move |_event, window, cx| {
-                    go_ahead.update(cx, |shell, cx| {
-                        let armed = shell
-                            .object_dialog
-                            .as_ref()
-                            .and_then(|state| state.draft.as_ref())
-                            .and_then(|draft| draft.confirm);
-                        if let Some(confirm) = armed {
-                            disarm_confirm(shell);
-                            run_confirmed(shell, confirm, window, cx);
-                        }
-                    });
-                }),
+            // Wrapped for the same reason each action-bar button is:
+            // `debug_bounds` resolves a `debug_selector`, not a button's
+            // element id, so a test that answers with the mouse
+            // (`confirming_with_the_mouse_while_filtering_empties_the_
+            // field`) has something to aim at.
+            div()
+                .debug_selector(|| "objectdialog-confirm-yes".to_string())
+                .child(
+                    Button::new("objectdialog-confirm-yes")
+                        .small()
+                        .danger()
+                        .label(match confirm {
+                            Confirm::Delete => "Delete",
+                            Confirm::Revert => "Revert",
+                            Confirm::Fork => "Copy to user layer",
+                            Confirm::Overwrite { .. } => "Overwrite",
+                        })
+                        .on_click(move |_event, window, cx| {
+                            go_ahead.update(cx, |shell, cx| {
+                                let armed = shell
+                                    .object_dialog
+                                    .as_ref()
+                                    .and_then(|state| state.draft.as_ref())
+                                    .and_then(|draft| draft.confirm);
+                                if let Some(confirm) = armed {
+                                    disarm_confirm(shell);
+                                    run_confirmed(shell, confirm, cx);
+                                }
+                                // A mouse answer never passes through the key
+                                // path, so it needs the same seam a row click
+                                // does (spec §16.1): `run_confirmed`'s
+                                // delete/revert arm walks all the way back to
+                                // browse through `leave_edit`, and the field it
+                                // was filtering with is emptied here or nowhere.
+                                dialog::sync_dialog_text(shell, window, cx);
+                            });
+                        }),
+                ),
         )
         .child(
-            Button::new("objectdialog-confirm-no")
-                .small()
-                .ghost()
-                .label("Cancel")
-                .on_click(move |_event, _window, cx| {
-                    leave_it.update(cx, |shell, cx| {
-                        cancel_confirm(shell);
-                        cx.notify();
-                    });
-                }),
+            div()
+                .debug_selector(|| "objectdialog-confirm-no".to_string())
+                .child(
+                    Button::new("objectdialog-confirm-no")
+                        .small()
+                        .ghost()
+                        .label("Cancel")
+                        .on_click(move |_event, window, cx| {
+                            leave_it.update(cx, |shell, cx| {
+                                cancel_confirm(shell);
+                                // Nothing here moves the mode or the query, so
+                                // the sync is a no-op today — present for the
+                                // same reason its twin above is: this closure is
+                                // off the key path, and the seam belongs to the
+                                // door rather than to what happens to be behind
+                                // it right now.
+                                dialog::sync_dialog_text(shell, window, cx);
+                                cx.notify();
+                            });
+                        }),
+                ),
         )
         .into_any_element()
 }
@@ -2442,23 +2486,21 @@ fn press_verb(shell: &mut ShellView, key: &str, _window: &mut Window, cx: &mut C
 /// verb is a second, deliberate keystroke or button press.
 ///
 /// Focus follows the current mode, exactly as browse's [`on_row_clicked`]
-/// does and for the same reason. Before §18.3 the edit stage could not be
-/// in [`DialogMode::Filter`] at all, so this handler focused the shell
-/// unconditionally; now that `/` reaches here, doing so would leave the
-/// pill reading `filter` and the caret painted over a blurred `Input` —
-/// the "one switch" broken by a mouse click, with every following
-/// keystroke going nowhere until `escape`.
+/// does and by the same means — [`dialog::sync_dialog_text`], which a
+/// click needs of its own because it never passes through the key path
+/// (spec §16.1).
+/// Before §18.3 the edit stage could not be in [`DialogMode::Filter`] at
+/// all, so this handler focused the shell unconditionally; now that `/`
+/// reaches here, doing so would leave the pill reading `filter` and the
+/// caret painted over a blurred `Input` — the "one switch" broken by a
+/// mouse click, with every following keystroke going nowhere until
+/// `escape`.
 fn on_edit_row_clicked(
     shell: &mut ShellView,
     position: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let input = shell.dialog_input.clone();
-    let filter_mode = shell
-        .object_dialog
-        .as_ref()
-        .is_some_and(|state| state.mode == DialogMode::Filter);
     if let Some(state) = shell.object_dialog.as_mut()
         && state.notice.take().is_some()
     {
@@ -2475,10 +2517,6 @@ fn on_edit_row_clicked(
         draft.selected = position;
     }
     shell.object_dialog_scroll.scroll_to_item(position);
-    if filter_mode {
-        input.read(cx).focus_handle(cx).focus(window, cx);
-    } else {
-        shell.focus_handle.focus(window, cx);
-    }
+    dialog::sync_dialog_text(shell, window, cx);
     cx.notify();
 }

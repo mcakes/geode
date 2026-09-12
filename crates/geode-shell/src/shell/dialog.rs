@@ -483,9 +483,11 @@ pub fn open_shell_dialog_with_key<F>(
 /// shared `Input` holds the dialog's effective query.
 ///
 /// Called at three seams and nowhere else — the tail of the modal branch
-/// in `ShellView::handle_key_down`, the tail of each row-click handler,
-/// and [`open_shell_dialog_with_key`] — so a transition site is a pure
-/// mutation and cannot forget the gpui half. A no-op when no modal
+/// in `ShellView::handle_key_down`, the tail of every mouse handler that
+/// mutates a dialog's own state (both dialogs' row clicks, and the object
+/// dialog's two confirm-button closures, none of which pass through the
+/// key path at all), and [`open_shell_dialog_with_key`] — so a transition
+/// site is a pure mutation and cannot forget the gpui half. A no-op when no modal
 /// dialog with a mode is open; the filter-only dialogs (settings, picker,
 /// as-of) keep their own open-time focus (§16.4).
 ///

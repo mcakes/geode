@@ -6185,16 +6185,41 @@ run_mutation "objectdialog: n on scopes reads the frame" \
 # to normal mode, which keeps the query applied) must still be emptied
 # before the name field takes focus, or the field opens pre-filled and a
 # few keystrokes on top of it can silently fork the wrong desk object.
-# The anchor spans both the `set_value` and the following focus line,
-# not `set_value` alone — the identical `set_value("", window, cx)` call
-# already exists a few dozen lines up, on the `ClearQuery` rung.
+# Re-anchored onto the pure clear when §16.1 made the transition pure:
+# the render-side `set_value`/focus pair this used to mutate is gone, and
+# `dialog::sync_dialog_text` now writes the field from
+# `effective_query` — so dropping the clear writes the stale browse
+# filter straight back into the name field, which is the same defect
+# through the new mechanism. Anchored on the two preceding lines as well
+# because `self.query.clear();` alone appears in four other transitions
+# in this file.
 run_mutation "objectdialog: n empties a leftover browse filter before naming" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                    input.update(cx, |i, cx| i.set_value("", window, cx));
-                    input.read(cx).focus_handle(cx).focus(window, cx);' \
-  '                    input.read(cx).focus_handle(cx).focus(window, cx);' \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    pub fn begin_naming(&mut self) {
+        self.stage = Stage::Naming;
+        self.query.clear();' \
+  '    pub fn begin_naming(&mut self) {
+        self.stage = Stage::Naming;' \
   geode-shell \
   n_opens_an_empty_name_field_even_after_a_browse_filter
+
+# §16.1: the confirm buttons are the only door into `run_confirmed` that
+# never passes through `ShellView::handle_key_down`, so the sync at the
+# end of the "yes" closure is the one that empties the shared field when
+# a confirmed delete walks back to browse. Reachable only with the
+# mouse: an armed confirm swallows every keystroke, `/` included, so the
+# keyboard cannot reach one from filter mode at all — but the action
+# bar's buttons are live in either mode. Anchored on the last comment
+# line too: the identical sync call appears four times in this file, and
+# the "no" closure's is indented identically.
+run_mutation "objectdialog: a mouse-confirmed delete leaves its filter text in the field" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                                // was filtering with is emptied here or nowhere.
+                                dialog::sync_dialog_text(shell, window, cx);' \
+  '                                // was filtering with is emptied here or nowhere.
+                                let _ = window;' \
+  geode-shell \
+  confirming_with_the_mouse_while_filtering_empties_the_field
 
 # ---- Task 6: filtering the edit stage (§18.3) --------------------------
 
@@ -6339,18 +6364,18 @@ run_mutation "objectdialog: the edit list sizes itself instead of the header it 
 # §18.3 made the edit stage reachable in filter mode, which its click
 # handler predates: focusing the shell unconditionally leaves the pill
 # reading `filter` and the caret painted over a blurred `Input`, and the
-# next keystroke goes nowhere. The anchor carries the preceding
-# `scroll_to_item(position)` line because browse's own `on_row_clicked`
-# ends in the identical five-line mode branch (`scroll_to_item(ix)`
-# there), which would otherwise make this anchor ambiguous.
+# next keystroke goes nowhere. Since §16.1 the handler asks
+# `dialog::sync_dialog_text` where focus belongs instead of branching on
+# the mode itself, so the mutation is that call replaced by the old
+# unconditional blur — the same defect, one seam later. The anchor
+# carries the preceding `scroll_to_item(position)` line because browse's
+# own `on_row_clicked` ends in the identical sync call
+# (`scroll_to_item(ix)` there), which would otherwise make this anchor
+# ambiguous.
 run_mutation "objectdialog: an edit-stage click takes the keyboard off the filter" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    shell.object_dialog_scroll.scroll_to_item(position);
-    if filter_mode {
-        input.read(cx).focus_handle(cx).focus(window, cx);
-    } else {
-        shell.focus_handle.focus(window, cx);
-    }' \
+    dialog::sync_dialog_text(shell, window, cx);' \
   '    shell.object_dialog_scroll.scroll_to_item(position);
     shell.focus_handle.focus(window, cx);' \
   geode-shell \
