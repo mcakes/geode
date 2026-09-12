@@ -3201,12 +3201,17 @@ fn space_on_the_last_available_row_keeps_the_cursor_at_the_bottom(cx: &mut gpui:
     assert_row_in_view(&mut cx, "objectdialog-item-m38", "space");
 }
 
-/// And `x` the other way: a member demoted to the *end* of the
-/// available block, from the top of a list too long to show both.
+/// And `x` the other way round: the demoted row travels to the *end* of
+/// the available block, a screenful below, but the cursor does not go
+/// with it (user ruling 2026-09-11) — it stays at the top, on the row
+/// that was next, which was on screen before the keystroke and still is.
+/// That is also why the `x` arm no longer calls `scroll_to_cursor`: with
+/// the cursor holding its own visible index there is nothing to scroll
+/// to, and a call no test could see would be a harness lie.
 #[gpui::test]
-fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
+fn x_leaves_the_cursor_on_the_next_row_still_in_view(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
-    let (_shell, mut cx) = dialog_test_shell_in_dir(
+    let (shell, mut cx) = dialog_test_shell_in_dir(
         cx,
         services_with_a_long_desk_view(),
         dir.path(),
@@ -3217,9 +3222,19 @@ fn x_scrolls_the_demoted_row_back_into_view(cx: &mut gpui::TestAppContext) {
     // Past `Dataset` and `Columns` onto `book`, the view's first member.
     cx.simulate_keystrokes("j j");
     cx.run_until_parked();
+    assert_eq!(cursor_item_name(&shell, &cx).as_deref(), Some("book"));
     cx.simulate_keystrokes("x");
     cx.run_until_parked();
-    assert_row_in_view(&mut cx, "objectdialog-item-book", "x");
+    assert_eq!(
+        cursor_item_name(&shell, &cx).as_deref(),
+        Some("npv"),
+        "the cursor stayed on the next member, not with book at the bottom"
+    );
+    assert_row_in_view(&mut cx, "objectdialog-item-npv", "x");
+    assert!(
+        !row_in_view(&mut cx, "objectdialog-item-book"),
+        "sanity: book really did travel off the bottom of the viewport"
+    );
 }
 
 // ---------------------------------------------------------------------

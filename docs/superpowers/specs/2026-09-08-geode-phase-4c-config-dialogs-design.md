@@ -1696,3 +1696,17 @@ are checked on a display against the artifact, not by test.
   `+ 1` and the clamp; the scroll-into-view tests for `space` and
   `shift+space` now put the cursor on the viewport's last row and assert
   the *next* row is scrolled in.
+
+- **`x` follows the same ruling (2026-09-11, same day):** the cursor
+  stays at its own visible index — the row that was next, since the
+  demoted item moved *later* in row order and the rows ahead of the next
+  one lost exactly one — rather than following the removed column to
+  the end of the available block. Removing the list's last row, where
+  the same index would still be on the removed item, steps back one row
+  instead (`dd` on a buffer's last line). Because the cursor now holds
+  a position that was on screen before the keystroke, the `x` arm's
+  `scroll_to_cursor` call (added by the 2026-09-11 fix wave above) is
+  gone along with its harness entry — an entry over a call no test can
+  see is a lie — and two entries over the rule replace it. `space`'s
+  arms keep theirs: an add can land the cursor one row past the
+  viewport's bottom.

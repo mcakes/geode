@@ -6433,15 +6433,35 @@ run_mutation "objectdialog: shift+space moves the cursor off screen and leaves i
 
 # And `x`, which moves the cursor the other way — to the end of the
 # available block, off the BOTTOM of the viewport.
-run_mutation "objectdialog: x moves the cursor off screen and leaves it there" \
-  crates/geode-shell/src/shell/objectdialog/render.rs \
-  '            Some(Step::Changed) => {
-                revalidate(shell);
-                scroll_to_cursor(shell);' \
-  '            Some(Step::Changed) => {
-                revalidate(shell);' \
+# `x` no longer scrolls (user ruling 2026-09-11: the cursor stays at its
+# own visible index — the row that was next — rather than following the
+# demoted item to the end of the available block, so the `x` arm's old
+# `scroll_to_cursor` call went with the old behaviour; an entry over a
+# call no test could see would be a harness lie). Two entries over the
+# rule itself instead. Inverting the "landed back on the removed item"
+# check makes the ORDINARY removal step back one row (the previous
+# member instead of the next) and the last-row removal stay on the
+# removed item.
+run_mutation "objectdialog: x steps back on every removal but the last" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if under_cursor == Some(moved) {' \
+  '        if under_cursor != Some(moved) {' \
   geode-shell \
-  x_scrolls_the_demoted_row_back_into_view
+  x_leaves_the_cursor_on_the_next_row
+
+# And the fallback itself: without the step back, removing the list's
+# last row leaves the cursor on the row it just removed, so the next
+# `space` quietly puts it back.
+run_mutation "objectdialog: x on the last row leaves the cursor on the removed item" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            self.selected = self.selected.saturating_sub(1);
+        }
+        Step::Changed' \
+  '            self.selected = self.selected;
+        }
+        Step::Changed' \
+  geode-shell \
+  x_on_the_last_row_steps_the_cursor_back_to_the_previous_row
 
 # A `Key` or `Attribute` column has no honest `[[columns]]` kind, so it
 # is not offered in the available block at all. Forcing either into

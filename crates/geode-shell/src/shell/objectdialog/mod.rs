@@ -857,12 +857,12 @@ impl Draft {
     /// item + end` used to do when `selected` indexed the unfiltered
     /// [`Draft::rows`] directly. Leaves `selected` where it is if `row`
     /// is no longer visible under the current query, which none of its
-    /// callers can actually produce (moving or unmembering an item never
-    /// changes its own label), but is the honest fallback for a future
-    /// one that might. An *add* deliberately does not call this — the
-    /// cursor stays behind on the next available row rather than
-    /// following the item into the member block (`step_selected`'s own
-    /// comment has the ruling).
+    /// callers can actually produce (moving an item never changes its
+    /// own label), but is the honest fallback for a future
+    /// one that might. Neither an *add* nor a *removal* calls this — the
+    /// cursor stays behind on the row that was next rather than following
+    /// the item across the member boundary (`step_selected`'s and
+    /// `remove_selected`'s own comments have the ruling).
     fn follow(&mut self, row: EditRow) {
         let rows = self.rows();
         if let Some(position) = self
@@ -1156,7 +1156,26 @@ impl Draft {
         entry.included = false;
         items.push(entry);
         let last = items.len() - 1;
-        self.follow(EditRow::Item { field, item: last });
+        // The cursor does NOT follow the item to the end of the available
+        // block, for the same reason `space`'s add leaves it behind (user
+        // ruling 2026-09-11): a trader removing several columns wants it
+        // on the row that was next. The removed item moved *later* in row
+        // order with its label unchanged, so the visible rows ahead of the
+        // next one lost exactly one — the next row now sits at the old
+        // index and `selected` is already right. The one exception is a
+        // removal with nothing visible after it: the item lands at the
+        // end, which is where it already was, so the old index would
+        // still be on it — step back to the previous row instead, the
+        // way `dd` on a buffer's last line does.
+        let moved = EditRow::Item { field, item: last };
+        let rows = self.rows();
+        let under_cursor = self
+            .visible_rows()
+            .get(self.selected)
+            .and_then(|m| rows.get(m.row).copied());
+        if under_cursor == Some(moved) {
+            self.selected = self.selected.saturating_sub(1);
+        }
         Step::Changed
     }
 
