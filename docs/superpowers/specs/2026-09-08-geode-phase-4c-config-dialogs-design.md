@@ -1484,7 +1484,11 @@ are checked on a display against the artifact, not by test.
   dead end for a name that is not on it.
 
 - **Views' column list is two `ListItem` blocks, `member` first.**
-  `ListItem.member` is definitional (`Destination::Doc`, forks a desk
+  *(Superseded 2026-09-12 by §18.7: the flag and its ordering rule are
+  gone; membership is two lists, `items` and `available:
+  Option<Vec<ListItem>>`, and `x`'s refusal keys on whether a catalogue
+  exists, not on `dest`. The bullet is kept as the record of what this
+  branch shipped.)* `ListItem.member` is definitional (`Destination::Doc`, forks a desk
   view) where `ListItem.included` is presentation (hide/show, never
   forks); Groupings sets `member: true` everywhere, since ticking
   already *is* membership there. `space` on an available row promotes
@@ -1745,9 +1749,9 @@ above — §18.7.5 explains why.)*
 dimension chain — and the only list that is ordered, written, counted
 or reorderable. `available` is what the trader may add: the chosen
 dataset's other columns for Views (`kind` filled from the schema role,
-Key/Attribute/derived still excluded per §18.6); empty for Groupings,
-whose unticked dimensions stay in `items` because ticking IS membership
-there. The rows paint `Field`, then `items`, then `available`, and the
+Key/Attribute/derived still excluded per §18.6); `None` for Groupings
+(as built — see §18.7.5), whose unticked dimensions stay in `items`
+because ticking IS membership there. The rows paint `Field`, then `items`, then `available`, and the
 third `EditRow` variant is what makes every consumer state what an
 available row means — the compiler refuses a match that forgets it.
 
@@ -1763,7 +1767,13 @@ available row means — the compiler refuses a match that forgets it.
   the list HAS an available block rather than off `dest`.
 - `shift+j`/`shift+k` move within `items` only; an `Available` row is
   inert with a notice. The available block is not reorderable, which
-  also retires the same-bytes presentation write §18.6 deferred.
+  retires the same-bytes presentation write a reorder *inside* the old
+  available block used to queue. (The other same-bytes write §18.6
+  deferred — a dataset switch queuing an unchanged
+  `view_presentation.toml` — is untouched: `writes_by_destination`
+  compares whole `Field`s, and `refresh_available` still changes the
+  `columns` field's `available`. It stays deferred, with its own test to
+  write when it is taken up.)
 - Cursor rules of §18.6 (the 2026-09-11 rulings: `space` leaves the
   cursor on the next available row, `x` on the row that was next)
   are unchanged.
@@ -1774,8 +1784,11 @@ available row means — the compiler refuses a match that forgets it.
 `membership_changed` compares `items`' names, no filter. `columns_for`,
 `doc_baseline` and `presentation_table` take `items`, no filter. The
 render paints one section header per non-empty list (`items` under
-`COLUMNS`/`DIMENSIONS`, `available` under `AVAILABLE`), no
-neighbour-comparison. `field_value` counts `items.len()`.
+`COLUMNS`/`DIMENSIONS`, `available` under `AVAILABLE`), keyed off the
+row's `EditRow` variant rather than a flag on the item — the loop still
+compares each row's list against the previous painted row's, because the
+header has to ride the first *visible* row of its list. `field_value`
+counts `items.len()`.
 
 ### 18.7.4 Tests and harness
 
@@ -1860,8 +1873,8 @@ Implemented 2026-09-12, commit `60760eb`.
   `available.as_mut()` to `.filter(|a| !a.is_empty())` — the entry that
   guards the controller's ruling above, the precise regression path back
   to the flag build's defect).
-- **Deferred, not fixed:** `views::refresh_available`'s doc comment
-  overstated its own fallback — it claimed a row that resolved before the
+- **Doc corrected; behaviour deferred:** `views::refresh_available`'s
+  doc comment overstated its own fallback — it claimed a row that resolved before the
   rebuild but is gone after falls back to the same index clamp used when
   the cursor could not be resolved at all. It does not: that case takes
   `Draft::follow`, which is a no-op on a miss rather than a clamp, leaving

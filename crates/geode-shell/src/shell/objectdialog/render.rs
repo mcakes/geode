@@ -889,9 +889,11 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         NormalCommand::Verb('r') => arm_revert(shell),
         NormalCommand::Verb('o') => arm_overwrite(shell),
         // §18.2: take the column under the cursor out of the view.
-        // Views-only by what `Draft::remove_selected` itself decides (a
-        // per-field `dest`, not a scan of the list's current contents —
-        // see its own doc), not by a check here, so its two `Refused`
+        // Views-only by what `Draft::remove_selected` itself decides —
+        // whether the field's list has an available catalogue at all
+        // (`Some`, even if empty), never its `dest` and never a scan of
+        // the list's contents; see its own doc — not by a check here, so
+        // its two `Refused`
         // reasons are routed straight to the footer rather than through
         // `refuse_step`: that helper's `d`/`r` hint is for the "must keep
         // at least one entry" refusal `space` can also produce, and
