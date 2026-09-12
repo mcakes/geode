@@ -477,6 +477,27 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     if edits.is_empty() {
         return None;
     }
+    let mut edits = edits;
+    // §19.6: a Doc write onto an object the user layer does not own is a
+    // fork; record what it shadows, in THIS batch, so the entry cannot
+    // land without the fork nor before it. Stale entries ride along as
+    // removals — the one moment the sidecar is being written anyway.
+    let domain = shell.object_dialog.as_ref().map(|s| s.domain);
+    if let Some(domain) = domain
+        && would_fork(shell, domain)
+        && let Some(draft) = shell.object_dialog.as_ref().and_then(|s| s.draft.as_ref())
+        && let Some((layer, value)) =
+            super::shadow_of(&shell.services.config, domain.doc(), &draft.name)
+    {
+        let key = super::override_key(domain.doc(), &draft.name);
+        for stale in super::stale_override_keys(&shell.services.config) {
+            edits.insert((super::OVERRIDES_DOC, stale), None);
+        }
+        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );
+    }
 
     // **Before the baseline moves.** A shell with nowhere to write queues
     // nothing, so nothing has been accounted for and the draft must stay

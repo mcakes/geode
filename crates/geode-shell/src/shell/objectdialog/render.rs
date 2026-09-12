@@ -1596,6 +1596,11 @@ fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
 /// path an edit does: merged through `Config::from_docs`, applied
 /// through `apply_reload`, written by the same `run_writes`, reverted by
 /// the same `revert_failed_write` if the write fails.
+///
+/// Also removes `doc.object`'s `overrides.toml` entry, if any (§19.6):
+/// same gate — a missing sidecar is never created just to remove nothing
+/// from it — and the same batch, so a fork's drift record never outlives
+/// the fork it describes.
 fn removal_edits(
     shell: &ShellView,
     docs: &[&'static str],
@@ -1619,7 +1624,18 @@ fn removal_edits(
     if touched.is_empty() {
         return Err(format!("nothing of yours defines {name}"));
     }
-    Ok(touched.into_iter().map(|doc| (doc, name.clone())).collect())
+    let mut keys: Vec<(&'static str, String)> =
+        touched.into_iter().map(|doc| (doc, name.clone())).collect();
+    // §19.6: the sidecar entry rides the same removal — never created
+    // just to remove nothing, hence the `has_override_entry` gate rather
+    // than an unconditional key.
+    if let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) {
+        let okey = super::override_key(domain.doc(), &name);
+        if super::has_override_entry(&shell.services.config, domain.doc(), &name) {
+            keys.push((super::OVERRIDES_DOC, okey));
+        }
+    }
+    Ok(keys)
 }
 
 /// `d`: arm the delete confirm, or say why there is nothing to delete.
@@ -1827,6 +1843,10 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
             }
             match removal_edits(shell, &docs) {
                 Ok(keys) => {
+                    // §19.6: named in the notice only when `removal_edits`
+                    // actually found an entry to remove — `keys` decides,
+                    // same as every other doc in this list.
+                    docs.push(super::OVERRIDES_DOC);
                     // Preserves `docs`' own order rather than whatever
                     // order `keys` happens to hold, so a notice naming
                     // both files reads "views and view_presentation" the
@@ -2080,9 +2100,9 @@ fn build(
                 cx,
             ));
         }
-        // Always `false` today (see `ObjectRow::drifted`'s own doc) — the
-        // badge exists so the day `overrides.toml` starts recording real
-        // drift, nothing here needs to change.
+        // §19.6: real once `derive_rows` has a sidecar entry to compare
+        // against (`ObjectRow::drifted`'s own doc has the full rule) —
+        // this row simply paints whatever it is handed.
         if row.drifted {
             markers = markers.child(dialog::badge(
                 "drifted",
@@ -2352,6 +2372,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                     cx,
                 ));
             }
+            // §19.6: the same tokens the browse row's own `drifted` badge
+            // uses — one classification, one set of colours.
+            if row.drifted {
+                markers = markers.child(dialog::badge(
+                    "drifted",
+                    theme.muted_foreground,
+                    theme.border,
+                    None,
+                    cx,
+                ));
+            }
         }
         // §18.2: `n` this session, and still true for the whole life of
         // the stage regardless of `row` — `editing_row` derives from
@@ -2372,6 +2403,17 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         }
         header = header.child(markers);
     }
+    // §19.6: under the header, not on it — a badge says WHAT the row is,
+    // this says what to DO about it, and only `r` (never `d`, which
+    // deletes the whole override rather than restoring a shadow) does.
+    let drift_note = row.as_ref().filter(|r| r.drifted).map(|_| {
+        div()
+            .text_xs()
+            .text_color(theme.warning)
+            .debug_selector(|| "objectdialog-drift-note".to_string())
+            .child("the desk's copy has changed since you copied it — r restores it")
+            .into_any_element()
+    });
 
     let domain = state.domain;
     let rows = draft.rows();
@@ -2967,6 +3009,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     v_flex()
         .gap_2()
         .child(header)
+        .children(drift_note)
         .child(diagnostics)
         .child(filter)
         .child(list)

@@ -156,17 +156,15 @@ pub struct ObjectRow {
     /// on a view only the user layer defines, that would delete the view
     /// outright rather than restore anything. See [`derive_rows`].
     pub overridden: bool,
-    /// Always `false` today, and deliberately still a field.
-    ///
-    /// Drift (spec §5.2) is "the layer I overrode has changed since I
-    /// overrode it", which cannot be computed from `Config` alone: an
-    /// override freezes a copy, so the shadowed layer's text at override
-    /// time has to have been recorded somewhere. That record is
-    /// `overrides.toml`, Part 2's work. Inventing a stand-in here — say,
-    /// comparing the user's copy against the desk's current one — would
-    /// mark every deliberate customisation as drifted, which is exactly
-    /// backwards, so the honest value until the sidecar exists is
-    /// `false`.
+    /// The layer this row overrides has changed since it was forked
+    /// (spec §5.2, §19.6). `overrides.toml` (`OVERRIDES_DOC`) records the
+    /// shadowed layer's canonical text at fork time, keyed by
+    /// [`override_key`]; `derive_rows` compares that text against the
+    /// shadow's CURRENT text. `false` whenever there is no recorded
+    /// entry — an override that predates this sidecar, or a stale entry
+    /// (see [`stale_override_keys`]) — never a guess made by comparing
+    /// the user's copy against the desk's current one, which would mark
+    /// every deliberate customisation as drifted (exactly backwards).
     pub drifted: bool,
     /// A grouping key painted before the name, dimmed (§19.3): the
     /// dataset a source feeds. `Some` only on Sources; the primary sort
@@ -399,6 +397,111 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
         .unwrap_or_default()
 }
 
+/// The drift sidecar (spec §5.2, §19.6): `overrides.toml`, user layer
+/// only, one entry per forked object keyed `"<doc>.<object>"`, holding
+/// the shadowed layer and the shadowed object's canonical TOML text at
+/// fork time. A sidecar rather than a key inside the object, because an
+/// atomic doc's reader treats an unknown key as a diagnostic.
+pub const OVERRIDES_DOC: &str = "overrides";
+
+pub fn override_key(doc: &str, object: &str) -> String {
+    format!("{doc}.{object}")
+}
+
+/// The entry recorded when `object` is forked over `shadowed`'s copy.
+/// The canonical text, not a hash: `DefaultHasher` is not stable across
+/// Rust versions, a crypto dependency is unjustified, and keeping the
+/// text makes a real diff free if it is ever wanted (§5.2).
+pub fn override_entry(shadowed: Layer, object: &str, value: &toml::Value) -> toml::Value {
+    let mut table = toml::Table::new();
+    table.insert(
+        "shadowed_layer".into(),
+        toml::Value::String(shadowed.name().to_string()),
+    );
+    table.insert(
+        "shadowed_text".into(),
+        toml::Value::String(object_text(object, toml_value_to_item(value))),
+    );
+    toml::Value::Table(table)
+}
+
+/// The copy a user-layer write of `object` would shadow: the LAST
+/// non-user layer defining it, with its value. `None` when no such
+/// layer does — a user-only object forks nothing.
+pub fn shadow_of(config: &Config, doc: &str, object: &str) -> Option<(Layer, toml::Value)> {
+    config
+        .layered_docs(doc)
+        .iter()
+        .filter(|d| d.layer != Layer::User)
+        .filter_map(|d| d.table.get(object).map(|v| (d.layer, v.clone())))
+        .next_back()
+}
+
+/// The overrides sidecar's own entries, user layer only, as `key ->
+/// (shadowed_layer, shadowed_text)`. Private: every reader outside this
+/// module goes through [`stale_override_keys`] or `derive_rows`'s own
+/// drift computation, never the raw map.
+fn override_entries(config: &Config) -> BTreeMap<String, (String, String)> {
+    config
+        .layered_docs(OVERRIDES_DOC)
+        .iter()
+        .filter(|d| d.layer == Layer::User)
+        .flat_map(|d| d.table.iter())
+        .filter(|(k, _)| *k != "config_version")
+        .filter_map(|(k, v)| {
+            let t = v.as_table()?;
+            Some((
+                k.clone(),
+                (
+                    t.get("shadowed_layer")?.as_str()?.to_string(),
+                    t.get("shadowed_text")?.as_str()?.to_string(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+/// Whether `doc.object` has a recorded override entry — the gate
+/// [`render::removal_edits`] uses to decide whether a delete/revert also
+/// touches `overrides.toml`, so a missing sidecar is never created just
+/// to remove nothing from it.
+pub(super) fn has_override_entry(config: &Config, doc: &str, object: &str) -> bool {
+    override_entries(config).contains_key(&override_key(doc, object))
+}
+
+/// Entries that describe nothing any more (§19.6): the user layer no
+/// longer holds the object, or no layer beneath shadows it. Ignored by
+/// `derive_rows` and pruned by the next overrides write.
+pub fn stale_override_keys(config: &Config) -> Vec<String> {
+    override_entries(config)
+        .keys()
+        .filter(|key| {
+            let Some((doc, object)) = key.split_once('.') else {
+                return true;
+            };
+            let user_has = config
+                .layered_docs(doc)
+                .iter()
+                .any(|d| d.layer == Layer::User && d.table.contains_key(object));
+            !user_has || shadow_of(config, doc, object).is_none()
+        })
+        .cloned()
+        .collect()
+}
+
+/// The gate [`derive_rows`] applies to compute [`ObjectRow::drifted`]:
+/// drift is provable only from the sidecar's recorded text, so no entry
+/// means not drifted, never a guess from the shadow's current copy
+/// (§19.6).
+fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name: &str) -> bool {
+    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        _ => false,
+    }
+}
+
 /// Every object named in `doc`'s layered documents, plus every name
 /// `roster` fixes as always-listed (§18.4 — Groupings' nine slots), one
 /// row each, sorted by name.
@@ -461,13 +564,19 @@ fn derive_rows(
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
     let personalised = personalised_names(config, presentation_doc);
+    // The sidecar's own entries, read once — the drift question below is
+    // per-row but the doc is not, and `override_entries` already
+    // filters to the user layer.
+    let entries = override_entries(config);
     // Accumulated by name — one name can appear in up to three documents
     // and each appearance updates the same row — in a `BTreeMap`, whose
     // key order IS the by-name order described above, so the rows come
     // out sorted without a separate pass. The `Vec<Layer>` beside each
     // row is every layer that defined it, which is what the `overridden`
-    // question below needs and the row itself does not carry.
-    let mut rows: BTreeMap<String, (Vec<Layer>, ObjectRow)> = BTreeMap::new();
+    // question below needs and the row itself does not carry; the
+    // trailing `Option<toml::Value>` is the last NON-USER layer's value —
+    // the shadow drift compares the sidecar's recorded text against.
+    let mut rows: BTreeMap<String, (Vec<Layer>, ObjectRow, Option<toml::Value>)> = BTreeMap::new();
     // Seeded before the layered walk, not after: a name the walk touches
     // has to update this entry in place (`entry.1.layer = Some(..)`
     // below), and a name it never touches has to survive untouched —
@@ -487,6 +596,7 @@ fn derive_rows(
                     drifted: false,
                     prefix: None,
                 },
+                None,
             ),
         );
     }
@@ -506,6 +616,7 @@ fn derive_rows(
                         drifted: false,
                         prefix: None,
                     },
+                    None,
                 )
             });
             entry.0.push(layered.layer);
@@ -515,13 +626,25 @@ fn derive_rows(
             entry.1.layer = Some(layered.layer);
             entry.1.summary = summary(value);
             entry.1.prefix = prefix.and_then(|f| f(value));
+            if layered.layer != Layer::User {
+                entry.2 = Some(value.clone());
+            }
         }
     }
     let mut out: Vec<ObjectRow> = rows
         .into_values()
-        .map(|(layers, mut row)| {
+        .map(|(layers, mut row, shadow)| {
             let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());
             row.overridden = mine && layers.iter().any(|l| *l < Layer::User);
+            // §19.6: drift is "the shadowed copy moved since the fork" —
+            // provable only from the sidecar's recorded text, so no
+            // entry means not drifted, never a guess.
+            row.drifted = row.overridden
+                && drift_of(
+                    entries.get(&override_key(doc, &row.name)),
+                    shadow.as_ref(),
+                    &row.name,
+                );
             row
         })
         .collect();
@@ -2492,6 +2615,69 @@ mod tests {
         let rows = Domain::Views.objects(&config);
         assert_eq!(rows.len(), 1);
         assert!(!rows[0].overridden);
+    }
+
+    #[test]
+    fn drifted_needs_an_override_entry_and_a_changed_shadow() {
+        let desk_v1 = "[tree]\ndataset = \"risk\"\ncolumns = []\n";
+        let user = "[tree]\ndataset = \"risk\"\n";
+        let entry = |text: &str| {
+            format!("[\"views.tree\"]\nshadowed_layer = \"desk\"\nshadowed_text = '''\n{text}'''\n")
+        };
+        // Entry recorded against exactly the desk text on disk: not drifted.
+        let shadow_text = object_text(
+            "tree",
+            toml_value_to_item(&desk_v1.parse::<toml::Table>().unwrap()["tree"]),
+        );
+        let recorded = entry(&shadow_text);
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v1),
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", recorded.as_str()),
+        ]);
+        let rows = Domain::Views.objects(&config);
+        assert!(rows[0].overridden);
+        assert!(!rows[0].drifted, "the desk has not moved");
+
+        // The desk adds a column: drifted.
+        let desk_v2 = "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n";
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v2),
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", recorded.as_str()),
+        ]);
+        assert!(Domain::Views.objects(&config)[0].drifted);
+
+        // No entry at all (an override that predates 2b): never drifted.
+        let config = config_from(&[
+            (Layer::Desk, "views", desk_v2),
+            (Layer::User, "views", user),
+        ]);
+        assert!(!Domain::Views.objects(&config)[0].drifted);
+
+        // Not overridden (user-only): an entry is stale and ignored.
+        let stale = entry("x");
+        let config = config_from(&[
+            (Layer::User, "views", user),
+            (Layer::User, "overrides", stale.as_str()),
+        ]);
+        assert!(!Domain::Views.objects(&config)[0].drifted);
+        assert_eq!(stale_override_keys(&config), vec!["views.tree".to_string()]);
+    }
+
+    #[test]
+    fn override_entry_records_the_shadowed_layer_and_its_text() {
+        let value: toml::Value = "dataset = \"risk\"\n"
+            .parse::<toml::Table>()
+            .unwrap()
+            .into();
+        let entry = override_entry(Layer::Desk, "tree", &value);
+        assert_eq!(entry["shadowed_layer"].as_str(), Some("desk"));
+        assert_eq!(
+            entry["shadowed_text"].as_str(),
+            Some(object_text("tree", toml_value_to_item(&value)).as_str())
+        );
+        assert_eq!(override_key("views", "tree"), "views.tree");
     }
 
     /// A presentation-only override **is** an override. A desk view a

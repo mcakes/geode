@@ -7627,6 +7627,52 @@ run_mutation "bridge: reload reports presentation diagnostics" \
   geode-app \
   a_reload_reports_a_stale_presentation_name
 
+# §19.6: no entry means NOT drifted — never a guess from the current desk copy.
+run_mutation "objectdialog: drifted is false without an override entry" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        _ => false,
+    }' \
+  '    match (entry, shadow) {
+        (Some((_, recorded)), Some(value)) => {
+            object_text(name, toml_value_to_item(value)) != *recorded
+        }
+        (None, Some(_)) => true,
+        _ => false,
+    }' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
+# §19.6: drifted compares the shadow's CURRENT text against the recorded one.
+run_mutation "objectdialog: drifted compares the shadow text" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            object_text(name, toml_value_to_item(value)) != *recorded' \
+  '            object_text(name, toml_value_to_item(value)) == *recorded' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
+# §19.6: the entry rides the fork's own batch.
+run_mutation "objectdialog: a fork records its override entry" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        edits.insert(
+            (super::OVERRIDES_DOC, key),
+            Some(super::override_entry(layer, &draft.name, &value)),
+        );' \
+  '        let _ = (key, layer, value);' \
+  geode-shell \
+  a_fork_records_an_override_entry_and_revert_removes_it
+
+# §19.6: the shadow is the last NON-USER layer.
+run_mutation "objectdialog: shadow_of skips the user layer" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        .filter(|d| d.layer != Layer::User)' \
+  '        .filter(|_| true)' \
+  geode-shell \
+  drifted_needs_an_override_entry_and_a_changed_shadow
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

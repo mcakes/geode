@@ -21,6 +21,9 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         // trader's column order into another's (spec §5.6).
         "views" | "view_presentation" | "layouts" | "groupings" | "scopes" | "datasets"
         | "sources" | "dimensions" => Some(1),
+        // `overrides` (4c §19.6): one entry per forked object, keyed
+        // "<doc>.<object>"; user layer only.
+        "overrides" => Some(1),
         _ => None,
     }
 }

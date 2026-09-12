@@ -633,6 +633,69 @@ fn adding_an_available_column_to_a_desk_view_asks_before_forking(cx: &mut gpui::
     let _ = shell;
 }
 
+/// §19.6: the fork's own batch carries the overrides entry, so it lands
+/// in the same flush; `r` removes it with the user copy.
+#[gpui::test]
+fn a_fork_records_an_override_entry_and_revert_removes_it(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A builtin view and two datasets, so stepping `dataset` is a Doc edit
+    // on an object the user does not own — a fork.
+    let mut services = test_services();
+    let views = LayerDoc::builtin(
+        "views",
+        "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"book\"\n",
+    )
+    .unwrap();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            views,
+            datasets,
+        ],
+        desk: None,
+        user: None,
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::views");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space"); // dataset: risk → vol
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter"); // fork
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(overrides.contains("[\"views.tree\"]"), "{overrides}");
+    assert!(
+        overrides.contains("shadowed_layer = \"builtin\""),
+        "{overrides}"
+    );
+    assert!(
+        overrides.contains("dataset = \"risk\""),
+        "the shadowed text is the builtin's, not the fork: {overrides}"
+    );
+
+    // The reload lands; the row is overridden, not drifted (nothing moved).
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-overridden-tree").is_some());
+    assert!(cx.debug_bounds("objectdialog-drifted-tree").is_none());
+
+    cx.simulate_keystrokes("enter r enter"); // revert to desk
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(!overrides.contains("views.tree"), "{overrides}");
+    let _ = shell;
+}
+
 /// **A draft whose own reader rejects it must not reach the batch.**
 ///
 /// Spec §7.1's no-carry-forward rule means `reload::decide` rejects any
