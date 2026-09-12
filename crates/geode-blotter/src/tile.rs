@@ -2439,7 +2439,6 @@ mod tests {
     #[gpui::test]
     fn the_line_numbers_global_paints_a_gutter_on_the_next_draw(cx: &mut gpui::TestAppContext) {
         use geode_shell::linenumbers::{LineNumbers, UiSettings};
-        use gpui_component::table::TableDelegate as _;
         let (h, mut cx) = open(cx);
         h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
         let p = next_query(&h.requests);
@@ -2451,6 +2450,19 @@ mod tests {
             cx.debug_bounds("blotter-gutter-0").is_none(),
             "no gutter while the setting is off (the default with no global set)"
         );
+        // The *painted* tree cell's width — what `TableState`'s cached
+        // column groups actually laid out — not `delegate().column()`'s
+        // answer, which a test could read without any refresh having
+        // happened.
+        let painted_tree_width = |cx: &mut gpui::VisualTestContext| -> f32 {
+            f32::from(
+                cx.debug_bounds("blotter-cell-0-0")
+                    .expect("row 0's tree cell painted")
+                    .size
+                    .width,
+            )
+        };
+        let base_width = painted_tree_width(&mut cx);
 
         cx.update(|_, cx| {
             cx.set_global(UiSettings {
@@ -2468,20 +2480,15 @@ mod tests {
             cx.debug_bounds("blotter-gutter-0").is_some(),
             "the gutter painted once the global was published"
         );
-        let tree_width = |cx: &mut gpui::VisualTestContext| -> f32 {
-            h.tile.read_with(cx, |t, cx| {
-                let table = t.table().read(cx);
-                f32::from(table.delegate().column(0, cx).width)
-            })
-        };
         let gutter = h
             .tile
             .read_with(&cx, |t, cx| t.table().read(cx).delegate().gutter_px());
         assert!(gutter > 0.0, "sanity: a live gutter has width");
-        assert_eq!(
-            tree_width(&mut cx),
-            crate::core::plan::TREE_WIDTH + gutter,
-            "the tree column widened by the gutter (a refresh re-read `column`)"
+        assert!(
+            (painted_tree_width(&mut cx) - (base_width + gutter)).abs() < 0.5,
+            "the painted tree cell widened by the gutter ({base_width} + {gutter}); \
+             `on_ui_settings` must `refresh` the table, since `TableState` caches \
+             `column()`'s width until told otherwise"
         );
         let texts = |cx: &mut gpui::VisualTestContext| -> Vec<String> {
             h.tile.update(cx, |t, cx| {
@@ -2519,10 +2526,9 @@ mod tests {
             cx.debug_bounds("blotter-gutter-0").is_none(),
             "off again on the next draw"
         );
-        assert_eq!(
-            tree_width(&mut cx),
-            crate::core::plan::TREE_WIDTH,
-            "and the tree column gave the width back"
+        assert!(
+            (painted_tree_width(&mut cx) - base_width).abs() < 0.5,
+            "and the tree cell gave the width back"
         );
     }
 
