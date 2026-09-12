@@ -8,7 +8,7 @@ use crate::core::find::FindState;
 use crate::core::flatten::SortSpec;
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
-use crate::delegate::BlotterDelegate;
+use crate::delegate::{BlotterDelegate, ChevronClicked};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
@@ -234,14 +234,23 @@ impl BlotterTile {
                 .col_movable(true)
                 .sortable(true)
         });
-        cx.subscribe(&table, |this, _, event: &TableEvent, cx| {
-            if let TableEvent::SelectRow(row) = event {
+        cx.subscribe(&table, |this, _, event: &TableEvent, cx| match event {
+            TableEvent::SelectRow(row) => {
                 this.table.update(cx, |t, _| {
                     let d = t.delegate_mut();
                     d.cursor.to_row(*row, d.shown.len());
                 });
                 cx.notify();
             }
+            // A double-click anywhere on a row is `space` on it. The
+            // table selects the row before emitting this, so the cursor
+            // is already there; `toggle_row` moves it again regardless.
+            TableEvent::DoubleClickedRow(row) => this.toggle_row(*row, cx),
+            _ => {}
+        })
+        .detach();
+        cx.subscribe(&table, |this, _, event: &ChevronClicked, cx| {
+            this.toggle_row(event.0, cx);
         })
         .detach();
         cx.observe(&frame, |this, _, cx| this.on_frame_changed(cx))
@@ -596,6 +605,35 @@ impl BlotterTile {
         });
     }
 
+    /// `zo`/`zc`/`za`/`space` on the cursor row, `n` times — and the one
+    /// path every mouse toggle (a row double-click, a chevron click) goes
+    /// through too, so the keyboard and the mouse can never disagree
+    /// about what opening a node entails: reflatten, refresh the table,
+    /// resync the cursor, and requery one level deeper when the node
+    /// opened past what the snapshot materialised.
+    fn expand_at_cursor(&mut self, open: Option<bool>, n: u32, cx: &mut Context<Self>) {
+        let grouping_len = self.last_grouping.len();
+        let needs_depth = self.with_delegate(cx, |d| {
+            for _ in 0..n {
+                d.expand_cursor(open);
+            }
+            d.cursor_needs_more_depth(grouping_len)
+        });
+        self.table.update(cx, |t, cx| t.refresh(cx));
+        self.sync_cursor(cx);
+        if needs_depth {
+            self.requery(cx);
+        }
+    }
+
+    /// A mouse toggle on the *shown* row `row`: the cursor is moved there
+    /// explicitly rather than trusting that the table's own `SelectRow`
+    /// arrived first, then the row toggles as `space` would.
+    fn toggle_row(&mut self, row: usize, cx: &mut Context<Self>) {
+        self.with_delegate(cx, |d| d.cursor.to_row(row, d.shown.len()));
+        self.expand_at_cursor(None, 1, cx);
+    }
+
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -605,7 +643,6 @@ impl BlotterTile {
         let Some(name) = action.0.strip_prefix("blotter::") else {
             return false;
         };
-        let grouping_len = self.last_grouping.len();
         match name {
             // The step sizes are `vimnav`'s own convention, shared with
             // every dialog list: `ctrl+d`/`ctrl+u` ±5, `ctrl+f`/`ctrl+b`
@@ -648,18 +685,7 @@ impl BlotterTile {
                     "collapse" => Some(false),
                     _ => None,
                 };
-                let n = count.unwrap_or(1).max(1);
-                let needs_depth = self.with_delegate(cx, |d| {
-                    for _ in 0..n {
-                        d.expand_cursor(open);
-                    }
-                    d.cursor_needs_more_depth(grouping_len)
-                });
-                self.table.update(cx, |t, cx| t.refresh(cx));
-                self.sync_cursor(cx);
-                if needs_depth {
-                    self.requery(cx);
-                }
+                self.expand_at_cursor(open, count.unwrap_or(1).max(1), cx);
             }
             "expand_all" | "collapse_all" => {
                 // `expand_all` always requeries with the full depth
@@ -2235,6 +2261,171 @@ mod tests {
             h.tile
                 .read_with(&cx, |t, cx| t.table().read(cx).delegate().cursor.row),
             2
+        );
+    }
+
+    /// Paints the tile and hands back the centre of one painted element
+    /// by its debug selector — the mouse tests below click real bounds,
+    /// never a synthesised event, so a listener that is not actually
+    /// wired to the painted element fails them.
+    fn centre_of(
+        cx: &mut gpui::VisualTestContext,
+        selector: &'static str,
+    ) -> gpui::Point<gpui::Pixels> {
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is painted"))
+            .center()
+    }
+
+    /// A left mouse-down/up pair at `at` carrying `click_count` — gpui's
+    /// own `simulate_click` hardwires a count of 1, and a double-click
+    /// is nothing but the second press of a pair with a count of 2.
+    fn click_at(
+        cx: &mut gpui::VisualTestContext,
+        at: gpui::Point<gpui::Pixels>,
+        click_count: usize,
+    ) {
+        cx.simulate_event(gpui::MouseDownEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+            first_mouse: false,
+        });
+        cx.simulate_event(gpui::MouseUpEvent {
+            position: at,
+            modifiers: gpui::Modifiers::default(),
+            button: gpui::MouseButton::Left,
+            click_count,
+        });
+    }
+
+    fn shown_rows(h: &Harness, cx: &gpui::VisualTestContext) -> Vec<u32> {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().shown.clone())
+    }
+
+    fn cursor_row(h: &Harness, cx: &gpui::VisualTestContext) -> usize {
+        h.tile
+            .read_with(cx, |t, cx| t.table().read(cx).delegate().cursor.row)
+    }
+
+    /// A double-click anywhere on a row is `space` on it: the cursor
+    /// moves there and the node toggles. Row 1 is L1, whose child SPX is
+    /// already materialised, so opening it needs no requery; the second
+    /// double-click closes it again.
+    #[gpui::test]
+    fn a_double_click_on_a_row_toggles_it_like_space(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2]);
+
+        // A measure cell, well away from the chevron.
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(cursor_row(&h, &cx), 1, "the click moved the cursor");
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            h.requests.try_recv().is_err(),
+            "no requery: SPX was in hand"
+        );
+
+        let at = centre_of(&mut cx, "blotter-cell-1-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2], "L1 closed again");
+    }
+
+    /// Opening a node whose children the snapshot stopped short of
+    /// requeries one level deeper — the same path `space` takes.
+    #[gpui::test]
+    fn a_double_click_at_the_depth_bound_requeries(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        // Row 2 is L2, which has no fetched child.
+        let at = centre_of(&mut cx, "blotter-cell-2-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        let p = next_query(&h.requests);
+        assert_eq!(
+            p.max_depth, 2,
+            "opening at the bound requeries one level deeper"
+        );
+    }
+
+    /// A leaf has nothing to toggle: `space` on it is a no-op, and so is
+    /// a double-click.
+    #[gpui::test]
+    fn a_double_click_on_a_leaf_changes_nothing(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+        h.tile.update(&mut cx, |t, cx| {
+            t.dispatch(&ActionId("blotter::down".into()), None, cx);
+            t.dispatch(&ActionId("blotter::expand".into()), None, cx);
+        });
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2]);
+
+        // Row 2 is now SPX, the leaf.
+        let at = centre_of(&mut cx, "blotter-cell-2-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(cursor_row(&h, &cx), 2);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "nothing to toggle");
+        assert!(h.requests.try_recv().is_err(), "a leaf never requeries");
+    }
+
+    /// A single click on the tree column's chevron toggles that row and
+    /// moves the cursor to it, exactly as a double-click on the row does.
+    #[gpui::test]
+    fn a_chevron_click_toggles_the_row(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(cursor_row(&h, &cx), 1, "the chevron click moved the cursor");
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 3, 2], "L1 opened");
+        assert!(
+            h.requests.try_recv().is_err(),
+            "no requery: SPX was in hand"
+        );
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        assert_eq!(shown_rows(&h, &cx), vec![0, 1, 2], "L1 closed again");
+    }
+
+    /// A fast double-click that lands on the chevron toggles ONCE: the
+    /// chevron's own listener acts on the first press only and stops the
+    /// row's click from reaching the double-click path, so the pair can
+    /// neither toggle twice (open, close) nor three times.
+    #[gpui::test]
+    fn a_double_click_on_the_chevron_toggles_once(cx: &mut gpui::TestAppContext) {
+        let (h, mut cx) = open(cx);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let at = centre_of(&mut cx, "blotter-chevron-1");
+        click_at(&mut cx, at, 1);
+        click_at(&mut cx, at, 2);
+        assert_eq!(
+            shown_rows(&h, &cx),
+            vec![0, 1, 3, 2],
+            "L1 opened once and stayed open"
         );
     }
 

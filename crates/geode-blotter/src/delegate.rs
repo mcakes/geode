@@ -16,11 +16,26 @@ use geode_core::view::{Colour, ViewSpec};
 use geode_shell::fonts;
 use geode_shell::linenumbers::{LineNumbers, gutter_digits, gutter_number};
 use gpui::prelude::*;
-use gpui::{App, Context, Div, IntoElement, SharedString, Stateful, TextAlign, Window, div, px};
+use gpui::{
+    App, ClickEvent, Context, Div, EventEmitter, IntoElement, SharedString, Stateful, TextAlign,
+    Window, div, px,
+};
 use gpui_component::ActiveTheme as _;
 use gpui_component::table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState};
 use std::ops::Range;
 use std::sync::Arc;
+
+/// A single left click landed on the tree column's disclosure glyph of
+/// the *shown* row it carries. The table has already selected that row
+/// (so `TableEvent::SelectRow` has moved the cursor there); the tile
+/// answers by toggling it, exactly as `space` does. Emitted from
+/// `render_td`'s glyph listener, which has no path to the tile except an
+/// event on the `TableState` it renders into — `TableEvent` is
+/// gpui-component's own closed enum, so the blotter emits its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChevronClicked(pub usize);
+
+impl EventEmitter<ChevronClicked> for TableState<BlotterDelegate> {}
 
 const INDENT: f32 = 14.0;
 const DETERMINED_MARK: &str = "†";
@@ -739,10 +754,29 @@ impl TableDelegate for BlotterDelegate {
             } else {
                 el = el.pl(indent);
             }
+            // The glyph is a click target: a single click on it toggles
+            // the row (`ChevronClicked`, handled by the tile). It stops
+            // propagation so the row's own click handler never sees the
+            // press — otherwise a fast double-click on the chevron would
+            // toggle here AND again through `TableEvent::DoubleClickedRow`
+            // — and it ignores the second press of a pair itself, so
+            // that double-click toggles exactly once. The listener
+            // captures one `usize`; gpui boxes it per element either way.
             el = el.child(
                 div()
+                    .id(("chevron", row_ix))
                     .w(px(14.))
+                    .cursor_pointer()
                     .text_color(theme.muted_foreground)
+                    .debug_selector(|| format!("blotter-chevron-{row_ix}"))
+                    .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
+                        cx.stop_propagation();
+                        if e.click_count() > 1 {
+                            return;
+                        }
+                        this.set_selected_row(row_ix, cx);
+                        cx.emit(ChevronClicked(row_ix));
+                    }))
                     .child(glyph),
             );
         }

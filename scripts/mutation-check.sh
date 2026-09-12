@@ -2620,6 +2620,33 @@ run_mutation "tile: completions offer dataset dimensions, not just displayed col
   geode-blotter \
   completions_offer_dataset_dimensions_not_just_displayed_columns
 
+# ---- blotter mouse toggles (2026-09-12): a row double-click and a chevron
+# click are `space`. The chevron listener's explicit cursor move in
+# `toggle_row` is deliberately NOT an entry: the table's own `SelectRow`
+# also lands the cursor there, so the two defences overlap and neither
+# is isolated (header rule 2).
+
+run_mutation "tile: a row double-click toggles the row" \
+  crates/geode-blotter/src/tile.rs \
+  '            TableEvent::DoubleClickedRow(row) => this.toggle_row(*row, cx),' \
+  '            TableEvent::DoubleClickedRow(_) => {}' \
+  geode-blotter \
+  a_double_click_on_a_row_toggles_it_like_space
+
+run_mutation "delegate: a single chevron click toggles, a second press is ignored" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        if e.click_count() > 1 {' \
+  '                        if e.click_count() > 0 {' \
+  geode-blotter \
+  a_chevron_click_toggles_the_row
+
+run_mutation "delegate: the chevron stops the row's own click from double-toggling" \
+  crates/geode-blotter/src/delegate.rs \
+  '                        cx.stop_propagation();' \
+  '                        let _ = 0;' \
+  geode-blotter \
+  a_double_click_on_the_chevron_toggles_once
+
 # ---- geode-app: the data bridge, the roster, --demo (Phase 3 §5.1, §5.4, §7.1)
 
 run_mutation "bridge: dropped_events counted on a refused try_send" \
