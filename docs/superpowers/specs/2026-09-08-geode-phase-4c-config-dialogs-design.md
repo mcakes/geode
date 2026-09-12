@@ -2353,3 +2353,309 @@ check.sh --anchors-only` held 0 stale/0 ambiguous throughout, rising
 from 562 (Task 3's final count) to 576 anchors across this section's
 commits. Whole-workspace verification for the finished branch is
 recorded in this plan's task-8 report.
+
+## 19. Part 2b — design (2026-09-12)
+
+Approved 2026-09-12, before Part 2b starts. Part 2b is the rest of
+Phase 4c: the two adapters Part 2a left (`Sources`, `Schema`), the
+committed-edit vocabulary both §8.2's rename ruling and §8.3's Sources
+constraint were waiting on, the unmet width item from §16, and the two
+provenance features every "Part 2" note above named — drift (§5.2) and
+per-field diagnostics (§8.5) — with `ShellEvent::ReloadRejected` riding
+along as §16's "Deferred" paragraph asked. Renames stay unbuilt (§8.2's
+ruling stands: nobody has asked for one, and the vocabulary landing here
+does not by itself make a rename safe to offer). One branch, eight tasks
+(§19.7).
+
+Three rulings taken during the design, each recorded where it applies:
+a Sources write reaches the running data service through the
+*existing* restart-required stripe, not a live restart (§19.3); a
+column's width is typed on the member row, not stepped on a sub-row
+(§19.2); and an empty `paths` is an idle source, not a broken one
+(§19.3).
+
+### 19.1 Committed text entry: `i` on any `Text` or `Number` row
+
+§18.8's chain field IS the committed-edit vocabulary — a shared `Input`
+in the filter row's place, seeded with a value, `enter` applying it
+through the tick's own path and `escape` cancelling — built for one
+field on one domain. Part 2b generalises it rather than adding a second
+mechanism beside it.
+
+**State.** `Draft::chain_entry: bool` becomes
+`Draft::text_entry: Option<TextEntry>`:
+
+```rust
+pub struct TextEntry {
+    /// The row whose value the field holds.
+    pub row: EditRow,
+    /// The row list below is a completion list for the text
+    /// (`groupings::chain_candidates`) rather than the edit rows.
+    pub completions: bool,
+}
+```
+
+Groupings' chain field is `TextEntry { row: Field(dimensions),
+completions: true }` and behaves exactly as §18.8 built it. Every
+invariant that section recorded carries over unchanged because the
+mechanism is the same one: the text is `Draft::query` with the mode at
+`Filter`, `dialog::sync_dialog_text` is the only thing that moves focus
+or writes the `Input`, the handler (`handle_text_key`, renamed from
+`handle_chain_key`) is dispatched ahead of the filter-mode branch, the
+action bar is withdrawn while the field is open, every transition out
+of the field resets the viewport, and `enter_edit_stage` still derives
+from `apply::config_with_pending`.
+
+**`i` on a `Text` row** opens the field seeded with the value and
+labelled with the field's label (`poll_interval`). With
+`completions: false` the rows below stay the edit rows with the edited
+one highlighted, so the trader sees what they are editing; `j`/`k` are
+text, as in any focused field, and `tab`/`shift+tab` get the "nothing
+to complete" notice. `enter` commits:
+
+1. `Domain::parse_text(key, &str) -> Result<String, String>`, a new
+   adapter function, normalises the text (trims; canonicalises a
+   spelling where one exists) and refuses what the field cannot hold.
+   `Err` is a `Step::Refused`: the field stays open with the text
+   intact and the notice says why — the chain field's duplicate-name
+   rule, applied to every text.
+2. `Ok(value)` writes the `Text`'s value and is a `Step::Changed` down
+   the tick's own path — `revalidate`, then `commit_or_confirm` — so a
+   desk-owned object still asks before forking, the write joins the
+   same batch behind the same debounce, and the reader's validation
+   remains the safety net for anything `parse_text` let through.
+3. The same text typed back is `Step::Inert`: the field closes with
+   nothing queued, closing being the visible answer (§18.8's rule).
+
+`escape` cancels: text dropped, field closed, value untouched, stage
+still `Edit`. The pill reads `edit` (`dialog::state_pill`'s "you are
+typing" pair); Groupings keeps `chain`, since that word says what its
+`enter` does.
+
+**`i` on a `Number` row also types.** A `Number` is a `Text` that
+parses and clamps: `parse_text` refuses a non-integer, and a value
+outside `min..=max` is refused rather than clamped, because a clamp
+would apply a number the trader did not type. `space`/`shift+space`
+stepping stays for both directions. A `Number`'s rule is the kind's own,
+so it parses in the scaffold, not through `parse_text`, which is the
+adapter's door for `Text` rows alone. This amends §3.3, whose `i` was
+`Text`'s alone; it is what makes a width settable by typing rather than
+by ten-pixel steps, and it costs one arm.
+
+**Domains.** Text entry is an edit-stage feature, not a per-domain
+one: every domain answers `i` on a `Text` or `Number` row. `Schema`
+refuses it through `writable()` (§19.4) as it refuses every other verb.
+A display-only `Text` on a writable domain — Groupings' `slot`, Scopes'
+two summaries — refuses with the notice it gives today.
+
+### 19.2 Width: typed on the member row
+
+§16's unmet item 2. §3.3 sketched a `Number` sub-row under each shown
+member; that sketch predates §19.1, and stepping a width ten pixels at
+a time under a doubled row count was never a good gesture. Ruled
+(2026-09-12): **the member row paints its width inline and `i` on it
+types the width.** No sub-row, so the member block's row count, the
+`j`/`k` walk and `shift+j`/`shift+k` reordering are all unchanged, and
+`space` stays the tick.
+
+- The label reads `npv · 120 px`, or `npv · auto` when no width is
+  set. `row_label` includes it, so the filter matches what is painted
+  (the edit stage's own rule, §18.3).
+- `i` on an `EditRow::Item` whose list carries widths (Views' `columns`
+  — `ListItem.width` exists; Groupings' items have none and refuse with
+  a notice) opens the field seeded with the current number or empty. The
+  scaffold (not `parse_text` — a width is the list kind's own rule, on
+  every domain that has one) accepts an integer in `20..=2000`, or
+  `auto`/empty to clear; anything else is refused with the range named.
+- `dest` is `Presentation`: the write goes to `view_presentation.toml`'s
+  `width` map and never forks. `Draft::writes_by_destination` already
+  routes an item's width there; what was missing was only a way to
+  change it.
+- The blotter reads `presentation.width` already, so a typed width
+  reaches the tile on the next flush with nothing new on that side. A
+  header drag writing the width back is still not built (§16's item
+  said so and still does); it belongs to the blotter, not this dialog.
+
+### 19.3 Sources
+
+`Domain::Sources`, `sources.toml`, palette `config::sources` ("Sources",
+category Config, no default binding — §10). Every field is
+`Destination::Doc`; there is no presentation doc.
+
+| Field | Kind | Spelling / rule |
+|---|---|---|
+| `dataset` | `Choice` | The schema's datasets, sorted; the object's own value kept as an option when the schema lacks it (Views' rule, for the same reason). |
+| `paths` | `Text` | The globs on one line separated by `;`, surrounding whitespace trimmed. Round-trips the reader's array exactly. `;` because it is illegal in a Windows path and unused in globs, where a space is legal in both. |
+| `readiness` | `Choice` | `sentinel`, `stable_mtime`. |
+| `stable polls` | `Number` | `1..=100`; the `polls` of `readiness = { stable_mtime = N }`, seeded from the object or else the reader's default. Shown and steppable always, written only when `readiness` is `stable_mtime`. |
+| `priority` | `Choice` | `latest_risk`, `latest_other`, `backfill`. |
+| `poll_interval`, `pending_timeout` | `Text` | The reader's own `45s` / `5m` / `2h`; `parse_text` refuses what `parse_duration` cannot read. An absent key shows the reader's default and is written explicitly on the object's first edit, since a write renders the whole object. |
+| `batch_pattern` | `Text` | Empty means none. `parse_text` refuses a regex that does not compile or has no `batch` capture — the reader's two diagnostics for it, made inline refusals. |
+
+The browse summary is `<dataset> · <n> path(s) · <priority>`.
+`validate` runs `SourceSpec::from_doc` over the rendered draft, as
+Views runs its reader, plus the one cross-check the reader cannot make
+(the dataset exists in the schema). Sources opens in the chooser, not a
+field: there is no chain field here (§18.8's landing rule is Groupings'
+alone).
+
+**`n` creates an idle source (ruling 2026-09-12).** The reader today
+makes empty `paths` an error and skips the source, and `commit_create`
+refuses a draft carrying an error, so nothing `n` could write was legal.
+Ruled: **a source with no paths is idle, not broken** — the reader
+downgrades "missing or empty 'paths'" to a warning and still skips the
+source (it has nothing to poll), a desk file with a typo still shows the
+warning in the diagnostics tile, and `n` writes
+`{ dataset = <first sorted>, paths = [] }` at zero debounce through
+`commit_create`, opening the stage with the warning on the `paths` row
+(§19.5) for the trader to type the globs into. The scheduler needs no
+change: a skipped source never reaches it.
+
+**A write reaches the service through nothing new (ruling 2026-09-12).**
+§8.3's sketch hung a "Reload data now?" prompt on a live `DataService`
+restart behind a swappable `DataHandle`. Every blotter tile holds its
+own `DataHandle` clone, so a swap means an indirection inside the handle
+or a rebuild of every module — a data-layer subsystem, not a dialog
+feature. Not built here. The dialog's in-memory apply already runs
+`apply_reload`, whose comparison of the `sources` doc against its
+session-start baseline raises the existing `sources changed — restart
+to apply` stripe (`restart_required`, `ShellEvent::RestartRequired`) and
+clears it when an edit goes back to the baseline. That is the whole
+delivery path. A live restart, if ever wanted, is its own design.
+
+### 19.4 The schema inspector
+
+`Domain::Schema`, palette `config::schema` ("Schema (read-only)",
+category Config), over `datasets`. §9 as written, with three mechanics
+settled:
+
+- **`Domain::writable()` lands** and answers `false` here alone. The
+  create gate and the footer hint move from `roster().is_some()` onto
+  it, as §18.6 asked. On this domain `space`, `shift+space`, `i`, `d`,
+  `r`, `x`, `n`, `shift+j`/`shift+k`, a tick click and a drop all answer
+  one notice — `the schema is read-only` — and the footer omits every
+  one of them. `/` filters as anywhere; a digit is the edit stage's
+  usual "not a verb here".
+- **Browse** lists datasets: summary `<n> columns · <grains>`. The
+  provenance walk (`derive_rows`) runs unchanged, so a desk dataset
+  shadowed by a user one is marked `override` like any object.
+- **The stage** lists one display-only `Text` row per column — label
+  the column name, value `<type> · <role>[ · grain <g>]` plus whichever
+  of `required`, `textual`, `categorical` hold — then one row per
+  derived dimension whose `from` is a column of this dataset, label
+  `<name> (derived)`, value `from <column> · <n> values`.
+- **`Field.layer: Option<Layer>`** is new, painted as a `dialog::badge`
+  on the row when `Some`. Schema fills it from `Config::explain` —
+  `datasets.<ds>` for a column row (a dataset is atomic at depth 1, so
+  every column of one dataset carries that dataset's layer; the badge is
+  honest, merely uniform), `dimensions.<name>` for a derived row, which
+  can differ. Every writable domain leaves it `None`; the object-level
+  badge stays the only one there.
+- `validate` runs `SchemaSpec::from_doc` over the dataset so the
+  inspector shows the schema's own diagnostics on the rows they name
+  (§19.5). `to_table` is unreachable behind `writable()` and returns the
+  source unchanged.
+
+### 19.5 Per-field diagnostics: readers fill `Diagnostic.path`
+
+§8.5's other half. Every reader fills `path` where it knows the key, in
+one grammar: `<doc>.<object>[.<field>[.<index>[.<subkey>]]]` —
+`views.tree.columns.3.name`, `sources.risk.paths`,
+`datasets.risk_snapshot.columns.7.kind`, `groupings.3`,
+`scopes.eod.<key>`, `dimensions.region.from`. The readers are
+`ViewSpec::from_doc`, `ViewPresentationSpec::from_doc`,
+`GroupingSlots::from_doc`, `saved_scopes_from_doc`,
+`SourceSpec::from_doc`, `SchemaSpec::from_doc` and
+`DerivedDimensions::from_doc`; each already has a local `diag`/`warn`
+helper, which gains the path. A diagnostic about the object as a whole
+(`missing 'dataset'` names the field; `unknown key 'foo'` names the
+object) carries the deepest path it honestly can. `Display` appends
+` (at <path>)` when set, so the diagnostics tile, the log and stderr
+gain it with no further work.
+
+**Matching.** `Draft::diagnostic_rows()` strips `<doc>.<object>.` and
+compares the remainder against each field's `key` (`dataset`), or a
+list field's `key.<index>` prefix for an `EditRow::Item`. A matched row
+paints a severity glyph before its label, and its line in the header's
+diagnostics block is prefixed with the row's label so the two can be
+read together. An unmatched diagnostic — no path, or a path naming no
+row — stays on the header exactly as today. **Rows keep their height:**
+the message is not painted under the row, because a row that grows
+under a diagnostic would move every row below it and the list's
+positional `scroll_to_item` with it. `Draft::diagnostics`' doc, which
+still says no reader fills the field, is corrected.
+
+### 19.6 Drift, and the rejected-reload signal
+
+**Drift** is §5.2 and §5.3 as written, with the mechanics settled:
+
+- The doc is `overrides` (`overrides.toml`, user layer only), registered
+  at `atomic_depth` 1. Each key is the quoted `"<doc>.<object>"`, holding
+  `shadowed_layer` (`desk` or `builtin`) and `shadowed_text`, the
+  `object_text` of the shadowed layer's object at fork time. The loader
+  already reads every `*.toml` in a layer dir and `config_write::edit`
+  stamps a fresh file with `config_version = 1`, so no reader and no new
+  door is needed.
+- An entry is one more `(doc, object)` edit in the **same batch** as the
+  fork it records, so it rides `run_writes` in the same flush: it cannot
+  land without the fork, nor before it. Three forks exist — a confirmed
+  `Confirm::Fork`, Scopes' `o` with `forks: true`, and none for `n`,
+  since a taken name is refused.
+- `r` (revert) removes the entry along with the user copy, and `d`
+  (delete) removes it too; both go through `commit_removal`, which gains
+  the second key.
+- `derive_rows` computes `drifted` as: overridden, an entry present, and
+  the shadowed layer's *current* `object_text` differing from
+  `shadowed_text`. No entry means not drifted, as today — an override
+  that predates Part 2b never claims a drift it cannot prove. A stale
+  entry (its user object gone, or its shadowed object gone so the row is
+  no longer overridden) is ignored, and pruned by the next overrides
+  write.
+- The browse row gains a `drifted` badge; the edit header says the
+  desk's copy has changed since it was copied and names `r`. No diff
+  (§1.4). A presentation-only personalisation never drifts (§15 item 4).
+
+**`ShellEvent::ReloadRejected(Vec<Diagnostic>)`** — §16's "Deferred"
+paragraph, built here because §19.5 is the half it was paired with.
+`apply_reload` emits it from the rejected branch (it has the diagnostics
+in hand where it decides to keep last-good). The open object dialog
+shows `saved to disk · rejected by the merge: <n> error(s) — keeping
+last good` as its status line, since the flush writes the file whether or not
+memory accepts the merge. The same task stops the bridge's reload path
+discarding `load_views`'s presentation diagnostics (`bridge.rs`'s
+`let (views, _) = load_views(config)`) and reports them the way
+`data_setup` does at startup, so a `view_presentation.toml` entry naming
+a view that no longer exists warns on every reload, not once.
+
+### 19.7 Sequencing, tests and harness
+
+One branch, in this order, each task resting on the one before:
+
+1. Text entry generalised from the chain field; `i` on `Text` and
+   `Number`; `Domain::parse_text`.
+2. Width typed on the member row.
+3. `Domain::writable()`, `Field.layer`, the Schema domain and its
+   action.
+4. The sources reader's empty-paths ruling, then the Sources domain and
+   its action.
+5. Readers fill `Diagnostic.path`; the draft matches rows.
+6. `ShellEvent::ReloadRejected`; the bridge's presentation diagnostics
+   on reload.
+7. Drift.
+8. Docs (`CLAUDE.md`, this section reconciled as "as built"), harness
+   entries reviewed as a set, full harness.
+
+Tests follow the crate's pattern: pure-core unit tests per adapter and
+per `Draft` mutation, window tests for every key path and mouse path
+that reaches a transition, `--changed` mutation after every task and
+the full harness at branch end. Harness entries, one per behaviour:
+`parse_text` refusing a bad duration and a bad regex; the `;`
+separator; `stable polls` written only under `stable_mtime`; the
+idle-source warning severity; `writable()` gating each Schema verb;
+`Field.layer` from `explain`; a width outside the range refused and
+`auto` clearing; a path matching a list item by index; an unmatched
+diagnostic staying on the header; `drifted` false without an entry and
+true on a changed shadow; the overrides entry riding the fork's own
+batch; `r` and `d` removing it; `ReloadRejected` emitted only on the
+rejected branch. Display checks stay pending on the user's screen, as
+§18.6's are.
