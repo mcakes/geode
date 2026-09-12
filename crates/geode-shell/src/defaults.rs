@@ -456,9 +456,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // deliberate act of config maintenance rather than muscle memory
     // worth a chord, and the palette is always reachable. Category
     // "Configuration" — its siblings (`config::groupings`,
-    // `config::scopes`, `config::schema`, and `config::sources` once its
-    // adapter arrives) land beside it, so the palette groups the whole
-    // family under one heading.
+    // `config::scopes`, `config::schema`, `config::sources`) land beside
+    // it, so the palette groups the whole family under one heading.
     action(reg, "config::views", "Edit views", "Configuration");
     // Part 2a Task 4: the object dialog over `groupings` — the nine
     // `ctrl+1`..`ctrl+9` slots. Palette-only for the same reason
@@ -482,6 +481,11 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // siblings; its title says read-only because the palette row is the
     // only place a trader learns that before opening it.
     action(reg, "config::schema", "Schema (read-only)", "Configuration");
+    // Part 2b Task 3: the object dialog over `sources` — the ingest
+    // feeds, flat-listed dataset first (§19.3). Palette-only like its
+    // siblings; there is no chord because a trader reaches for it as
+    // rarely as `config::scopes` or `config::groupings` do.
+    action(reg, "config::sources", "Edit sources", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no

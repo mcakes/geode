@@ -1406,8 +1406,8 @@ run_mutation "sources: an undeclared dataset skips the source" \
 
 run_mutation "sources: a pattern without a batch capture is dropped" \
   crates/geode-core/src/source_config.rs \
-  '                    Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Some(p.to_string()),' \
-  '                    Ok(re) if re.capture_names().count() > 0 => Some(p.to_string()),' \
+  '        Ok(re) if re.capture_names().any(|c| c == Some("batch")) => Ok(()),' \
+  '        Ok(re) if re.capture_names().count() > 0 => Ok(()),' \
   geode-core \
   a_pattern_without_a_batch_capture_is_dropped_with_a_warning
 
@@ -7514,6 +7514,46 @@ run_mutation "objectdialog: a drop on the schema inspector is refused" \
     if false {' \
   geode-shell \
   a_drop_on_the_schema_inspector_is_refused
+
+# §19.3: the path separator is `;`, not whitespace — a space is legal in a path.
+run_mutation "sources: paths split on the semicolon" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '    text.split(PATH_SEPARATOR)' \
+  '    text.split(char::is_whitespace)' \
+  geode-shell \
+  parse_text_refuses_bad_durations_and_patterns_and_splits_paths
+
+# §19.3: `stable_polls` is written only under `stable_mtime`.
+run_mutation "sources: polls are written only under stable_mtime" \
+  crates/geode-shell/src/shell/objectdialog/sources.rs \
+  '        (Some("stable_mtime"), Some(polls)) => {' \
+  '        (Some(_), Some(polls)) => {' \
+  geode-shell \
+  to_table_writes_readiness_polls_only_under_stable_mtime
+
+# §19.3: an idle source is a WARNING — an error would block `n`.
+run_mutation "sources: empty paths is a warning not an error" \
+  crates/geode-core/src/source_config.rs \
+  '                diags.push(diag(Severity::Warning, name, IDLE_PATHS));' \
+  '                diags.push(diag(Severity::Error, name, IDLE_PATHS));' \
+  geode-core \
+  empty_paths_is_a_warning_and_the_source_is_skipped
+
+# §19.3: rows sort by dataset first.
+run_mutation "objectdialog: prefixed rows sort by prefix then name" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        out.sort_by(|a, b| (&a.prefix, &a.name).cmp(&(&b.prefix, &b.name)));' \
+  '        out.sort_by(|a, b| a.name.cmp(&b.name));' \
+  geode-shell \
+  rows_are_sorted_by_dataset_then_name_and_carry_the_prefix
+
+# §19.3: `n` seeds the dataset from the cursor row, not the schema's first.
+run_mutation "sources: n seeds the dataset from the cursor row" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    row.prefix.clone()' \
+  '    None' \
+  geode-shell \
+  n_on_sources_seeds_the_dataset_and_creates_an_idle_source
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

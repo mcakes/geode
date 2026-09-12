@@ -4579,3 +4579,153 @@ fn a_drop_on_the_schema_inspector_is_refused(cx: &mut gpui::TestAppContext) {
         "a drop on a read-only row queued a write"
     );
 }
+
+/// A two-source `sources.toml` over a two-dataset schema — `vols` feeds
+/// `vol`, `live` feeds `risk` and carries every optional key, so the
+/// window tests below have both the sort order (§19.3: dataset first)
+/// and a full set of fields to exercise `i` against.
+fn services_with_sources() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [vol.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+    )
+    .unwrap();
+    let sources = LayerDoc::builtin(
+        "sources",
+        "[vols]\ndataset = \"vol\"\npaths = [\"/v/*.csv\"]\n\
+         [live]\ndataset = \"risk\"\npaths = [\"/a/*.csv\"]\npoll_interval = \"2s\"\n",
+    )
+    .unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            sources,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §19.3: rows read dataset first and sort by it; `i` on a text row
+/// opens the field seeded with the value; a bad duration is refused with
+/// the field open; a good one applies and, on a builtin source, asks
+/// before forking; the flush writes the spelling the reader reads.
+#[gpui::test]
+fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    let live = cx.debug_bounds("objectdialog-row-live").unwrap();
+    let vols = cx.debug_bounds("objectdialog-row-vols").unwrap();
+    assert!(
+        live.origin.y < vols.origin.y,
+        "risk · live sorts before vol · vols"
+    );
+
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    // Cursor to `poll_interval` (row 5: dataset, paths, readiness, polls, priority, poll_interval).
+    cx.simulate_keystrokes("j j j j j");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some() && !d.chain_entry()));
+    assert!(dialog_filter_is_focused(&shell, &mut cx));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "2s",
+        "seeded with the value"
+    );
+    assert!(cx.debug_bounds("dialog-mode-pill-edit").is_some());
+    assert!(
+        cx.debug_bounds("objectdialog-actions").is_none(),
+        "no verbs while a field is open"
+    );
+
+    cx.simulate_input(" minutes");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_some()),
+        "refused: still open"
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+            .unwrap()
+            .contains("45s")
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "2s minutes",
+        "the text is kept"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace");
+    cx.simulate_input("30s");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    assert_eq!(dialog_state(&shell, &cx, |s| s.mode), DialogMode::Normal);
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_some(),
+        "a builtin source asks before forking"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+    assert!(written.contains("poll_interval = \"30s\""), "{written}");
+    assert!(written.contains("paths = [\"/a/*.csv\"]"), "{written}");
+    // §19.3's delivery path: the in-memory apply ran `apply_reload`, whose
+    // sources-baseline comparison raised the existing stripe.
+    assert!(
+        shell
+            .read_with(&cx, |s, _| s.restart_required.clone())
+            .is_some_and(|m| m.contains("sources")),
+        "a sources write raises the restart-required stripe"
+    );
+}
+
+/// §19.3: `n` seeds the dataset from the cursor row and the name from
+/// it when free; the created source is idle (empty paths, a warning
+/// on the row, never an error).
+#[gpui::test]
+fn n_on_sources_seeds_the_dataset_and_creates_an_idle_source(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_sources(), dir.path(), "config::sources");
+    cx.simulate_keystrokes("j"); // vol · vols
+    cx.simulate_keystrokes("n");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.naming_dataset.clone()).as_deref(),
+        Some("vol")
+    );
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "vol",
+        "the dataset's name, since no source holds it"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)).as_deref(),
+        Some("vol")
+    );
+    assert!(edit_draft(&shell, &cx, |d| d
+        .diagnostics
+        .iter()
+        .all(|x| x.severity != geode_core::config::Severity::Error)));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("sources.toml")).unwrap();
+    assert!(
+        written.contains("[vol]\ndataset = \"vol\"\npaths = []"),
+        "{written}"
+    );
+}

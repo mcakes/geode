@@ -71,6 +71,7 @@ mod groupings;
 pub mod render;
 mod schema;
 mod scopes;
+mod sources;
 mod views;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,8 +88,7 @@ use crate::dialogmode::DialogMode;
 pub const READ_ONLY_NOTICE: &str = "the schema is read-only";
 
 /// Which config domain a dialog is browsing. One variant per adapter
-/// module under this directory (spec §8 has one more — Sources — still to
-/// arrive with its own adapter).
+/// module under this directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Domain {
     Views,
@@ -97,6 +97,8 @@ pub enum Domain {
     /// Read-only (§9, §19.4): the datasets the other adapters build their
     /// choices from.
     Schema,
+    /// The ingest feeds, one object per source (§8.3, §19.3).
+    Sources,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -166,6 +168,27 @@ pub struct ObjectRow {
     /// backwards, so the honest value until the sidecar exists is
     /// `false`.
     pub drifted: bool,
+    /// A grouping key painted before the name, dimmed (§19.3): the
+    /// dataset a source feeds. `Some` only on Sources; the primary sort
+    /// key when present, part of `searchable_text`, never the identity —
+    /// the doc key is still `name`, so a dataset with two sources is two
+    /// rows and every click handler and selector stays keyed by `name`.
+    pub prefix: Option<String>,
+}
+
+impl ObjectRow {
+    /// What the browse row paints as its label (§19.3): `"<prefix> ·
+    /// <name>"` for a prefixed row, the bare name otherwise. The one
+    /// spelling of that join, shared by the painted label
+    /// (`render.rs`'s browse painter) and [`searchable_text`], so a hit
+    /// inside the prefix ranks and highlights against the exact text on
+    /// screen.
+    pub fn display_name(&self) -> String {
+        match &self.prefix {
+            Some(p) => format!("{p} · {}", self.name),
+            None => self.name.clone(),
+        }
+    }
 }
 
 impl Domain {
@@ -180,6 +203,7 @@ impl Domain {
             Domain::Groupings => groupings::DOC,
             Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
+            Domain::Sources => sources::DOC,
         }
     }
 
@@ -190,6 +214,7 @@ impl Domain {
             Domain::Groupings => "Groupings",
             Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
+            Domain::Sources => "Sources",
         }
     }
 
@@ -202,6 +227,7 @@ impl Domain {
             Domain::Groupings => "slots",
             Domain::Scopes => "saved",
             Domain::Schema => "datasets",
+            Domain::Sources => "sources",
         }
     }
 
@@ -214,6 +240,7 @@ impl Domain {
             Domain::Groupings => groupings::summary,
             Domain::Scopes => scopes::summary,
             Domain::Schema => schema::summary,
+            Domain::Sources => sources::summary,
         }
     }
 
@@ -233,11 +260,12 @@ impl Domain {
     fn presentation_doc(self) -> Option<&'static str> {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
-            // Scopes has no presentation doc for the same reason
-            // Groupings does not: every field this domain has is
-            // `Destination::Doc` (`scopes.rs`'s module doc). Schema joins
-            // them for the reason this method's own doc comment gives.
-            Domain::Groupings | Domain::Scopes | Domain::Schema => None,
+            // Scopes and Sources have no presentation doc for the same
+            // reason Groupings does not: every field either domain has is
+            // `Destination::Doc` (`scopes.rs`'s and `sources.rs`'s own
+            // module docs). Schema joins them for the reason this
+            // method's own doc comment gives.
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Sources => None,
         }
     }
 
@@ -258,7 +286,7 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema => None,
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources => None,
         }
     }
 
@@ -273,6 +301,19 @@ impl Domain {
         !matches!(self, Domain::Schema)
     }
 
+    /// The text painted before an object's name, if this domain groups
+    /// its objects (§19.3). `None` on every domain but Sources — a
+    /// source's row leads with the dataset it feeds
+    /// (`sources::prefix`), painted dimmed ahead of the name and used as
+    /// the primary sort key in [`derive_rows`]; every other domain's
+    /// objects are already uniquely named with nothing to group them by.
+    fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
+        match self {
+            Domain::Sources => Some(sources::prefix),
+            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => None,
+        }
+    }
+
     /// Every named object in this domain, with its provenance markers.
     ///
     /// **Deliberately not a `match`.** The `layer`/`overridden`
@@ -282,11 +323,11 @@ impl Domain {
     /// must share the one tested walk. A per-domain `match` here would
     /// merely *discourage* an adapter from doing its own walk and
     /// diverging; an unconditional call makes that unrepresentable — the
-    /// only things a domain decides are its doc name, its summary line
-    /// and (optionally) its presentation doc, and all three arrive
-    /// through the small matches above. Part 2 adds two more adapters
-    /// onto this exact seam, which is why the hole is closed while there
-    /// are still only two.
+    /// only things a domain decides are its doc name, its summary line,
+    /// its optional row prefix and (optionally) its presentation doc, and
+    /// all four arrive through the small matches above. Part 2 adds three
+    /// more adapters onto this exact seam, which is why the hole stays
+    /// closed as they arrive.
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
         derive_rows(
             config,
@@ -294,6 +335,7 @@ impl Domain {
             self.presentation_doc(),
             self.roster(),
             self.summary_fn(),
+            self.prefix_fn(),
         )
     }
 
@@ -394,11 +436,17 @@ fn personalised_names<'a>(config: &'a Config, presentation_doc: Option<&str>) ->
 /// at all (`presentation_doc: None`) simply has nothing this half can
 /// add.
 ///
-/// Sorted by name rather than kept in file order: rows come from up to
-/// three documents, so "file order" would mean one file's order followed
-/// by whatever names the next file added, which is neither the user's
-/// nor the desk's order and shifts as soon as anything is overridden.
-/// Alphabetical is the one ordering that stays put.
+/// Sorted by name by default, kept rather than left in file order: rows
+/// come from up to three documents, so "file order" would mean one
+/// file's order followed by whatever names the next file added, which is
+/// neither the user's nor the desk's order and shifts as soon as
+/// anything is overridden. Alphabetical is the one ordering that stays
+/// put — and the `BTreeMap` walk below already produces it for free. A
+/// domain with a `prefix` (Sources, §19.3) sorts by `(prefix, name)`
+/// instead: the dataset a source feeds is the grouping a trader scans
+/// by, so its rows cluster by dataset with by-name order only breaking a
+/// tie inside one dataset — a second, explicit sort over the by-name
+/// output, since the `BTreeMap`'s own key is still the bare name.
 ///
 /// `config_version` is skipped — it is the schema stamp every layered
 /// doc carries, not an object.
@@ -408,6 +456,7 @@ fn derive_rows(
     presentation_doc: Option<&str>,
     roster: Option<&'static [&'static str]>,
     summary: fn(&toml::Value) -> String,
+    prefix: Option<fn(&toml::Value) -> Option<String>>,
 ) -> Vec<ObjectRow> {
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
@@ -436,6 +485,7 @@ fn derive_rows(
                     layer: None,
                     overridden: false,
                     drifted: false,
+                    prefix: None,
                 },
             ),
         );
@@ -454,6 +504,7 @@ fn derive_rows(
                         layer: Some(layered.layer),
                         overridden: false,
                         drifted: false,
+                        prefix: None,
                     },
                 )
             });
@@ -463,15 +514,21 @@ fn derive_rows(
             // actually takes effect.
             entry.1.layer = Some(layered.layer);
             entry.1.summary = summary(value);
+            entry.1.prefix = prefix.and_then(|f| f(value));
         }
     }
-    rows.into_values()
+    let mut out: Vec<ObjectRow> = rows
+        .into_values()
         .map(|(layers, mut row)| {
             let mine = layers.contains(&Layer::User) || personalised.contains(row.name.as_str());
             row.overridden = mine && layers.iter().any(|l| *l < Layer::User);
             row
         })
-        .collect()
+        .collect();
+    if prefix.is_some() {
+        out.sort_by(|a, b| (&a.prefix, &a.name).cmp(&(&b.prefix, &b.name)));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------
@@ -535,6 +592,12 @@ impl Destination {
             // to keep the match exhaustive.
             (Destination::Presentation, Domain::Schema) => {
                 unreachable!("Schema has no Presentation-destined fields")
+            }
+            // Sources joins the same list: `sources.rs`'s module doc has
+            // the reasoning (every field is `Destination::Doc`, there is
+            // no presentation overlay for a source).
+            (Destination::Presentation, Domain::Sources) => {
+                unreachable!("Sources has no Presentation-destined fields")
             }
         }
     }
@@ -1734,28 +1797,33 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 
 impl Domain {
     /// May `i` edit the `Text` row keyed `key` on this domain? `false`
-    /// everywhere until an adapter has an editable text — Groupings'
-    /// `slot` and Scopes' two summaries are display-only `Text`s and
-    /// must refuse. Sources (§19.3) is the first `true`.
+    /// everywhere but Sources — Groupings' `slot` and Scopes' two
+    /// summaries are display-only `Text`s and must refuse; Schema is
+    /// read-only outright. Sources (§19.3) is the first `true`, for
+    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
+    /// (`sources::text_editable`).
     pub fn text_editable(self, key: &str) -> bool {
         match self {
             Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
                 let _ = key;
                 false
             }
+            Domain::Sources => sources::text_editable(key),
         }
     }
 
     /// The adapter's door for a committed `Text` (§19.1): normalise the
     /// typed text, or refuse it with the reason the notice shows. Trims
     /// by default; an adapter with a real grammar (a duration, a regex, a
-    /// path list) overrides its own keys.
+    /// path list) overrides its own keys — Sources is the first
+    /// (`sources::parse_text`).
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
             Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
+            Domain::Sources => sources::parse_text(key, text),
         }
     }
 
@@ -1771,6 +1839,7 @@ impl Domain {
             Domain::Groupings => groupings::fields(config, object),
             Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
+            Domain::Sources => sources::fields(config, object),
         }
     }
 
@@ -1827,6 +1896,7 @@ impl Domain {
             Domain::Groupings => groupings::to_table(draft, dest),
             Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
+            Domain::Sources => sources::to_table(draft, dest),
         }
     }
 
@@ -1839,6 +1909,7 @@ impl Domain {
             Domain::Groupings => groupings::validate(draft, config),
             Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
+            Domain::Sources => sources::validate(draft, config),
         }
     }
 }
@@ -1972,6 +2043,11 @@ pub struct ObjectDialogState {
     /// state this dialog stores rather than derives — deliberately, since
     /// it is also what the edit stage paints; see [`Draft`].
     pub draft: Option<Draft>,
+    /// The dataset the row under the cursor fed when `n` was pressed
+    /// (§19.3, Sources only): the new source's `dataset` seed. Cleared by
+    /// [`Self::cancel_naming`] and consumed by
+    /// `render::create_from_name`.
+    pub naming_dataset: Option<String>,
 }
 
 impl ObjectDialogState {
@@ -1988,6 +2064,7 @@ impl ObjectDialogState {
             mode: DialogMode::Normal,
             notice: None,
             draft: None,
+            naming_dataset: None,
         }
     }
 
@@ -2183,6 +2260,7 @@ impl ObjectDialogState {
         self.mode = DialogMode::Normal;
         self.selected = 0;
         self.notice = None;
+        self.naming_dataset = None;
     }
 
     /// Whether `escape` has a stage to step back into before it closes
@@ -2204,13 +2282,14 @@ impl ObjectDialogState {
     }
 }
 
-/// The text one row exposes to the filter: its name and summary —
-/// exactly what the row paints, and nothing more. `keybindings_view`'s
-/// own `searchable_text` carries the same rule and the review finding
-/// behind it: matching text the user cannot see breaks the agreement
-/// between what ranked and what is highlighted.
+/// The text one row exposes to the filter: its painted label
+/// ([`ObjectRow::display_name`] — the prefix and all, on a Sources row)
+/// and its summary — exactly what the row paints, and nothing more.
+/// `keybindings_view`'s own `searchable_text` carries the same rule and
+/// the review finding behind it: matching text the user cannot see
+/// breaks the agreement between what ranked and what is highlighted.
 pub fn searchable_text(row: &ObjectRow) -> String {
-    format!("{} {}", row.name, row.summary)
+    format!("{} {}", row.display_name(), row.summary)
 }
 
 /// The rows this dialog currently shows, ranked by

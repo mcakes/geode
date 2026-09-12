@@ -121,6 +121,7 @@ use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
 use super::scopes;
+use super::sources;
 use super::views;
 use super::{
     Confirm, Destination, Domain, Draft, EditRow, FieldKind, ObjectDialogState, ObjectRow,
@@ -292,6 +293,16 @@ fn handle_key(
 ///    dialog.
 fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<ShellView>) -> bool {
     let rows = derive_rows(shell);
+    // §19.3: read before `state` takes its `&mut` borrow of
+    // `shell.object_dialog` below, whose lifetime spans the rest of this
+    // function — `seed_dataset_under_cursor` needs a plain `&ShellView`,
+    // which a live sibling `&mut` borrow would refuse. `None` on any
+    // domain but Sources (the function's own first check), so this costs
+    // every other domain nothing but the check itself.
+    let seed = seed_dataset_under_cursor(shell);
+    let seed_taken = seed
+        .as_deref()
+        .is_some_and(|d| Domain::Sources.name_taken(&shell.services.config, d));
     let Some(state) = shell.object_dialog.as_mut() else {
         return false;
     };
@@ -401,6 +412,20 @@ fn handle_browse_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<She
                     // whatever `query` still held would otherwise be
                     // written straight back into it.
                     state.begin_naming();
+                    // §19.3: `n` on Sources seeds the new source's dataset
+                    // from the browse row under the cursor (`seed`,
+                    // computed above the `&mut` borrow), and pre-fills the
+                    // name field with it too when no source already holds
+                    // that name — one source per dataset is the common
+                    // case, so the trader's next keystroke is usually just
+                    // `enter`. `seed` is `None` on every domain but
+                    // Sources, so this is a no-op everywhere else.
+                    state.naming_dataset = seed.clone();
+                    if let Some(dataset) = seed
+                        && !seed_taken
+                    {
+                        state.query = dataset;
+                    }
                 }
             }
             // §18.8: a bare digit names a slot on the one domain whose
@@ -541,6 +566,19 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         return;
     }
     let mut draft = domain.new_draft(&shell.services.config, &name);
+    if domain == Domain::Sources
+        && let Some(dataset) = shell
+            .object_dialog
+            .as_ref()
+            .and_then(|s| s.naming_dataset.clone())
+    {
+        // §19.3: the dataset `n` seeded from the cursor row
+        // (`seed_dataset_under_cursor`) becomes the new source's own
+        // `dataset` field — revalidated so the idle-source warning shows
+        // in the edit stage immediately rather than one debounce late.
+        sources::seed_dataset(&mut draft, &dataset);
+        draft.diagnostics = domain.validate(&draft, &shell.services.config);
+    }
     if domain == Domain::Scopes {
         // The frame's current scope IS the new scope (§18.2) — the same
         // read `run_confirmed`'s `Confirm::Overwrite` arm makes, for the
@@ -574,6 +612,20 @@ fn derive_rows(shell: &ShellView) -> Vec<ObjectRow> {
         .as_ref()
         .map(|state| state.domain.objects(&shell.services.config))
         .unwrap_or_default()
+}
+
+/// §19.3: the dataset of the browse row under the cursor, for `n` on
+/// Sources — `None` on every other domain, or with no row (an empty
+/// list, or a keystroke racing the modal closing).
+fn seed_dataset_under_cursor(shell: &ShellView) -> Option<String> {
+    let state = shell.object_dialog.as_ref()?;
+    if state.domain != Domain::Sources {
+        return None;
+    }
+    let rows = derive_rows(shell);
+    let visible = super::visible_rows(state, &rows);
+    let row = visible.get(state.selected).and_then(|m| rows.get(m.row))?;
+    row.prefix.clone()
 }
 
 /// A real mouse click on the row for `clicked` (resolved back to a
@@ -1944,7 +1996,8 @@ fn build(
         let Some(row) = rows.get(m.row) else { continue };
         let is_selected = position == state.selected;
 
-        let name_len = row.name.chars().count();
+        let display = row.display_name();
+        let name_len = display.chars().count();
         // The same `"{a} {b}"` split both list dialogs use — this is its
         // third consumer, and the reason it lives in one place: the
         // arithmetic is only correct while every `searchable_text` in the
@@ -1963,16 +2016,41 @@ fn build(
             row_el = row_el.bg(theme.selection).text_color(theme.primary);
         }
 
-        let label = v_flex()
-            .gap_0p5()
-            .child(highlighted_text(&row.name, &name_ix, theme.primary))
-            .child(
-                div()
-                    .font_family(crate::fonts::MONO)
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
-            );
+        // §19.3: a prefixed row paints `<prefix> · ` dimmed and the name
+        // after it, as two runs of one highlighted label — the indices
+        // are split at the prefix's end so a hit inside the dataset still
+        // highlights there. `cut` is the prefix run's length in the
+        // painted `display` text (`"{prefix} · "`, three chars for the
+        // separator), matching `ObjectRow::display_name`'s own join.
+        let head: AnyElement = match &row.prefix {
+            Some(prefix) => {
+                let cut = prefix.chars().count() + 3;
+                let (in_prefix, in_name): (Vec<usize>, Vec<usize>) =
+                    name_ix.iter().copied().partition(|i| *i < cut);
+                let in_name: Vec<usize> = in_name.into_iter().map(|i| i - cut).collect();
+                h_flex()
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(highlighted_text(
+                                &format!("{prefix} · "),
+                                &in_prefix,
+                                theme.primary,
+                            )),
+                    )
+                    .child(highlighted_text(&row.name, &in_name, theme.primary))
+                    .into_any_element()
+            }
+            None => highlighted_text(&row.name, &name_ix, theme.primary),
+        };
+
+        let label = v_flex().gap_0p5().child(head).child(
+            div()
+                .font_family(crate::fonts::MONO)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(highlighted_text(&row.summary, &summary_ix, theme.primary)),
+        );
 
         // Provenance, right-aligned: the layer that won as a muted outlined
         // badge, and `overridden` as a `primary` one beside it — a
@@ -2847,11 +2925,12 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "DIMENSIONS — space includes · shift+j / shift+k reorder",
             "members",
         ),
-        // Neither Scopes nor Schema has an `OrderedList` field at all
-        // (`scopes.rs`'s and `schema.rs`'s own module docs — both are
-        // read-only summaries), so this arm is unreachable for either;
-        // kept only to stay exhaustive as domains are added.
-        (Domain::Scopes | Domain::Schema, _) => ("", "members"),
+        // None of Scopes, Schema or Sources has an `OrderedList` field at
+        // all (`scopes.rs`'s, `schema.rs`'s and `sources.rs`'s own module
+        // docs — every field on any of the three is a plain scalar), so
+        // this arm is unreachable for all three; kept only to stay
+        // exhaustive as domains are added.
+        (Domain::Scopes | Domain::Schema | Domain::Sources, _) => ("", "members"),
     }
 }
 
