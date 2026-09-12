@@ -180,6 +180,7 @@ if [[ "$only" == --* ]]; then
 fi
 skipped=0
 changed_files=""
+
 if [[ -n "$changed_ref" ]]; then
   # Computed once, now, before any entry mutates a file — the harness
   # edits tracked files in place, so computing this later would see its
@@ -7332,6 +7333,19 @@ run_mutation "objectdialog: a completion row click completes the chain" \
   '        draft.selected = position;
         true' \
   geode-shell clicking_a_completion_row_completes_the_chain
+
+# ---- Mouse parity: the command palette (2026-09-12) ------------------
+# 2026-09-12: a palette row click is the mouse form of enter — select the
+# clicked row, then commit through the same door the key uses. Mutated
+# back to the old select-only click, the palette stays open and the
+# clicked row's action never runs.
+run_mutation "palette: a row click dispatches the clicked row" \
+  crates/geode-shell/src/shell/render.rs \
+  '                        view.commit_selected(window, cx);
+                        cx.notify();' \
+  '                        view.sync_palette_scroll();
+                        cx.notify();' \
+  geode-shell click_on_a_result_row_dispatches_it_like_enter
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

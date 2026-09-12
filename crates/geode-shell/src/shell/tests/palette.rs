@@ -699,16 +699,22 @@ fn ctrl_a_is_consumed_by_the_input_and_does_not_leak_to_the_shell(cx: &mut gpui:
     );
 }
 
-/// A row click SELECTS it (moves the highlight) without dispatching —
-/// Enter is still what dispatches. Real mouse coordinates, recovered
-/// from `palette::render`'s `"palette-row-{i}"` debug selector (same
-/// pattern `arrow_down_past_visible_rows_advances_selection_and_
-/// scrolls_it_into_view` and `keybindings_view`'s own row-click test
-/// use) rather than a direct `PaletteState::set_selected` call, so this
-/// exercises the real click -> `ShellView::render`'s `on_row_click` ->
-/// `set_selected` path end to end.
+/// A row click DISPATCHES that row — the mouse form of `enter` (user
+/// request 2026-09-12, the palette's own half of §17.1 rule 2), through
+/// the same `commit_selected` door the key uses. Real mouse coordinates,
+/// recovered from `palette::render`'s `"palette-row-{i}"` debug selector
+/// (same pattern `arrow_down_past_visible_rows_advances_selection_and_
+/// scrolls_it_into_view` uses) rather than a direct `PaletteState` call,
+/// so this exercises the real click -> `ShellView::render`'s
+/// `on_row_click` -> dispatch path end to end.
+///
+/// The clicked row is deliberately NOT the highlighted one: with
+/// "gruvbox" typed, row 0 is `Theme: Gruvbox Dark` (highlighted) and row
+/// 1 is `Theme: Gruvbox Light`, so asserting the active theme became
+/// Gruvbox *Light* proves the click dispatched the row under the mouse,
+/// not whatever the keyboard had selected.
 #[gpui::test]
-fn click_on_a_result_row_selects_it_without_dispatching(cx: &mut gpui::TestAppContext) {
+fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext) {
     cx.update(gpui_component::init);
 
     let window = cx
@@ -733,40 +739,45 @@ fn click_on_a_result_row_selects_it_without_dispatching(cx: &mut gpui::TestAppCo
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
+    let before = shell.read_with(&cx, |shell, _| {
+        shell.services.theme.active_name().to_string()
+    });
+    assert_ne!(
+        before, "Gruvbox Light",
+        "the starting theme must differ from the target"
+    );
+
     cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("gruvbox");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
     assert_eq!(
         shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
         0,
-        "sanity: the palette opens with row 0 selected"
+        "sanity: the highlight is on row 0 (Gruvbox Dark), not the row we click"
     );
 
     let row_bounds = cx
-        .debug_bounds("palette-row-3")
-        .expect("row 3 should have painted bounds to click into");
-    let inside_row_3 = gpui::point(
+        .debug_bounds("palette-row-1")
+        .expect("row 1 (Theme: Gruvbox Light) should have painted bounds to click into");
+    let inside_row_1 = gpui::point(
         row_bounds.origin.x + gpui::px(10.0),
         row_bounds.origin.y + gpui::px(10.0),
     );
-    cx.simulate_mouse_down(inside_row_3, MouseButton::Left, gpui::Modifiers::none());
+    cx.simulate_mouse_down(inside_row_1, MouseButton::Left, gpui::Modifiers::none());
+    cx.run_until_parked();
 
-    assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.palette.as_ref().unwrap().selected()),
-        3,
-        "clicking row 3 should select it"
-    );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.palette.is_some()),
-        "a row click must not dispatch — the palette stays open"
+        shell.read_with(&cx, |shell, _| shell.palette.is_none()),
+        "a row click dispatches, so the palette closes as it does on enter"
     );
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
+    let after = shell.read_with(&cx, |shell, _| {
+        shell.services.theme.active_name().to_string()
     });
     assert_eq!(
-        tile_count, 0,
-        "selecting a row via click must not have dispatched anything"
+        after, "Gruvbox Light",
+        "the click dispatched the row under the mouse (row 1), not the highlighted row 0"
     );
 }
 

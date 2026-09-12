@@ -819,12 +819,16 @@ pub(crate) fn highlighted_title(title: &str, indices: &[usize], primary: gpui::H
 /// toolbar's bare `Input::new(filter_input)` already uses (`shell::
 /// toolbar::toolbar`, no wrapping padding there either).
 ///
-/// **Mouse** (palette-input-polish task): each row's `on_mouse_down`
-/// SELECTS it via `on_row_click` (a caller-supplied, cheaply `Clone`-able
-/// closure — see [`ShellView::render`](../shell/struct.ShellView.html)'s
-/// call site for how it's built from a `WeakEntity<ShellView>`, sidestepping
-/// per-row heap allocation) — moves the highlight only, Enter (still routed
-/// through `ShellView::handle_palette_key`) is what dispatches. The panel's
+/// **Mouse** (palette-input-polish task; dispatch added 2026-09-12): each
+/// row's `on_mouse_down` hands its index to `on_row_click` (a
+/// caller-supplied, cheaply `Clone`-able closure — see
+/// [`ShellView::render`](../shell/struct.ShellView.html)'s call site for
+/// how it's built from a `WeakEntity<ShellView>`, sidestepping per-row heap
+/// allocation), which SELECTS the row and then COMMITS it — the mouse form
+/// of Enter, through the same `ShellView::commit_selected` door the key
+/// takes (the interaction model's §17.1 rule 2, adopted here by user
+/// request: a click that only moved the highlight left a mouse user one
+/// keystroke short of everything). The panel's
 /// own `on_mouse_down` calls `cx.stop_propagation()` (precedent:
 /// `dialog::render_modal`'s panel does the same over its backdrop) so a
 /// click anywhere inside the panel — a row, the input, empty space — never

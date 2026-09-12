@@ -773,3 +773,25 @@ starting count, before Task 1) to 576 anchors across the range as each
 task's entries landed. Whole-workspace verification (`cargo test
 --workspace`, workspace clippy, `--changed`) for the finished branch is
 recorded in this plan's task-8 report.
+
+**Follow-up — the command palette (2026-09-12, same day, after merge).**
+Rule 2 was written for the modal dialogs and §17.2 left the filter-only
+surfaces untouched; the user then asked for the palette too ("allow
+entries in the command palette to be chosen by clicking on it"). A
+palette row click now selects the clicked row and commits it — the
+mouse form of `enter` — through one new door, `ShellView::
+commit_selected` (`shell/palette_ctl.rs`), which the `enter` arm of
+`handle_palette_key` and `ShellView::render`'s `on_row_click` closure
+both call, so the key and the click cannot drift (close first, then
+dispatch, and the use is recorded for the ranking either way). Nothing
+else on the palette moved: click-outside still dismisses, the panel
+still stops propagation, the keyboard is unchanged, and the other three
+filter-only surfaces (settings, the picker, the as-of selector) keep
+select-only clicks — none of them commits on `enter` in a way a click
+would sensibly stand in for. Proved by `click_on_a_result_row_dispatches_
+it_like_enter` (`shell/tests/palette.rs`), which clicks row 1 while row
+0 is highlighted and asserts the *clicked* theme became active, and
+guarded by the harness entry `palette: a row click dispatches the
+clicked row` (the click mutated back to select-only). The old
+`click_on_a_result_row_selects_it_without_dispatching` test asserted the
+superseded rule and was rewritten, not weakened.

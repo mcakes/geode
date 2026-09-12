@@ -172,6 +172,31 @@ impl ShellView {
         }
     }
 
+    /// Commit the highlighted row: close the palette, then dispatch the
+    /// item that was under the highlight. **The one door** for both the
+    /// keyboard (`enter`, in [`Self::handle_palette_key`]) and the mouse
+    /// (a row click, via `ShellView::render`'s `on_row_click`, which
+    /// selects the clicked row first and then comes here) — the palette's
+    /// own half of the interaction model's §17.1 rule 2, "a row click
+    /// does what `enter` would", adopted for this filter-only surface by
+    /// user request (2026-09-12) rather than by that rule's own scope.
+    /// One method rather than two copies so the key and the click cannot
+    /// drift: whatever the palette does on commit (close first, so the
+    /// dispatched action sees the shell without the overlay; record the
+    /// use for the ranking) happens identically from either.
+    ///
+    /// The item is read before `close_palette` because closing drops
+    /// `self.palette`, and dispatched after it so an action that opens a
+    /// dialog or another palette-sized overlay is not immediately painted
+    /// under this one.
+    pub(super) fn commit_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
+        self.close_palette(window, cx);
+        if let Some(item) = selected {
+            self.dispatch_palette_item(&item, window, cx);
+        }
+    }
+
     /// Handle one *bubbled* key event while the palette is open — reworked
     /// by the palette-input-polish task from the old "owns every key,
     /// including free text entry" version. Query editing (typing,
@@ -229,13 +254,7 @@ impl ShellView {
 
         match ks.key.as_str() {
             "escape" => self.close_palette(window, cx),
-            "enter" => {
-                let selected = self.palette.as_ref().and_then(PaletteState::selected_item);
-                self.close_palette(window, cx);
-                if let Some(item) = selected {
-                    self.dispatch_palette_item(&item, window, cx);
-                }
-            }
+            "enter" => self.commit_selected(window, cx),
             "up" => {
                 if let Some(palette) = self.palette.as_mut() {
                     palette.move_selection(-1);

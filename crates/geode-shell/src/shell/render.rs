@@ -1273,23 +1273,28 @@ impl Render for ShellView {
             // children paint above earlier siblings) but below gpui-
             // component's own dialog/notification layers below.
             .when_some(self.palette.as_ref(), |el, state| {
-                // Row click -> select (no dispatch — Enter still
-                // dispatches, via `handle_palette_key`): a small `Clone`-
-                // able closure over a `WeakEntity<Self>`, not `cx.listener`
-                // directly (its returned `impl Fn` isn't itself `Clone`,
-                // and `palette::render` clones this once per row to close
-                // over each row's own index — see that function's doc
-                // comment) — this way building it costs one stack closure,
-                // not a heap allocation per row, per frame, while the
-                // palette is open (PHILOSOPHY.md: "per-frame heap churn is
-                // a defect").
+                // Row click -> select, then commit — the mouse form of
+                // `enter` (user request 2026-09-12; the palette's half of
+                // the interaction model's §17.1 rule 2). The select comes
+                // first so `commit_selected` — the ONE door the key path
+                // also goes through (`palette_ctl`) — reads the clicked
+                // row as the highlighted one; a click never dispatches by
+                // any other route, so the two cannot drift. A small
+                // `Clone`-able closure over a `WeakEntity<Self>`, not
+                // `cx.listener` directly (its returned `impl Fn` isn't
+                // itself `Clone`, and `palette::render` clones this once
+                // per row to close over each row's own index — see that
+                // function's doc comment) — this way building it costs one
+                // stack closure, not a heap allocation per row, per frame,
+                // while the palette is open (PHILOSOPHY.md: "per-frame heap
+                // churn is a defect").
                 let weak = cx.entity().downgrade();
-                let on_row_click = move |idx: usize, _window: &mut Window, cx: &mut App| {
+                let on_row_click = move |idx: usize, window: &mut Window, cx: &mut App| {
                     let _ = weak.update(cx, |view, cx| {
                         if let Some(palette) = view.palette.as_mut() {
                             palette.set_selected(idx);
                         }
-                        view.sync_palette_scroll();
+                        view.commit_selected(window, cx);
                         cx.notify();
                     });
                 };
