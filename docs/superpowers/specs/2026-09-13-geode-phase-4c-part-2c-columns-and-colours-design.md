@@ -956,10 +956,16 @@ re-run after the `width` → `presentation` rename; Task 8's full
 `--changed` run covers them.
 
 **Task 4.** `desk_baseline` walks the source's columns on every
-column-stage keystroke (modal, bounded by typing speed). A member-row
+column-stage keystroke (modal, bounded by typing speed). ~~A member-row
 **click** still only selects — no mouse parity with `enter` for the
-column stage. The value field's label in the column stage reads `tree ·
-Width` (the object) rather than `npv · Width`.
+column stage.~~ **Closed 2026-09-13** by the dataset-level column
+presentation branch: `render::column_stage_target` is the one answer
+both `commit_selected_row` and `on_edit_row_clicked` read, so a
+member-row click opens the column stage exactly as `enter` does (and
+leaves filter mode, as `enter` already did) — see
+`2026-09-13-geode-dataset-column-presentation-design.md` §4.1. The value
+field's label in the column stage reads `tree · Width` (the object)
+rather than `npv · Width`.
 
 **Task 5.** The swatch harness entry is covered by the whole window test
 rather than a unit test. Two files are named `colours.rs`, disambiguated

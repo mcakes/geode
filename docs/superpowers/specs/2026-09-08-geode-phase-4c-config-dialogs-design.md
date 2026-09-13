@@ -2559,7 +2559,13 @@ settled:
   `r`, `x`, `n`, `shift+j`/`shift+k`, a tick click and a drop all answer
   one notice — `the schema is read-only` — and the footer omits every
   one of them. `/` filters as anywhere; a digit is the edit stage's
-  usual "not a verb here".
+  usual "not a verb here". **Amended 2026-09-13:** the gate is now
+  stage-aware — `Domain::writable(self, stage: &Stage) -> bool`, passed
+  `&state.stage` at all ten sites — and Schema's **column stage** is its
+  one writable surface, where `enter` or a click on a column row edits
+  that column's dataset-level presentation. Everything above still holds
+  on every other stage. See
+  `2026-09-13-geode-dataset-column-presentation-design.md` §4.2.
 - **Browse** lists datasets: summary
   `<n> column(s) · <m> measure(s) · <k> dimension(s)`, counted off the
   raw `[columns]` table (so a dataset the reader drops a column from
