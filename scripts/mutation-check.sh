@@ -8680,6 +8680,20 @@ run_mutation "sources/adapter: paths on a subscribed source warns" \
   '                if false {' \
   geode-core directory_keys_on_a_subscribed_source_warn_and_a_directory_source_still_needs_paths
 
+# Task 5 review (2026-09-13): `source_time = "document:<field>"` is
+# validated against the schema — the field must be a document-level
+# attribute AND date/utf8, not merely a document-level attribute of any
+# type. Dropping the type half of the guard accepts an f64 attribute
+# (`spot_ref` in the fixture) exactly as readily as a date one — a
+# wrong-VALUE mutation (an f64 field silently becomes usable), not a
+# marker, and the one the reviewer's `document:spot_ref` case exists to
+# catch.
+run_mutation "sources/adapter: document:<field> must be date or utf8, not just an attribute" \
+  crates/geode-core/src/source_config.rs \
+  '                                        && matches!(c.ty, ColumnType::Date | ColumnType::Utf8) =>' \
+  '                                        && true =>' \
+  geode-core source_time_document_field_is_validated_against_the_schema
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
