@@ -7,7 +7,7 @@
 //! priority (market-data spec §5.4, amended in Task 11: the rung wording
 //! there predates this ruling). Two reasons. A document publish is
 //! milliseconds — the rows are already parsed and already coalesced to
-//! the latest per key upstream (`ingest::coalescer`), so there is nothing
+//! the latest per key upstream (`ingest::coalesce`), so there is nothing
 //! to read, split or scan — and so it cannot starve a file load however
 //! many arrive: the file it jumps is delayed by the length of one
 //! appender pass. And a single rule spares the runner a second priority
@@ -370,9 +370,12 @@ fn take_work(q: &mut Queue) -> Option<Work> {
 /// catalog), so a second event vocabulary would only make the service
 /// and the diagnostics tile handle the same publish twice.
 ///
-/// A free function, like the log helpers below, so its own behaviour is
-/// reachable from a test without a runner thread; and it takes `job` by
-/// value because the rows die with the publish.
+/// A free function rather than an arm of `run`'s `match`, so the file
+/// body below keeps the one indentation level it has always had: the
+/// alternative re-indents every line of it, which is both a diff nobody
+/// can review and — concretely — a break of the six mutation anchors
+/// sitting inside it. It takes `job` by value because the rows die with
+/// the publish.
 fn publish_one_document(
     store: &Store,
     schema: &SchemaSpec,
