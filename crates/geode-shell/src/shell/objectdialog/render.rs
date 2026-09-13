@@ -897,7 +897,7 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                 // The one builder of this door's context — shared with
                 // the two test openers that mirror this function, so
                 // they cannot drift from it (`views::column_context`).
-                views::column_context(draft, config, &object, column, item),
+                views::column_context(draft, column, item),
             )
         }
         // §4.3: the dataset overlay is the only layer this door has, and
@@ -1727,22 +1727,41 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
 /// domain's fields, and every other Views field, leave `views::
 /// refresh_available` untouched — it only ever rebuilds `columns`.
 fn maybe_refresh_available(shell: &mut ShellView) {
-    let Some(state) = shell.object_dialog.as_mut() else {
+    let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
     if state.domain != Domain::Views {
         return;
     }
-    let Some(draft) = state.draft.as_mut() else {
+    let Some(draft) = state.draft.as_ref() else {
         return;
     };
     let is_dataset_row = matches!(
         draft.selected_row(),
         Some(EditRow::Field(i)) if draft.fields.get(i).is_some_and(|f| f.key == "dataset")
     );
-    if is_dataset_row {
-        views::refresh_available(draft, &shell.services.config);
+    if !is_dataset_row {
+        return;
     }
+    // Folded, not `services.config` alone: `views::dataset_catalogue`
+    // seeds each catalogue row's presentation from
+    // `dataset_presentation.toml` (§5.4), so inside the 250 ms write
+    // debounce — a Schema column-stage edit, escape out, open this
+    // dialog, step this row — the plain read is the overlay as it stood
+    // BEFORE the last keystroke, and a column promoted off that stale
+    // catalogue carries the stale layer into the writer's comparison.
+    // Every other read of this layer on this branch is folded (the
+    // final whole-branch review's Minor 4).
+    let folded = apply::config_with_pending(shell);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);
+    let Some(draft) = shell
+        .object_dialog
+        .as_mut()
+        .and_then(|state| state.draft.as_mut())
+    else {
+        return;
+    };
+    views::refresh_available(draft, config);
 }
 
 /// Would `space` change anything on the row the cursor is on? A
@@ -2388,10 +2407,21 @@ fn actions(shell: &ShellView) -> Vec<Action> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();
     };
-    if state.draft.is_none() {
+    let Some(draft) = state.draft.as_ref() else {
+        return Vec::new();
+    };
+    if !state.domain.writable(&state.stage) {
         return Vec::new();
     }
-    if !state.domain.writable(&state.stage) {
+    // Nothing here is a verb in a column's stage — `d`, `r` and `o` all
+    // refuse through `in_column_stage`/`arm_overwrite` — so BOTH doors
+    // paint none of them rather than advertising a button that can only
+    // answer "not a verb in a column's stage". The Views door has
+    // always offered `Delete this view` there; on the Schema door,
+    // whose whole promise is "read-only", offering `Delete this
+    // dataset` read worse still (the final whole-branch review's
+    // Minor 6).
+    if draft.column().is_some() {
         return Vec::new();
     }
     let row = editing_row(shell);

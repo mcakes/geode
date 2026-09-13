@@ -19,7 +19,7 @@ use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_vie
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
 use geode_core::view::{
     Colour, ColumnFormat, ColumnPresentation, DATASET_PRESENTATION_DOC, DatasetPresentationSpec,
-    Negative, Scale, ViewColumn, ViewPresentationSpec, ViewSpec,
+    Negative, Scale, ViewColumn, ViewSpec,
 };
 
 use super::{
@@ -835,40 +835,23 @@ pub(super) fn baseline_below(draft: &Draft) -> BTreeMap<String, ColumnPresentati
     below
 }
 
-/// The three layers under one column (§5.3), for the provenance chip and
-/// the fold notice — each as the keys that layer ITSELF sets, never
-/// merged, so a layer can be named.
+/// The two layers below the view overlay under one column (§5.3), for
+/// the provenance chip and the fold notice — each as the keys that layer
+/// ITSELF sets, never merged, so a layer can be named.
 ///
-/// `view` is the trader's view-overlay entry as the doc holds it. The
-/// fields' own values are compared against `below_view()` at paint
-/// (`dataset_columns::provenance_of`), so a just-stepped field already
-/// reads `view` on the same frame rather than 250 ms later when the
-/// write lands.
+/// The view overlay is NOT read here. The fields' own values are
+/// compared against `below_view()` at paint
+/// (`dataset_columns::provenance_of`), which is what makes a
+/// just-stepped field read `view` on the same frame rather than 250 ms
+/// later when the write lands — and what makes a field stepped BACK
+/// read the layer below on the same frame, which a captured overlay
+/// could not (the final whole-branch review's named risk 4).
 ///
 /// [`ColumnLayers::below_view`]: super::ColumnLayers::below_view
-pub(super) fn column_layers(
-    draft: &Draft,
-    config: &Config,
-    view: &str,
-    column: &str,
-) -> ColumnLayers {
+pub(super) fn column_layers(draft: &Draft, column: &str) -> ColumnLayers {
     let desk = desk_baseline(draft).remove(column).unwrap_or_default();
     let dataset = draft.dataset_layer.get(column).cloned().unwrap_or_default();
-    let view_overlay = config
-        .doc(PRESENTATION_DOC)
-        .map(|doc| ViewPresentationSpec::from_doc(doc).0)
-        .and_then(|spec| {
-            spec.views
-                .get(view)
-                .and_then(|v| v.columns.get(column))
-                .cloned()
-        })
-        .unwrap_or_default();
-    ColumnLayers {
-        desk,
-        dataset,
-        view: view_overlay,
-    }
+    ColumnLayers { desk, dataset }
 }
 
 /// The Views door's [`ColumnContext`], whole — the one place it is built.
@@ -882,16 +865,10 @@ pub(super) fn column_layers(
 /// `Some`, both by the door's own definition — the view's list holds the
 /// item this stage folds into, so the scratch copy here is read only for
 /// the column's kind default.
-pub(super) fn column_context(
-    draft: &Draft,
-    config: &Config,
-    view: &str,
-    column: &str,
-    item: ListItem,
-) -> ColumnContext {
+pub(super) fn column_context(draft: &Draft, column: &str, item: ListItem) -> ColumnContext {
     ColumnContext {
         door: ColumnDoor::View,
-        layers: column_layers(draft, config, view, column),
+        layers: column_layers(draft, column),
         overlay_object: toml::Table::new(),
         item: Some(item),
     }
@@ -1493,13 +1470,7 @@ mod tests {
     /// The context comes from [`column_context`], the door's own builder,
     /// rather than a literal here: a test opener with its own copy of
     /// that literal is how a missing layer stays green.
-    fn open_column(
-        draft: &mut Draft,
-        config: &Config,
-        view: &str,
-        column: &str,
-        colours: &[String],
-    ) -> bool {
+    fn open_column(draft: &mut Draft, column: &str, colours: &[String]) -> bool {
         let Some(item) = draft
             .list_items("columns")
             .and_then(|items| items.iter().find(|i| i.name == column))
@@ -1508,7 +1479,7 @@ mod tests {
             return false;
         };
         let fields = column_fields(&item, colours, Destination::Presentation);
-        draft.column_ctx = Some(column_context(draft, config, view, column, item));
+        draft.column_ctx = Some(column_context(draft, column, item));
         draft.enter_column(column, fields)
     }
 
@@ -2699,13 +2670,7 @@ mod tests {
             Some("NPV"),
             "sanity: the item carries the desk's label"
         );
-        assert!(open_column(
-            &mut draft,
-            &with_desk_label,
-            "tree",
-            "npv",
-            &[]
-        ));
+        assert!(open_column(&mut draft, "npv", &[]));
         clear_text_field(&mut draft, "label");
         assert_eq!(
             draft.fold_column(),
@@ -2735,7 +2700,7 @@ mod tests {
         let bare =
             config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
         let mut draft = Domain::Views.draft(&bare, "tree");
-        assert!(open_column(&mut draft, &bare, "tree", "npv", &[]));
+        assert!(open_column(&mut draft, "npv", &[]));
         clear_text_field(&mut draft, "label");
         assert_eq!(
             draft.fold_column(),
@@ -2763,13 +2728,7 @@ mod tests {
         let mut draft = Domain::Views.draft(&with_desk_width, "tree");
         let item = draft.list_items("columns").unwrap()[0].clone();
         assert_eq!(item.presentation.width, Some(140.0), "sanity");
-        assert!(open_column(
-            &mut draft,
-            &with_desk_width,
-            "tree",
-            "npv",
-            &[]
-        ));
+        assert!(open_column(&mut draft, "npv", &[]));
         set_text_field(&mut draft, "width", AUTO);
         assert_eq!(
             draft.fold_column(),
@@ -2790,7 +2749,7 @@ mod tests {
         let bare =
             config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
         let mut draft = Domain::Views.draft(&bare, "tree");
-        assert!(open_column(&mut draft, &bare, "tree", "npv", &[]));
+        assert!(open_column(&mut draft, "npv", &[]));
         set_text_field(&mut draft, "width", AUTO);
         assert_eq!(draft.fold_column(), None, "already auto: nothing cleared");
         assert_eq!(
@@ -2832,7 +2791,7 @@ mod tests {
              [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
         );
         let mut draft = Domain::Views.draft(&config, "tree");
-        assert!(open_column(&mut draft, &config, "tree", "npv", &[]));
+        assert!(open_column(&mut draft, "npv", &[]));
         let scale = draft.fields.iter().position(|f| f.key == "scale").unwrap();
         draft.selected = scale;
         assert_eq!(draft.toggle_selected(), Step::Changed);

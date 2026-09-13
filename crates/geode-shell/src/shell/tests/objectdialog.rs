@@ -3495,6 +3495,42 @@ fn clicking_an_edit_row_while_filtering_keeps_the_filter_focused(cx: &mut gpui::
     );
 }
 
+/// The final whole-branch review's Minor 6: none of `d`, `r`, `o` is a
+/// verb in a column's stage — all three refuse — so the action bar
+/// advertises none of them there, on EITHER door. `tree` is overridden
+/// in the user layer in this fixture, so both destructive buttons really
+/// do paint one stage out; without the gate they paint here too, naming
+/// the view (or, on the Schema door, the dataset) a keystroke can only
+/// decline to delete.
+#[gpui::test]
+fn a_column_stage_offers_no_destructive_action(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = open_views_dialog(cx);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-action-d").is_some(),
+        "sanity: tree has a user-layer copy, so the edit stage offers d"
+    );
+    assert!(
+        cx.debug_bounds("objectdialog-action-r").is_some(),
+        "sanity: and it overrides a builtin, so the edit stage offers r"
+    );
+    // Dataset row, Columns row, then the one member — `enter` on it.
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert!(cx.debug_bounds("objectdialog-action-d").is_none());
+    assert!(cx.debug_bounds("objectdialog-action-r").is_none());
+    // And back out again, so the gate is the stage and not a one-way
+    // door.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-action-d").is_some());
+}
+
 /// Dataset-presentation §4.1's mouse-parity half on the VIEWS door: a
 /// click on a member row does what `enter` would and opens that column's
 /// stage. Before this, a member row was the one row in this dialog whose
@@ -4891,6 +4927,122 @@ fn the_schema_column_row_opens_the_column_stage_and_writes_the_dataset_overlay(
     );
 }
 
+/// Two datasets and one desk view over the first — the fixture the
+/// catalogue-seed test below needs, and the only one here with a
+/// steppable `dataset` field.
+fn services_with_two_datasets_and_a_view() -> ShellServices {
+    let mut services = test_services();
+    let datasets = LayerDoc::builtin(
+        "datasets",
+        "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+         [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+         [vol.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+         [vol.columns.strike]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
+    )
+    .unwrap();
+    let views = LayerDoc {
+        layer: Layer::Desk,
+        name: "views".to_string(),
+        file: "<test:desk>".into(),
+        table: "[tree]\ndataset = \"risk\"\ngrouping = [\"book\"]\n\
+                [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n"
+            .parse()
+            .unwrap(),
+    };
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            datasets,
+            views,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// The final whole-branch review's Minor 4: `maybe_refresh_available`
+/// seeds each catalogue row from `dataset_presentation.toml` (§5.4), so
+/// it must read the config with the PENDING batch folded in. Inside the
+/// 250 ms debounce — a Schema column-stage edit, out of that dialog,
+/// into Views, step the `dataset` row — a plain `services.config` read
+/// is the overlay as it stood before the last keystroke, and a column
+/// promoted off that stale catalogue carries the stale layer into the
+/// writer's comparison.
+#[gpui::test]
+fn a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write(
+    cx: &mut gpui::TestAppContext,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_two_datasets_and_a_view(),
+        dir.path(),
+        "config::schema",
+    );
+    // browse: risk, vol — `j` onto vol, `enter` into its column rows
+    // (file order: underlying_ref, strike), `j enter` onto strike, the
+    // one of the two a Views catalogue can offer (`schema_role_kind`
+    // answers `None` for a key column, so it is never available).
+    cx.simulate_keystrokes("j enter j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { ref object, ref column }
+            if object == "vol" && column == "strike"
+    ));
+    cx.simulate_keystrokes("j i"); // width
+    cx.run_until_parked();
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("160");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+
+    // Still INSIDE the debounce: no `flush_config_write`, so the write
+    // lives on `shell.pending_config_write` and nowhere else.
+    assert!(
+        shell.read_with(&cx, |s, _| s.pending_config_write.is_some()),
+        "the edit is pending, which is the whole point of this test"
+    );
+    assert!(!dir.path().join("dataset_presentation.toml").exists());
+
+    cx.simulate_keystrokes("escape escape escape");
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId("config::views".to_string()), None, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter"); // tree's edit stage, cursor on `dataset`
+    cx.run_until_parked();
+    cx.simulate_keystrokes("space"); // risk -> vol
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("dataset").map(str::to_string)),
+        Some("vol".to_string()),
+        "sanity: the step landed on the other dataset"
+    );
+
+    let width = edit_draft(&shell, &cx, |d| {
+        d.fields
+            .iter()
+            .find(|f| f.key == "columns")
+            .and_then(|f| match &f.kind {
+                objectdialog::FieldKind::OrderedList { available, .. } => available.as_ref(),
+                _ => None,
+            })
+            .and_then(|rows| rows.iter().find(|i| i.name == "strike"))
+            .and_then(|i| i.presentation.width)
+    });
+    assert_eq!(
+        width,
+        Some(160.0),
+        "the rebuilt catalogue carries the dataset level as the PENDING \
+         batch holds it, not as the last flush left it"
+    );
+}
+
 /// §4.1 mouse parity: a click on a schema column row opens the stage.
 #[gpui::test]
 fn a_click_on_a_schema_column_row_opens_the_column_stage(cx: &mut gpui::TestAppContext) {
@@ -5514,9 +5666,12 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
         "tree › npv"
     );
 
-    // The door filled all three layers, each as the keys that layer
-    // itself sets — the desk's own label is still nameable underneath
-    // the dataset's, which is what lets the fold notice choose.
+    // The door filled both layers below the view overlay, each as the
+    // keys that layer itself sets — the desk's own label is still
+    // nameable underneath the dataset's, which is what lets the fold
+    // notice choose. The view overlay is not captured at all: the chip
+    // asks whether the field differs from these two (the final
+    // whole-branch review's named risk 4).
     let layers = edit_draft(&shell, &cx, |d| {
         d.column_ctx.as_ref().map(|c| c.layers.clone())
     })
@@ -5527,7 +5682,6 @@ fn clearing_a_view_label_says_it_follows_the_dataset(cx: &mut gpui::TestAppConte
         layers.dataset.scale,
         Some(geode_core::view::Scale::Thousands)
     );
-    assert_eq!(layers.view, geode_core::view::ColumnPresentation::default());
 
     assert!(
         cx.debug_bounds("objectdialog-field-provenance-scale")

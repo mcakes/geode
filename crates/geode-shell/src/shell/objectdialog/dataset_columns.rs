@@ -61,8 +61,12 @@ impl<'a> ProvenanceInputs<'a> {
 
 /// Which layer's value `field` is showing (§5.3). Through the Views
 /// door: `View` when the field differs from the desk + dataset baseline
-/// (the trader has diverged here, whether or not the write has landed),
-/// else `Dataset` / `Desk` by which layer sets the key, else `None`.
+/// — the writer never emits a view key equal to the layer below, so a
+/// stored equal key is unobservable and the next keystroke removes it,
+/// which is why the view overlay is not consulted at all (the final
+/// whole-branch review's named risk 4: a field stepped BACK to the
+/// value below still read `view` until the stage was reopened). Else
+/// `Dataset` / `Desk` by which layer sets the key, else `None`.
 /// Through the Schema door: `Dataset` when the field differs from the
 /// kind default, else `None` — there is no desk value to name (§4.3, a
 /// plan-level ruling over the spec's `user` badge).
@@ -126,7 +130,7 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
             // `Some` for this door by construction
             // ([`ProvenanceInputs::new`]); borrowed, never cloned.
             let below = inputs.below.as_ref().unwrap_or(&unset);
-            if differs_from(below) || set_in(&ctx.layers.view) {
+            if differs_from(below) {
                 Some(Provenance::View)
             } else if set_in(&ctx.layers.dataset) {
                 Some(Provenance::Dataset)
@@ -378,10 +382,15 @@ mod tests {
         }
     }
 
-    fn ctx(door: ColumnDoor, layers: ColumnLayers) -> ColumnContext {
+    /// `view` is the trader's view-overlay entry. It is no longer a
+    /// [`ColumnLayers`] field — the chip asks whether the field differs
+    /// from desk + dataset, never whether the overlay holds a key — so
+    /// it reaches the stage only the way the door delivers it: merged
+    /// into the item the fields are built from.
+    fn ctx(door: ColumnDoor, layers: ColumnLayers, view: &ColumnPresentation) -> ColumnContext {
         let merged = {
             let mut p = layers.below_view();
-            p.merge_over(&layers.view);
+            p.merge_over(view);
             p
         };
         ColumnContext {
@@ -413,12 +422,15 @@ mod tests {
                 scale: Some(Scale::Thousands),
                 ..Default::default()
             },
-            view: ColumnPresentation {
+        };
+        let c = ctx(
+            ColumnDoor::View,
+            layers,
+            &ColumnPresentation {
                 precision: Some(4),
                 ..Default::default()
             },
-        };
-        let c = ctx(ColumnDoor::View, layers);
+        );
         assert_eq!(provenance(&c, &field(&c, "label")), Some(Provenance::Desk));
         assert_eq!(
             provenance(&c, &field(&c, "scale")),
@@ -444,7 +456,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let c = ctx(ColumnDoor::View, layers);
+        let c = ctx(ColumnDoor::View, layers, &ColumnPresentation::default());
         let mut scale = field(&c, "scale");
         if let FieldKind::Choice { options, selected } = &mut scale.kind {
             *selected = options
@@ -464,12 +476,58 @@ mod tests {
             },
             ..Default::default()
         };
-        let c = ctx(ColumnDoor::Dataset, layers);
+        let c = ctx(ColumnDoor::Dataset, layers, &ColumnPresentation::default());
         assert_eq!(
             provenance(&c, &field(&c, "width")),
             Some(Provenance::Dataset)
         );
         assert_eq!(provenance(&c, &field(&c, "label")), None);
+    }
+
+    /// The other half of `a_stepped_field_reads_view_before_its_write
+    /// _lands`: a field stepped BACK to the value the layer below gives
+    /// reads THAT layer on the same frame. The view overlay still holds
+    /// the key the write is about to remove, so a chip that read the
+    /// captured overlay said `view` until the stage was reopened (the
+    /// final whole-branch review's named risk 4).
+    #[test]
+    fn a_field_stepped_back_to_the_layer_below_reads_that_layer() {
+        let layers = ColumnLayers {
+            dataset: ColumnPresentation {
+                scale: Some(Scale::Thousands),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let c = ctx(
+            ColumnDoor::View,
+            layers,
+            // The trader's own view-level override, as the doc holds it.
+            &ColumnPresentation {
+                scale: Some(Scale::Millions),
+                ..Default::default()
+            },
+        );
+        let mut scale = field(&c, "scale");
+        assert_eq!(
+            provenance(&c, &scale),
+            Some(Provenance::View),
+            "sanity: as opened, the field shows the view's own value"
+        );
+        if let FieldKind::Choice { options, selected } = &mut scale.kind {
+            *selected = options
+                .iter()
+                .position(|o| o == views::scale_key(Scale::Thousands))
+                .unwrap();
+        }
+        assert_eq!(
+            provenance(&c, &scale),
+            Some(Provenance::Dataset),
+            "stepped back to the dataset level's own value, the chip \
+             names the dataset — which is what the file will say 250 ms \
+             later, since the writer omits every key equal to the layer \
+             below"
+        );
     }
 }
 

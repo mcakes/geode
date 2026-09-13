@@ -776,10 +776,12 @@ impl Destination {
             (Destination::Presentation, Domain::Scopes) => {
                 unreachable!("Scopes has no Presentation-destined fields")
             }
-            // Schema has no fields at all in the writable sense — every
-            // one of its `Field`s is `Destination::Doc` (`schema.rs`'s
-            // module doc) — so this arm, like the two above, exists only
-            // to keep the match exhaustive.
+            // Schema's only writable fields are `DatasetPresentation`-
+            // destined (its column stage, the arm below); no Schema
+            // field carries `Presentation`, since `view_presentation.toml`
+            // is keyed by VIEW and this domain browses datasets. So this
+            // arm, like the two above, exists only to keep the match
+            // exhaustive.
             (Destination::Presentation, Domain::Schema) => {
                 unreachable!("Schema has no Presentation-destined fields")
             }
@@ -951,14 +953,22 @@ pub enum ColumnDoor {
     Dataset,
 }
 
-/// The three layers under one column, each as the keys that layer
-/// itself sets — NOT merged — so provenance and the fold can name a
-/// layer (§5.1–§5.3).
+/// The two layers BELOW the view overlay under one column, each as the
+/// keys that layer itself sets — NOT merged — so provenance and the fold
+/// can name a layer (§5.1–§5.3).
+///
+/// The view overlay itself is deliberately absent. It had exactly one
+/// reader, `dataset_columns::provenance_of`'s View arm, and reading it
+/// there was the defect: a field stepped BACK to the value the layer
+/// below already gives still read `view`, because the captured overlay
+/// still held a key the write was about to remove. The chip now asks
+/// only whether the field differs from desk + dataset, which is a
+/// question the field's own value answers (the final whole-branch
+/// review's named risk 4).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ColumnLayers {
     pub desk: ColumnPresentation,
     pub dataset: ColumnPresentation,
-    pub view: ColumnPresentation,
 }
 
 impl ColumnLayers {
@@ -3314,7 +3324,6 @@ mod tests {
         let mut both = open(ColumnLayers {
             desk: labelled("NPV"),
             dataset: labelled("Δ"),
-            view: ColumnPresentation::default(),
         });
         assert_eq!(
             both.fold_column(),
@@ -5745,13 +5754,7 @@ mod tests {
         // §5.1): without it the stage opens but folds nothing. Through
         // the door's OWN builder, so this mirror of
         // `render::enter_column_stage` cannot drift from it.
-        draft.column_ctx = Some(views::column_context(
-            &draft,
-            &config,
-            "tree",
-            "npv",
-            npv.clone(),
-        ));
+        draft.column_ctx = Some(views::column_context(&draft, "npv", npv.clone()));
         assert!(draft.enter_column(
             "npv",
             views::column_fields(&npv, &[], Destination::Presentation)
