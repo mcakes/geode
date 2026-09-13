@@ -2972,63 +2972,17 @@ tasks — and the fix wave — moved their source lines; `--anchors-only`
 caught every one of those before commit, as it is meant to).
 `--anchors-only` reports 0 stale, 0 ambiguous.
 
-## 20. Part 2c — direction only (2026-09-12)
+## 20. Part 2c — designed elsewhere
 
-Not yet designed; recorded so the session that designs it starts from
-the rulings already taken rather than rediscovering them. Part 2c is
-**column presentation and shared colours**: a nested *column stage*
-under a Views member row (`enter` on a member) holding every
-presentation field the model already has — `label`, `width`, `scale`
-(`none`/`k`/`M`, the header already paints `npv (k)`), `precision`,
-`thousands`, `negative` — plus a named, shared colour; the user overlay
-(`view_presentation.toml`) grows to carry the same format keys per
-column so a trader's own scale or decimals merge *over* the desk's view
-without forking it (the rule §4.1 already applies to width); and a
-dialog of its own for the shared colours, on a doc of its own, read by
-the blotter now and by charting later.
-
-**The colour model, agreed in principle (user, 2026-09-12).** A shared
-colour is a **hue angle on a canonical wheel plus a tone**, and each
-theme is a transformation of that wheel: every bundled theme sets
-twelve base hues (`base.red`/`yellow`/`green`/`cyan`/`blue`/`magenta`,
-each with a `.light` tone), placed at canonical angles 0/60/120/180/
-240/300, and a definition's hue is interpolated between the theme's two
-nearest anchors **in OKLCH**, not HSL (HSL midpoints across hues lose
-lightness and chroma; the OKLab conversion is ~40 lines of pure
-arithmetic in `geode-core`, no dependency). `hue = 240` is exactly the
-theme's blue; `hue = 210` is a third of the way from its cyan to its
-blue in that theme's own saturation and lightness. A `token` form stays
-for the semantic colours a theme already names (`chart.bullish`,
-`chart.bearish`, `danger`), so sign colouring and a shared colour share
-one vocabulary. **No literal hex**: a hex is theme-blind, and a
-theme-blind colour is the failure this model exists to remove. Sketch:
-
-```toml
-[delta]
-hue = 240
-
-[gamma]
-hue = 210
-tone = "light"
-
-[pnl]
-token = "chart.bullish"
-```
-
-Known strains, to be met by checks rather than rules: a theme whose
-neighbouring anchors sit close together folds that arc, so definitions
-apart on the canonical wheel can coincide there — extend the
-theme-authoring checks to report each theme's smallest inter-anchor arc
-and each generated hue's contrast against the theme background; and
-distinguishability is per theme, so the colour dialog should paint a
-swatch strip in the active theme beside each definition.
-
-**Open for the design session:** the name of the thing ("colour
-family" was the user's placeholder and is not final); whether a
-column's colour paints the header, the values, or both; whether a
-shared colour can combine with `sign` on one column; how a resolved
-colour reaches modules (the `UiSettings` gpui global is the
-shell→module pattern, and colours are genuinely app-wide and
-module-visible, which is the bar CLAUDE.md sets for widening it); and
-how the overlay's per-column keys are spelled next to the existing
-`order`/`hidden`/`width`.
+Part 2c — the column stage, the overlay's per-column tables, and named
+colours — is governed by
+`docs/superpowers/specs/2026-09-13-geode-phase-4c-part-2c-columns-and-colours-design.md`
+(approved 2026-09-13). The direction note that stood here on 2026-09-12
+(a hue on a canonical wheel that each theme transforms, OKLCH
+interpolation over the theme's twelve base hues, a `token` form, no
+literal hex) is that spec's §2 in full; its open questions were settled
+there: the thing is a **named colour** (`colours.toml`, "Edit colours"),
+it paints a column's **header and values** and does not combine with
+`sign`, definitions travel to modules like views and resolve at the
+paint site, and the overlay carries one `[view.columns.<col>]` table per
+column.
