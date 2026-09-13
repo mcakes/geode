@@ -486,6 +486,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // siblings; there is no chord because a trader reaches for it as
     // rarely as `config::scopes` or `config::groupings` do.
     action(reg, "config::sources", "Edit sources", "Configuration");
+    // Part 2c Task 5: the object dialog over `colours` — the shared
+    // colour vocabulary a column's `colour` field and a chart series can
+    // name (spec §6.1). Palette-only like its siblings; there is no
+    // chord because naming a colour is an occasional act of desk
+    // configuration, not something reached for mid-session.
+    action(reg, "config::colours", "Edit colours", "Configuration");
     // Frame-time instrumentation (spec §7.4). The overlay toggle is bound
     // `mod+shift+p` ("performance" — a shifted letter keeps its modifier,
     // unlike the punctuation story above, so this spelling is real, and no

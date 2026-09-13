@@ -4,6 +4,7 @@
 //! gpui-component's `DataTable`; `tile` is the entity per tile;
 //! `content` is what the shell hosts.
 
+pub mod colour_cache;
 pub mod content;
 pub mod core;
 pub mod delegate;

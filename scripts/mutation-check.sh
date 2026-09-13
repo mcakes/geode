@@ -2630,8 +2630,8 @@ run_mutation "delegate: the cursor follows its node across a new snapshot" \
 
 run_mutation "delegate: a regroup with a different grouping rebuilds the plan" \
   crates/geode-blotter/src/delegate.rs \
-  '            Some(p) => p.grouping != grouping || !p.same_columns(&snapshot),' \
-  '            Some(_p) => false,' \
+  '        let rebuild = self.plan.as_ref() != Some(&fresh);' \
+  '        let rebuild = self.plan.is_none();' \
   geode-blotter \
   a_regroup_prunes_expansion_and_rebuilds_the_plan
 
@@ -3883,8 +3883,8 @@ run_mutation "views: a presentation naming a view the config lacks is skipped LO
 # on disk and nothing on screen moves until the next restart.
 run_mutation "reload: a view_presentation change triggers the same reload a views change does" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  'changed("views") || changed("view_presentation") || changed("dimensions");' \
-  'changed("views") || changed("dimensions");' \
+  '                || changed("view_presentation")' \
+  '                || changed("views")' \
   geode-shell \
   a_view_presentation_only_change_emits_config_reloaded
 
@@ -3983,10 +3983,17 @@ run_mutation "objectdialog: closing the modal leaves the dialog's state behind" 
 # and a forked view is frozen: the desk adds a column next week and this
 # trader never sees it. Only a test asserting that `views.toml` was NOT
 # created can see it.
+#
+# Re-anchored in Task 4: `views::column_fields` builds `Presentation`
+# fields of its own, so the bare `dest:` line matches three times now —
+# the anchor carries the `columns` field's own `kind` line above it,
+# which is unique.
 run_mutation "objectdialog: a presentation field is written to the view's own doc" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '            dest: Destination::Presentation,' \
-  '            dest: Destination::Doc,' \
+  '            kind: FieldKind::OrderedList { items, available },
+            dest: Destination::Presentation,' \
+  '            kind: FieldKind::OrderedList { items, available },
+            dest: Destination::Doc,' \
   geode-shell \
   hiding_a_column_writes_presentation_and_does_not_fork_the_view
 
@@ -4369,7 +4376,7 @@ run_mutation "plan: a hidden column is planned anyway" \
 # reordered can see it.
 run_mutation "views: a presentation save pins the desk's column order" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '    if names != doc_order {' \
+  '    if names != order {' \
   '    if true {' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
@@ -4379,10 +4386,18 @@ run_mutation "views: a presentation save pins the desk's column order" \
 # desk declared cannot tell "kept the trader's" from "copied the desk's".
 # The fixture has to declare a width in `views.toml` and change something
 # else entirely.
+#
+# Re-anchored for 2c §4.3: the flat `doc_widths` map this compared
+# against became `desk_baseline`'s per-column `ColumnPresentation`, and
+# every key (not just `width`) now goes through this same
+# compare-then-emit shape — this entry keeps its original width-specific
+# anchor rather than the shared one `views: the overlay writer omits keys
+# equal to the desk` uses (`precision`), so the two entries are isolated
+# from each other.
 run_mutation "views: a presentation save copies the desk's widths into the user's file" \
   crates/geode-shell/src/shell/objectdialog/views.rs \
-  '        if doc_widths.get(item.name.as_str()) == Some(&width) {' \
-  '        if false {' \
+  '        if item.presentation.width != desk.width {' \
+  '        if true {' \
   geode-shell \
   a_presentation_save_writes_only_what_the_trader_changed
 
@@ -6069,10 +6084,16 @@ run_mutation "dialogmode: shift+space maps to nothing (forward-only restored)" \
 # backward arm always refuse (`return false`) is the old defect, and only
 # a test asserting the value actually moves down — not just that the row
 # is steppable — can see it.
+# Re-anchored for 2c §5.4: `step_selected`'s Number arm no longer
+# special-cases each `StepDirection` with its own early return — a single
+# `wrap`-aware clamp handles both directions now (see `a wrapping number
+# wraps`, above). The behaviour this entry pins is the non-wrapping
+# backward clamp: without the `next < *min` guard, stepping back from the
+# bound would walk the value below `min` instead of stopping at it.
 run_mutation "objectdialog: Number refuses to step down" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                        StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),' \
-  '                        StepDirection::Backward => return false,' \
+  '                        } else if next < *min {' \
+  '                        } else if false {' \
   geode-shell a_number_steps_both_ways_and_stops_at_each_end
 
 # ---- Phase 4c part 2a, Task 4: the Groupings adapter -------------------
@@ -6798,7 +6819,7 @@ run_mutation "objectdialog: reorder skips hidden rows" \
 # not tell the two apart.
 run_mutation "objectdialog: set_query mirrors into the open draft only in the edit stage" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        if matches!(self.stage, Stage::Edit { .. })
+  '        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
             && let Some(draft) = self.draft.as_mut()' \
   '        if false
             && let Some(draft) = self.draft.as_mut()' \
@@ -7043,8 +7064,8 @@ run_mutation "dialogmode: listening overrides the mode for focus" \
 # stage paints (and, after Task 3, WRITES into the Input) the browse query.
 run_mutation "objectdialog: effective_query reads the edit stage's draft" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '            (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),' \
-  '            (Stage::Edit { .. }, Some(_draft)) => self.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),' \
+  '            (Stage::Edit { .. } | Stage::Column { .. }, Some(_draft)) => self.query.as_str(),' \
   geode-shell \
   the_effective_query_is_the_stages_own
 
@@ -8342,8 +8363,8 @@ run_mutation "objectdialog: a rejected in-memory apply paints the status line" \
 # §19.6: the reload path reports presentation diagnostics instead of dropping them.
 run_mutation "bridge: reload reports presentation diagnostics" \
   crates/geode-app/src/bridge.rs \
-  '                if !presentation_diags.is_empty() {' \
-  '                if false && !presentation_diags.is_empty() {' \
+  '                if !reload_diags.is_empty() {' \
+  '                if false && !reload_diags.is_empty() {' \
   geode-app \
   a_reload_reports_a_stale_presentation_name
 
@@ -9114,6 +9135,382 @@ run_mutation "cvi: a second <term> inside one slice wins silently instead of bei
                         }' \
   '                        let _ = &slice.term;' \
   geode-documents a_second_term_inside_one_slice_is_refused_naming_it
+# 2c §2.1: a colour with both hue and token is dropped, not merged.
+run_mutation "colour: both hue and token is refused" \
+  crates/geode-core/src/colour/mod.rs \
+  '                    refuse_both(&mut diags, &at, name);
+                    continue;' \
+  '                    let _ = &at;
+                    Definition::Token(Token::Danger)' \
+  geode-core \
+  reads_hue_tone_and_token_and_refuses_both_or_neither
+
+# 2c §2.2: an anchor hue is the theme's colour itself, never re-derived.
+run_mutation "colour: an anchor hue returns the anchor untouched" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if t <= 0.0 {' \
+  '    if false && t <= 0.0 {' \
+  geode-core \
+  an_anchor_hue_is_the_themes_own_colour_exactly
+
+# 2c §2.2: hue interpolates along the SHORTER arc.
+run_mutation "colour: hue takes the shorter arc" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let dh = (b.h - a.h + PI).rem_euclid(TAU) - PI; // the shorter arc' \
+  '    let dh = b.h - a.h;' \
+  geode-core \
+  a_hue_between_anchors_interpolates_along_the_shorter_arc
+
+# 2c §2.2: gamut overflow pulls chroma, never clamps channels.
+run_mutation "colour: gamut clip pulls chroma" \
+  crates/geode-core/src/colour/oklab.rs \
+  '    if in_gamut(direct) {' \
+  '    if true {' \
+  geode-core \
+  gamut_clip_pulls_chroma_and_keeps_lightness_and_hue
+
+# 2c §3: an unknown named colour warns with the column's file index.
+run_mutation "load_views: an unknown colour name warns with its path" \
+  crates/geode-core/src/config/load.rs \
+  '                && colours.get(name).is_none()' \
+  '                && false' \
+  geode-core \
+  a_column_naming_an_unknown_colour_warns_with_its_path
+
+# 2c §4.2: a column set in both a legacy key and its own [view.columns.
+# <col>] table takes the TABLE's value — the table is read first, so the
+# legacy fold's own guard is what defends the conflict rule.
+run_mutation "overlay: the column table wins over a legacy key" \
+  crates/geode-core/src/view.rs \
+  '                            if p.columns.get(col).is_some_and(|e| e.width.is_some()) {' \
+  '                            if p.columns.get(col).is_some_and(|e| e.width.is_none()) {' \
+  geode-core \
+  the_legacy_hidden_and_width_keys_still_load_and_the_table_wins_a_conflict
+
+# 2c §4.4: apply's ColumnPresentation::merge_over copies only the keys
+# `other` (the overlay) actually SET — a field it left `None` keeps the
+# view's own value. Mutating the `scale` guard specifically (not
+# `precision`, which the same test also sets on the overlay side, so a
+# missing guard there is not observable) is what the test's "the desk's
+# key survives" assertion catches.
+run_mutation "overlay: apply merges Some keys only" \
+  crates/geode-core/src/view.rs \
+  '        if other.scale.is_some() {
+            self.scale = other.scale;
+        }' \
+  '        self.scale = other.scale;' \
+  geode-core \
+  apply_merges_a_column_table_over_the_view
+
+# 2c §4: the overlay's own [view.columns.<col>].colour gets the same
+# unknown-colour cross-check as the view's own format.colour (§3, above).
+run_mutation "load_views: an unknown colour in the overlay warns with its path" \
+  crates/geode-core/src/config/load.rs \
+  '                if colours.get(name).is_none() {' \
+  '                if false {' \
+  geode-core \
+  a_presentation_naming_an_unknown_colour_warns_with_its_path
+
+# 2c §5.4: a wrapping Number goes round; a plain one lands on the bound.
+run_mutation "objectdialog: a wrapping number wraps" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '                        let landed = if *wrap {' \
+  '                        let landed = if false {' \
+  geode-shell \
+  a_number_steps_by_its_step_and_wraps_only_when_asked
+
+# 2c §4.3: the writer omits a key equal to the desk baseline. Re-anchored
+# in Task 4 (same guard, same semantics): the comparison now resolves both
+# sides through the kind default, which is what §4.3 calls the baseline.
+run_mutation "views: the overlay writer omits keys equal to the desk" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if effective.precision != desk_format.precision {' \
+  '        if effective.precision != desk_format.precision || true {' \
+  geode-shell \
+  the_writer_emits_only_keys_that_differ_from_the_desk
+
+# 2c §4.3: the baseline is the kind default WITH THE DESK'S OWN KEYS over
+# it — drop the desk half and every key the desk declares reads as a
+# personalisation and is copied into the trader's overlay, which is the
+# freeze the whole comparison exists to prevent.
+run_mutation "views: the writer's baseline carries the desk's own format keys" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        let desk_format = kind.clone().with(&desk);' \
+  '        let desk_format = kind.clone();' \
+  geode-shell \
+  the_writer_emits_only_keys_that_differ_from_the_desk
+
+# 2c §4.3: a demoted column (`d`/space) is written `hidden = true` in its
+# own [columns.<name>] table — the guard this task's writer replaced the
+# legacy `hidden = [...]` array with. Mutating it true unconditionally
+# would hide EVERY column, member or not, the moment any one of them had
+# something else to say.
+run_mutation "views: hidden is written whenever a member is excluded" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '        if !item.included {' \
+  '        if false {' \
+  geode-shell \
+  hiding_a_column_writes_presentation_and_does_not_fork_the_view
+
+# 2c §5.4: the member-row summary names only the keys that differ from
+# the column's kind default — mutating this comparison to always-true
+# would name precision on every column, including ones the trader never
+# touched.
+run_mutation "views: the member summary omits keys at the kind default" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '    if effective.precision != kind_default.precision {' \
+  '    if effective.precision != kind_default.precision || true {' \
+  geode-shell \
+  column_summary_names_only_the_keys_in_force
+
+# 2c §5.2: `x`, `shift+j` and `shift+k` reorder or demote rows of a list
+# the column stage does not install, so each names this stage rather than
+# giving the edit stage's answer about rows that are not on screen. One
+# guard feeds all three arms.
+run_mutation "objectdialog: the list verbs name the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '        .is_some_and(|draft| draft.column().is_some())' \
+  '        .is_some_and(|draft| draft.column().is_none())' \
+  geode-shell \
+  the_column_stages_width_is_typed_and_refused_out_of_range
+
+# 2c §5.3: an empty label / an `auto` width means "stop overriding", not
+# "delete" — the overlay cannot remove a key `views.toml` sets. Folding a
+# literal `None` instead is silent in the worst way: the writer omits the
+# key, the file reads back as "nothing to say", and the desk's label comes
+# back on the next rebuild with the trader's clear gone.
+run_mutation "views: clearing a desk-set key restores the desk's value" \
+  crates/geode-shell/src/shell/objectdialog/views.rs \
+  '                    desk.label.clone()' \
+  '                    None' \
+  geode-shell \
+  clearing_a_desk_label_falls_back_to_the_desk
+
+# 2c §5.2: every changed value folds into the item BEFORE validation and commit.
+run_mutation "objectdialog: revalidate folds the column stage first" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if draft.column().is_some() {' \
+  '    if draft.column().is_none() {' \
+  geode-shell \
+  the_column_stage_writes_a_differing_key_to_the_overlay
+
+# 2c §5.2: `enter` means one thing in both modes — the browse stage's own
+# rule for the same key. Filtering to a column and pressing enter is how a
+# trader reaches one column of a thirty-column view.
+run_mutation "objectdialog: enter opens the column stage from filter mode too" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '            commit_selected_row(shell, cx);' \
+  '            edit_commit_notice(shell);' \
+  geode-shell \
+  the_column_stage_writes_a_differing_key_to_the_overlay
+
+# 2c §5.3: `enter` on an editable Text names `i`, the verb that row
+# really has. Without the branch it falls through to "this row is
+# read-only", which is a lie about `label`/`width` (and was already one
+# about every Sources text row).
+run_mutation "objectdialog: enter names i on a row i can open" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    } else if typeable {' \
+  '    } else if false {' \
+  geode-shell \
+  the_column_stages_width_is_typed_and_refused_out_of_range
+
+# 2c §5.2: a failed write rebuilds the draft from the reverted config —
+# the object's, with no projection on it — so the stage has to step back
+# with it, or the crumb keeps naming a column whose fields are gone.
+run_mutation "objectdialog: a reverted write leaves the column stage" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '                rebuilt.select_item_named(&column);
+                state.stage = Stage::Edit { object };' \
+  '                rebuilt.select_item_named(&column);' \
+  geode-shell \
+  a_failed_write_in_the_column_stage_steps_back_to_the_view
+
+# 2c §5.5: a path naming ANOTHER column lands nowhere in this stage.
+run_mutation "objectdialog: row_for_path in the column stage is scoped to the open column" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            if resolved_name != column {' \
+  '            if false && resolved_name != column {' \
+  geode-shell \
+  row_for_path_in_the_column_stage_lands_on_the_format_key
+
+# 2c §5.2: enter on a non-member is refused.
+run_mutation "objectdialog: enter_column refuses a non-member" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if !is_member {' \
+  '        if false && !is_member {' \
+  geode-shell \
+  entering_a_column_swaps_the_fields_and_leaving_restores_them_with_the_fold
+
+# 2c §6.1: to_table writes only the keys in force — no dead hue under a token.
+run_mutation "colours: to_table omits the hue under a token" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '    let saved_hue = table.remove("hue");' \
+  '    let saved_hue: Option<toml_edit::Item> = None;' \
+  geode-shell \
+  fields_seed_from_the_definition_and_to_table_writes_only_the_keys_in_force
+
+# 2c §6.1: reserved names are taken on Colours alone.
+run_mutation "objectdialog: reserved colour names are taken" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.reserved_names().contains(&name) {' \
+  '        if false && self.reserved_names().contains(&name) {' \
+  geode-shell \
+  reserved_names_are_taken
+
+# 2c §6.1: a browse row's swatch resolves that row's own saved colour,
+# not a fixed one — observable through the window test, since the fixture
+# defines only `delta` and a wrong lookup name paints no swatch at all.
+run_mutation "colours: the browse swatch resolves the row's own definition" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '                named.get(&row.name).map(|def| (def, anchors, tokens))' \
+  '                named.get("nonexistent").map(|def| (def, anchors, tokens))' \
+  geode-shell \
+  the_colours_dialog_paints_swatches_and_refuses_reserved_names
+
+# 2c §6.2: a colours change reaches the tiles like a views change.
+run_mutation "hot_reload: a colours change fires ConfigReloaded" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed("colours");' \
+  '                || changed("views");' \
+  geode-shell \
+  a_colours_change_fires_config_reloaded
+
+# 2c §6.2: the doc is read for the service, so its own diagnostics are
+# reported here — `load_views` reads it too and throws them away.
+run_mutation "bridge: data_setup reports the colours doc diagnostics" \
+  crates/geode-app/src/bridge.rs \
+  '    diagnostics.extend(colour_diags);' \
+  '    diagnostics.extend(Vec::new());' \
+  geode-app \
+  data_setup_carries_the_colours_and_reports_their_diagnostics
+
+# 2c §6.2: the tile hands its definitions down with the plan.
+run_mutation "blotter: a tile hands the delegate its colours" \
+  crates/geode-blotter/src/tile.rs \
+  '                t.delegate_mut().set_colours(colours);' \
+  '                let _ = colours;' \
+  geode-blotter \
+  a_delivered_snapshot_hands_the_delegate_the_tiles_colours
+
+# 2c §6.3: the cache empties when an anchor changes.
+run_mutation "blotter: the colour cache invalidates on a changed anchor" \
+  crates/geode-blotter/src/colour_cache.rs \
+  '        if self.key.as_ref() != Some(&key) {' \
+  '        if self.key.is_none() {' \
+  geode-blotter \
+  a_steady_theme_costs_no_recompute_and_a_changed_anchor_empties_the_cache
+
+# 2c §6.3: an unknown name paints in foreground, never a stale colour.
+run_mutation "blotter: an unknown colour name resolves to none" \
+  crates/geode-blotter/src/delegate.rs \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens)' \
+  '        self.colour_cache.get(&self.colours, name, anchors, tokens).or(Some(gpui::Hsla::default()))' \
+  geode-blotter \
+  a_named_column_paints_its_resolved_colour
+
+# 2c §7: the formula the theme check reads. Weakening the check's own
+# `ratio >= 3.0` comparison is not observable — `contrast_ratio` sorts its
+# two luminances, so the ratio is always >= 1.0 and any looser bound is
+# unconditionally true — so this entry guards the arithmetic underneath it.
+# The theme-level behaviour is guarded separately, by the
+# `theme: bundled themes clear 3:1 through the resolver` entry below,
+# which disables the readability floor and so reintroduces the original
+# Task 7 finding for the bundled-theme test to catch.
+run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
+  crates/geode-core/src/colour/mod.rs \
+  '    (hi + 0.05) / (lo + 0.05)' \
+  '    hi / lo' \
+  geode-core \
+  contrast_ratio_is_wcag
+
+# 2c §7 fix round 2: the readability floor's own early return — disabling
+# it (forcing the "already readable" branch unconditionally) must leave
+# an unreadable colour unreadable, caught at both the unit-test level
+# and, now that the theme test reads through `resolve` with no
+# exceptions, at the bundled-theme level too.
+run_mutation "colour: the readability floor pulls lightness until 3:1" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+        return rgb;
+    }' \
+  '    if true {
+        return rgb;
+    }' \
+  geode-core \
+  readable_on_pulls_a_faint_colour_darker_until_it_clears
+
+run_mutation "theme: bundled themes clear 3:1 through the resolver" \
+  crates/geode-core/src/colour/mod.rs \
+  '    if contrast_ratio(rgb, background) >= READABLE_RATIO {
+        return rgb;
+    }' \
+  '    if true {
+        return rgb;
+    }' \
+  geode-shell \
+  every_bundled_theme_keeps_generated_hues_readable
+
+run_mutation "blotter: the theme-input memo re-derives on a changed theme" \
+  crates/geode-blotter/src/delegate.rs \
+  'Some((have, ..)) if *have == signature => {}' \
+  'Some((_have, ..)) if true => {}' \
+  geode-blotter \
+  the_theme_input_memo_re_derives_only_when_a_theme_colour_moves
+
+run_mutation "objectdialog: d and r are refused in the column stage" \
+  crates/geode-shell/src/shell/objectdialog/render.rs \
+  '    if in_column_stage(shell) {
+        not_a_column_verb(shell, "r");
+        return;
+    }' \
+  '    if false {
+        not_a_column_verb(shell, "r");
+        return;
+    }' \
+  geode-shell \
+  delete_and_revert_are_refused_in_the_column_stage
+
+run_mutation "objectdialog: enter_column refuses re-entry" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '        if self.column.is_some() {
+            return false;
+        }' \
+  '        if false {
+            return false;
+        }' \
+  geode-shell \
+  enter_column_refuses_re_entry_and_keeps_the_objects_own_list
+
+run_mutation "colours: an unstepped hue is written back verbatim" \
+  crates/geode-shell/src/shell/objectdialog/colours.rs \
+  '.is_some_and(|saved| saved.round() as i64 == value);' \
+  '.is_some_and(|_saved| false);' \
+  geode-shell \
+  a_fractional_hue_survives_a_save_that_did_not_step_it
+
+# A Views-dialog presentation edit (label, width, colour — 2c §5) arrives
+# as a requery whose snapshot has the SAME columns at the same indices.
+# The plan holds those settings, so it must be rebuilt on any difference,
+# not only on a grouping or column-set change — the 2026-09-13 display
+# report: labels, widths and colours never applied until a regroup.
+run_mutation "delegate: a presentation edit rebuilds the plan on a same-column snapshot" \
+  crates/geode-blotter/src/delegate.rs \
+  '        let rebuild = self.plan.as_ref() != Some(&fresh);' \
+  '        let rebuild = self.plan.as_ref().map_or(true, |p| p.grouping != fresh.grouping);' \
+  geode-blotter \
+  a_presentation_change_rebuilds_the_plan_on_a_same_column_snapshot
+
+# 4c §19.9: a keystroke in an open PLAIN text field keeps the cursor on
+# the edited row — the filter's reset-to-top is for a list that just
+# re-ranked, and a plain field's rows stay unfiltered (the 2026-09-13
+# display report: every keystroke after `i` jumped to the first row).
+run_mutation "objectdialog: a keystroke in a plain field keeps the cursor on its row" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            }) => self.follow(field),' \
+  '            }) => self.selected = 0,' \
+  geode-shell \
+  a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

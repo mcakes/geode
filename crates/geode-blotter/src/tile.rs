@@ -9,6 +9,7 @@ use crate::core::flatten::{SortOrder, SortSpec};
 use crate::core::plan::ColumnKind;
 use crate::core::yank::tsv;
 use crate::delegate::{BlotterDelegate, ChevronClicked};
+use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
@@ -86,6 +87,13 @@ pub struct BlotterTile {
     frame: Entity<Frame>,
     data: DataHandle,
     views: Rc<RefCell<Vec<ViewSpec>>>,
+    /// The named colours a `Colour::Named` column paints in (Part 2c
+    /// §6.2) — shared with every other tile exactly as `views` is, and
+    /// refreshed on `ConfigReloaded` by the same `BlotterFactory` door.
+    /// Handed to the delegate in `apply`, the one place a plan is built
+    /// or rebuilt, so the delegate's own `Arc` is never older than the
+    /// snapshot it is painting.
+    colours: Rc<RefCell<Arc<NamedColours>>>,
     /// The schema and derived dimensions `:filter` validates a tile's
     /// scope against (Phase 4a §3.7) — shared with every other tile the
     /// same way `views` is, refreshed on `ConfigReloaded`.
@@ -144,6 +152,7 @@ impl BlotterTile {
         frame: Entity<Frame>,
         data: DataHandle,
         views: Rc<RefCell<Vec<ViewSpec>>>,
+        colours: Rc<RefCell<Arc<NamedColours>>>,
         schema: Rc<RefCell<SchemaSpec>>,
         dims: Rc<RefCell<DerivedDimensions>>,
         find_style: Rc<Cell<FindStyle>>,
@@ -267,6 +276,7 @@ impl BlotterTile {
             frame,
             data,
             views,
+            colours,
             schema,
             dims,
             find_style,
@@ -429,7 +439,19 @@ impl BlotterTile {
     /// under.
     fn apply(&mut self, snapshot: Arc<Snapshot>, grouping: Vec<String>, cx: &mut Context<Self>) {
         if let Some(view) = self.view() {
+            // The plan is (re)built from `view` here, so the definitions
+            // its `Colour::Named` columns resolve against are refreshed
+            // in the same breath — a reloaded `colours.toml` reaches the
+            // paint on the requery every applied reload already triggers
+            // (`Frame::note_config_reloaded`), never a frame behind it.
+            let colours = Arc::clone(&self.colours.borrow());
             self.table.update(cx, |t, cx| {
+                t.delegate_mut().set_colours(colours);
+                // `refresh` re-prepares the column groups from `column()` (the
+                // `on_ui_settings` gotcha), so a plan whose labels or widths
+                // changed reaches the header through it — no separate header
+                // relayout is needed, and whether the plan was replaced is
+                // nothing this door has to act on.
                 t.delegate_mut().apply_snapshot(snapshot, &view, &grouping);
                 t.refresh(cx);
                 let row = t.delegate().cursor.row;
@@ -1583,6 +1605,7 @@ mod tests {
                                 frame.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views())),
+                                Rc::new(RefCell::new(Arc::new(NamedColours::default()))),
                                 Rc::new(RefCell::new(schema())),
                                 Rc::new(RefCell::new(DerivedDimensions::default())),
                                 Rc::new(Cell::new(FindStyle::Vim)),
@@ -1624,6 +1647,18 @@ mod tests {
         restored: Option<&toml::Table>,
         views: Vec<ViewSpec>,
     ) -> (Harness, gpui::VisualTestContext) {
+        open_with_views_and_colours(cx, restored, views, NamedColours::default())
+    }
+
+    /// [`open_with_views`] with the tile's shared `colours` cell filled
+    /// too — the factory's own pairing (Part 2c §6.2), so a test can see
+    /// what a tile actually hands its delegate.
+    fn open_with_views_and_colours(
+        cx: &mut gpui::TestAppContext,
+        restored: Option<&toml::Table>,
+        views: Vec<ViewSpec>,
+        colours: NamedColours,
+    ) -> (Harness, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(crate::init);
         let (data, requests) = DataHandle::for_tests();
@@ -1638,6 +1673,7 @@ mod tests {
                                 frame.clone(),
                                 data.clone(),
                                 Rc::new(RefCell::new(views)),
+                                Rc::new(RefCell::new(Arc::new(colours))),
                                 Rc::new(RefCell::new(schema())),
                                 Rc::new(RefCell::new(DerivedDimensions::default())),
                                 Rc::new(Cell::new(FindStyle::Vim)),
@@ -1717,6 +1753,7 @@ mod tests {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let frame = cx.new(|_| Frame::new(slots(), SavedScopes::new(), None));
                     let views = Rc::new(RefCell::new(views()));
+                    let colours = Rc::new(RefCell::new(Arc::new(NamedColours::default())));
                     let schema = Rc::new(RefCell::new(schema()));
                     let dims = Rc::new(RefCell::new(DerivedDimensions::default()));
                     cx.new(|cx| {
@@ -1726,6 +1763,7 @@ mod tests {
                                 frame.clone(),
                                 data.clone(),
                                 views.clone(),
+                                colours.clone(),
                                 schema.clone(),
                                 dims.clone(),
                                 Rc::new(Cell::new(FindStyle::Vim)),
@@ -1741,6 +1779,7 @@ mod tests {
                                 frame.clone(),
                                 data.clone(),
                                 views.clone(),
+                                colours.clone(),
                                 schema.clone(),
                                 dims.clone(),
                                 Rc::new(Cell::new(FindStyle::Vim)),
@@ -3524,6 +3563,66 @@ mod tests {
             "titles must match too, not just ids — `ActionRegistry::register`'s \
              discarded `Err` on the shell's duplicate registration means the \
              shell's title, not the blotter's, is what actually reaches the palette"
+        );
+    }
+    /// 2c §6.2: the definitions travel from the factory's shared cell to
+    /// the delegate, and they travel on the plan — the tile hands them
+    /// over in `apply`, where the plan is built, so the delegate can
+    /// never be painting a plan against colours older than it. Asserted
+    /// through `cell_colour`, the same door `render_td`/`render_th` use.
+    #[gpui::test]
+    fn a_delivered_snapshot_hands_the_delegate_the_tiles_colours(cx: &mut gpui::TestAppContext) {
+        let text = "[tree]\ndataset = \"d\"\ngrouping = [\"lhu\"]\n\
+                    [[tree.columns]]\nname = \"delta01\"\nformat = { colour = \"delta\" }\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let mut colours = NamedColours::default();
+        colours.insert(
+            "delta".into(),
+            geode_core::colour::Definition::Token(geode_core::colour::Token::Danger),
+        );
+        let (h, mut cx) =
+            open_with_views_and_colours(cx, None, ViewSpec::from_doc(&doc).0, colours);
+        h.tile.update(&mut cx, |t, cx| t.set_visible(true, cx));
+        let p = next_query(&h.requests);
+        deliver(&h, &mut cx, p.tag, Ok(snapshot()));
+
+        let grey = geode_core::colour::Rgb {
+            r: 0.5,
+            g: 0.5,
+            b: 0.5,
+        };
+        let danger = geode_core::colour::Rgb {
+            r: 0.75,
+            g: 0.125,
+            b: 0.125,
+        };
+        let anchors = geode_core::colour::Anchors {
+            normal: [grey; 6],
+            light: [grey; 6],
+        };
+        let tokens = geode_core::colour::Tokens {
+            foreground: grey,
+            muted: grey,
+            primary: grey,
+            accent: grey,
+            danger,
+            warning: grey,
+            success: grey,
+            info: grey,
+            chart: [grey; 5],
+            bullish: grey,
+            bearish: grey,
+            background: grey,
+        };
+        let resolved = h.tile.update(&mut cx, |t, cx| {
+            t.table().update(cx, |table, _| {
+                table.delegate_mut().cell_colour(1, &anchors, &tokens)
+            })
+        });
+        assert_eq!(
+            resolved,
+            Some(geode_shell::shell::colours::to_hsla(danger)),
+            "the tile's own colours must reach the delegate with the plan"
         );
     }
 }

@@ -87,6 +87,60 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
     });
 }
 
+/// 2c §6.2: a named colour is part of what a tile paints, so a
+/// `colours.toml` edit must reach the modules the same way a `views`
+/// edit does — through `ConfigReloaded`, which is what makes the app's
+/// bridge re-read the doc and hand the blotter factory the new
+/// definitions. Without it a trader's colour change would sit on disk
+/// until the next restart.
+#[gpui::test]
+fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    // The fixture's config has no docs at all, so this reload's ONLY
+    // difference from the running one is the `colours` doc — `views`,
+    // `view_presentation` and `dimensions` are all absent before and
+    // after, which is what makes the emission attributable to `colours`.
+    let new_config = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap()],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::ConfigReloaded)),
+        "a colours-only reload must fire ConfigReloaded: {:?}",
+        events.borrow()
+    );
+}
+
 /// A clean reload (no error diagnostics) is applied: the mod alias
 /// (and therefore the keymap built from it) updates to match the new
 /// config, an open palette closes (brief: "must close on a successful

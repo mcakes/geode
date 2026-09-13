@@ -272,8 +272,16 @@ impl ShellView {
             // commonest edit there is (a column width). Omitted here, a
             // personalisation would sit on disk until the next restart
             // (spec §5.6).
-            let views_changed =
-                changed("views") || changed("view_presentation") || changed("dimensions");
+            // `colours` rides here too (Part 2c §6.2): a named colour is
+            // part of what a tile PAINTS, and the app's bridge re-reads
+            // the doc in this very event's handler to hand the blotter
+            // factory the new definitions. Omitted, a trader's colour
+            // edit would sit on disk until the next restart — the same
+            // failure `view_presentation`'s inclusion just above fixed.
+            let views_changed = changed("views")
+                || changed("view_presentation")
+                || changed("dimensions")
+                || changed("colours");
             // The dimension pickers' column list (Phase 4a §3.3):
             // `pickable_columns` depends on exactly `datasets` (categorical
             // columns) and `dimensions` (derived dimensions) — the same

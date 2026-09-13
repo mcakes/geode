@@ -67,6 +67,7 @@
 //! from the reverted config, so the two cannot drift apart.
 
 pub mod apply;
+mod colours;
 mod groupings;
 pub mod render;
 mod schema;
@@ -77,6 +78,7 @@ mod views;
 use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::config::{Config, Diagnostic, Layer, Severity};
+use geode_core::view::ColumnPresentation;
 
 use crate::dialogmode::DialogMode;
 
@@ -99,6 +101,10 @@ pub enum Domain {
     Schema,
     /// The ingest feeds, one object per source (§8.3, §19.3).
     Sources,
+    /// The shared colour vocabulary a column's `colour` field and a
+    /// chart series can name — one object per named colour, a hue (with
+    /// its tone) or a theme token (Part 2c §6.1).
+    Colours,
 }
 
 /// Which stage of the scaffold is on screen.
@@ -125,6 +131,21 @@ pub enum Stage {
     /// `PartialEq` stage comparison has no business walking.
     Edit {
         object: String,
+    },
+    /// Editing one column's presentation — a **projection** over the same
+    /// [`Draft`] (Part 2c §5.2), not a draft of its own: `enter` on a
+    /// member row stashes the view's fields and installs the column's
+    /// seven, every change folds back onto the item
+    /// ([`Draft::fold_column`]), and `escape` restores the view with the
+    /// cursor on the column.
+    ///
+    /// It carries both names for the same reason [`Stage::Edit`] carries
+    /// one: the pair is what `escape` steps back through and what the
+    /// crumb reads (`tree › npv`). Everything mutable about the column
+    /// lives on the draft, as it does for `Edit`.
+    Column {
+        object: String,
+        column: String,
     },
 }
 
@@ -202,6 +223,7 @@ impl Domain {
             Domain::Scopes => scopes::DOC,
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
+            Domain::Colours => colours::DOC,
         }
     }
 
@@ -213,6 +235,7 @@ impl Domain {
             Domain::Scopes => "Scopes",
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
+            Domain::Colours => "Colours",
         }
     }
 
@@ -226,6 +249,7 @@ impl Domain {
             Domain::Scopes => "saved",
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
+            Domain::Colours => "colours",
         }
     }
 
@@ -239,6 +263,7 @@ impl Domain {
             Domain::Scopes => scopes::summary,
             Domain::Schema => schema::summary,
             Domain::Sources => sources::summary,
+            Domain::Colours => colours::summary,
         }
     }
 
@@ -262,8 +287,15 @@ impl Domain {
             // reason Groupings does not: every field either domain has is
             // `Destination::Doc` (`scopes.rs`'s and `sources.rs`'s own
             // module docs). Schema joins them for the reason this
-            // method's own doc comment gives.
-            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Sources => None,
+            // method's own doc comment gives. Colours joins for the same
+            // "every field is `Destination::Doc`" reason (`colours.rs`'s
+            // own module doc) — there is nothing to personalise about a
+            // shared colour without forking it.
+            Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colours => None,
         }
     }
 
@@ -284,7 +316,9 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources => None,
+            Domain::Views | Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours => {
+                None
+            }
         }
     }
 
@@ -308,7 +342,11 @@ impl Domain {
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
             Domain::Sources => Some(sources::prefix),
-            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => None,
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Colours => None,
         }
     }
 
@@ -353,9 +391,29 @@ impl Domain {
     /// cannot see that name at all, which is why the refusal reads this
     /// union rather than the list.
     ///
+    /// The names this domain refuses outright, reserved by a grammar
+    /// outside its own doc (Part 2c §6.1) — `Colours` alone: a column's
+    /// `colour` field already spells `none` and `sign` itself, so a
+    /// named colour object by either name would be unreachable through
+    /// that field and confusing everywhere else. Empty for every other
+    /// domain, which has no such collision.
+    pub fn reserved_names(self) -> &'static [&'static str] {
+        match self {
+            Domain::Colours => &geode_core::colour::RESERVED_NAMES,
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Scopes
+            | Domain::Schema
+            | Domain::Sources => &[],
+        }
+    }
+
     /// `config_version` never reaches here: `check_object_name` refuses
     /// it before the caller asks.
     pub fn name_taken(self, config: &Config, name: &str) -> bool {
+        if self.reserved_names().contains(&name) {
+            return true;
+        }
         if self.roster().is_some_and(|roster| roster.contains(&name)) {
             return true;
         }
@@ -724,6 +782,12 @@ impl Destination {
             (Destination::Presentation, Domain::Sources) => {
                 unreachable!("Sources has no Presentation-destined fields")
             }
+            // Colours joins the same list: `colours.rs`'s module doc has
+            // the reasoning (every field is `Destination::Doc`, there is
+            // no presentation overlay for a shared colour).
+            (Destination::Presentation, Domain::Colours) => {
+                unreachable!("Colours has no Presentation-destined fields")
+            }
         }
     }
 }
@@ -742,19 +806,30 @@ impl Destination {
 /// [`FieldKind::OrderedList`] documents, and nothing has to keep a flag
 /// and a position agreeing with each other.
 ///
-/// `width` is `Option<f32>` and not the spec sketch's `u32` because
-/// `ColumnPresentation::width` — the thing it round-trips through — is
-/// `Option<f32>`. `None` means "no width declared", which is not the
-/// same as zero: a declared zero would be a column of no width.
+/// `presentation` is the column's presentation as the trader sees it —
+/// the kind default with the desk's and the overlay's keys applied, i.e.
+/// `ViewSpec::presentation_of` after `load_views` (Part 2c §4.3) — not a
+/// bare `width` (the shape this field carried before Part 2c): a
+/// picker's `column_summary` needs precision, colour and scale too, and
+/// carrying the whole `ColumnPresentation` is what lets it read them off
+/// one value rather than growing a field per format key. A domain with
+/// no presentation concept at all (Groupings' `dimensions`) carries
+/// `ColumnPresentation::default()`, which is indistinguishable from "no
+/// override of anything" — exactly what such a domain means to say.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ListItem {
     pub name: String,
     /// Shown rather than hidden. For a view this is the inverse of
     /// `ColumnPresentation::hidden`, and it is presentation, never the
     /// column set: a hidden column stays in `ViewSpec::columns`, so the
-    /// compiler still selects it and unhiding costs nothing.
+    /// compiler still selects it and unhiding costs nothing. `included`
+    /// is the one truth from here on — the tick flips it and
+    /// `views::presentation_table` reads only it to decide `hidden`;
+    /// `presentation.hidden` is merely the seed `views::fields` read out
+    /// of the merged overlay when this item was built, never consulted
+    /// again.
     pub included: bool,
-    pub width: Option<f32>,
+    pub presentation: ColumnPresentation,
     /// The `[[columns]]` `kind` a first-time write of this item needs —
     /// `"dimension"` or `"measure"` for Views (`views::fields`'s own doc
     /// has the schema-role mapping and why a `key`/`attribute` column
@@ -782,10 +857,20 @@ pub struct ListItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
     Text(String),
+    /// `step` is the distance one `space` moves; `wrap` makes the range
+    /// circular — a hue, say — so a step past `max` lands at
+    /// `min + overshoot` rather than pinning at `max` (spec §5.4). Every
+    /// `Number` this crate builds today is `step: 1, wrap: false` (the
+    /// only one live is Sources' `stable_polls`; Groupings' `slot` is
+    /// display-only and a [`FieldKind::Text`], not a `Number`, per
+    /// `groupings.rs`'s own doc) — a future field that steps by more than
+    /// one, or wraps, is what this pair exists for.
     Number {
         value: i64,
         min: i64,
         max: i64,
+        step: i64,
+        wrap: bool,
     },
     Bool(bool),
     Choice {
@@ -1050,6 +1135,24 @@ pub struct Draft {
     /// what the escape ladder and the browse cursor restore key on, and
     /// both must still read `Edit` here.
     pub text_entry: Option<TextEntry>,
+    /// The object's OWN fields, while [`Stage::Column`] has swapped
+    /// `fields` out for one column's seven (Part 2c §5.2). `None`
+    /// everywhere else.
+    ///
+    /// The view's list has to stay reachable while the stage is open,
+    /// because the write path renders the whole object on every
+    /// keystroke — `views::presentation_table` reads
+    /// `list_items("columns")` — and the column stage's own writes are
+    /// exactly writes to that list. Stashing the fields here rather than
+    /// building a second `Draft` is what keeps `is_dirty`,
+    /// `writes_by_destination`, `mark_saved` and the commit path
+    /// unchanged: they see one draft whose fields happen to be a
+    /// column's.
+    parent_fields: Option<Vec<Field>>,
+    /// Which column [`Draft::parent_fields`] was stashed for — the fold
+    /// target, and the scope [`Draft::row_for_path`] narrows to. `Some`
+    /// exactly when `parent_fields` is; [`Draft::column`] is the read.
+    column: Option<String>,
 }
 
 /// Which way [`Draft::step_selected`] moves the value under the cursor.
@@ -1269,16 +1372,237 @@ impl Draft {
         self.source = self.baseline_source.clone();
     }
 
-    /// The object's own items of the ordered-list field named `key` —
-    /// what is written, counted and reorderable.
-    pub fn list_items(&self, key: &str) -> Option<&[ListItem]> {
+    /// The column whose presentation is open, if [`Stage::Column`] is
+    /// (Part 2c §5.2). The one question `render::revalidate` asks before
+    /// folding, and the reason the fold is a property of the draft rather
+    /// than of the stage the gpui side happens to be painting.
+    pub fn column(&self) -> Option<&str> {
+        self.column.as_deref()
+    }
+
+    /// Open the column stage over `column` (Part 2c §5.2): stash the
+    /// object's fields, install `fields` (the column's seven —
+    /// `views::column_fields`), and start the stage clean.
+    ///
+    /// `false`, changing nothing, when `column` is not one of the
+    /// object's own members. The check is the whole safety property here:
+    /// [`Draft::fold_column`] finds its item BY NAME in the stashed list,
+    /// so a stage opened over a name that list does not hold would take
+    /// every keystroke and fold none of them — a stage that silently
+    /// discards work, which is worse than one that never opens. An
+    /// AVAILABLE row is a non-member by exactly this test, which is what
+    /// keeps 2b's notice on it rather than opening a stage over a column
+    /// the view does not have.
+    ///
+    /// `baseline` becomes the installed fields, so the first keystroke in
+    /// the stage is the first difference — and so `writes_by_destination`
+    /// compares seven column fields against seven, never against the two
+    /// it replaced. `query`, `selected`, `text_entry` and `confirm` all
+    /// reset for the same reason [`ObjectDialogState::enter_edit`] resets
+    /// its own: a filter or a half-open field belonging to the list
+    /// behind would be live against rows that no longer exist.
+    pub fn enter_column(&mut self, column: &str, fields: Vec<Field>) -> bool {
+        // Re-entry would be the end of the object (the final review's
+        // M-1): the membership test below passes THROUGH
+        // `field_by_key`'s parent fallback, so from an already-open
+        // stage it would stash the seven installed column fields as
+        // `parent_fields` and drop the view's own list forever — after
+        // which `list_items("columns")` answers `None` and the write
+        // path renders a view with no columns at all. Unreached today
+        // (this stage installs no `EditRow::Item` rows, and
+        // `commit_selected_row` gates on `column().is_none()` besides),
+        // so this line is what makes it unrepresentable rather than
+        // merely unreached.
+        if self.column.is_some() {
+            return false;
+        }
+        let is_member = self
+            .list_items("columns")
+            .is_some_and(|items| items.iter().any(|i| i.name == column));
+        if !is_member {
+            return false;
+        }
+        self.parent_fields = Some(std::mem::replace(&mut self.fields, fields));
+        self.column = Some(column.to_string());
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        self.selected = 0;
+        self.text_entry = None;
+        self.confirm = None;
+        true
+    }
+
+    /// Write the installed column fields back onto the item the object's
+    /// own list holds (Part 2c §5.2) — the projection's whole mechanism.
+    ///
+    /// Called from `render::revalidate`, so it runs on every changed
+    /// value BEFORE the validator and the write path read the list. A
+    /// no-op outside the stage, and a no-op for a column the stashed list
+    /// no longer holds, which [`Draft::enter_column`]'s membership check
+    /// makes unreachable.
+    ///
+    /// **The desk baseline goes in and the two `Text` fields come back
+    /// out.** A cleared `label` or an `auto` width means "stop overriding
+    /// this", which resolves to whatever the desk's own `views.toml` says
+    /// (`views::fold_into` has the full statement, and why writing `None`
+    /// there would silently swallow the clear). The fold then re-seeds
+    /// those two fields from the item, so the desk's value is on screen
+    /// on the same keystroke rather than a blank the next rebuild
+    /// contradicts. Re-seeding is a no-op for every other value, since
+    /// the field and the item already agree.
+    ///
+    /// Returns the key that fell back, for the caller's notice — see
+    /// `views::fold_into` on why at most one can.
+    ///
+    /// **This method is coupled to `Domain::Views` by name** (the final
+    /// review's M-5): it calls `views::desk_baseline` and
+    /// `views::fold_into` directly, where [`Draft::enter_column`]
+    /// deliberately takes the stage's fields in rather than reaching for
+    /// a domain's vocabulary. Correct today because Views is the only
+    /// domain that ever sets `self.column` — but a second domain gaining
+    /// a column stage would silently inherit Views' desk-fallback
+    /// semantics here, and the fix at that point is to hand the fold in
+    /// the way `enter_column` hands the fields in, not to add a match.
+    pub fn fold_column(&mut self) -> Option<&'static str> {
+        let name = self.column.clone()?;
+        // Read before the mutable borrow below: the baseline comes off
+        // `source`, which the column stage never touches, so one walk per
+        // fold describes the desk exactly.
+        let desk = views::desk_baseline(self)
+            .remove(name.as_str())
+            .unwrap_or_default();
+        let parent = self.parent_fields.as_mut()?;
+        let field = parent.iter_mut().find(|f| f.key == "columns")?;
+        let FieldKind::OrderedList { items, .. } = &mut field.kind else {
+            return None;
+        };
+        let item = items.iter_mut().find(|i| i.name == name)?;
+        let followed_desk = views::fold_into(item, &self.fields, &desk);
+        // Copied out so the parent's borrow ends before the installed
+        // fields are written.
+        let (label, width) = (item.presentation.label.clone(), item.presentation.width);
+        for field in &mut self.fields {
+            let FieldKind::Text(text) = &mut field.kind else {
+                continue;
+            };
+            match field.key.as_str() {
+                "label" => *text = label.clone().unwrap_or_default(),
+                "width" => *text = views::width_text(width),
+                _ => {}
+            }
+        }
+        followed_desk
+    }
+
+    /// Close the column stage (Part 2c §5.2): fold one last time, restore
+    /// the object's fields, and leave the cursor on the column's own row.
+    ///
+    /// The final fold is not belt-and-braces — it is what makes leaving
+    /// without having pressed anything since the last change still
+    /// correct — and it costs nothing when the item is already up to
+    /// date, since the fold writes the same values back.
+    ///
+    /// `baseline` becomes the restored fields, which says "nothing is
+    /// outstanding": every change made in the stage went through
+    /// `commit_or_confirm` on its own keystroke, so there is nothing here
+    /// for a later comparison to rediscover. (A change the commit
+    /// REFUSED — an error diagnostic standing — is the one thing that
+    /// baseline forgets; it is already on screen and already blocked, and
+    /// the trader's next keystroke on the restored object queues it
+    /// again along with whatever they do next.)
+    ///
+    /// The cursor is resolved after the restore and by NAME, through the
+    /// same `visible_rows` index every verb speaks: the column's position
+    /// in the list is not the position it had in the seven-row stage, and
+    /// an index carried across would land wherever that number happens to
+    /// point.
+    pub fn leave_column(&mut self) {
+        self.fold_column();
+        let Some(parent) = self.parent_fields.take() else {
+            return;
+        };
+        let column = self.column.take();
+        self.fields = parent;
+        self.baseline = self.fields.clone();
+        self.query.clear();
+        // The stage's own text field can only be open with `escape`
+        // claimed by `handle_text_key`, so this cannot be `Some` here;
+        // cleared anyway because its `EditRow` indexes the fields being
+        // replaced, and a stale one would point into the restored list.
+        self.text_entry = None;
+        // Symmetric with `enter_column`'s own reset: a confirm armed over
+        // the seven installed fields has nothing to answer for once they
+        // are gone, and leaving it armed would hold the restored list's
+        // keystrokes hostage to a question about a stage that has closed.
+        // Unreachable today — the armed block claims `escape` before this
+        // rung is read — which is exactly why it is cleared rather than
+        // relied on.
+        self.confirm = None;
+        self.selected = 0;
+        if let Some(column) = column {
+            self.select_item_named(&column);
+        }
+    }
+
+    /// Put the cursor on the row of the ordered-list item named `name`,
+    /// or on the first row when no list holds it.
+    ///
+    /// By NAME through the `visible_rows` index every verb speaks, never
+    /// by a carried index: the column stage's seven rows and the view's
+    /// own list are different lists, so a number carried from one to the
+    /// other lands wherever it happens to point. Shared by
+    /// [`Draft::leave_column`] and `apply::revert_failed_write`, whose
+    /// rebuilt draft has the same problem for the same reason.
+    pub(in crate::shell::objectdialog) fn select_item_named(&mut self, name: &str) {
+        self.selected = 0;
+        let target = self.fields.iter().enumerate().find_map(|(field, f)| {
+            let FieldKind::OrderedList { items, .. } = &f.kind else {
+                return None;
+            };
+            items
+                .iter()
+                .position(|i| i.name == name)
+                .map(|item| EditRow::Item { field, item })
+        });
+        if let Some(row) = target {
+            self.follow(row);
+        }
+    }
+
+    /// The field keyed `key` — the installed ones first, then the
+    /// object's own if [`Stage::Column`] has them stashed
+    /// ([`Draft::parent_fields`]).
+    ///
+    /// The one lookup [`Draft::list_items`], [`Draft::available_items`]
+    /// and [`Draft::choice`] all go through, so the fallback is a
+    /// property of "reading a field by name" rather than something three
+    /// call sites remember. Nothing shadows: the column stage's seven
+    /// keys (`views::COLUMN_KEYS`) and a view's own two (`dataset`,
+    /// `columns`) are disjoint, so the installed-first order only ever
+    /// decides between a key and its absence.
+    fn field_by_key(&self, key: &str) -> Option<&Field> {
         self.fields
             .iter()
             .find(|f| f.key == key)
-            .and_then(|f| match &f.kind {
-                FieldKind::OrderedList { items, .. } => Some(items.as_slice()),
-                _ => None,
-            })
+            .or_else(|| self.parent_fields.as_ref()?.iter().find(|f| f.key == key))
+    }
+
+    /// The object's own items of the ordered-list field named `key` —
+    /// what is written, counted and reorderable.
+    ///
+    /// Read through [`Draft::field_by_key`], which falls back to the
+    /// object's stashed fields, and that fallback is load-bearing rather
+    /// than tidy: the column stage (Part 2c §5.2) swaps `fields` out for
+    /// one column's seven, while the write path still renders the WHOLE
+    /// object on every keystroke — `views::presentation_table` and
+    /// `views::doc_table` both read this — and the item being folded into
+    /// lives in that stashed list. Without the fallback, a keystroke in
+    /// the column stage would render a view with no columns at all.
+    pub fn list_items(&self, key: &str) -> Option<&[ListItem]> {
+        self.field_by_key(key).and_then(|f| match &f.kind {
+            FieldKind::OrderedList { items, .. } => Some(items.as_slice()),
+            _ => None,
+        })
     }
 
     /// The catalogue of what may JOIN the ordered-list field named `key`
@@ -1289,26 +1613,18 @@ impl Draft {
     /// ([`FieldKind::OrderedList`]'s own doc), so this deliberately does
     /// not flatten them into one empty slice.
     pub fn available_items(&self, key: &str) -> Option<&[ListItem]> {
-        self.fields
-            .iter()
-            .find(|f| f.key == key)
-            .and_then(|f| match &f.kind {
-                FieldKind::OrderedList { available, .. } => available.as_deref(),
-                _ => None,
-            })
+        self.field_by_key(key).and_then(|f| match &f.kind {
+            FieldKind::OrderedList { available, .. } => available.as_deref(),
+            _ => None,
+        })
     }
 
     /// The selected option of the `Choice` field named `key`.
     pub fn choice(&self, key: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|f| f.key == key)
-            .and_then(|f| match &f.kind {
-                FieldKind::Choice { options, selected } => {
-                    options.get(*selected).map(String::as_str)
-                }
-                _ => None,
-            })
+        self.field_by_key(key).and_then(|f| match &f.kind {
+            FieldKind::Choice { options, selected } => options.get(*selected).map(String::as_str),
+            _ => None,
+        })
     }
 
     /// `space`: change the value under the cursor forward, recording it
@@ -1333,6 +1649,26 @@ impl Draft {
     /// list below it? `false` when no field is open at all.
     pub fn chain_entry(&self) -> bool {
         self.text_entry.is_some_and(|entry| entry.completions)
+    }
+
+    /// The write half of the query mirror for this draft —
+    /// `ObjectDialogState::set_query` routes an edit- or column-stage
+    /// keystroke here. A filter keystroke resets the cursor to the top
+    /// match, because the list just re-ranked and the old index points at
+    /// an unrelated row. An open PLAIN text field is not a filter: its rows
+    /// stay unfiltered with the edited row highlighted (§19.1), so the
+    /// cursor stays on that row. The chain field's rows ARE its completions
+    /// and keep the reset (§18.8). Found on a display 2026-09-13: every
+    /// keystroke after `i` sent the highlight back to the first row.
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        match self.text_entry {
+            Some(TextEntry {
+                row: field,
+                completions: false,
+            }) => self.follow(field),
+            _ => self.selected = 0,
+        }
     }
 
     /// `i` on a `Text` or `Number` row (§19.1): open the field seeded with
@@ -1430,7 +1766,9 @@ impl Draft {
         let field = &mut self.fields[index];
         let label = field.label.clone();
         let outcome = match &mut field.kind {
-            FieldKind::Number { value, min, max } => match typed.parse::<i64>() {
+            FieldKind::Number {
+                value, min, max, ..
+            } => match typed.parse::<i64>() {
                 Err(_) => return Step::Refused(format!("{label} must be a whole number")),
                 Ok(n) if n < *min || n > *max => {
                     return Step::Refused(format!("{label} must be between {min} and {max}"));
@@ -1512,7 +1850,13 @@ impl Draft {
                         };
                         Step::Changed
                     }
-                    FieldKind::Number { value, min, max } => {
+                    FieldKind::Number {
+                        value,
+                        min,
+                        max,
+                        step,
+                        wrap,
+                    } => {
                         // A value outside [min, max] can arise entirely
                         // outside this dialog's own bounds — Sources' reader
                         // accepts any positive `stable_mtime` while the
@@ -1526,12 +1870,32 @@ impl Draft {
                                 "{label} is {value}, outside {min}–{max} — type a value with i"
                             ));
                         }
-                        match direction {
-                            StepDirection::Forward if *value >= *max => return Step::Inert,
-                            StepDirection::Backward if *value <= *min => return Step::Inert,
-                            StepDirection::Forward => *value = (*value + 1).clamp(*min, *max),
-                            StepDirection::Backward => *value = (*value - 1).clamp(*min, *max),
+                        // `span` is the count of representable values —
+                        // `max - min + 1`, not `max - min` — so a value
+                        // that steps exactly one span past `max` wraps
+                        // back to itself rather than to its neighbour.
+                        // `wrap` is what makes the range circular (a hue:
+                        // 359 + 15 lands at 14, not clamped at 359);
+                        // without it a step past either bound clamps to
+                        // that bound instead.
+                        let span = *max - *min + 1;
+                        let next = match direction {
+                            StepDirection::Forward => *value + *step,
+                            StepDirection::Backward => *value - *step,
+                        };
+                        let landed = if *wrap {
+                            (next - *min).rem_euclid(span) + *min
+                        } else if next > *max {
+                            *max
+                        } else if next < *min {
+                            *min
+                        } else {
+                            next
+                        };
+                        if landed == *value {
+                            return Step::Inert;
                         }
+                        *value = landed;
                         Step::Changed
                     }
                     // See `FieldKind`: `Text` is `i`'s and `MultiChoice`
@@ -1927,6 +2291,8 @@ impl Draft {
             diagnostics: Vec::new(),
             confirm: None,
             text_entry: None,
+            parent_fields: None,
+            column: None,
         }
     }
 
@@ -1938,8 +2304,41 @@ impl Draft {
     /// to the item that array position currently names (never an
     /// available row — the object has no diagnostic about a column it
     /// does not have).
+    ///
+    /// **In the column stage (Part 2c §5.5) the grammar is narrower**,
+    /// because the rows are one column's format keys rather than the
+    /// object's fields: the path must be `columns.<i>.[format.]<key>`,
+    /// its index must resolve — by name, the same 2b rule — to the OPEN
+    /// column, and `<key>` must be one of the installed fields. A path
+    /// naming another column lands nowhere while this stage is open (its
+    /// row is not on screen to carry the glyph), and so does a path
+    /// naming the object itself (`views.tree.dataset`); both stay on the
+    /// header, where every diagnostic's text is of record regardless.
+    /// The `format.` segment is optional because `label` and `width` sit
+    /// on the column's own table while the other five sit under its
+    /// `format` sub-table — one grammar, both spellings.
     pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
         let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
+        if let Some(column) = self.column.as_deref() {
+            let rest = rest.strip_prefix("columns.")?;
+            let (raw_index, after) = rest.split_once('.')?;
+            let raw_index = raw_index.parse::<usize>().ok()?;
+            let items = match &self.field_by_key("columns")?.kind {
+                FieldKind::OrderedList { items, .. } => items,
+                _ => return None,
+            };
+            let resolved = self.resolve_list_index("columns", raw_index, items)?;
+            let resolved_name = items.get(resolved)?.name.as_str();
+            if resolved_name != column {
+                return None;
+            }
+            let key = after.strip_prefix("format.").unwrap_or(after);
+            return self
+                .fields
+                .iter()
+                .position(|field| field.key == key)
+                .map(EditRow::Field);
+        }
         self.fields.iter().enumerate().find_map(|(i, field)| {
             let after = if rest == field.key {
                 ""
@@ -2046,18 +2445,23 @@ fn membership_changed(before: Option<&Field>, field: &Field) -> bool {
 }
 
 impl Domain {
-    /// May `i` edit the `Text` row keyed `key` on this domain? `false`
-    /// everywhere but Sources — Groupings' `slot` and Scopes' two
-    /// summaries are display-only `Text`s and must refuse; Schema is
-    /// read-only outright. Sources (§19.3) is the first `true`, for
-    /// `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
-    /// (`sources::text_editable`).
+    /// May `i` edit the `Text` row keyed `key` on this domain? `false` on
+    /// Groupings, Scopes, Schema and Colours — Groupings' `slot` and
+    /// Scopes' two summaries are display-only `Text`s and must refuse;
+    /// Schema is read-only outright; Colours has no `Text` row at all
+    /// (`hue` is a `Number`, `tone`/`token` are `Choice`), so `i` never
+    /// reaches this door for it. Sources (§19.3) was the first `true`,
+    /// for `paths`/`poll_interval`/`pending_timeout`/`batch_pattern`
+    /// (`sources::text_editable`); Views answers `true` for the column
+    /// stage's `label` and `width` (Part 2c §5.3, `views::text_editable`)
+    /// and for nothing else it has.
     pub fn text_editable(self, key: &str) -> bool {
         match self {
-            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
                 let _ = key;
                 false
             }
+            Domain::Views => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
         }
     }
@@ -2065,14 +2469,19 @@ impl Domain {
     /// The adapter's door for a committed `Text` (§19.1): normalise the
     /// typed text, or refuse it with the reason the notice shows. Trims
     /// by default; an adapter with a real grammar (a duration, a regex, a
-    /// path list) overrides its own keys — Sources is the first
-    /// (`sources::parse_text`).
+    /// path list) overrides its own keys — Sources was the first
+    /// (`sources::parse_text`), Views the second (the column stage's
+    /// `width`, Part 2c §5.3).
     pub fn parse_text(self, key: &str, text: &str) -> Result<String, String> {
         match self {
-            Domain::Views | Domain::Groupings | Domain::Scopes | Domain::Schema => {
+            // Colours joins for the same reason `text_editable` gives
+            // it no `true` above: no `Text` row for this door to ever
+            // be called on.
+            Domain::Groupings | Domain::Scopes | Domain::Schema | Domain::Colours => {
                 let _ = key;
                 Ok(text.trim().to_string())
             }
+            Domain::Views => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
         }
     }
@@ -2090,6 +2499,7 @@ impl Domain {
             Domain::Scopes => scopes::fields(config, object),
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
+            Domain::Colours => colours::fields(config, object),
         }
     }
 
@@ -2116,6 +2526,8 @@ impl Domain {
             diagnostics: Vec::new(),
             confirm: None,
             text_entry: None,
+            parent_fields: None,
+            column: None,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -2147,6 +2559,7 @@ impl Domain {
             Domain::Scopes => scopes::to_table(draft, dest),
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
+            Domain::Colours => colours::to_table(draft, dest),
         }
     }
 
@@ -2160,6 +2573,7 @@ impl Domain {
             Domain::Scopes => scopes::validate(draft, config),
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
+            Domain::Colours => colours::validate(draft, config),
         }
     }
 }
@@ -2187,8 +2601,8 @@ pub(super) fn set_object(document: &mut toml_edit::DocumentMut, name: &str, item
 /// Goes through a `DocumentMut` rather than `Table::to_string`, which is
 /// not the same thing and quietly loses work: a bare table renders only
 /// its own key-value pairs, so an array of tables (`[[tree.columns]]`)
-/// and a sub-table (`[tree.width]`) both need the document's header path
-/// to appear at all.
+/// and a sub-table (`[tree.columns.npv]`) both need the document's
+/// header path to appear at all.
 pub fn object_text(name: &str, item: toml_edit::Item) -> String {
     let mut document = toml_edit::DocumentMut::new();
     set_object(&mut document, name, item);
@@ -2458,11 +2872,13 @@ impl ObjectDialogState {
     /// empty-looking filter field, and a `leave_edit` cursor restore that
     /// silently failed to find the object it was looking for.
     pub fn set_query(&mut self, query: String) {
-        if matches!(self.stage, Stage::Edit { .. })
+        // The column stage (Part 2c §5.2) is the edit stage's own filter
+        // row over a different set of rows — one draft, one cursor space
+        // — so it takes the same side of the mirror.
+        if matches!(self.stage, Stage::Edit { .. } | Stage::Column { .. })
             && let Some(draft) = self.draft.as_mut()
         {
-            draft.query = query;
-            draft.selected = 0;
+            draft.set_query(query);
         } else {
             self.query = query;
             self.selected = 0;
@@ -2477,8 +2893,20 @@ impl ObjectDialogState {
     /// left sitting in the other stage's slot can never reach the screen.
     pub fn effective_query(&self) -> &str {
         match (&self.stage, self.draft.as_ref()) {
-            (Stage::Edit { .. }, Some(draft)) => draft.query.as_str(),
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.query.as_str(),
             _ => self.query.as_str(),
+        }
+    }
+
+    /// The cursor of the open stage, in the same slot rule as
+    /// [`Self::effective_query`]: the draft's in the edit and column
+    /// stages, the state's own otherwise. What the change subscription
+    /// scrolls to after a keystroke — the top for a filter (the reset),
+    /// the edited row for an open plain field, which `set_query` keeps.
+    pub fn effective_selected(&self) -> usize {
+        match (&self.stage, self.draft.as_ref()) {
+            (Stage::Edit { .. } | Stage::Column { .. }, Some(draft)) => draft.selected,
+            _ => self.selected,
         }
     }
 
@@ -2528,7 +2956,10 @@ impl ObjectDialogState {
     /// stage would close the whole dialog out from under the object being
     /// edited, instead of going back one stage.
     pub fn has_previous_stage(&self) -> bool {
-        matches!(self.stage, Stage::Edit { .. } | Stage::Naming)
+        matches!(
+            self.stage,
+            Stage::Edit { .. } | Stage::Naming | Stage::Column { .. }
+        )
     }
 }
 
@@ -2598,6 +3029,34 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    /// A `tree` view over a `risk` dataset with two member columns — `npv`
+    /// (a measure) and `book` (a dimension) — and nothing left in the
+    /// available catalogue.
+    ///
+    /// The column stage's own fixture (Part 2c §5): it needs a REAL
+    /// dataset doc, unlike most tests here, because the `dataset` choice
+    /// is what proves the parent's fields are still reachable through
+    /// [`Draft::field_by_key`] while the stage has swapped `fields` out,
+    /// and a second member is what proves a path naming the OTHER column
+    /// lands nowhere (§5.5).
+    fn config_with_view_and_datasets() -> Config {
+        config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (
+                Layer::Desk,
+                "views",
+                "[tree]\ndataset = \"risk\"\n\
+                 [[tree.columns]]\nname = \"npv\"\n\
+                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+            ),
+        ])
     }
 
     #[test]
@@ -3174,6 +3633,8 @@ mod tests {
             diagnostics: Vec::new(),
             confirm: None,
             text_entry: None,
+            parent_fields: None,
+            column: None,
         }
     }
 
@@ -3190,6 +3651,8 @@ mod tests {
             value: 0,
             min: 0,
             max: 2,
+            step: 1,
+            wrap: false,
         });
         assert!(
             !draft.toggle_selected_back().changed(),
@@ -3200,7 +3663,9 @@ mod tests {
             FieldKind::Number {
                 value: 0,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
         assert!(draft.toggle_selected().changed());
@@ -3209,7 +3674,9 @@ mod tests {
             FieldKind::Number {
                 value: 1,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
 
@@ -3218,6 +3685,8 @@ mod tests {
             value: 2,
             min: 0,
             max: 2,
+            step: 1,
+            wrap: false,
         });
         assert!(
             !draft.toggle_selected().changed(),
@@ -3228,7 +3697,9 @@ mod tests {
             FieldKind::Number {
                 value: 2,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
         );
         assert!(draft.toggle_selected_back().changed());
@@ -3237,8 +3708,54 @@ mod tests {
             FieldKind::Number {
                 value: 1,
                 min: 0,
-                max: 2
+                max: 2,
+                step: 1,
+                wrap: false,
             }
+        );
+    }
+
+    /// 2c §5.4: a `Number` with `wrap: true` steps past its bound and
+    /// lands on the other side rather than clamping — the hue field's
+    /// own behaviour — while a plain (`wrap: false`) field still clamps
+    /// to the bound, exactly as `a_number_steps_both_ways_and_stops_at_
+    /// each_end` pins for `step: 1`.
+    #[test]
+    fn a_number_steps_by_its_step_and_wraps_only_when_asked() {
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 350,
+            min: 0,
+            max: 359,
+            step: 15,
+            wrap: true,
+        });
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(
+            matches!(draft.fields[0].kind, FieldKind::Number { value: 5, .. }),
+            "wraps: {:?}",
+            draft.fields[0].kind
+        );
+        assert_eq!(draft.toggle_selected_back(), Step::Changed);
+        assert!(matches!(
+            draft.fields[0].kind,
+            FieldKind::Number { value: 350, .. }
+        ));
+        let mut draft = single_field_draft(FieldKind::Number {
+            value: 355,
+            min: 0,
+            max: 359,
+            step: 15,
+            wrap: false,
+        });
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        assert!(
+            matches!(draft.fields[0].kind, FieldKind::Number { value: 359, .. }),
+            "lands on the bound without wrap"
+        );
+        assert_eq!(
+            draft.toggle_selected(),
+            Step::Inert,
+            "at the bound, no wrap: inert"
         );
     }
 
@@ -3253,6 +3770,8 @@ mod tests {
             value: 500,
             min: 1,
             max: 100,
+            step: 1,
+            wrap: false,
         });
         assert!(matches!(draft.toggle_selected(), Step::Refused(_)));
         assert_eq!(
@@ -3260,7 +3779,9 @@ mod tests {
             FieldKind::Number {
                 value: 500,
                 min: 1,
-                max: 100
+                max: 100,
+                step: 1,
+                wrap: false,
             },
             "forward must not clamp the value"
         );
@@ -3270,7 +3791,9 @@ mod tests {
             FieldKind::Number {
                 value: 500,
                 min: 1,
-                max: 100
+                max: 100,
+                step: 1,
+                wrap: false,
             },
             "backward must not clamp the value either"
         );
@@ -3385,7 +3908,7 @@ mod tests {
             .find(|f| f.key == "columns")
             .map(|f| &mut f.kind)
         {
-            items[1].width = Some(120.0);
+            items[1].presentation.width = Some(120.0);
         }
         draft.toggle_selected(); // hide `book`
         draft.move_item(1); // and move it below `npv`
@@ -3397,8 +3920,14 @@ mod tests {
             text.contains("order = [\"npv\", \"book\", \"delta01\"]"),
             "{text}"
         );
-        assert!(text.contains("hidden = [\"book\"]"), "{text}");
-        assert!(text.contains("npv = 120.0"), "{text}");
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[tree.columns.npv]") && text.contains("width = 120"),
+            "{text}"
+        );
     }
 
     /// **A presentation save must not freeze the desk's own values.**
@@ -3425,7 +3954,7 @@ mod tests {
             .position(|r| matches!(r, EditRow::Item { .. }))
             .expect("the fixture view has columns");
         assert_eq!(
-            draft.list_items("columns").map(|i| i[1].width),
+            draft.list_items("columns").map(|i| i[1].presentation.width),
             Some(Some(140.0)),
             "the desk's width reaches the draft — that is why it can be copied back"
         );
@@ -3435,7 +3964,10 @@ mod tests {
             "tree",
             Domain::Views.to_table(&draft, Destination::Presentation),
         );
-        assert!(text.contains("hidden = [\"book\"]"), "{text}");
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
         assert!(
             !text.contains("order"),
             "nothing was reordered, so pinning the desk's order is a freeze:\n{text}"
@@ -3483,7 +4015,7 @@ mod tests {
         ]);
         let mut draft = Domain::Views.draft(&config, "tree");
         assert_eq!(
-            draft.list_items("columns").map(|i| i[1].width),
+            draft.list_items("columns").map(|i| i[1].presentation.width),
             Some(Some(140.0)),
             "the draft has to read the width back before it can keep it"
         );
@@ -3499,8 +4031,12 @@ mod tests {
             Domain::Views.to_table(&draft, Destination::Presentation),
         );
         assert!(
-            text.contains("npv = 140.0"),
+            text.contains("[tree.columns.npv]") && text.contains("width = 140"),
             "the width was dropped:\n{text}"
+        );
+        assert!(
+            !text.contains("[tree.columns.book]"),
+            "book returned to its desk default (not hidden) and needs no table:\n{text}"
         );
         assert!(!text.contains("hidden"), "{text}");
     }
@@ -3959,7 +4495,7 @@ mod tests {
         ListItem {
             name: name.to_string(),
             included: false,
-            width: None,
+            presentation: ColumnPresentation::default(),
             kind: None,
         }
     }
@@ -4327,6 +4863,8 @@ mod tests {
                         value: 3,
                         min: 1,
                         max: 100,
+                        step: 1,
+                        wrap: false,
                     },
                     dest: Destination::Doc,
                     layer: None,
@@ -4341,6 +4879,34 @@ mod tests {
             ],
             toml::Table::new(),
         )
+    }
+
+    /// A keystroke in an open plain field reaches the draft through the
+    /// `Input`'s change subscription as `set_query`. The rows under a plain
+    /// field stay unfiltered with the edited row highlighted (§19.1), so
+    /// the cursor must stay on that row — the filter's "reset to the top
+    /// match" rule is for a list that just re-ranked, and this one did
+    /// not. Found on a display 2026-09-13: every keystroke after `i` sent
+    /// the highlight back to the first row.
+    #[test]
+    fn a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row() {
+        let mut draft = draft_with_number_and_text();
+        draft.selected = 1;
+        assert_eq!(draft.begin_text_entry(), Step::Changed);
+        assert_eq!(draft.selected, 1);
+        draft.set_query("45".to_string());
+        assert_eq!(draft.query, "45");
+        assert_eq!(
+            draft.selected, 1,
+            "typing must not move the cursor off the field"
+        );
+        draft.set_query(String::new());
+        assert_eq!(draft.selected, 1, "an emptied field is still the same row");
+        // Without a field open the same call is the filter, and the filter
+        // starts from the top match.
+        draft.cancel_text_entry();
+        draft.set_query("po".to_string());
+        assert_eq!(draft.selected, 0);
     }
 
     #[test]
@@ -4484,6 +5050,8 @@ mod tests {
                         value: 3,
                         min: 1,
                         max: 100,
+                        step: 1,
+                        wrap: false,
                     },
                     dest: Destination::Doc,
                     layer: None,
@@ -4571,20 +5139,20 @@ mod tests {
                             ListItem {
                                 name: "npv".into(),
                                 included: true,
-                                width: None,
+                                presentation: ColumnPresentation::default(),
                                 kind: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
-                                width: None,
+                                presentation: ColumnPresentation::default(),
                                 kind: None,
                             },
                         ],
                         available: Some(vec![ListItem {
                             name: "vega".into(),
                             included: false,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         }]),
                     },
@@ -4672,13 +5240,13 @@ mod tests {
                         ListItem {
                             name: "delta".into(),
                             included: true,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
-                            width: None,
+                            presentation: ColumnPresentation::default(),
                             kind: None,
                         },
                     ],
@@ -4757,6 +5325,8 @@ mod tests {
                 value: 3,
                 min: 1,
                 max: 100,
+                step: 1,
+                wrap: false,
             },
             dest: Destination::Doc,
             layer: None,
@@ -4776,5 +5346,147 @@ mod tests {
         );
         let empty = Draft::new_object("x", Vec::new(), toml::Table::new());
         assert!(!empty.offers_text_entry(Domain::Sources));
+    }
+
+    /// Part 2c §5.2: the column stage is a PROJECTION over the same draft
+    /// — the view's fields are stashed, the column's seven installed, and
+    /// the view's own list stays reachable underneath (which is what lets
+    /// the overlay writer keep rendering from it mid-stage). A step there
+    /// folds onto the item, writes presentation alone, and leaving
+    /// restores the view with the cursor back on the column.
+    #[test]
+    fn entering_a_column_swaps_the_fields_and_leaving_restores_them_with_the_fold() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let parent_len = draft.fields.len();
+        assert!(
+            draft.enter_column(
+                "npv",
+                views::column_fields(
+                    draft
+                        .list_items("columns")
+                        .unwrap()
+                        .iter()
+                        .find(|i| i.name == "npv")
+                        .unwrap(),
+                    &[]
+                )
+            )
+        );
+        assert_eq!(draft.column(), Some("npv"));
+        assert_eq!(draft.fields.len(), 7);
+        assert!(
+            draft.list_items("columns").is_some(),
+            "the view's list is still reachable through the parent"
+        );
+        assert_eq!(draft.choice("dataset"), Some("risk"), "so is the dataset");
+        let i = draft.fields.iter().position(|f| f.key == "scale").unwrap();
+        draft.selected = i;
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        draft.fold_column();
+        assert_eq!(
+            draft.list_items("columns").unwrap()[0].presentation.scale,
+            Some(geode_core::view::Scale::Thousands)
+        );
+        assert!(
+            draft
+                .writes_by_destination()
+                .contains_key(&Destination::Presentation)
+        );
+        assert!(
+            !draft
+                .writes_by_destination()
+                .contains_key(&Destination::Doc)
+        );
+        draft.mark_saved();
+        draft.leave_column();
+        assert_eq!(draft.column(), None);
+        assert_eq!(draft.fields.len(), parent_len);
+        assert!(
+            !draft.is_dirty(),
+            "leaving after a committed change is clean"
+        );
+        assert!(
+            matches!(draft.selected_row(), Some(EditRow::Item { .. })),
+            "cursor back on the column"
+        );
+        assert!(!draft.enter_column("ghost", Vec::new()), "not a member");
+    }
+
+    /// M-1 (Part 2c final review): a second `enter_column` while a column
+    /// stage is already open is refused, changing nothing.
+    ///
+    /// Unreachable through the dialog today, which is exactly why the
+    /// guard is worth its line: the membership test below it passes
+    /// through `field_by_key`'s parent fallback, so a re-entry would
+    /// stash the SEVEN installed column fields as `parent_fields` and
+    /// drop the view's own `columns` list forever — and the next write
+    /// would render a view with no columns at all. The assertions are on
+    /// that list surviving, not merely on the `false`.
+    #[test]
+    fn enter_column_refuses_re_entry_and_keeps_the_objects_own_list() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert!(draft.enter_column("npv", views::column_fields(&item, &[])));
+        let installed = draft.fields.len();
+        let names = |draft: &Draft| {
+            draft
+                .list_items("columns")
+                .map(|items| items.iter().map(|i| i.name.clone()).collect::<Vec<_>>())
+        };
+        let before = names(&draft);
+        assert_eq!(
+            before.as_deref(),
+            Some(&["npv".to_string(), "book".to_string()][..])
+        );
+
+        assert!(
+            !draft.enter_column("npv", Vec::new()),
+            "re-entry on the open column is refused"
+        );
+        assert!(
+            !draft.enter_column("book", Vec::new()),
+            "re-entry on another member is refused too — it is the open \
+             stage that forbids this, not the name"
+        );
+        assert_eq!(draft.column(), Some("npv"));
+        assert_eq!(
+            draft.fields.len(),
+            installed,
+            "the seven fields still stand"
+        );
+        assert_eq!(
+            names(&draft),
+            before,
+            "the view's own column list survived the refused re-entry"
+        );
+    }
+
+    /// Part 2c §5.5: a diagnostic path whose index resolves — by name, 2b's
+    /// rule — to the OPEN column lands on the row keyed by its format key;
+    /// a path naming any other column, or the view itself, lands on
+    /// nothing while this stage is open (those stay on the header).
+    #[test]
+    fn row_for_path_in_the_column_stage_lands_on_the_format_key() {
+        let config = config_with_view_and_datasets();
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        draft.enter_column("npv", views::column_fields(&item, &[]));
+        let precision = draft
+            .fields
+            .iter()
+            .position(|f| f.key == "precision")
+            .unwrap();
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.0.format.precision"),
+            Some(EditRow::Field(precision))
+        );
+        assert_eq!(
+            draft.row_for_path("views", "views.tree.columns.1.format.precision"),
+            None,
+            "another column's path lands nowhere here"
+        );
+        assert_eq!(draft.row_for_path("views", "views.tree.dataset"), None);
     }
 }

@@ -17,7 +17,9 @@ use std::collections::BTreeMap;
 
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, Severity, load_views, merge_docs};
 use geode_core::schema::{ColumnRole, DatasetSpec, SchemaSpec};
-use geode_core::view::{ViewColumn, ViewSpec};
+use geode_core::view::{
+    Colour, ColumnFormat, ColumnPresentation, Negative, Scale, ViewColumn, ViewSpec,
+};
 
 use super::{Destination, Draft, Field, FieldKind, ListItem};
 
@@ -165,7 +167,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                     ListItem {
                         name: column.name().to_string(),
                         included: !presentation.hidden.unwrap_or(false),
-                        width: presentation.width,
+                        presentation,
                         kind: Some(view_column_kind(column).to_string()),
                     }
                 })
@@ -287,7 +289,7 @@ fn dataset_catalogue(items: &[ListItem], dataset: &DatasetSpec) -> Vec<ListItem>
         available.push(ListItem {
             name: column.name.clone(),
             included: false,
-            width: None,
+            presentation: ColumnPresentation::default(),
             kind: Some(kind.to_string()),
         });
     }
@@ -420,88 +422,190 @@ fn columns_for(source: &toml::Table, wanted: &[&ListItem]) -> toml_edit::ArrayOf
     out
 }
 
-/// The trader's personal view of the view, for `view_presentation.toml`:
-/// the column order, which are hidden, and any widths.
+/// The trader's personal view of the view, for `view_presentation.toml`
+/// (Part 2c §4.3): the column order, and one `[columns.<name>]` table per
+/// column whose presentation the trader has actually changed.
 ///
 /// Rendered fresh from the draft rather than merged into whatever is on
-/// disk, because this table is replaced whole (see [`to_table`]). Empty
-/// `hidden`/`width` are omitted rather than written as empty containers —
-/// a file that says nothing is easier to hand-edit than one full of `[]`.
+/// disk, because this table is replaced whole (see [`to_table`]). A
+/// column with nothing to say gets no table at all — a file that says
+/// nothing is easier to hand-edit than one full of empty `[...]`
+/// headers, and it is also what keeps a save from ever writing the
+/// LEGACY `hidden`/`width` spelling this function superseded: every key
+/// this writes lands inside `[columns.<name>]`, never a top-level
+/// `hidden` array or `width` table.
 ///
 /// **Only what the trader actually changed is written.** `order` and
-/// `width` both arrive here off the *effective* view, which already
-/// carries whatever `views.toml` declared — so writing every column's
-/// position and every declared width back would pin the desk's layout
-/// for this trader against the desk's later changes. That is the same
-/// freeze [`Destination`] exists to prevent, one field-granularity down,
-/// and it would fire on the commonest edit there is: hiding one column
-/// would silently adopt the desk's order and widths forever. Both are
-/// therefore compared against [`doc_baseline`] — what this same save
-/// leaves in `views.toml` — and omitted when they still match it.
-/// `hidden` needs no such comparison: nothing but this file can set it.
+/// every per-column key arrive here off the *effective* presentation
+/// (`ListItem::presentation`), which already carries whatever
+/// `views.toml` declared — so writing every column's position and every
+/// declared format key back would pin the desk's layout for this trader
+/// against the desk's later changes. That is the same freeze
+/// [`Destination`] exists to prevent, one field-granularity down, and it
+/// would fire on the commonest edit there is: hiding one column would
+/// silently adopt the desk's order and every other column's format
+/// forever. Every key is therefore compared, one at a time, against
+/// [`desk_baseline`] — what the SAME save leaves in `views.toml` — and
+/// omitted when it still matches. The five `ColumnFormat` keys compare
+/// RESOLVED (each side through [`kind_default`], §4.3's own definition of
+/// the baseline), which is what keeps a key the desk never declared and
+/// the trader never moved out of the file; the loop body has the full
+/// reasoning and the state that reaches it. `hidden` needs no such
+/// comparison:
+/// nothing but this file can ever set it, so a column is either
+/// unhidden (the universal desk default) or explicitly hidden here.
+///
+/// Each of the seven comparisons below is deliberately a nested `if <the
+/// two sides differ> { if let Some(v) = item.presentation.<key> { … } }`
+/// rather than clippy's preferred `if … && let Some(v) = … {}`
+/// single-line collapse: the mutation harness anchors two entries on an
+/// OUTER condition's own line, and collapsing the two would fold that
+/// line into a different one the moment a sibling key's comparison
+/// changed — `#[allow]` below, not the suggested rewrite. The five
+/// `ColumnFormat` keys spell that outer condition `effective.<key> !=
+/// desk_format.<key>`, both sides resolved through [`kind_default`];
+/// `label` and `width` spell it `item.presentation.<key> != desk.<key>`,
+/// having no kind default to resolve against.
+///
+/// **An item key `None` where the desk has `Some` still cannot arise
+/// here, and Part 2c is why that is now a guarantee rather than an
+/// accident.** The item is seeded from the *merged* presentation
+/// (`ListItem::presentation`'s own doc), so a key the desk sets is never
+/// `None` on the item unless something cleared it — and the column stage
+/// **is** that clear verb: an empty `label`, an `auto` width. What makes
+/// it safe is that a clear here means *stop overriding*, never *delete*
+/// — this overlay cannot remove a key `views.toml` sets — so
+/// [`fold_into`] resolves a cleared key to the DESK's own value and the
+/// comparison below simply finds them equal and writes nothing. Writing
+/// a literal `None` instead would omit the key and read back as "nothing
+/// to say", which is true only when the desk says nothing either; where
+/// the desk sets a label, it would swallow the clear whole.
+/// **This writer fully owns the overlay's `[view.columns.*]` block**
+/// (the final review's M-7). Every other adapter's `to_table` starts
+/// from `draft.source` and preserves what it does not model; this one is
+/// built from `items` instead, so anything a trader hand-wrote under a
+/// column's table that the vocabulary does not model is dropped on the
+/// next save. That matches the reader, which already drops unrecognised
+/// keys there, and the pre-2c behaviour of `order`/`hidden`/`width` —
+/// this doc is the statement of it, not a change to it.
+#[allow(clippy::collapsible_if)]
 fn presentation_table(draft: &Draft) -> toml_edit::Table {
     let mut table = toml_edit::Table::new();
     // Only the view's own columns are presented at all — a column still
     // in the available catalogue is not part of the view, so it has no
-    // order, no hidden state and no width to write here either.
+    // order and no format to write here either.
     let items: Vec<&ListItem> = draft
         .list_items("columns")
         .unwrap_or_default()
         .iter()
         .collect();
-    let (doc_order, doc_widths) = doc_baseline(draft);
+    let order = doc_order(draft);
+    let baseline = desk_baseline(draft);
 
     let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
-    if names != doc_order {
-        let mut order = toml_edit::Array::new();
+    if names != order {
+        let mut ord = toml_edit::Array::new();
         for name in &names {
-            order.push(*name);
+            ord.push(*name);
         }
-        table["order"] = toml_edit::value(order);
+        table["order"] = toml_edit::value(ord);
     }
 
-    let mut hidden = toml_edit::Array::new();
-    for item in items.iter().filter(|i| !i.included) {
-        hidden.push(item.name.as_str());
-    }
-    if !hidden.is_empty() {
-        table["hidden"] = toml_edit::value(hidden);
-    }
+    let mut columns = toml_edit::Table::new();
+    for item in &items {
+        let desk = baseline
+            .get(item.name.as_str())
+            .cloned()
+            .unwrap_or_default();
+        // §4.3's baseline is "the kind's default with the desk's format
+        // and label applied" — RESOLVED, not the desk's raw `Option`s —
+        // so the five format keys are compared through `ColumnFormat`
+        // and only `label`/`width`, which have no kind default to
+        // resolve against, compare as bare `Option`s.
+        //
+        // Resolving matters exactly where the two sides say the same
+        // thing in different words: a key the desk leaves unset and the
+        // item carries at the kind's own default. `views::fold_into`
+        // (Part 2c §5.2) produces that state on every keystroke in the
+        // column stage — it writes a `Some` for all five keys, since
+        // every field there was seeded with the value in force — and a
+        // raw-`Option` comparison called all five "different from the
+        // desk" and copied them into the trader's overlay. That is the
+        // freeze §4.3 names in so many words: "a trader who changes a
+        // precision does not copy the desk's scale into their file and
+        // freeze it against the desk's next change".
+        let kind = kind_default(item);
+        let desk_format = kind.clone().with(&desk);
+        let effective = kind.with(&item.presentation);
+        let mut t = toml_edit::Table::new();
 
-    let mut widths = toml_edit::Table::new();
-    for item in items {
-        let Some(width) = item.width else { continue };
-        if doc_widths.get(item.name.as_str()) == Some(&width) {
-            continue; // the desk's own width, not the trader's
+        if effective.precision != desk_format.precision {
+            if let Some(v) = item.presentation.precision {
+                t["precision"] = toml_edit::value(i64::from(v));
+            }
         }
-        widths[item.name.as_str()] = toml_edit::value(f64::from(width));
+        if effective.thousands != desk_format.thousands {
+            if let Some(v) = item.presentation.thousands {
+                t["thousands"] = toml_edit::value(v);
+            }
+        }
+        if effective.negative != desk_format.negative {
+            if let Some(v) = item.presentation.negative {
+                t["negative"] = toml_edit::value(negative_key(v));
+            }
+        }
+        if effective.colour != desk_format.colour {
+            if let Some(v) = &item.presentation.colour {
+                t["colour"] = toml_edit::value(colour_key(v));
+            }
+        }
+        if effective.scale != desk_format.scale {
+            if let Some(v) = item.presentation.scale {
+                t["scale"] = toml_edit::value(scale_key(v));
+            }
+        }
+        if item.presentation.label != desk.label {
+            if let Some(v) = &item.presentation.label {
+                t["label"] = toml_edit::value(v.as_str());
+            }
+        }
+        if item.presentation.width != desk.width {
+            if let Some(v) = item.presentation.width {
+                t["width"] = width_value(v);
+            }
+        }
+        if !item.included {
+            t["hidden"] = toml_edit::value(true);
+        }
+
+        if !t.is_empty() {
+            columns[item.name.as_str()] = toml_edit::Item::Table(t);
+        }
     }
-    if !widths.is_empty() {
-        table["width"] = toml_edit::Item::Table(widths);
+    if !columns.is_empty() {
+        table["columns"] = toml_edit::Item::Table(columns);
     }
 
     table
 }
 
-/// The column order and the per-column widths **the view's own doc will
-/// hold after this same save** — read back out of [`columns_for`] rather
-/// than off `draft.source` directly, so the two halves of one save cannot
+/// The column order **the view's own doc will hold after this same
+/// save** — read back out of [`columns_for`] rather than off
+/// `draft.source` directly, so the two halves of one save cannot
 /// disagree about what the doc says.
 ///
 /// This is the "pre-presentation view" [`presentation_table`] compares
 /// against. Using the post-write doc rather than the raw source is what
 /// keeps a change to the column set honest: adding or dropping one
-/// rewrites
-/// `views.toml`'s column list, and the trader has not reordered anything
-/// merely by doing so.
-fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
+/// rewrites `views.toml`'s column list, and the trader has not reordered
+/// anything merely by doing so.
+fn doc_order(draft: &Draft) -> Vec<&str> {
     let wanted: Vec<&ListItem> = draft
         .list_items("columns")
         .unwrap_or_default()
         .iter()
         .collect();
     let mut order = Vec::with_capacity(wanted.len());
-    let mut widths = BTreeMap::new();
     for column in columns_for(&draft.source, &wanted).iter() {
         let Some(name) = column.get("name").and_then(|item| item.as_str()) else {
             continue;
@@ -511,24 +615,534 @@ fn doc_baseline(draft: &Draft) -> (Vec<&str>, BTreeMap<String, f32>) {
         let Some(item) = wanted.iter().find(|w| w.name == name) else {
             continue;
         };
-        if let Some(width) = doc_width(column) {
-            widths.insert(item.name.clone(), width);
-        }
         order.push(item.name.as_str());
     }
-    (order, widths)
+    order
 }
 
-/// One column table's declared `width`, read exactly as
-/// `ViewSpec::from_doc` reads it — an integer or a float, positive, cast
-/// to `f32`. Anything else is not a width the loader would have applied,
-/// so it is not one this can be compared against either.
-fn doc_width(column: &toml_edit::Table) -> Option<f32> {
-    let value = column.get("width")?.as_value()?;
-    let width = value
-        .as_float()
-        .or_else(|| value.as_integer().map(|i| i as f64))?;
-    (width > 0.0).then_some(width as f32)
+/// Each column's presentation **as the view's own doc already declares
+/// it** — one column, one `format` sub-table plus `label`/`width`, read
+/// directly off `draft.source`'s own `[[columns]]` tables (never through
+/// [`columns_for`]'s `toml_edit` rendering: a bare `toml_edit::Table`
+/// with no document to hang a header path off loses a nested table
+/// entirely when printed — `object_text`'s own doc comment has the same
+/// warning about `Table::to_string` — so a column's `format` sub-table
+/// would silently vanish on the very round trip meant to read it back).
+/// `draft.source` is already a plain `toml::Table`, which is exactly the
+/// shape [`ColumnPresentation`]'s readers want, so no conversion is
+/// needed at all.
+///
+/// A column `columns_for` would synthesise fresh (one `wanted` names but
+/// `draft.source` does not yet have — a column just promoted out of the
+/// available catalogue) has no entry here, and [`presentation_table`]'s
+/// `.unwrap_or_default()` treats that exactly as "no desk baseline yet",
+/// which is correct: nothing has published a presentation for a column
+/// that does not exist in `views.toml` yet either.
+///
+/// `read_hidden: false`, always: `hidden` is never a view's own key —
+/// only the overlay this function's caller writes ever sets it — so a
+/// column's baseline `hidden` is always `None`, which is exactly why
+/// [`presentation_table`] compares `included` against the desk's default
+/// (unhidden) directly rather than against a baseline field for it. The
+/// `warn` callback is a no-op: a column's table here already passed
+/// through the loader once as `views.toml` itself, so a key it could not
+/// parse would already have been reported there — reporting it again
+/// while rendering a save would be noise about the SAME problem from a
+/// second place.
+pub(super) fn desk_baseline(draft: &Draft) -> BTreeMap<String, ColumnPresentation> {
+    let noop_warn = |_: &str, _: String| {};
+    let mut baseline = BTreeMap::new();
+    let source_columns: Vec<&toml::Table> = draft
+        .source
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_table()).collect())
+        .unwrap_or_default();
+    for column in source_columns {
+        let Some(name) = column.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let mut presentation = ColumnPresentation::default();
+        if let Some(format) = column.get("format").and_then(|v| v.as_table()) {
+            presentation.parse_format_keys(format, &noop_warn);
+        }
+        presentation.parse_column_keys(column, false, &noop_warn);
+        baseline.insert(name.to_string(), presentation);
+    }
+    baseline
+}
+
+/// `negative`'s two written spellings — the same two [`ColumnPresentation
+/// ::parse_format_keys`] reads back.
+fn negative_key(n: Negative) -> &'static str {
+    match n {
+        Negative::Minus => "minus",
+        Negative::Parens => "parens",
+    }
+}
+
+/// `scale`'s three written spellings — the same three the reader accepts.
+fn scale_key(s: Scale) -> &'static str {
+    match s {
+        Scale::None => "none",
+        Scale::Thousands => "k",
+        Scale::Millions => "M",
+    }
+}
+
+/// `colour`'s written spelling: the two built-ins, or a name into
+/// `colours.toml` verbatim.
+fn colour_key(c: &Colour) -> String {
+    match c {
+        Colour::None => "none".to_string(),
+        Colour::Sign => "sign".to_string(),
+        Colour::Named(name) => name.clone(),
+    }
+}
+
+/// A whole-number width is written as an integer (`width = 140`), never
+/// `140.0` — the common case by far, and the plain integer is what a
+/// trader hand-editing the file would type.
+fn width_value(width: f32) -> toml_edit::Item {
+    if width.fract() == 0.0 {
+        toml_edit::value(width as i64)
+    } else {
+        toml_edit::value(f64::from(width))
+    }
+}
+
+/// The default format a column's kind implies before any presentation is
+/// applied — [`ColumnFormat::TEXT`] for a dimension, [`ColumnFormat::
+/// MEASURE`] for everything else (a measure or a derived column).
+///
+/// Three readers, and the third is why this is more than a display
+/// nicety: [`column_summary`], so a member row states only what the
+/// trader has actually overridden; [`column_fields`], which seeds the
+/// column stage's rows with the value in FORCE rather than a raw
+/// `Option`; and [`presentation_table`], where it is half of the desk
+/// baseline (§4.3: "the kind's default with the desk's `format` and
+/// `label` applied"). So what `view_presentation.toml` ends up
+/// containing depends on this function — a column whose `kind` is read
+/// wrong here does not merely paint a wrong summary, it writes keys the
+/// trader never set, or omits ones they did.
+pub fn kind_default(item: &ListItem) -> ColumnFormat {
+    if item.kind.as_deref() == Some("dimension") {
+        ColumnFormat::TEXT
+    } else {
+        ColumnFormat::MEASURE
+    }
+}
+
+/// The compact summary painted after a member row's name (Part 2c §5.4):
+/// only the presentation keys that differ from `kind_default`, joined by
+/// " · ", or the empty string when the column carries no override at
+/// all — the common case, so most rows paint nothing here.
+///
+/// `width` and `label` are read off `p` directly rather than off the
+/// resolved format, because neither has a "default" a `ColumnFormat`
+/// could compare against — a width is either declared or it isn't, and
+/// the same is true of a label. Every other part reads the RESOLVED
+/// value (`kind_default.with(p)`) against the kind default, not `p`
+/// directly, because `p` being `None` on a key still has a real,
+/// meaningful value once the kind default fills it in — precision 0 is
+/// not "no precision", it is the dimension default, and there is nothing
+/// to call out about it.
+pub fn column_summary(kind_default: &ColumnFormat, p: &ColumnPresentation) -> String {
+    let effective = kind_default.clone().with(p);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(width) = p.width {
+        parts.push(format!("{width:.0} px"));
+    }
+    match effective.scale {
+        Scale::None => {}
+        Scale::Thousands => parts.push("k".to_string()),
+        Scale::Millions => parts.push("M".to_string()),
+    }
+    if effective.precision != kind_default.precision {
+        parts.push(format!("{} dp", effective.precision));
+    }
+    if effective.negative != Negative::Minus {
+        parts.push("parens".to_string());
+    }
+    if effective.thousands != kind_default.thousands {
+        if effective.thousands {
+            parts.push("thousands".to_string());
+        } else {
+            parts.push("no thousands".to_string());
+        }
+    }
+    if effective.colour != kind_default.colour {
+        parts.push(match &effective.colour {
+            Colour::None => "none".to_string(),
+            Colour::Sign => "sign".to_string(),
+            Colour::Named(name) => name.clone(),
+        });
+    }
+    if let Some(label) = &p.label {
+        parts.push(format!("→ {label}"));
+    }
+    parts.join(" · ")
+}
+
+/// The seven keys of the column stage (Part 2c §5.3), in the order the
+/// stage paints them — which is also the order [`column_fields`] builds
+/// them in and the order a reader of `view_presentation.toml` meets
+/// them.
+///
+/// A constant rather than seven literals spread across the builder, the
+/// fold and the tests, because the fold matches on these strings: a key
+/// renamed in one place and not the other would silently stop folding
+/// that field, and a silent stop is the failure this whole design
+/// exists to remove.
+pub const COLUMN_KEYS: [&str; 7] = [
+    "label",
+    "width",
+    "scale",
+    "precision",
+    "thousands",
+    "negative",
+    "colour",
+];
+
+/// The value `width` takes when the column has none of its own — a real
+/// value in the field rather than an empty string, because "no width" is
+/// something a trader chooses (the table measures the column) and an
+/// empty text box would read as an unset field they had failed to fill
+/// in.
+const AUTO: &str = "auto";
+
+/// The largest width the stage will accept, and the smallest. A column
+/// narrower than `MIN_WIDTH` cannot show a header glyph and a column
+/// wider than `MAX_WIDTH` is wider than any window this shell opens, so
+/// both are refused (§5.3) rather than written and silently clamped by
+/// the table.
+const MIN_WIDTH: i64 = 20;
+const MAX_WIDTH: i64 = 2000;
+
+/// One column's presentation as the seven fields the column stage paints
+/// (Part 2c §5.3).
+///
+/// **Every field is [`Destination::Presentation`]**, which is the whole
+/// reason this stage asks nothing before writing: there is no key here
+/// that could fork the desk's view, so `commit_or_confirm` never reaches
+/// its fork question from inside the stage.
+///
+/// Each field is seeded with the **effective** value — the kind default
+/// (`kind_default`) with the column's own presentation over it — not with
+/// the raw `Option` the overlay holds. A `Choice` seeded from a `None`
+/// would have to show some placeholder for "unset", and stepping it
+/// would then write whatever option happened to sit beside the
+/// placeholder; seeding the value in force means every step moves from
+/// what the trader is looking at. What that costs is that the fold
+/// writes a `Some` for every key ([`fold_into`]'s own doc), which
+/// [`presentation_table`] then compares against the desk before writing
+/// anything.
+///
+/// `colours` is the `colours` doc's own names, sorted, as the caller read
+/// them (`render::enter_column_stage`). The two built-in spellings lead;
+/// a colour named on the column but absent from the doc is appended
+/// rather than sorted in, so the `Choice` can always represent the value
+/// it is showing (Views' "keep the object's own value" rule, the same one
+/// [`fields`] keeps for a dataset the schema has dropped) while still
+/// reading as the odd name out rather than as one the doc defines.
+pub fn column_fields(item: &ListItem, colours: &[String]) -> Vec<Field> {
+    let p = &item.presentation;
+    let effective = kind_default(item).with(p);
+
+    let mut colour_options: Vec<String> = geode_core::colour::RESERVED_NAMES
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    colour_options.extend(
+        colours
+            .iter()
+            .filter(|name| !geode_core::colour::RESERVED_NAMES.contains(&name.as_str()))
+            .cloned(),
+    );
+    let current_colour = colour_key(&effective.colour);
+    if !colour_options.contains(&current_colour) {
+        colour_options.push(current_colour.clone());
+    }
+
+    let fields = vec![
+        text_row("label", "Label", p.label.clone().unwrap_or_default()),
+        text_row("width", "Width", width_text(p.width)),
+        choice_row("scale", "Scale", scale_keys(), scale_key(effective.scale)),
+        Field {
+            key: "precision".to_string(),
+            label: "Precision".to_string(),
+            kind: FieldKind::Number {
+                value: i64::from(effective.precision),
+                min: 0,
+                max: 12,
+                step: 1,
+                wrap: false,
+            },
+            dest: Destination::Presentation,
+            layer: None,
+        },
+        Field {
+            key: "thousands".to_string(),
+            label: "Thousands".to_string(),
+            kind: FieldKind::Bool(effective.thousands),
+            dest: Destination::Presentation,
+            layer: None,
+        },
+        choice_row(
+            "negative",
+            "Negative",
+            negative_keys(),
+            negative_key(effective.negative),
+        ),
+        choice_row("colour", "Colour", colour_options, current_colour),
+    ];
+    // [`COLUMN_KEYS`] is the statement of record for what this stage
+    // edits and in what order; the literal above is what a reader
+    // actually sees. Checked rather than derived because deriving the
+    // fields FROM the constant would mean one builder with seven
+    // branches, which is harder to read than seven rows — and this runs
+    // in every test and every debug build, which is where a drift would
+    // be introduced.
+    debug_assert!(
+        fields.iter().map(|f| f.key.as_str()).eq(COLUMN_KEYS),
+        "the column stage's fields must be COLUMN_KEYS, in order"
+    );
+    fields
+}
+
+/// The width a column carries, as the field shows it: a bare pixel count,
+/// or [`AUTO`].
+///
+/// A whole number prints without a fraction — the common case, and the
+/// only one [`parse_text`] lets a trader type. A width that is NOT whole
+/// (a hand-edited file, or a future header drag) prints in full rather
+/// than truncated, so the field never tells the trader a different number
+/// than the file holds; [`fold_into`] parses it back as a float, so
+/// merely opening the stage on such a column and changing something else
+/// leaves the odd width exactly as it was.
+pub(super) fn width_text(width: Option<f32>) -> String {
+    match width {
+        None => AUTO.to_string(),
+        Some(w) if w.fract() == 0.0 => format!("{}", w as i64),
+        Some(w) => format!("{w}"),
+    }
+}
+
+fn text_row(key: &str, label: &str, value: String) -> Field {
+    Field {
+        key: key.to_string(),
+        label: label.to_string(),
+        kind: FieldKind::Text(value),
+        dest: Destination::Presentation,
+        layer: None,
+    }
+}
+
+/// A `Choice` over `options`, selected at `current` — which is always one
+/// of them by construction at every call site above (each `current` is
+/// spelled by the same `*_key` function that spelled the options), so the
+/// `unwrap_or(0)` is a fallback that cannot fire rather than a silent
+/// reset.
+fn choice_row(key: &str, label: &str, options: Vec<String>, current: impl AsRef<str>) -> Field {
+    let selected = options
+        .iter()
+        .position(|o| o == current.as_ref())
+        .unwrap_or(0);
+    Field {
+        key: key.to_string(),
+        label: label.to_string(),
+        kind: FieldKind::Choice { options, selected },
+        dest: Destination::Presentation,
+        layer: None,
+    }
+}
+
+fn scale_keys() -> Vec<String> {
+    ["none", "k", "M"].iter().map(|s| s.to_string()).collect()
+}
+
+fn negative_keys() -> Vec<String> {
+    ["minus", "parens"].iter().map(|s| s.to_string()).collect()
+}
+
+/// The column stage's fields written back onto the item the view's own
+/// list holds (Part 2c §5.2) — the fold that makes the stage a
+/// projection rather than a second copy of the data.
+///
+/// Called on every changed value, from `render::revalidate`, BEFORE the
+/// validator and the write path read the list: both render from
+/// `ListItem::presentation`, so a fold that ran later would validate and
+/// write the keystroke before last.
+///
+/// **Every key becomes `Some`**, because [`column_fields`] seeded each
+/// field with the value in force and a field therefore always has one to
+/// give back. What keeps that from freezing the desk's presentation into
+/// the trader's overlay is [`presentation_table`], which compares each
+/// key against [`desk_baseline`] and omits the ones that still match —
+/// the one place that decision is made for the whole file.
+///
+/// **The two `Text` keys are the clear verb, and `desk` is what makes
+/// the clear honest.** An empty `label` and an [`AUTO`] `width` are how a
+/// trader says "I have nothing to say about this" — and what that means
+/// is *stop overriding*, never *delete*: this overlay cannot remove a key
+/// the desk's own `views.toml` sets, it can only decline to override it.
+/// So a cleared key resolves to the DESK's value — `None` where the desk
+/// sets none, the desk's own `label`/`width` where it sets one — and
+/// [`presentation_table`] then sees equality and writes no key at all,
+/// which is exactly "this trader has no opinion here".
+///
+/// Writing a literal `None` instead is the bug this signature exists to
+/// prevent, and it is silent in the worst way: the writer's `if key !=
+/// desk.key { if let Some(v) = key { … } }` omits the key, the file reads
+/// back as "nothing to say", the desk's label returns on the next
+/// rebuild, and the trader's clear has vanished with nothing said about
+/// it. The caller re-seeds the two fields from the item after the fold
+/// ([`super::Draft::fold_column`]), so the screen shows the desk's value
+/// coming back on the same keystroke rather than a blank that lies.
+///
+/// Returns the key that fell back to a desk value, for the caller's
+/// notice. At most one can: [`column_fields`] seeds both `Text`s from the
+/// item's own merged presentation, so a key is only ever empty because
+/// this keystroke typed it empty, and one keystroke types one field.
+///
+/// An unparseable width leaves the key untouched — `parse_text` refuses
+/// one on the way in, so the only way to reach this is a seed this file
+/// wrote, and silently clearing a width nobody asked to clear would be
+/// worse than ignoring a value that cannot arise.
+pub fn fold_into(
+    item: &mut ListItem,
+    fields: &[Field],
+    desk: &ColumnPresentation,
+) -> Option<&'static str> {
+    let mut followed_desk = None;
+    for field in fields {
+        match (field.key.as_str(), &field.kind) {
+            ("label", FieldKind::Text(text)) => {
+                let text = text.trim();
+                item.presentation.label = if text.is_empty() {
+                    if desk.label.is_some() {
+                        followed_desk = Some("label");
+                    }
+                    desk.label.clone()
+                } else {
+                    Some(text.to_string())
+                };
+            }
+            ("width", FieldKind::Text(text)) => {
+                let text = text.trim();
+                if text == AUTO {
+                    if desk.width.is_some() {
+                        followed_desk = Some("width");
+                    }
+                    item.presentation.width = desk.width;
+                } else if let Ok(width) = text.parse::<f32>() {
+                    item.presentation.width = Some(width);
+                }
+            }
+            ("scale", FieldKind::Choice { options, selected }) => {
+                if let Some(scale) = options.get(*selected).and_then(|key| scale_from_key(key)) {
+                    item.presentation.scale = Some(scale);
+                }
+            }
+            ("precision", FieldKind::Number { value, .. }) => {
+                if let Ok(precision) = u8::try_from(*value) {
+                    item.presentation.precision = Some(precision);
+                }
+            }
+            ("thousands", FieldKind::Bool(value)) => item.presentation.thousands = Some(*value),
+            ("negative", FieldKind::Choice { options, selected }) => {
+                if let Some(negative) = options
+                    .get(*selected)
+                    .and_then(|key| negative_from_key(key))
+                {
+                    item.presentation.negative = Some(negative);
+                }
+            }
+            ("colour", FieldKind::Choice { options, selected }) => {
+                if let Some(colour) = options.get(*selected).map(|key| colour_from_key(key)) {
+                    item.presentation.colour = Some(colour);
+                }
+            }
+            // A key this fold does not know, or a field whose kind is not
+            // the one that key is built with: left alone rather than
+            // guessed at. Unreachable through `column_fields`, which is
+            // the only builder of these fields.
+            _ => {}
+        }
+    }
+    followed_desk
+}
+
+/// May `i` open a value field on the Views row keyed `key` (§5.3)?
+///
+/// The column stage's two `Text` rows and nothing else: a view's own
+/// `dataset` is a `Choice` and its `columns` an `OrderedList`, so no key
+/// outside the stage can answer `true` here even in principle. That is
+/// why this is not gated on the stage being open — there is no row for it
+/// to wrongly enable — while [`Draft::offers_text_entry`] still keeps the
+/// `i` chip off a view's own edit footer, since that reads the fields
+/// actually installed.
+///
+/// [`Draft::offers_text_entry`]: super::Draft::offers_text_entry
+pub fn text_editable(key: &str) -> bool {
+    matches!(key, "label" | "width")
+}
+
+/// Normalise a committed `Text` on Views, or refuse it with the reason
+/// the notice shows (§5.3).
+///
+/// `width` is the one key with a grammar: [`AUTO`], or a whole pixel
+/// count inside `MIN_WIDTH..=MAX_WIDTH`. Refused rather than clamped, the
+/// same rule `Draft::apply_text_entry` keeps for a `Number` — a clamp
+/// applies a value the trader did not type, and the field stays open with
+/// their own text in it so they can correct it.
+pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
+    let text = text.trim();
+    match key {
+        "width" => {
+            if text == AUTO {
+                return Ok(AUTO.to_string());
+            }
+            match text.parse::<i64>() {
+                Ok(px) if (MIN_WIDTH..=MAX_WIDTH).contains(&px) => Ok(px.to_string()),
+                _ => Err(format!(
+                    "width must be {AUTO} or {MIN_WIDTH}–{MAX_WIDTH} px"
+                )),
+            }
+        }
+        _ => Ok(text.to_string()),
+    }
+}
+
+/// [`scale_key`]'s inverse.
+fn scale_from_key(key: &str) -> Option<Scale> {
+    match key {
+        "none" => Some(Scale::None),
+        "k" => Some(Scale::Thousands),
+        "M" => Some(Scale::Millions),
+        _ => None,
+    }
+}
+
+/// [`negative_key`]'s inverse.
+fn negative_from_key(key: &str) -> Option<Negative> {
+    match key {
+        "minus" => Some(Negative::Minus),
+        "parens" => Some(Negative::Parens),
+        _ => None,
+    }
+}
+
+/// [`colour_key`]'s inverse. Total, unlike the other two: every string
+/// that is not one of the two built-in spellings IS a name into
+/// `colours.toml`, which is exactly what the reader
+/// (`ColumnPresentation::parse_format_keys`) does with it.
+fn colour_from_key(key: &str) -> Colour {
+    match key {
+        "none" => Colour::None,
+        "sign" => Colour::Sign,
+        name => Colour::Named(name.to_string()),
+    }
 }
 
 /// Everything wrong with the draft as it stands (spec §7.2).
@@ -627,6 +1241,40 @@ mod tests {
             desk: None,
             user: None,
         })
+    }
+
+    /// A `views` doc of `views_text` verbatim, over a `risk` dataset
+    /// declaring exactly the two columns the writer tests below need:
+    /// `npv` (a measure, grain instrument) and `book` (a dimension) —
+    /// the smallest schema `presentation_table`'s desk-baseline
+    /// comparison can exercise without a third column's presentation
+    /// muddying an assertion about the other two.
+    fn config_with_view(views_text: &str) -> Config {
+        config_from(&[
+            (
+                Layer::Builtin,
+                "datasets",
+                "[risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"\n\
+                 [risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+            ),
+            (Layer::Desk, "views", views_text),
+        ])
+    }
+
+    /// The `columns` field's own list, mutable — for a test that pokes at
+    /// a `ListItem`'s presentation or inclusion directly rather than
+    /// through a verb, the way `presentation_table`'s desk-comparison
+    /// tests need to.
+    fn items_mut(draft: &mut Draft) -> &mut Vec<ListItem> {
+        let field = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == "columns")
+            .expect("the draft has a columns field");
+        match &mut field.kind {
+            FieldKind::OrderedList { items, .. } => items,
+            _ => panic!("columns is not an ordered list"),
+        }
     }
 
     /// `tree` selects `npv` out of a `risk` dataset that also has `book`
@@ -1311,5 +1959,361 @@ mod tests {
             Some(EditRow::Field(0)),
             "the cursor followed the dataset field through the rebuild"
         );
+    }
+
+    /// Part 2c §4.3: the overlay writer emits one `[view.columns.<col>]`
+    /// table per column with an override, carrying only the keys that
+    /// differ from the desk's own baseline — never the legacy `hidden`
+    /// array or `width` table `presentation_table` wrote before this
+    /// task.
+    #[test]
+    fn the_writer_emits_only_keys_that_differ_from_the_desk() {
+        // desk: npv has scale k, precision 2; the trader sets precision 0 and a colour, and hides book.
+        let config = config_with_view(
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nformat = { scale = \"k\", precision = 2 }\n[[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+        );
+        let mut draft = Domain::Views.draft(&config, "tree");
+        {
+            let items = items_mut(&mut draft);
+            items[0].presentation.precision = Some(0);
+            items[0].presentation.colour = Some(Colour::Named("delta".to_string()));
+            items[1].included = false;
+        }
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(text.contains("[tree.columns.npv]"), "{text}");
+        assert!(
+            text.contains("precision = 0") && text.contains("colour = \"delta\""),
+            "{text}"
+        );
+        assert!(
+            !text.contains("scale"),
+            "the desk's own scale is not copied: {text}"
+        );
+        assert!(
+            text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("\nwidth = {") && !text.contains("hidden = ["),
+            "no legacy spelling: {text}"
+        );
+        // Setting precision back to the desk's value drops the key.
+        items_mut(&mut draft)[0].presentation.precision = Some(2);
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("precision"), "{text}");
+    }
+
+    /// A bare `ListItem` of `kind`, for [`kind_default`]'s own test —
+    /// nothing else about the item matters to it.
+    fn item_of_kind(kind: Option<&str>) -> ListItem {
+        ListItem {
+            name: "x".to_string(),
+            included: true,
+            presentation: ColumnPresentation::default(),
+            kind: kind.map(str::to_string),
+        }
+    }
+
+    /// Part 2c §5.4: [`kind_default`] answers [`ColumnFormat::TEXT`] only
+    /// for a dimension, and [`column_summary`] names only the keys the
+    /// trader actually overrode — nothing at all for an untouched column,
+    /// and both directions of `thousands` (a dimension turning it ON is
+    /// as much an override as a measure turning it off).
+    #[test]
+    fn column_summary_names_only_the_keys_in_force() {
+        assert_eq!(
+            kind_default(&item_of_kind(Some("dimension"))),
+            ColumnFormat::TEXT
+        );
+        assert_eq!(
+            kind_default(&item_of_kind(Some("measure"))),
+            ColumnFormat::MEASURE
+        );
+        assert_eq!(kind_default(&item_of_kind(None)), ColumnFormat::MEASURE);
+
+        let overridden = ColumnPresentation {
+            width: Some(120.0),
+            scale: Some(Scale::Thousands),
+            precision: Some(0),
+            colour: Some(Colour::Named("delta".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(
+            column_summary(&ColumnFormat::MEASURE, &overridden),
+            "120 px · k · 0 dp · delta"
+        );
+
+        assert_eq!(
+            column_summary(&ColumnFormat::MEASURE, &ColumnPresentation::default()),
+            "",
+            "an untouched column paints nothing"
+        );
+
+        // A dimension defaults to no thousands separators; turning them ON
+        // is exactly as much an override as a measure turning them off.
+        let dimension_thousands = ColumnPresentation {
+            thousands: Some(true),
+            ..Default::default()
+        };
+        let summary = column_summary(&ColumnFormat::TEXT, &dimension_thousands);
+        assert!(
+            summary.contains("thousands"),
+            "a dimension's non-default thousands must be named: {summary:?}"
+        );
+    }
+
+    /// Part 2c §5.3: the column stage's seven fields, in the overlay's own
+    /// key order, every one `Destination::Presentation` (nothing here can
+    /// fork, so nothing here asks), and each seeded with the value the
+    /// trader currently SEES — the kind default with the column's own
+    /// presentation over it — rather than with the raw `Option` the
+    /// overlay happens to hold.
+    #[test]
+    fn column_fields_are_seven_presentation_rows_seeded_from_the_item() {
+        let item = ListItem {
+            name: "npv".into(),
+            included: true,
+            kind: Some("measure".into()),
+            presentation: ColumnPresentation {
+                scale: Some(Scale::Thousands),
+                precision: Some(0),
+                width: Some(120.0),
+                colour: Some(Colour::Named("delta".into())),
+                ..Default::default()
+            },
+        };
+        let fields = column_fields(&item, &["delta".to_string(), "gamma".to_string()]);
+        let keys: Vec<&str> = fields.iter().map(|f| f.key.as_str()).collect();
+        assert_eq!(keys, COLUMN_KEYS);
+        assert!(fields.iter().all(|f| f.dest == Destination::Presentation));
+        let by = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
+        assert!(matches!(&by("label").kind, FieldKind::Text(t) if t.is_empty()));
+        assert!(matches!(&by("width").kind, FieldKind::Text(t) if t == "120"));
+        assert!(
+            matches!(&by("scale").kind, FieldKind::Choice { options, selected } if options[*selected] == "k")
+        );
+        assert!(matches!(
+            &by("precision").kind,
+            FieldKind::Number {
+                value: 0,
+                min: 0,
+                max: 12,
+                step: 1,
+                wrap: false
+            }
+        ));
+        assert!(
+            matches!(&by("thousands").kind, FieldKind::Bool(true)),
+            "the measure default"
+        );
+        assert!(
+            matches!(&by("negative").kind, FieldKind::Choice { options, selected } if options[*selected] == "minus")
+        );
+        assert!(
+            matches!(&by("colour").kind, FieldKind::Choice { options, selected }
+                if options == &["none", "sign", "delta", "gamma"] && options[*selected] == "delta")
+        );
+    }
+
+    /// Part 2c §5.2: the fold is what carries a keystroke in the stage
+    /// back onto the item the overlay writer renders from. `auto` is a
+    /// value, not a blank — it clears the width rather than parsing as
+    /// one — and an empty label is the column's own name, so it clears
+    /// too.
+    #[test]
+    fn fold_into_writes_the_fields_back_and_auto_clears_the_width() {
+        let mut item = ListItem {
+            name: "npv".into(),
+            included: true,
+            kind: Some("measure".into()),
+            presentation: ColumnPresentation::default(),
+        };
+        let mut fields = column_fields(&item, &[]);
+        for f in &mut fields {
+            match f.key.as_str() {
+                "width" => f.kind = FieldKind::Text("auto".into()),
+                "precision" => {
+                    f.kind = FieldKind::Number {
+                        value: 4,
+                        min: 0,
+                        max: 12,
+                        step: 1,
+                        wrap: false,
+                    }
+                }
+                "colour" => {
+                    f.kind = FieldKind::Choice {
+                        options: vec!["none".into(), "sign".into()],
+                        selected: 1,
+                    }
+                }
+                "label" => f.kind = FieldKind::Text("NPV".into()),
+                _ => {}
+            }
+        }
+        // A desk that declares nothing: `auto` and an empty label have
+        // nothing to fall back to, so each really does clear its key.
+        assert_eq!(
+            fold_into(&mut item, &fields, &ColumnPresentation::default()),
+            None,
+            "nothing followed the desk — there is no desk value to follow"
+        );
+        assert_eq!(item.presentation.width, None);
+        assert_eq!(item.presentation.precision, Some(4));
+        assert_eq!(item.presentation.colour, Some(Colour::Sign));
+        assert_eq!(item.presentation.label.as_deref(), Some("NPV"));
+    }
+
+    /// Part 2c §5.3, the clear verb: an empty `label` means "stop
+    /// overriding", which resolves to the DESK's label — never a literal
+    /// `None`, which the writer would omit and the next rebuild would
+    /// read as "nothing to say" while the desk's label came back anyway,
+    /// silently swallowing the clear.
+    ///
+    /// Both directions: a desk that sets a label, and one that does not.
+    #[test]
+    fn clearing_a_desk_label_falls_back_to_the_desk() {
+        let with_desk_label = config_with_view(
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n",
+        );
+        let mut draft = Domain::Views.draft(&with_desk_label, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert_eq!(
+            item.presentation.label.as_deref(),
+            Some("NPV"),
+            "sanity: the item carries the desk's label"
+        );
+        assert!(draft.enter_column("npv", column_fields(&item, &[])));
+        clear_text_field(&mut draft, "label");
+        assert_eq!(draft.fold_column(), Some("label"));
+
+        assert_eq!(
+            draft.list_items("columns").unwrap()[0]
+                .presentation
+                .label
+                .as_deref(),
+            Some("NPV"),
+            "the clear stops overriding; it cannot delete the desk's key"
+        );
+        assert!(
+            matches!(&draft.fields[0].kind, FieldKind::Text(t) if t == "NPV"),
+            "and the field is re-seeded, so the screen is not a blank that lies"
+        );
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("label"), "so no key is written: {text}");
+
+        // No desk label: the same clear really does clear, and says
+        // nothing about following anything.
+        let bare =
+            config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
+        let mut draft = Domain::Views.draft(&bare, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert!(draft.enter_column("npv", column_fields(&item, &[])));
+        clear_text_field(&mut draft, "label");
+        assert_eq!(draft.fold_column(), None);
+        assert_eq!(
+            draft.list_items("columns").unwrap()[0].presentation.label,
+            None
+        );
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("label"), "{text}");
+    }
+
+    /// [`clearing_a_desk_label_falls_back_to_the_desk`]'s twin for
+    /// `width`, where the clear is spelled [`AUTO`] rather than an empty
+    /// string — the same ruling, the same failure if it wrote `None`.
+    #[test]
+    fn an_auto_width_falls_back_to_the_desk() {
+        let with_desk_width = config_with_view(
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\nwidth = 140\n",
+        );
+        let mut draft = Domain::Views.draft(&with_desk_width, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert_eq!(item.presentation.width, Some(140.0), "sanity");
+        assert!(draft.enter_column("npv", column_fields(&item, &[])));
+        set_text_field(&mut draft, "width", AUTO);
+        assert_eq!(draft.fold_column(), Some("width"));
+
+        assert_eq!(
+            draft.list_items("columns").unwrap()[0].presentation.width,
+            Some(140.0)
+        );
+        assert!(matches!(&draft.fields[1].kind, FieldKind::Text(t) if t == "140"));
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("width"), "{text}");
+
+        let bare =
+            config_with_view("[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n");
+        let mut draft = Domain::Views.draft(&bare, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert!(draft.enter_column("npv", column_fields(&item, &[])));
+        set_text_field(&mut draft, "width", AUTO);
+        assert_eq!(draft.fold_column(), None);
+        assert_eq!(
+            draft.list_items("columns").unwrap()[0].presentation.width,
+            None
+        );
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(!text.contains("width"), "{text}");
+    }
+
+    /// What `i`, a typed value and `enter` leave behind on one installed
+    /// `Text` row — the pure half of that path, with no window.
+    fn set_text_field(draft: &mut Draft, key: &str, value: &str) {
+        let field = draft
+            .fields
+            .iter_mut()
+            .find(|f| f.key == key)
+            .expect("the column stage installs this field");
+        field.kind = FieldKind::Text(value.to_string());
+    }
+
+    fn clear_text_field(draft: &mut Draft, key: &str) {
+        set_text_field(draft, key, "");
+    }
+
+    /// Part 2c §4.3 against §5.2: one change in the column stage writes
+    /// ONE key.
+    ///
+    /// The fold gives every format key a `Some` (it has a field for each,
+    /// seeded with the value in force), so the writer's baseline
+    /// comparison is the only thing standing between a trader who steps
+    /// the scale and a file that has also adopted the kind's precision,
+    /// thousands, negative and colour — frozen against the desk's next
+    /// change, which is the exact freeze §4.3 forbids.
+    #[test]
+    fn a_fold_of_untouched_keys_leaves_them_out_of_the_overlay() {
+        let config = config_with_view(
+            "[tree]\ndataset = \"risk\"\n[[tree.columns]]\nname = \"npv\"\n\
+             [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n",
+        );
+        let mut draft = Domain::Views.draft(&config, "tree");
+        let item = draft.list_items("columns").unwrap()[0].clone();
+        assert!(draft.enter_column("npv", column_fields(&item, &[])));
+        let scale = draft.fields.iter().position(|f| f.key == "scale").unwrap();
+        draft.selected = scale;
+        assert_eq!(draft.toggle_selected(), Step::Changed);
+        draft.fold_column();
+
+        let text = super::super::object_text("tree", to_table(&draft, Destination::Presentation));
+        assert!(text.contains("scale = \"k\""), "{text}");
+        for untouched in ["precision", "thousands", "negative", "colour"] {
+            assert!(
+                !text.contains(untouched),
+                "{untouched} is the measure default the desk never declared: {text}"
+            );
+        }
+    }
+
+    /// Part 2c §5.3: `width` is a `Text` because `auto` is one of its
+    /// values; everything else it accepts is a pixel count inside the
+    /// range a table can actually lay out. `label` and `width` are the
+    /// only two keys `i` may open on Views.
+    #[test]
+    fn width_text_is_auto_or_a_pixel_count_in_range() {
+        assert_eq!(parse_text("width", " 120 ").unwrap(), "120");
+        assert_eq!(parse_text("width", "auto").unwrap(), "auto");
+        assert!(parse_text("width", "5").is_err() && parse_text("width", "wide").is_err());
+        assert!(text_editable("label") && text_editable("width") && !text_editable("dataset"));
     }
 }

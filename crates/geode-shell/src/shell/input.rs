@@ -185,6 +185,11 @@ impl ShellView {
             // `Domain::Sources` (`shell::objectdialog::sources`).
             // Palette-only, like `config::views` above.
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
+        } else if action.0 == "config::colours" {
+            // Part 2c Task 5: the object dialog's browse stage over
+            // `Domain::Colours` (`shell::objectdialog::colours`).
+            // Palette-only, like `config::views` above.
+            objectdialog::render::open(self, objectdialog::Domain::Colours, window, cx);
         } else if action.0 == "fontsize::increase" {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's

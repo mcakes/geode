@@ -120,6 +120,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::apply;
+use super::colours;
 use super::scopes;
 use super::sources;
 use super::views;
@@ -133,6 +134,11 @@ use crate::listfilter;
 use crate::vimnav;
 
 use super::super::ShellView;
+// Aliased: `colours` (unqualified, `use super::colours;` above) is the
+// `Domain::Colours` adapter; this is `shell::colours`, the gpui<->pure
+// theme bridge (§6.1) — a different module, one directory further out,
+// that the adapter itself never touches.
+use super::super::colours as colour_theme;
 use super::super::dialog;
 use super::super::keybindings_view::{highlighted_text, key_chip, split_label_indices};
 
@@ -227,8 +233,9 @@ pub fn open(
 }
 
 /// The title-row crumb (§18.1): a count in browse and naming, the slot's
-/// chord in a Groupings edit, nothing otherwise. Pure so a test can read
-/// it without laying out a window.
+/// chord in a Groupings edit, the object and column in the column stage
+/// (Part 2c §5.2), nothing otherwise. Pure so a test can read it without
+/// laying out a window.
 pub(crate) fn crumb_text(shell: &ShellView) -> String {
     let Some(state) = shell.object_dialog.as_ref() else {
         return String::new();
@@ -236,6 +243,11 @@ pub(crate) fn crumb_text(shell: &ShellView) -> String {
     match &state.stage {
         Stage::Edit { object } if state.domain == Domain::Groupings => format!("ctrl+{object}"),
         Stage::Edit { .. } => String::new(),
+        // The one crumb that is a PATH rather than a count or a chord:
+        // the edit header still paints the object's name alone, so
+        // without this the stage would say nothing about which column it
+        // is editing. Same arrow the blotter's own rollup path uses.
+        Stage::Column { object, column } => format!("{object} › {column}"),
         Stage::Browse | Stage::Naming => {
             let n = derive_rows(shell).len();
             format!("{n} {}", state.domain.crumb_noun())
@@ -256,7 +268,13 @@ fn handle_key(
     cx: &mut Context<ShellView>,
 ) -> bool {
     match shell.object_dialog.as_ref().map(|s| &s.stage) {
-        Some(Stage::Edit { .. }) => handle_edit_key(shell, ks, cx),
+        // The column stage shares the edit stage's whole key table (Part
+        // 2c §5.2): it is the same draft with different fields installed,
+        // so `space`, `i`, `/`, `d`/`r`/`o` and the escape ladder all mean
+        // what they already mean — the only key that behaves differently
+        // is `enter`, and it branches inside the `Commit` arm on what the
+        // cursor is on rather than on the stage.
+        Some(Stage::Edit { .. } | Stage::Column { .. }) => handle_edit_key(shell, ks, cx),
         Some(Stage::Naming) => handle_naming_key(shell, ks, cx),
         _ => handle_browse_key(shell, ks, cx),
     }
@@ -546,15 +564,21 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         }
     };
     if domain.name_taken(&shell.services.config, &name) {
-        // Two ways a name can be taken, and they need different
-        // instructions. A name with a row is one `escape` and an `enter`
-        // away; a name only the presentation overlay holds
-        // (`Domain::name_taken`'s own doc) has nothing on this list to
-        // open at all, so pointing the trader at the list would be a
-        // dead end — the orphaned `view_presentation.toml` entry is the
-        // thing in their way, and it is the thing the notice names.
-        let listed = derive_rows(shell).iter().any(|row| row.name == name);
-        let notice = if listed {
+        // Three ways a name can be taken, and they need different
+        // instructions. Reserved (Colours' `none`/`sign`, Part 2c §6.1)
+        // is checked first — no row and no orphaned presentation could
+        // ever explain it, so it gets its own message rather than
+        // falling into either of the other two, both of which point the
+        // trader at something that does not exist for a reserved name. A
+        // name with a row is one `escape` and an `enter` away; a name
+        // only the presentation overlay holds (`Domain::name_taken`'s
+        // own doc) has nothing on this list to open at all, so pointing
+        // the trader at the list would be a dead end — the orphaned
+        // `view_presentation.toml` entry is the thing in their way, and
+        // it is the thing the notice names.
+        let notice = if domain.reserved_names().contains(&name.as_str()) {
+            format!("'{name}' is reserved")
+        } else if derive_rows(shell).iter().any(|row| row.name == name) {
             format!("'{name}' already exists — open it instead")
         } else {
             format!(
@@ -760,6 +784,114 @@ fn enter_edit_stage(
     cx.notify();
 }
 
+/// **The one door into the column stage** (Part 2c §5.2) — `enter` on a
+/// member row of a Views draft.
+///
+/// A pure mutation, like [`enter_edit_stage`]: the mode is set to
+/// `Normal` here and `dialog::sync_dialog_text` empties and blurs the
+/// shared `Input` on the handler's return (spec §16.1). The stage opens
+/// in normal mode whatever mode `enter` arrived in — the same reason
+/// `enter_edit` gives for its own explicit set: a stage left reading
+/// `Filter` sends the next `escape` down a rung this handler does not
+/// claim, and the shell closes the whole dialog instead of stepping back
+/// to the view.
+///
+/// The colour names come from the live `colours` doc — with the pending
+/// write batch folded in, [`enter_edit_stage`]'s own rule — read at open
+/// time rather than carried on the draft: the doc can be reloaded while
+/// the dialog stands, and the `Choice` is built once per stage, so a
+/// name added to `colours.toml` shows up the next time a column is
+/// opened. That is the same freshness every other choice list here has.
+///
+/// [`Draft::enter_column`] answers `false` for a name the view's list
+/// does not hold, and then nothing moves: no stage change, no cursor
+/// change, and the row keeps 2b's notice. That is the available-row case
+/// (the caller's own `EditRow::Item` guard already refuses it) and, more
+/// usefully, the case where a future caller aims at a stale name.
+fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
+    // Through the folded config, exactly as `enter_edit_stage` reads it
+    // (the final review's M-6): inside the 250 ms write debounce
+    // `services.config` is still the documents as they stood before the
+    // last tick, so a colour just created in the Colours dialog would be
+    // missing from this `Choice` for as long as that window is open. The
+    // two doors into a stage now agree about what "the live config"
+    // means.
+    // Named `pending` rather than `folded` (the spelling `enter_edit_stage`
+    // uses) only so the mutation harness's anchor on that line stays
+    // unambiguous — one entry, one site.
+    let pending = apply::config_with_pending(shell);
+    let colours: Vec<String> = pending
+        .as_ref()
+        .unwrap_or(&shell.services.config)
+        .doc("colours")
+        .map(|doc| {
+            geode_core::colour::NamedColours::from_doc(doc)
+                .0
+                .names()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let object = match &state.stage {
+        Stage::Edit { object } | Stage::Column { object, .. } => object.clone(),
+        _ => return,
+    };
+    let Some(draft) = state.draft.as_mut() else {
+        return;
+    };
+    let Some(item) = draft
+        .list_items("columns")
+        .and_then(|items| items.iter().find(|i| i.name == column))
+        .cloned()
+    else {
+        return;
+    };
+    let fields = views::column_fields(&item, &colours);
+    if !draft.enter_column(column, fields) {
+        return;
+    }
+    state.stage = Stage::Column {
+        object,
+        column: column.to_string(),
+    };
+    state.mode = DialogMode::Normal;
+    state.notice = None;
+    // The row list is now seven fields with the cursor on the first, so
+    // the viewport goes with it — `enter_edit_stage`'s own reset.
+    shell.object_dialog_scroll.scroll_to_item(0);
+    cx.notify();
+}
+
+/// `escape` out of the column stage (Part 2c §5.2): fold, restore the
+/// view's fields, and put the cursor back on the column's own row.
+///
+/// The mirror of [`enter_column_stage`], and the reason the escape
+/// ladder's `PreviousStage` rung branches rather than the stage machine
+/// growing a second ladder: from here "the previous stage" is the view's
+/// own edit stage, not the browse list.
+///
+/// No mode is set, for [`leave_edit`]'s reason: this rung is reachable
+/// only from normal mode with an empty query, so the keys are already on
+/// the shell root.
+fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Stage::Column { object, .. } = state.stage.clone() else {
+        return;
+    };
+    if let Some(draft) = state.draft.as_mut() {
+        draft.leave_column();
+    }
+    state.stage = Stage::Edit { object };
+    state.notice = None;
+    scroll_to_cursor(shell);
+    cx.notify();
+}
+
 /// A bare `1`–`9` on the Groupings dialog (§18.8): open that slot's edit
 /// stage, from the browse list or from another slot's edit stage alike.
 /// The slot number IS the object's name (`groupings.rs`'s own doc), so
@@ -787,15 +919,26 @@ fn jump_to_slot(shell: &mut ShellView, slot: u8, cx: &mut Context<ShellView>) {
     enter_edit_stage(shell, &name, None, cx);
 }
 
-/// The edit stage's keys, in the one order they can be read in:
+/// The edit stage's keys — **and the column stage's**, which shares this
+/// whole table (Part 2c §5.2: it is the same draft with one column's
+/// seven fields installed, so every verb here means what it already
+/// meant). Two arms below read the projection rather than the stage:
+/// `Commit`, which opens the column stage from a member row and gives
+/// the ordinary notice everywhere else, and the `PreviousStage` rung,
+/// which goes back to the view rather than to the browse list. `enter` is
+/// therefore the only key whose behaviour the column stage changes, and
+/// it changes it by looking at the row under the cursor.
+///
+/// In the one order they can be read in:
 ///
 /// 1. an armed [`Confirm`] owns **every** keystroke until it is answered
 ///    (`enter`/`y`) or cancelled (`escape`/`n`). It replaces the action
 ///    bar rather than adding a row, so nothing above it moves;
 /// 2. in [`DialogMode::Filter`] (§18.3, entered by `/` the same as
-///    browse) `escape` leaves filter mode keeping the query, `enter`
-///    gives the same notice normal mode's `Commit` does (there is
-///    nothing here to open), navigation goes through
+///    browse) `escape` leaves filter mode keeping the query, `enter` goes
+///    through [`commit_selected_row`] exactly as normal mode's `Commit`
+///    does — one meaning for one key, and the way a trader reaches one
+///    column of a thirty-column view — navigation goes through
 ///    [`listfilter::nav_command`] against [`Draft::visible_rows`], and
 ///    `tab`/`shift+tab` are claimed and dropped — everything else is
 ///    unclaimed (`false`), reaching the focused `Input`;
@@ -893,10 +1036,15 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             return true;
         }
         if ks.mods == Modifiers::NONE && ks.key == "enter" {
-            // Nothing here to open — the same notice normal mode's
-            // `Commit` gives, so `enter` says the same thing in either
-            // mode.
-            edit_commit_notice(shell);
+            // Exactly what normal mode's `Commit` does, so `enter` means
+            // one thing in either mode — the browse stage's own rule
+            // ("bare `enter` is claimed in both modes and opens the edit
+            // stage on the selected row"). Until Part 2c there was
+            // nothing here to open and both modes could only give the
+            // notice; now a member row opens its column stage, and it
+            // opens from the filtered list too — which is how a trader
+            // reaches one column of a thirty-column view.
+            commit_selected_row(shell, cx);
             cx.notify();
             return true;
         }
@@ -954,7 +1102,20 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 // fork the user has not confirmed was taken back off the
                 // draft when they declined it. Leaving abandons exactly
                 // nothing.
-                leave_edit(shell, cx);
+                //
+                // Part 2c §5.2: from the column stage this rung goes back
+                // one stage, not all the way out — to the view whose
+                // fields `leave_column_stage` restores, cursor on the
+                // column just edited.
+                let in_column = shell
+                    .object_dialog
+                    .as_ref()
+                    .is_some_and(|state| matches!(state.stage, Stage::Column { .. }));
+                if in_column {
+                    leave_column_stage(shell, cx);
+                } else {
+                    leave_edit(shell, cx);
+                }
                 return true;
             }
             // `LeaveFilter` is unreachable at this match — the
@@ -1035,6 +1196,14 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
                 "nothing on this row changes with shift+space".to_string(),
             ),
         },
+        NormalCommand::MoveItem(delta) if in_column_stage(shell) => {
+            // Part 2c §5.2: there is no list in this stage to reorder, so
+            // the ordinary "that is as far as this row goes" would answer
+            // about rows that are not on screen. Both directions get the
+            // same sentence, with the key they actually pressed in it.
+            let key = if delta < 0 { "shift+k" } else { "shift+j" };
+            not_a_column_verb(shell, key);
+        }
         NormalCommand::MoveItem(delta) => {
             let skipped = draft_mut(shell).and_then(|draft| draft.move_item(delta));
             match skipped {
@@ -1070,6 +1239,11 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
         // which was on screen before the keystroke and so still is — the
         // demoted row is the one that travels, and the cursor no longer
         // travels with it (`Draft::remove_selected`'s own comment).
+        // Part 2c §5.2: same reasoning as `MoveItem`'s own column-stage
+        // arm just above — `x` demotes a column into the catalogue, and
+        // neither list is on screen here, so the notice names the stage
+        // rather than a list the trader cannot see.
+        NormalCommand::Verb('x') if in_column_stage(shell) => not_a_column_verb(shell, "x"),
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
                 revalidate(shell);
@@ -1114,7 +1288,7 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
             shell.object_dialog_scroll.scroll_to_item(0);
         }
         NormalCommand::EditText => open_text_field(shell),
-        NormalCommand::Commit => edit_commit_notice(shell),
+        NormalCommand::Commit => commit_selected_row(shell, cx),
         // §18.8: from one slot's edit stage a digit jumps straight to
         // another's. On any other domain it is named like an unbound
         // letter would be — the edit stage's rule for a key that did
@@ -1140,18 +1314,66 @@ fn handle_edit_key(shell: &mut ShellView, ks: &Keystroke, cx: &mut Context<Shell
     true
 }
 
-/// `enter`/`i` in the edit stage — reachable from either mode
-/// (normal mode's own `Commit`/`EditText` match arm, and filter mode's
-/// `enter`, which gives the identical notice because there is nothing to
-/// open either way): say whether `space` would do anything on the
-/// selected row, since every field here is a choice, a list, or a
-/// read-only `Text`, and `space` only helps for the first two.
-fn edit_commit_notice(shell: &mut ShellView) {
-    let writable = shell
+/// `enter` in the edit stage, from either mode — the one door both
+/// spellings go through, so the two cannot drift about what `enter`
+/// means (the browse stage's own rule for the same key).
+///
+/// Part 2c §5.2: on one of the view's OWN column rows it opens that
+/// column's presentation; anywhere else it is [`edit_commit_notice`]'s
+/// answer. Gated on three things and **no stage check**: the domain (only
+/// Views has a column stage), that no column stage is open already (the
+/// stage installs no item rows, so this cannot fire twice — reading it
+/// off the draft rather than the stage is what keeps the two from ever
+/// disagreeing), and that the cursor is on an `EditRow::Item` — never an
+/// `Available` one, which is a column the view does not have and so has
+/// no presentation to edit (§5.2 keeps 2b's notice there).
+fn commit_selected_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
+    let opens_column = shell.object_dialog.as_ref().is_some_and(|state| {
+        state.domain == Domain::Views
+            && state.draft.as_ref().is_some_and(|draft| {
+                draft.column().is_none()
+                    && matches!(draft.selected_row(), Some(EditRow::Item { .. }))
+            })
+    });
+    if !opens_column {
+        edit_commit_notice(shell);
+        return;
+    }
+    // An item row's label IS its column name (`Draft::row_label`), which
+    // is the identity every verb here and `Draft::enter_column`'s own
+    // membership check speak.
+    let name = shell
         .object_dialog
         .as_ref()
-        .is_some_and(|state| state.domain.writable());
-    if !writable {
+        .and_then(|state| state.draft.as_ref())
+        .and_then(|draft| draft.selected_row().map(|row| draft.row_label(row)));
+    match name {
+        Some(name) => enter_column_stage(shell, &name, cx),
+        None => edit_commit_notice(shell),
+    }
+}
+
+/// `enter`'s answer for a row with nothing to open
+/// ([`commit_selected_row`]'s fallback, in either mode), and `i`'s for a
+/// row it cannot open ([`open_text_field`]): name the verb that DOES
+/// change the selected row, or say the row has none.
+///
+/// Three answers, because there are three kinds of row here: `space` for
+/// a choice, a bool or a list entry; `i` for a `Number` or a `Text` the
+/// domain marks editable (`Domain::text_editable`); and "read-only" for
+/// the display-only `Text`s (Groupings' `slot`, Scopes' two summaries).
+/// The `i` answer arrived with the column stage's `label` and `width`
+/// (Part 2c §5.3), which are the first Views rows `i` can open — before
+/// them, every editable `Text` in this crate was a Sources row, where
+/// `enter` gave the read-only wording about a row `i` opens perfectly
+/// well. That was the two verbs disagreeing about the same row, which is
+/// exactly what [`open_text_field`]'s own doc says they must not do.
+fn edit_commit_notice(shell: &mut ShellView) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    let domain = state.domain;
+    if !domain.writable() {
         // §19.4: agree with `i` and every other verb's refusal on a
         // read-only domain rather than falling back to the ordinary
         // "this row is read-only" wording, which names the ROW, not the
@@ -1160,13 +1382,21 @@ fn edit_commit_notice(shell: &mut ShellView) {
         set_notice(shell, READ_ONLY_NOTICE.to_string());
         return;
     }
-    let steppable = shell
-        .object_dialog
-        .as_ref()
-        .and_then(|state| state.draft.as_ref())
-        .is_some_and(selected_field_is_steppable);
-    let notice = if steppable {
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    let typeable = match draft.selected_row() {
+        Some(EditRow::Field(i)) => match &draft.fields[i].kind {
+            FieldKind::Number { .. } => true,
+            FieldKind::Text(_) => domain.text_editable(&draft.fields[i].key),
+            _ => false,
+        },
+        _ => false,
+    };
+    let notice = if selected_field_is_steppable(draft) {
         "press space to change the selected row"
+    } else if typeable {
+        "press i to type a value"
     } else {
         "this row is read-only — nothing here has a verb"
     };
@@ -1404,6 +1634,28 @@ fn selected_field_is_steppable(draft: &Draft) -> bool {
     }
 }
 
+/// Is the column stage open (Part 2c §5.2)? Read off the DRAFT, never
+/// the stage, for [`commit_selected_row`]'s reason: the projection is
+/// what the verbs below actually act on, so asking the thing that carries
+/// it keeps the two from ever disagreeing.
+fn in_column_stage(shell: &ShellView) -> bool {
+    shell
+        .object_dialog
+        .as_ref()
+        .and_then(|state| state.draft.as_ref())
+        .is_some_and(|draft| draft.column().is_some())
+}
+
+/// The one answer for a verb the column stage does not own: `x`,
+/// `shift+j` and `shift+k` all reorder or demote rows of a list this
+/// stage does not install, and `d`/`r` (the final review's I-2) act on
+/// the whole view the crumb has narrowed away from — so each says the
+/// same thing with its own key in it, rather than the edit stage's
+/// answer about an object or rows that are not on screen.
+fn not_a_column_verb(shell: &mut ShellView, key: &str) {
+    set_notice(shell, format!("{key} is not a verb in a column's stage"));
+}
+
 /// Set the footer notice, if a dialog is open at all.
 fn set_notice(shell: &mut ShellView, notice: String) {
     if let Some(state) = shell.object_dialog.as_mut() {
@@ -1510,7 +1762,16 @@ fn scroll_to_cursor(shell: &mut ShellView) {
     shell.object_dialog_scroll.scroll_to_item(selected);
 }
 
-/// Re-run [`Domain::validate`] over the draft as it now stands.
+/// Re-run [`Domain::validate`] over the draft as it now stands — and,
+/// first, fold the column stage's fields back onto the item they came
+/// from.
+///
+/// The fold lives here because this is the one function every changed
+/// value passes through on its way to [`commit_or_confirm`]: the step
+/// arms (`space`/`shift+space`), a committed text field, `x`, and the
+/// tick click all call it, and none of them knows or should know that a
+/// projection is open. A fold anywhere else would be a fold each of those
+/// call sites had to remember.
 fn revalidate(shell: &mut ShellView) {
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
@@ -1519,12 +1780,31 @@ fn revalidate(shell: &mut ShellView) {
     let Some(draft) = state.draft.as_mut() else {
         return;
     };
+    // The key a cleared `label`/`width` handed back to the desk, if any —
+    // see the notice at the end of this function.
+    let mut followed_desk = None;
+    // 2c §5.2: the column stage is a projection; fold it into the item
+    // FIRST so the validator and the overlay writer see this keystroke.
+    if draft.column().is_some() {
+        followed_desk = draft.fold_column();
+    }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
     // borrow the compiler allows here and a `&mut self` method would not.
     let diagnostics = domain.validate(draft, &shell.services.config);
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
+    }
+    // §5.3's clear verb said out loud. The field under the cursor has
+    // just been re-seeded with the desk's own value (`Draft::fold_column`),
+    // so without this the trader would watch what they typed be replaced
+    // by something else with no explanation — a screen that appears to
+    // have ignored the keystroke rather than one that honoured it
+    // exactly. Set here, not in the arms: every path that changes a value
+    // comes through this function, and only this function knows the fold
+    // happened.
+    if let Some(key) = followed_desk {
+        set_notice(shell, format!("{key} follows the desk again"));
     }
 }
 
@@ -1547,7 +1827,7 @@ fn revalidate(shell: &mut ShellView) {
 /// nothing else about the keyboard.
 fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => String::new(),
     };
     if let Some(state) = shell.object_dialog.as_mut() {
@@ -1572,7 +1852,10 @@ fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
 /// derivation rather than by a second guess made here.
 fn editing_row(shell: &ShellView) -> Option<ObjectRow> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        // The column stage's verbs act on the OBJECT, not the column
+        // (Part 2c §5.2): `d`, `r` and `o` are the view's, and the row
+        // they are gated by is the view's row.
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => return None,
     };
     derive_rows(shell).into_iter().find(|row| row.name == name)
@@ -1606,7 +1889,9 @@ fn removal_edits(
     docs: &[&'static str],
 ) -> Result<Vec<(&'static str, String)>, String> {
     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-        Some(Stage::Edit { object }) => object.clone(),
+        // Same rule `editing_row` states: a removal armed from the column
+        // stage removes the OBJECT, which is what `d`/`r` mean there too.
+        Some(Stage::Edit { object } | Stage::Column { object, .. }) => object.clone(),
         _ => return Err("nothing is open".to_string()),
     };
     let touched: Vec<&'static str> = docs
@@ -1660,6 +1945,26 @@ fn removal_edits(
 /// the message names the real state ("is empty") and the real remedy
 /// (tick a dimension) instead.
 fn arm_delete(shell: &mut ShellView) {
+    // Part 2c final review, I-2: refused in the column stage, through
+    // the very notice `x`/`shift+j`/`shift+k` already answer with. The
+    // crumb has narrowed the object to one column, and `d`'s confirmed
+    // effect is on the whole view — it deletes the user-layer view
+    // outright. A destructive verb must not answer about an object the
+    // trader has navigated away from, which is the same rule the three
+    // list verbs were refused under; leaving these two live where those
+    // three were refused is the asymmetry that reads as an oversight.
+    // The cost is one keystroke: `escape` first, then `d`.
+    //
+    // Guarded here rather than at the dispatch arm (where `x`'s own
+    // guard sits) because this function has two callers — the `d`
+    // keystroke and `press_verb`'s action-bar click (§18.9 made the bar
+    // the mouse form of these letters), and a guard on only the keyboard
+    // one would leave the stage destructible with a mouse, exactly the
+    // Part 2b review Major that `Domain::writable`'s ten sites answer.
+    if in_column_stage(shell) {
+        not_a_column_verb(shell, "d");
+        return;
+    }
     match editing_row(shell) {
         Some(row) if row.layer == Some(Layer::User) => {
             if let Some(draft) = draft_mut(shell) {
@@ -1700,6 +2005,16 @@ fn arm_delete(shell: &mut ShellView) {
 /// undo for hiding a column — the commonest edit §4.1's split exists to
 /// make cheap, and the one whose override never reaches `views.toml`.
 fn arm_revert(shell: &mut ShellView) {
+    // Part 2c final review, I-2 — `arm_delete`'s guard, for the same
+    // reason and with the same reach over both callers. `r`'s confirmed
+    // effect is a removal across `views` AND `view_presentation`, so
+    // from a stage crumbed `tree > npv` it would throw away the
+    // trader's personalisation of every column of the view, not the one
+    // the crumb names.
+    if in_column_stage(shell) {
+        not_a_column_verb(shell, "r");
+        return;
+    }
     match editing_row(shell) {
         Some(row) if row.overridden => {
             if let Some(draft) = draft_mut(shell) {
@@ -1852,7 +2167,9 @@ fn run_confirmed(shell: &mut ShellView, confirm: Confirm, cx: &mut Context<Shell
                     // both files reads "views and view_presentation" the
                     // way it always has.
                     let name = match shell.object_dialog.as_ref().map(|state| &state.stage) {
-                        Some(Stage::Edit { object }) => object.clone(),
+                        Some(Stage::Edit { object } | Stage::Column { object, .. }) => {
+                            object.clone()
+                        }
                         _ => String::new(),
                     };
                     let files: Vec<String> = docs
@@ -1988,7 +2305,10 @@ fn build(
     let Some(state) = shell.object_dialog.as_ref() else {
         return div().into_any_element();
     };
-    if matches!(state.stage, Stage::Edit { .. }) {
+    // The column stage paints the edit stage's own chrome (Part 2c §5.2)
+    // — header, filter row, row list, action bar — over the seven fields
+    // it installed; only the crumb tells them apart.
+    if matches!(state.stage, Stage::Edit { .. } | Stage::Column { .. }) {
         return build_edit(shell, entity, cx);
     }
     // The same one derivation path `handle_key` uses — a second spelling
@@ -1999,6 +2319,34 @@ fn build(
     // Copied out so the row closures below don't hold the `theme` borrow.
     let chip_fg = theme.muted_foreground;
     let chip_bg = theme.muted;
+
+    // §6.1: the merged `colours.toml` AND the theme's own
+    // anchors/tokens, read once for the whole list rather than once per
+    // row — every browse row's swatch resolves its own saved colour
+    // against them. `None` for every other domain, so a non-Colours
+    // dialog never even asks `Config` for a doc it will never read the
+    // rest of the row loop for.
+    //
+    // The pair is hoisted with the doc (the final review's M-8):
+    // `resolve_named` (since deleted — this hoist left it with no caller) read the theme inside itself, so
+    // resolving per row cost M x 28 `Hsla -> Rgb` conversions for a list
+    // of M colours. Bounded by colour count in a modal rather than by row
+    // count on the paint path, so it is tidiness rather than budget — but
+    // it is the same shape the blotter's I-1 memo answers, and the list
+    // was already hoisting the doc.
+    let named_colours: Option<(
+        geode_core::colour::NamedColours,
+        geode_core::colour::Anchors,
+        geode_core::colour::Tokens,
+    )> = (state.domain == Domain::Colours).then(|| {
+        let empty = geode_core::config::MergedDoc::default();
+        let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
+        (
+            geode_core::colour::NamedColours::from_doc(doc).0,
+            colour_theme::anchors_from_theme(theme),
+            colour_theme::tokens_from_theme(theme),
+        )
+    });
 
     let visible = super::visible_rows(state, &rows);
 
@@ -2113,10 +2461,25 @@ fn build(
             ));
         }
 
+        // §6.1: a swatch before the label, resolved from this row's own
+        // saved colour — painted only when the colour actually resolves
+        // (a dropped or invalid one paints no swatch, never a fallback
+        // that would misrepresent it).
+        let swatch = named_colours
+            .as_ref()
+            .and_then(|(named, anchors, tokens)| {
+                named.get(&row.name).map(|def| (def, anchors, tokens))
+            })
+            .map(|(def, anchors, tokens)| {
+                let hsla = colour_theme::to_hsla(geode_core::colour::resolve(def, anchors, tokens));
+                dialog::swatch(hsla, format!("objectdialog-swatch-{}", row.name), cx)
+            });
+
         let entity_for_row = entity.clone();
         let clicked = row.name.clone();
         let selector_name = row.name.clone();
         let row_el = row_el
+            .children(swatch)
             .child(label)
             .child(markers)
             // Keyed by the object's own name, not its index: the list is
@@ -2341,6 +2704,30 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
     let chip_bg = theme.muted;
     let row = editing_row(shell);
 
+    // §6.1: on Colours, the swatch beside the name — resolved from the
+    // draft's own live fields (`colours::definition_of`), not from the
+    // saved `colours.toml`, so stepping the hue repaints it before any
+    // write lands. `None` (no swatch) only if the draft somehow lacks a
+    // `hue` row, which `colours::fields` never produces.
+    let name_child = match (state.domain, colours::definition_of(draft)) {
+        (Domain::Colours, Some(def)) => {
+            let anchors = colour_theme::anchors_from_theme(theme);
+            let tokens = colour_theme::tokens_from_theme(theme);
+            let hsla = colour_theme::to_hsla(geode_core::colour::resolve(&def, &anchors, &tokens));
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(dialog::swatch(
+                    hsla,
+                    "objectdialog-swatch-header".to_string(),
+                    cx,
+                ))
+                .child(div().text_lg().child(draft.name.clone()))
+                .into_any_element()
+        }
+        _ => div().text_lg().child(draft.name.clone()).into_any_element(),
+    };
+
     // The object header: its name, and the same two provenance markers
     // the browse row carries, so opening an object never loses the
     // context the list gave it.
@@ -2349,7 +2736,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
         .items_center()
         .justify_between()
         .gap_3()
-        .child(div().text_lg().child(draft.name.clone()))
+        .child(name_child)
         .debug_selector(|| "objectdialog-edit-header".to_string());
     if row.is_some() || draft.is_new {
         let mut markers = h_flex().gap_1().items_center();
@@ -2617,21 +3004,34 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 if !entry.included {
                     name_row = name_row.text_color(theme.muted_foreground);
                 }
-                let name = name_row
-                    .child(highlighted_text(&entry.name, &m.indices, theme.primary))
-                    .into_any_element();
-                let width = match entry.width {
-                    Some(width) => format!("{width:.0}px"),
-                    None => "auto".to_string(),
-                };
+                name_row = name_row.child(highlighted_text(&entry.name, &m.indices, theme.primary));
+                // The compact per-column summary (Part 2c §5.4) is painted
+                // after the name, muted, on a member row only — an
+                // available row's presentation is always the empty
+                // default (nothing has ever overridden a column not yet
+                // in the view), so `column_summary` would paint nothing
+                // for one anyway, but `own` says so rather than relying
+                // on that coincidence. It is deliberately part of the
+                // NAME element, not `row_label` — `Draft::row_label`
+                // stays the name alone, so the filter still matches only
+                // what it always matched.
+                if own {
+                    let summary =
+                        views::column_summary(&views::kind_default(entry), &entry.presentation);
+                    if !summary.is_empty() {
+                        name_row = name_row.child(
+                            div()
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .child(summary),
+                        );
+                    }
+                }
+                let name = name_row.into_any_element();
                 (
                     format!("objectdialog-item-{}", entry.name),
                     name,
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground)
-                        .child(width)
-                        .into_any_element(),
+                    div().into_any_element(),
                 )
             }
         };
@@ -2915,6 +3315,40 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 }),
             ],
         )
+    } else if draft.column().is_some() {
+        // Part 2c §5.2: the column stage's own vocabulary. No
+        // `shift+j`/`shift+k` and no `x` — there is no list here to
+        // reorder or demote from, and this footer's standing rule is to
+        // name only the keys that act on THESE rows. `i` is always live
+        // (`label` and `width` are both editable `Text`s), so it is
+        // stated unconditionally rather than through
+        // `offers_text_entry`, which would answer the same thing one
+        // indirection later. `escape` names the object it goes back to,
+        // since "back to the list" would be a lie about a rung that
+        // stops at the view.
+        let back = format!("back to {}", draft.name);
+        (
+            vec![
+                chip("j"),
+                chip("k"),
+                sep("move ·"),
+                chip("space"),
+                chip("shift+space"),
+                sep("change"),
+            ],
+            vec![
+                hint_i(chip("i")),
+                sep("type a value ·"),
+                chip("/"),
+                sep("filter ·"),
+                chip("escape"),
+                if draft.query.is_empty() {
+                    div().child(back).into_any_element()
+                } else {
+                    sep("clear the filter")
+                },
+            ],
+        )
     } else {
         let mut motion = vec![
             chip("j"),
@@ -3058,12 +3492,12 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "DIMENSIONS — space includes · shift+j / shift+k reorder",
             "members",
         ),
-        // None of Scopes, Schema or Sources has an `OrderedList` field at
-        // all (`scopes.rs`'s, `schema.rs`'s and `sources.rs`'s own module
-        // docs — every field on any of the three is a plain scalar), so
-        // this arm is unreachable for all three; kept only to stay
-        // exhaustive as domains are added.
-        (Domain::Scopes | Domain::Schema | Domain::Sources, _) => ("", "members"),
+        // None of Scopes, Schema, Sources or Colours has an `OrderedList`
+        // field at all (`scopes.rs`'s, `schema.rs`'s, `sources.rs`'s and
+        // `colours.rs`'s own module docs — every field on any of the
+        // four is a plain scalar), so this arm is unreachable for all
+        // four; kept only to stay exhaustive as domains are added.
+        (Domain::Scopes | Domain::Schema | Domain::Sources | Domain::Colours, _) => ("", "members"),
     }
 }
 

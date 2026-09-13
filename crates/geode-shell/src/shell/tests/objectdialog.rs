@@ -315,9 +315,13 @@ fn desk_view_docs() -> Vec<LayerDoc> {
         layer: Layer::Desk,
         name: "views".to_string(),
         file: "<test:desk>".into(),
+        // `npv` carries a desk `label` — the one column key Part 2c's
+        // column stage can CLEAR (§5.3), and a clear is only meaningful
+        // against a desk that set something. Nothing else here reads it;
+        // it simply gives the stage a key to hand back.
         table: "[tree]\ndataset = \"risk_snapshot\"\ngrouping = [\"book\"]\n\
                 [[tree.columns]]\nname = \"book\"\nkind = \"dimension\"\n\
-                [[tree.columns]]\nname = \"npv\"\n"
+                [[tree.columns]]\nname = \"npv\"\nlabel = \"NPV\"\n"
             .parse()
             .unwrap(),
     };
@@ -501,7 +505,7 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
     let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("view_presentation.toml should have been written");
     assert!(
-        presentation.contains("hidden = [\"book\"]"),
+        presentation.contains("[tree.columns.book]") && presentation.contains("hidden = true"),
         "the hidden column must survive the reload the edit triggered:\n{presentation}"
     );
 }
@@ -585,7 +589,7 @@ fn hiding_a_column_writes_presentation_and_does_not_fork_the_view(cx: &mut gpui:
     let presentation = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("view_presentation.toml should have been written");
     assert!(
-        presentation.contains("hidden = [\"book\"]"),
+        presentation.contains("[tree.columns.book]") && presentation.contains("hidden = true"),
         "the hidden column has to actually be in the file:\n{presentation}"
     );
     assert!(
@@ -984,7 +988,10 @@ fn an_edit_with_only_warnings_still_joins_the_batch(cx: &mut gpui::TestAppContex
     flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("a warning must not have stopped the write");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// **The requirement, in one test.** Changing a config field is INSTANT:
@@ -1037,15 +1044,19 @@ fn a_field_edit_shows_instantly_and_the_config_and_file_follow_together(
         .expect("the debounced flush has to reach the merged config");
     assert_eq!(
         applied
-            .get("hidden")
-            .and_then(|v| v.as_array())
-            .map(|a| a.len()),
-        Some(1),
+            .get("columns")
+            .and_then(|v| v.get("book"))
+            .and_then(|v| v.get("hidden"))
+            .and_then(|v| v.as_bool()),
+        Some(true),
         "hiding a column has to reach the merged config, got {applied:?}"
     );
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("and the file, on the same timer");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// **Applying stays singular, and the fan-out rides the write's timer.**
@@ -1252,7 +1263,10 @@ fn a_stale_write_completion_does_not_erase_a_newer_edit(cx: &mut gpui::TestAppCo
 
     let text = std::fs::read_to_string(&file)
         .expect("the batch a stale completion left alone still has to be written");
-    assert!(text.contains("hidden = [\"book\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.book]") && text.contains("hidden = true"),
+        "{text}"
+    );
     assert!(
         presentation_of(&shell, &cx, "tree").is_some(),
         "and it has to have been applied, not just written"
@@ -1428,18 +1442,24 @@ fn edits_inside_the_debounce_window_coalesce_into_one_write(cx: &mut gpui::TestA
     let text = std::fs::read_to_string(dir.path().join("view_presentation.toml"))
         .expect("the coalesced write has to land");
     assert!(
-        text.contains("hidden = [\"npv\"]"),
+        text.contains("[tree.columns.npv]") && text.contains("hidden = true"),
         "and it has to be the FINAL state, not the first edit of the run:\n{text}"
+    );
+    assert!(
+        !text.contains("[tree.columns.book]"),
+        "book ended the run unhidden, its desk default, so it needs no \
+         table at all:\n{text}"
     );
     // Memory and the file agree, which is the only thing a coalesced
     // write is allowed to change about the result.
     let applied = presentation_of(&shell, &cx, "tree").expect("still personalised");
     assert_eq!(
         applied
-            .get("hidden")
-            .and_then(|v| v.as_array())
-            .map(Vec::len),
-        Some(1)
+            .get("columns")
+            .and_then(|v| v.get("npv"))
+            .and_then(|v| v.get("hidden"))
+            .and_then(|v| v.as_bool()),
+        Some(true)
     );
 }
 
@@ -4116,7 +4136,10 @@ fn clicking_a_tick_hides_the_column_and_parks_the_cursor_there(cx: &mut gpui::Te
     cx.run_until_parked();
     let text =
         std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap_or_default();
-    assert!(text.contains("hidden = [\"npv\"]"), "{text}");
+    assert!(
+        text.contains("[tree.columns.npv]") && text.contains("hidden = true"),
+        "{text}"
+    );
 }
 
 /// On an available row the tick adds — `space`'s add — which is a `Doc`
@@ -5132,4 +5155,322 @@ fn the_edit_footer_hides_i_where_it_would_only_refuse(cx: &mut gpui::TestAppCont
         cx.debug_bounds("objectdialog-hint-i").is_none(),
         "Views has no row i can open, so the footer must not teach it"
     );
+}
+
+// ---- Part 2c Task 4: the column stage (2c §5) -------------------------
+
+/// §5: enter on a member opens the column stage; a step there writes
+/// one [view.columns.<col>] key to the overlay and never forks the view;
+/// escape returns to the view's stage with the cursor on the column.
+#[gpui::test]
+fn the_column_stage_writes_a_differing_key_to_the_overlay(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // `tree` is a DESK view of `book` and `npv`, with the cursor landing
+    // on `book`; one `j` puts it on `npv`, whose name the overlay
+    // assertions below read.
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert_eq!(
+        shell.read_with(&cx, |s, _| objectdialog::render::crumb_text(s)),
+        "tree › npv"
+    );
+    assert!(cx.debug_bounds("objectdialog-field-scale").is_some());
+    cx.simulate_keystrokes("j j space"); // label, width, scale → k
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("objectdialog-confirm").is_none(),
+        "presentation never forks"
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(
+        written.contains("[tree.columns.npv]") && written.contains("scale = \"k\""),
+        "{written}"
+    );
+    assert!(
+        !dir.path().join("views.toml").exists(),
+        "the desk's view is untouched"
+    );
+
+    // §5.3's clear verb, end to end: `i` on `Label`, typed empty,
+    // `enter`. An empty label means "stop overriding", never "delete" —
+    // this overlay cannot remove a key `views.toml` sets — so the field
+    // comes back reading the desk's own label, the trader is told why,
+    // and no `label` key reaches the file.
+    cx.simulate_keystrokes("k k"); // scale → width → label
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "NPV",
+        "seeded with the label in force — the desk's"
+    );
+    cx.simulate_keystrokes("backspace backspace backspace enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        &d.fields[0].kind,
+        objectdialog::FieldKind::Text(t) if t == "NPV"
+    )));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("label follows the desk again")
+    );
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(
+        !written.contains("label"),
+        "the overlay has no opinion about the label: {written}"
+    );
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.selected_row(),
+        Some(objectdialog::EditRow::Item { .. })
+    )));
+
+    // And `enter` means the same thing in filter mode, which is how a
+    // trader reaches one column of a thirty-column view.
+    cx.simulate_keystrokes("/");
+    cx.simulate_input("npv");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Column { .. }
+    ));
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        DialogMode::Normal,
+        "the stage opens in normal mode whatever mode enter arrived in"
+    );
+}
+
+/// §5.2: a failed write rebuilds the draft from the reverted config —
+/// the OBJECT's fields, with no column projection on them — so the stage
+/// has to come back with it rather than leaving the crumb naming a column
+/// whose seven fields are no longer installed.
+///
+/// Same fixture trick `a_failed_removal_reverts_the_in_memory_change_and_
+/// says_so` uses: the file on disk will not parse, but the config in
+/// memory never read it, so only the write can discover the problem.
+#[gpui::test]
+fn a_failed_write_in_the_column_stage_steps_back_to_the_view(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    std::fs::write(dir.path().join("view_presentation.toml"), "[tree\nhidden =").unwrap();
+    cx.simulate_keystrokes("j j space"); // scale → k
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        objectdialog::Stage::Edit { .. }
+    ));
+    assert!(edit_draft(&shell, &cx, |d| d.column().is_none()));
+    let reported = shell.read_with(&cx, |s, _| s.config_write_error.clone());
+    assert!(
+        reported.as_deref().is_some_and(|m| m.contains("reverted")),
+        "{reported:?}"
+    );
+}
+
+/// I-2 (Part 2c final review): `d` and `r` are refused in the column
+/// stage, through the same `not_a_column_verb` notice `x`, `shift+j` and
+/// `shift+k` already answer with.
+///
+/// The crumb has narrowed the object to one column, and both verbs act
+/// on the WHOLE view — `d` deletes the user-layer view, `r` undoes the
+/// trader's personalisation of every column of it, not the open one. The
+/// fixture makes that reachable rather than merely refused-anyway: one
+/// `space` on `scale` gives the view a user-layer presentation override,
+/// so `r` would arm a real `Confirm::Revert` here absent the guard.
+///
+/// The last block is the scoping half: the refusal is the column
+/// stage's, not a blanket disabling of the two letters — one `escape`
+/// back to the view and `r` arms exactly as it always did.
+#[gpui::test]
+fn delete_and_revert_are_refused_in_the_column_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j space"); // scale → k, a real override
+    cx.run_until_parked();
+    // The override has to reach MEMORY before either verb is asked
+    // about it: an ordinary field edit applies at the debounced flush,
+    // and `derive_rows` reads the live config — without this the row is
+    // not `overridden` yet and `r` would have been refused anyway,
+    // which would make the assertions below prove nothing.
+    flush_config_write(&mut cx);
+
+    for key in ["d", "r"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()),
+            Some(format!("{key} is not a verb in a column's stage")),
+            "{key} answered about the view from inside a column's stage"
+        );
+        assert_eq!(
+            edit_draft(&shell, &cx, |d| d.confirm),
+            None,
+            "{key} armed a confirm the crumb has navigated away from"
+        );
+        assert!(
+            edit_draft(&shell, &cx, |d| d.column().is_some()),
+            "{key} left the column stage"
+        );
+    }
+
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.column().is_none()));
+    cx.simulate_keystrokes("r");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.confirm),
+        Some(objectdialog::Confirm::Revert),
+        "the refusal is the column stage's alone — r still arms on the view"
+    );
+}
+
+/// §5.3: `width` is a typed value, not a stepped one — `i` opens it
+/// seeded with `auto`, a pixel count inside the range applies and reaches
+/// the overlay, and anything else is refused with the range named and the
+/// field still open on the trader's own text.
+#[gpui::test]
+fn the_column_stages_width_is_typed_and_refused_out_of_range(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = open_tree_edit_stage(cx, dir.path());
+    cx.simulate_keystrokes("j enter"); // npv's column stage
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j"); // label → width
+    cx.run_until_parked();
+    // §5.2: the list verbs answer about THIS stage, not about a column
+    // list that is not on screen — one sentence, whichever key.
+    for (key, pressed) in [("x", "x"), ("shift-j", "shift+j"), ("shift-k", "shift+k")] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+        assert_eq!(
+            dialog_state(&shell, &cx, |s| s.notice.clone()),
+            Some(format!("{pressed} is not a verb in a column's stage"))
+        );
+    }
+    // `enter` names the verb this row actually has — `i`, not `space`,
+    // and certainly not "read-only", which is what an editable `Text`
+    // used to be told it was.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("press i to type a value")
+    );
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+    assert_eq!(
+        dialog_input_text(&shell, &cx),
+        "auto",
+        "seeded with the width in force"
+    );
+
+    // A word is not a width: refused, named, and the field stays open so
+    // the typed text can be corrected rather than retyped.
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("wide");
+    cx.run_until_parked();
+    // Typing mirrors through the `Input`'s change subscription; the
+    // cursor must still be on the width row (1), not reset to the top as a
+    // filter keystroke is (found on a display 2026-09-13).
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.selected),
+        1,
+        "typing into the open field must not move the cursor"
+    );
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone()).unwrap_or_default();
+    assert!(notice.contains("20–2000"), "{notice}");
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_some()));
+
+    cx.simulate_keystrokes("backspace backspace backspace backspace");
+    cx.simulate_input("160");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| d.text_entry.is_none()));
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("view_presentation.toml")).unwrap();
+    assert!(written.contains("width = 160"), "{written}");
+}
+
+// --- Task 5: the Colours dialog (Part 2c §6.1) --------------------------
+
+/// A builtin `colours` doc with one colour (`delta`, `hue = 240`) plus
+/// the keymap — the same shape `services_with_sources` uses, so a first
+/// edit to `delta` asks before forking exactly as a builtin source's
+/// first edit does.
+fn services_with_colours() -> ShellServices {
+    let mut services = test_services();
+    let colours = LayerDoc::builtin("colours", "[delta]\nhue = 240\n").unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            colours,
+        ],
+        desk: None,
+        user: None,
+    });
+    services
+}
+
+/// §6.1: the browse rows and the edit header carry a swatch resolved
+/// against the active theme; stepping the hue repaints it; `n` refuses a
+/// reserved name.
+#[gpui::test]
+fn the_colours_dialog_paints_swatches_and_refuses_reserved_names(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_with_colours(), dir.path(), "config::colours");
+    assert!(cx.debug_bounds("objectdialog-swatch-delta").is_some());
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("sign");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert!(
+        dialog_state(&shell, &cx, |s| s.notice.clone())
+            .unwrap()
+            .contains("reserved")
+    );
+    cx.simulate_keystrokes("escape");
+    cx.simulate_keystrokes("enter"); // delta
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("objectdialog-swatch-header").is_some());
+    cx.simulate_keystrokes("space"); // hue 240 → 255
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[0].kind,
+        objectdialog::FieldKind::Number { value: 255, .. }
+    )));
+    // A builtin colour's first edit asks the fork question, exactly as
+    // `sources_rows_are_dataset_first_and_i_types_a_duration` presses
+    // `enter` on it before the flush.
+    assert!(cx.debug_bounds("objectdialog-confirm").is_some());
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let written = std::fs::read_to_string(dir.path().join("colours.toml")).unwrap();
+    assert!(written.contains("[delta]\nhue = 255"), "{written}");
 }

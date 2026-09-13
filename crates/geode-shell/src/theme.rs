@@ -809,6 +809,7 @@ mod gpui_tests {
     use super::*;
     use geode_core::config::{ConfigSources, LayerDoc};
     use gpui::TestAppContext;
+    use gpui_component::ActiveTheme as _;
 
     fn config_from(app_toml: &str) -> Config {
         let doc = LayerDoc::builtin("app", app_toml).unwrap();
@@ -866,6 +867,99 @@ mod gpui_tests {
             service.active_name(),
             "Gruvbox Light",
             "a family name is not a theme and must not pick a variant"
+        );
+    }
+
+    /// 2c §7 fix round 2 (controller ruling, 2026-09-13): the exception
+    /// list from fix round 1 is gone. [`geode_core::colour::resolve`]
+    /// itself now floors every `Definition::Hue` against the theme's
+    /// own background (`readable_on`, spec §2.2/§7), so every bundled
+    /// theme clears `READABLE_RATIO` at every generated hue, in both
+    /// tones, with no exceptions — asserted here unconditionally, the
+    /// same assertion for `Tone::Normal` and `Tone::Light` alike (the
+    /// prior round's Light-tone report-only split is also gone: a
+    /// floored resolver has nothing left to report there that the
+    /// assertion doesn't already cover).
+    ///
+    /// What used to be a 107-pair exception list is now one number per
+    /// theme: how many of the 24 (hue, tone) pairs needed the floor at
+    /// all, found by comparing `resolve` against the raw, unfloored
+    /// `interpolate_hue`. The five themes needing it most are
+    /// `eprintln!`'d as the retune work order — as data, not a list
+    /// committed to source, since a maintainer who improves a theme's
+    /// own anchors changes that count on the next run rather than
+    /// editing a line here.
+    ///
+    /// The anchor-arc report stays as an independent number: a folded
+    /// palette (two anchors landing on the same OKLCH hue) is a
+    /// different defect from a contrast failure, and Hybrid Dark
+    /// supplies a live example — its smallest arc measures exactly
+    /// 0.0°, i.e. two of its Normal-tone anchors resolve to the
+    /// identical hue angle.
+    #[gpui::test]
+    fn every_bundled_theme_keeps_generated_hues_readable(cx: &mut gpui::TestAppContext) {
+        cx.update(gpui_component::init);
+        let (service, _) = load_bundled();
+        let mut worst: Vec<(String, f32)> = Vec::new();
+        let mut floor_counts: Vec<(String, u32)> = Vec::new();
+        for entry in &service.entries {
+            let (anchors, tokens) = cx.update(|cx| {
+                Theme::global_mut(cx).apply_config(entry);
+                let theme = cx.theme();
+                (
+                    crate::shell::colours::anchors_from_theme(theme),
+                    crate::shell::colours::tokens_from_theme(theme),
+                )
+            });
+            let mut smallest_arc = f32::MAX;
+            for i in 0..6 {
+                let a = geode_core::colour::oklab::lab_to_lch(
+                    geode_core::colour::oklab::srgb_to_oklab(anchors.normal[i]),
+                );
+                let b = geode_core::colour::oklab::lab_to_lch(
+                    geode_core::colour::oklab::srgb_to_oklab(anchors.normal[(i + 1) % 6]),
+                );
+                let arc = ((b.h - a.h + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                    - std::f32::consts::PI)
+                    .abs()
+                    .to_degrees();
+                smallest_arc = smallest_arc.min(arc);
+            }
+            worst.push((entry.name.to_string(), smallest_arc));
+            let mut floored = 0u32;
+            for tone in [
+                geode_core::colour::Tone::Normal,
+                geode_core::colour::Tone::Light,
+            ] {
+                for step in 0..12 {
+                    let hue = step as f32 * 30.0;
+                    let raw = geode_core::colour::interpolate_hue(hue, tone, &anchors);
+                    let resolved = geode_core::colour::resolve(
+                        &geode_core::colour::Definition::Hue { degrees: hue, tone },
+                        &anchors,
+                        &tokens,
+                    );
+                    if resolved != raw {
+                        floored += 1;
+                    }
+                    let ratio = geode_core::colour::contrast_ratio(resolved, tokens.background);
+                    assert!(
+                        ratio >= geode_core::colour::READABLE_RATIO,
+                        "{}: hue {} ({tone:?}) reads {ratio:.2}:1 against the background even through the floor",
+                        entry.name,
+                        step * 30
+                    );
+                }
+            }
+            floor_counts.push((entry.name.to_string(), floored));
+        }
+        worst.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        eprintln!("smallest anchor arcs: {:?}", &worst[..worst.len().min(5)]);
+
+        floor_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        eprintln!(
+            "themes needing the readability floor most, of 24 hue/tone pairs each (retune work order): {:?}",
+            &floor_counts[..floor_counts.len().min(5)]
         );
     }
 }

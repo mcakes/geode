@@ -2972,6 +2972,27 @@ tasks — and the fix wave — moved their source lines; `--anchors-only`
 caught every one of those before commit, as it is meant to).
 `--anchors-only` reports 0 stale, 0 ambiguous.
 
+### 19.9 Post-merge fix: typing in a plain field moved the cursor
+
+Reported on a display 2026-09-13 from the column stage, though it held
+for every `i` field in the edit stage too: the first keystroke after `i`
+sent the highlight to the first row. `ObjectDialogState::set_query`, the
+write half of the query mirror, reset the draft's cursor to 0 on every
+`Input` change — right for a filter, whose list just re-ranked, and for
+the chain field, whose rows are its completions, but wrong for a plain
+field, whose rows stay unfiltered with the edited row highlighted
+(§19.1); nothing re-followed the row, and the change subscription then
+scrolled the list to item 0 as well. The fix moves the rule beside the
+state it reads: `Draft::set_query` keeps the cursor on `TextEntry.row`
+while a plain field is open (`follow`), resets it otherwise, and the
+subscription scrolls to `ObjectDialogState::effective_selected` — the
+cursor of the open stage under the same slot rule as `effective_query`.
+Pinned by `a_keystroke_in_a_plain_field_keeps_the_cursor_on_the_edited_row`
+(pure) and the width assertion in
+`the_column_stages_width_is_typed_and_refused_out_of_range` (window), and
+by the harness entry `objectdialog: a keystroke in a plain field keeps
+the cursor on its row`.
+
 ## 20. Part 2c — designed elsewhere
 
 Part 2c — the column stage, the overlay's per-column tables, and named
@@ -2986,3 +3007,9 @@ it paints a column's **header and values** and does not combine with
 `sign`, definitions travel to modules like views and resolve at the
 paint site, and the overlay carries one `[view.columns.<col>]` table per
 column.
+
+**Built 2026-09-13** and reconciled as that spec's `## 9. As built`,
+which is also where §19.2's width ended up (the column stage's `width`
+field). None of §19's own text went stale; what did change is inside the
+2c spec, by user ruling — a readability floor inside the resolver, which
+amended 2c §2.2's identity rule and 2c §7's theme check in place.
