@@ -399,7 +399,7 @@ impl SourceSpec {
                 }
             }
 
-            let paths: Vec<String> = table
+            let mut paths: Vec<String> = table
                 .get("paths")
                 .and_then(|v| v.as_array())
                 .map(|a| {
@@ -420,6 +420,13 @@ impl SourceSpec {
                              (adapter != \"{CSV_DIR_ADAPTER}\")"
                         ),
                     ));
+                    // Dropped, not merely left unread: a reader must not
+                    // STORE what it has just said it ignores. A surface
+                    // reading `paths` back — the diagnostics tile's
+                    // sources section does — has no other way to know
+                    // this source was never going to be polled, and
+                    // painted a leftover glob as if it were live.
+                    paths.clear();
                 }
             } else if paths.is_empty() {
                 // §19.3 (ruling 2026-09-12): a source with nothing to poll
@@ -1001,6 +1008,34 @@ priority = "latest_other"
         assert_eq!(s.coalesce, Duration::from_millis(250));
         assert_eq!(s.source_time, SourceTime::Receive);
         assert!(s.paths.is_empty());
+    }
+
+    /// A subscribed source's `paths` is warned about AND dropped. Storing
+    /// what the reader has just said it ignores is how a surface comes to
+    /// paint a subscribed source as a directory one — the diagnostics
+    /// tile's sources section reads `SourceSpec::paths` and has no other
+    /// way to know it was never going to be polled.
+    #[test]
+    fn a_subscribed_sources_paths_are_warned_about_and_cleared() {
+        let (sources, diags) = from(
+            r#"
+[cvi]
+adapter = "demo_bus"
+dataset = "cvi_params"
+document = "cvi_params"
+topics = ["marketdata/cvi/>"]
+paths = ["/tmp/leftover/*.csv"]
+"#,
+        );
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Warning);
+        assert_eq!(diags[0].path.as_deref(), Some("sources.cvi.paths"));
+        assert!(diags[0].message.contains("ignored"), "{:?}", diags[0]);
+        assert!(
+            sources[0].paths.is_empty(),
+            "ignored means dropped, not stored: {:?}",
+            sources[0].paths
+        );
     }
 
     #[test]

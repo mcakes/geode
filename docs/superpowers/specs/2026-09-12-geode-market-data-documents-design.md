@@ -544,8 +544,27 @@ demo bus's transport (§10).
   counts inbound publishes the bus itself could not queue (the
   dispatcher fell behind); `SubscriptionWorker::refused()`
   (`geode_data::ingest::subscribe`) exposes a subscribed source's own
-  dropped-message count the same way. Neither has an in-app reader yet
-  — the natural next one is the diagnostics tile's sources section.
+  dropped-message count the same way — by holding the shared COUNTER
+  (`MessageSink::refused_counter`) and never a `MessageSink` clone,
+  because a sink is a sender: with one alive on the worker's side
+  `unsubscribe` disconnected nothing, the receiver loop's `Disconnected`
+  arm was unreachable on shutdown, and every join waited out a `MAX_WAIT`
+  tick, serially per source in `DataService::shutdown` (final fix wave).
+  Neither count has an in-app reader yet — the natural next one is the
+  diagnostics tile's sources section.
+- **A subscribed source is described as one, and its `paths` is dropped
+  rather than stored** (final fix wave). `SourceSpec::from_doc` already
+  warned that a subscribed source's `paths` is ignored; it now clears the
+  vector too, since a reader must not store what it has just said it
+  ignores. `geode_shell::diagnostics::SourceSummary` carries `adapter`
+  and `topics` (empty for a directory source, which is how a reader tells
+  the two apart), filled by `geode_app::bridge::attach` from the
+  `SourceSpec`, and the diagnostics tile's sources section paints two
+  rows per source either way: `path:` plus `adapter · priority ·
+  readiness` for a directory source, `adapter:` plus `topics:` for a
+  subscribed one — which has no path to poll and no readiness rule, so
+  printing either described a market-data feed as a directory source with
+  an empty path and a sentinel convention it has never used.
 - **The demo bus publishes every key once at start, then advances one
   key per `cadence ± jitter` sleep.** `geode_app::demo_bus::spawn`
   publishes every one of `CviGenerator::underlyings()` immediately, so

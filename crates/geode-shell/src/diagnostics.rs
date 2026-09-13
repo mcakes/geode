@@ -41,6 +41,17 @@ pub struct SourceSummary {
     pub paths: Vec<String>,
     pub priority: String,
     pub readiness: String,
+    /// Which channel implementation feeds this source
+    /// (`geode_core::source_config::CSV_DIR_ADAPTER` for a directory of
+    /// CSVs, a broker adapter's name otherwise). Without it the tile
+    /// described every source as a directory one — it had only `paths`
+    /// and `readiness` to go on, and a subscribed source has neither.
+    pub adapter: String,
+    /// The topic patterns a subscribed source subscribes to, and EMPTY
+    /// for a directory source — which is how a reader tells the two
+    /// apart (a subscribed source is refused at load without at least
+    /// one topic).
+    pub topics: Vec<String>,
 }
 
 /// How many transitions [`SourceState::history`] keeps, newest last.
@@ -828,6 +839,8 @@ mod tests {
                 paths: vec![],
                 priority: "".into(),
                 readiness: "".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         d.note_polled(
@@ -914,6 +927,8 @@ mod tests {
                 paths: vec!["/data/*.csv".into()],
                 priority: "latest_risk".into(),
                 readiness: "sentinel".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         assert_eq!(d.summary().as_ref(), "");
@@ -1060,6 +1075,8 @@ mod tests {
                 paths: vec!["/data/*.csv".into()],
                 priority: "latest_risk".into(),
                 readiness: "sentinel".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         assert!(d.version() > v0);
@@ -1078,6 +1095,8 @@ mod tests {
             paths: vec!["/x".into()],
             priority: "p".into(),
             readiness: "r".into(),
+            adapter: "csv_dir".into(),
+            topics: Vec::new(),
         };
         d.describe_source("risk", summary.clone());
         let v = d.version();

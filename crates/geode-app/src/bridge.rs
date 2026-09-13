@@ -253,6 +253,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     paths: source.paths.clone(),
                     priority: format!("{:?}", source.priority),
                     readiness: format!("{:?}", source.readiness),
+                    adapter: source.adapter.clone(),
+                    // Already empty for a directory source — `from_doc`
+                    // reads `topics` only when the source is subscribed —
+                    // and the tile reads that emptiness as "a directory
+                    // source", so it is cloned rather than gated here.
+                    topics: source.topics.clone(),
                 },
             );
         }

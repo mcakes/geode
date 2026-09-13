@@ -5725,20 +5725,23 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
-  '    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-    out.push(row(
-        format!(
-            "priority: {} · readiness: {}",
-            spec.priority, spec.readiness
-        ),
-        1,
-        Tone::Muted,
-    ));' \
-  '    out.push(row(
-        format!("path: {paths} · priority: {} · readiness: {}", spec.priority, spec.readiness),
-        1,
-        Tone::Muted,
-    ));' \
+  '        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+        out.push(row(
+            format!(
+                "adapter: {} · priority: {} · readiness: {}",
+                spec.adapter, spec.priority, spec.readiness
+            ),
+            1,
+            Tone::Muted,
+        ));' \
+  '        out.push(row(
+            format!(
+                "path: {paths} · adapter: {} · priority: {} · readiness: {}",
+                spec.adapter, spec.priority, spec.readiness
+            ),
+            1,
+            Tone::Muted,
+        ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
 run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
@@ -9091,6 +9094,18 @@ run_mutation "subscribe: the worker keeps a sender alive, so unsubscribe never d
         subscription.subscribe(&spec.topics, sink, on_connection)?;
         std::mem::forget(kept_sender);' \
   geode-data shutting_down_an_idle_worker_does_not_wait_out_max_wait
+
+run_mutation "sources: a subscribed source stores the paths it just said it ignores" \
+  crates/geode-core/src/source_config.rs \
+  '                    paths.clear();' \
+  '' \
+  geode-core a_subscribed_sources_paths_are_warned_about_and_cleared
+
+run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    if spec.topics.is_empty() {' \
+  '    if true {' \
+  geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -453,8 +453,6 @@ pub(crate) fn assert_generations_match_tables(conn: &Connection, dataset: &str, 
 
 #[cfg(test)]
 pub(crate) mod tests_support {
-    use crate::store::Store;
-    use crate::store::document::{DocumentPublishRequest, DocumentPublished, publish_document};
     use chrono::{DateTime, NaiveDate, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::document::{
@@ -629,28 +627,6 @@ role = "attribute"
             ],
             values: vec![("param".into(), Column::F64(params.to_vec()))],
         }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn publish_cvi(
-        store: &Store,
-        ds: &DatasetSpec,
-        key: &str,
-        params: [f64; 6],
-        at: &str,
-    ) -> DocumentPublished {
-        publish_document(
-            store,
-            &DocumentPublishRequest {
-                dataset: ds,
-                source: "cvi",
-                rows: &cvi_doc(key, params),
-                source_time: ts(at),
-                received_at: ts(at),
-                bytes: 1234,
-            },
-        )
-        .unwrap()
     }
 
     /// A [`DocumentKind`] shaped exactly like the real CVI XML kind —
