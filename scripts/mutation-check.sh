@@ -9011,7 +9011,7 @@ run_mutation "subscribe: a panicking parse is NOT contained -- the receiver thre
 run_mutation "subscribe: a subscription's refusal count reads zero rather than its sink's counter" \
   crates/geode-data/src/ingest/subscribe.rs \
   '    pub fn refused(&self) -> u64 {
-        self.sink.refused()
+        self.refused.load(Ordering::Relaxed)
     }' \
   '    pub fn refused(&self) -> u64 {
         0
@@ -9081,6 +9081,16 @@ run_mutation "subscribe: a topic-keyed parse failure is never cleared by a later
         }' \
   '        self.failed_topics.remove(topic);' \
   geode-data a_parse_failure_sets_the_load_lane_and_a_later_clean_document_clears_it
+
+run_mutation "subscribe: the worker keeps a sender alive, so unsubscribe never disconnects" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        let refused = sink.refused_counter();
+        subscription.subscribe(&spec.topics, sink, on_connection)?;' \
+  '        let refused = sink.refused_counter();
+        let kept_sender = sink.clone();
+        subscription.subscribe(&spec.topics, sink, on_connection)?;
+        std::mem::forget(kept_sender);' \
+  geode-data shutting_down_an_idle_worker_does_not_wait_out_max_wait
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -59,7 +59,7 @@ use geode_core::schema::{ColumnType, DatasetSpec};
 use geode_core::source_config::{SourceSpec, SourceTime};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -71,9 +71,10 @@ use std::time::{Duration, Instant};
 /// thread immediately and a held document wakes it on its own deadline, so
 /// the only thing this bounds is how long `shutdown` could wait if the
 /// channel did not disconnect first (it does — `shutdown` unsubscribes
-/// before it joins, which drops the adapter's sink clone). A quarter of a
-/// second was chosen to cost nothing per idle source while keeping that
-/// backstop short.
+/// before it joins, which drops the adapter's sink, and that sink is the
+/// only sender there is: this side keeps the refusal COUNTER rather than a
+/// sink clone, exactly so that holds). A quarter of a second was chosen to
+/// cost nothing per idle source while keeping that backstop short.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 
 /// What a receiver thread reports about its own documents: the batch it
@@ -118,14 +119,22 @@ struct Pending {
 pub struct SubscriptionWorker {
     subscription: Box<dyn Subscription>,
     stop: Arc<AtomicBool>,
-    /// A clone of the sink handed to the adapter, kept for one reason:
+    /// The sink's refusal counter — the COUNTER, never a clone of the
+    /// sink itself.
+    ///
     /// [`MessageSink::refused`] is the only record of a message this
-    /// source DROPPED, and the counter lives on the sink. Moving the sole
-    /// copy into `subscribe` made a refusal — a receiver that fell behind
-    /// its feed, which is data silently missing from every query — a
-    /// number nothing in the process could read. Clones share the counter,
-    /// so this one reads the subscription's own total (fix round 1).
-    sink: MessageSink,
+    /// source DROPPED (a receiver that fell behind its feed, which is
+    /// data silently missing from every query), so something here has to
+    /// be able to read it; fix round 1 kept a `MessageSink` clone for
+    /// that, and the clone kept the receiver's channel CONNECTED. With a
+    /// sender alive here, `unsubscribe` no longer disconnected anything,
+    /// the loop's `Disconnected` arm became unreachable on shutdown, and
+    /// every join waited out a [`MAX_WAIT`] tick instead — serially, once
+    /// per source, in `DataService::shutdown`. The counter carries the
+    /// number and no capability (`MessageSink::refused_counter`), so the
+    /// sole sender is the one the adapter holds and dropping it is what
+    /// ends the thread.
+    refused: Arc<AtomicU64>,
     /// `None` once joined, so `shutdown` is idempotent and `Drop` can call
     /// it again with nothing to do.
     thread: Option<JoinHandle<()>>,
@@ -155,7 +164,11 @@ impl SubscriptionWorker {
         on_connection: HealthSink,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
-        subscription.subscribe(&spec.topics, sink.clone(), on_connection)?;
+        // The counter first, then the sink MOVED into the adapter: after
+        // this line nothing on this side holds a sender (see the `refused`
+        // field), which is what makes `unsubscribe` disconnect.
+        let refused = sink.refused_counter();
+        subscription.subscribe(&spec.topics, sink, on_connection)?;
         let stop = Arc::new(AtomicBool::new(false));
         let mut receiving = Receiving {
             source: spec.name.clone(),
@@ -176,7 +189,7 @@ impl SubscriptionWorker {
             Ok(thread) => Ok(SubscriptionWorker {
                 subscription,
                 stop,
-                sink,
+                refused,
                 thread: Some(thread),
             }),
             Err(e) => {
@@ -205,18 +218,21 @@ impl SubscriptionWorker {
     /// stale for this reason looks identical to a healthy one from a
     /// query, and the count is the only way to tell the two apart.
     pub fn refused(&self) -> u64 {
-        self.sink.refused()
+        self.refused.load(Ordering::Relaxed)
     }
 
     /// Stops delivery, then the thread. Idempotent.
     ///
     /// Order matters: `unsubscribe` first so no further message is queued
-    /// and the channel disconnects (which the loop treats as a stop),
-    /// then the flag for the case where an adapter's unsubscribe leaves
-    /// the sink alive, then the join. A document the coalescer is still
-    /// holding is deliberately dropped rather than flushed — it is one
-    /// superseded snapshot per key, and the runner it would be submitted
-    /// to is being shut down in the same breath.
+    /// and the channel disconnects — which it does, this side holding no
+    /// sender of its own (see [`SubscriptionWorker::refused`]), and which
+    /// the loop treats as a stop, so the join returns at once rather than
+    /// after a [`MAX_WAIT`] tick. Then the flag, the backstop for an
+    /// adapter whose `unsubscribe` leaves a sink alive somewhere; then
+    /// the join. A document the coalescer is still holding is
+    /// deliberately dropped rather than flushed — it is one superseded
+    /// snapshot per key, and the runner it would be submitted to is being
+    /// shut down in the same breath.
     pub fn shutdown(&mut self) {
         self.subscription.unsubscribe();
         self.stop.store(true, Ordering::Relaxed);
@@ -975,6 +991,41 @@ mod tests {
             h.states.lock().unwrap().len(),
             2,
             "an unsubscribed worker hears no more state either"
+        );
+    }
+
+    /// `shutdown` unsubscribes before it joins, and unsubscribing drops
+    /// the adapter's clone of the sender — so the loop returns on
+    /// `Disconnected` at once rather than sleeping out a [`MAX_WAIT`] tick
+    /// first. That rests on this side holding NO sender of its own: fix
+    /// round 1 kept a whole `MessageSink` here (for its refusal counter),
+    /// which kept the channel connected, made the `Disconnected` arm
+    /// unreachable on shutdown, and left every join waiting on the stop
+    /// flag — serially, once per source, in `DataService::shutdown`.
+    ///
+    /// Timed rather than asserted structurally because the two paths
+    /// differ only in when the thread wakes. The bound is half of
+    /// `MAX_WAIT` (125ms today) against a true cost of microseconds: the
+    /// publish immediately before it means the receiver has just entered a
+    /// fresh full-length `recv_timeout`, so the flag-only path costs very
+    /// nearly all of `MAX_WAIT`.
+    #[test]
+    fn shutting_down_an_idle_worker_does_not_wait_out_max_wait() {
+        let mut h = plain_harness();
+        // One message handled end to end: evidence the thread is in its
+        // loop rather than still starting up, and it restarts the wait.
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        let start = Instant::now();
+        h.worker.shutdown();
+        let took = start.elapsed();
+        assert!(
+            took < MAX_WAIT / 2,
+            "shutdown took {took:?}: the channel did not disconnect, so the \
+             join waited on the stop flag instead (MAX_WAIT is {MAX_WAIT:?})"
         );
     }
 

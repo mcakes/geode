@@ -118,6 +118,20 @@ impl MessageSink {
     pub fn refused(&self) -> u64 {
         self.refused.load(Ordering::Relaxed)
     }
+
+    /// The shared refusal counter on its own, for a reader that wants the
+    /// count WITHOUT holding a sender.
+    ///
+    /// That distinction is the whole reason this exists
+    /// (`SubscriptionWorker`'s own `refused` field): keeping a
+    /// `MessageSink` clone alive to read [`MessageSink::refused`] also
+    /// keeps the receiver's channel connected, so unsubscribing no longer
+    /// disconnects it and every join has to wait out the receiver's
+    /// timeout instead of returning at once. An `Arc<AtomicU64>` carries
+    /// the number and nothing else.
+    pub fn refused_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.refused)
+    }
 }
 
 /// What an adapter says about its connection to the feed.
