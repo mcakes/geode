@@ -40,11 +40,15 @@
 //!
 //! Unlike Views' `columns`, whose `OrderedList` keeps the columns the
 //! view has and the ones it may gain in two lists, `dimensions` here is
-//! ONE list of **every** column [`crate::shell::pickable_columns`] would
-//! offer (the same vocabulary `mod+p`'s dimension picker has): the slot's
-//! own chain, in chain order, ticked; every other pickable column after,
-//! unticked, in schema order. Ticking one on adds it to the chain;
-//! `shift+j`/`shift+k` reorder whichever items are ticked.
+//! ONE list of **every** column [`crate::shell::groupable_columns`] would
+//! offer — the query compiler's own grouping vocabulary (every column
+//! some declared grain carries as a dimension: key columns like
+//! `position_ref` and `instrument_ref`, carried dimensions categorical or
+//! not, derived dimensions), NOT `mod+p`'s categorical-only picker list,
+//! which has no key columns and offers attributes no grain can group by:
+//! the slot's own chain, in chain order, ticked; every other groupable
+//! column after, unticked, in schema order. Ticking one on adds it to the
+//! chain; `shift+j`/`shift+k` reorder whichever items are ticked.
 //!
 //! So this domain's list has NO available catalogue at all — `available:
 //! None` (spec §18.7.1) rather than an empty one, which is a different
@@ -130,7 +134,7 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             kind: None,
         })
         .collect();
-    for column in crate::shell::pickable_columns(config) {
+    for column in crate::shell::groupable_columns(config) {
         if current.contains(&column.column) {
             continue;
         }
@@ -430,15 +434,18 @@ mod tests {
         assert_eq!(summary(&value("[]")), "empty");
     }
 
-    /// A config with one dataset carrying two dimension columns and no
-    /// `[dimensions]` doc — the plainest fixture `pickable_columns` can
-    /// read, and the one `fields` is built against.
+    /// A config with one dataset carrying two dimension columns, a key
+    /// column and one position-grain measure (so the position grain is
+    /// *declared* — `groupable_columns` offers nothing from a dataset with
+    /// no grain to scan) and no `[dimensions]` doc — the plainest fixture
+    /// `groupable_columns` can read, and the one `fields` is built against.
     fn config_with_slot(groupings: &str) -> Config {
         let datasets = LayerDoc::builtin(
             "datasets",
             "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
              [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
-             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n\
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
         )
         .unwrap();
         let groupings = LayerDoc::builtin("groupings", groupings).unwrap();
@@ -449,13 +456,13 @@ mod tests {
         })
     }
 
-    /// `dimensions` offers the dataset's pickable columns (spec's own
-    /// words for this task): the slot's own chain first, in chain order
-    /// and ticked, then every other pickable column, unticked — here
-    /// `book` is the only one left over once `lhu` and `position_ref`
-    /// (a key column, never pickable) are accounted for.
+    /// `dimensions` offers the dataset's groupable columns: the slot's own
+    /// chain first, in chain order and ticked, then every other groupable
+    /// column, unticked, in schema order — `position_ref` included, a key
+    /// column the compiler groups by happily even though the dimension
+    /// picker (categorical columns only) never offers it.
     #[test]
-    fn fields_offers_every_pickable_column_chain_first_then_the_rest() {
+    fn fields_offers_every_groupable_column_chain_first_then_the_rest() {
         let config = config_with_slot("3 = [\"lhu\"]\n");
         let fields = fields(&config, Some("3"));
         assert_eq!(fields[0].key, "slot");
@@ -476,7 +483,7 @@ mod tests {
                 .iter()
                 .map(|i| (i.name.as_str(), i.included))
                 .collect::<Vec<_>>(),
-            vec![("lhu", true), ("book", false)],
+            vec![("lhu", true), ("book", false), ("position_ref", false)],
             "the chain leads, ticked; the rest of the catalogue follows, unticked"
         );
     }
@@ -507,7 +514,8 @@ mod tests {
     fn to_table_excludes_unticked_items() {
         let config = config_with_slot("3 = [\"lhu\"]\n");
         let draft = Domain::Groupings.draft(&config, "3");
-        // `book` is on the list (every pickable column is), unticked.
+        // `book` and `position_ref` are on the list (every groupable
+        // column is), unticked.
         assert_eq!(
             draft
                 .list_items("dimensions")
@@ -515,7 +523,7 @@ mod tests {
                 .iter()
                 .map(|i| (i.name.as_str(), i.included))
                 .collect::<Vec<_>>(),
-            vec![("lhu", true), ("book", false)]
+            vec![("lhu", true), ("book", false), ("position_ref", false)]
         );
         let item = to_table(&draft, Destination::Doc);
         let toml_edit::Item::Value(value) = &item else {
@@ -599,17 +607,20 @@ mod tests {
 
     // ---- Chain entry (§18.8) -------------------------------------------
 
-    /// Three pickable dimensions, so a chain can be reordered, extended
+    /// Three groupable dimensions, so a chain can be reordered, extended
     /// and completed against more than one candidate. `desk` is not a
     /// built-in key column, so it has to name the grain that carries it
-    /// (Phase 4a's rule in `validate_dataset`) or the loader drops it.
+    /// (Phase 4a's rule in `validate_dataset`) or the loader drops it;
+    /// the position-grain measure declares the grain the three are
+    /// carried by, and no key column is declared so exactly three names
+    /// are ever candidates.
     fn config_with_three_dims(groupings: &str) -> Config {
         let datasets = LayerDoc::builtin(
             "datasets",
             "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n\
              [risk.columns.lhu]\ntype = \"utf8\"\nrole = \"dimension\"\n\
              [risk.columns.desk]\ntype = \"utf8\"\nrole = \"dimension\"\ngrain = \"position\"\n\
-             [risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+             [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
         )
         .unwrap();
         let groupings = LayerDoc::builtin("groupings", groupings).unwrap();

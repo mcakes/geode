@@ -680,8 +680,18 @@ harness entries.
   inside it, so editing it is a rename, and renames are unbuilt (below).
 - ~~`name` — `Text`.~~ **Not built.** Groupings have no name beyond their
   slot; see the rename ruling below.
-- `dimensions` — `OrderedList` over `pickable_columns(config)`, no
-  per-item `width`. All `Doc`.
+- `dimensions` — `OrderedList` over `groupable_columns(config)`, no
+  per-item `width`. All `Doc`. **Amended 2026-09-12:** the list was
+  first built over `pickable_columns(config)`, the `mod+p` picker's
+  categorical-only vocabulary, which hid every key column
+  (`position_ref`, `instrument_ref`) and every non-string dimension (a
+  strike) while offering categorical attributes no grain can group by.
+  The vocabulary is now the query compiler's own (`carries_all`): every
+  declared column some *declared* grain carries as a dimension — key
+  columns and carried dimensions, categorical or not — plus every derived
+  dimension, in schema order. A dataset declaring no grain contributes
+  nothing, exactly as the compiler would refuse it. The picker keeps its
+  own list: a key or a strike has no ENUM dictionary to browse.
 
 **Renaming an object is unbuilt everywhere, on a Part 2a ruling**, which
 is why neither this section's `name` nor §8.4's survives. Under
@@ -1373,8 +1383,9 @@ keeping the query, clear the query, back to browse, close.
 
 The browse stage always lists slots `1`–`9`, in order, whatever
 `groupings.toml` holds. An unconfigured slot's row reads `empty` and
-wears no layer badge. Opening it shows every pickable dimension
-unticked — the empty-object fields the adapter already produces — and
+wears no layer badge. Opening it shows every groupable column (§8.2's
+amended vocabulary) unticked — the empty-object fields the adapter
+already produces — and
 ticking the first one writes the slot to the user layer, with no fork
 to confirm since nothing lies beneath. `d` on a configured user slot
 returns the row to `empty` rather than removing it; `r` on an
@@ -2950,8 +2961,9 @@ the browse row and the edit header, and the drift note under the header.
 Everything else in this section is verified against window-test
 assertions, unit tests, the harness, and the code directly.
 
-**Harness.** 650 entries (619 at the branch point, 25 added over the
-seven tasks, 6 more added by the final review's fix wave above, none
+**Harness.** 655 entries once main was merged back in (main had gained
+five groupings-vocabulary entries meanwhile); this branch's own count was
+650 (619 at the branch point, 25 added over the seven tasks, 6 more added by the final review's fix wave above, none
 removed, plus several pre-existing entries re-anchored where these
 tasks — and the fix wave — moved their source lines; `--anchors-only`
 caught every one of those before commit, as it is meant to).

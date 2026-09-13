@@ -1718,6 +1718,114 @@ grain = "underlying"
         );
     }
 
+    /// A numeric carried dimension — a strike a desk groups by — is
+    /// carried exactly like a string one: the compiler's vocabulary is
+    /// "what some declared grain carries", not "what has an ENUM
+    /// dictionary", so `role = "dimension"` on an `f64` column produces a
+    /// grouping level per distinct value, selected as TEXT (the varchar
+    /// cast below is what the blotter's tree cell can read). Pins the
+    /// schema side too: with the old categorical default (dimension ⇒
+    /// categorical, no type check) `apply_schema` would have sent this
+    /// column for ENUM interning.
+    #[test]
+    fn grouping_by_a_numeric_carried_dimension_produces_a_level_with_its_values() {
+        let text = r#"
+[risk_num.columns.book]
+type = "utf8"
+role = "dimension"
+[risk_num.columns.lhu]
+type = "utf8"
+role = "dimension"
+[risk_num.columns.position_ref]
+type = "utf8"
+role = "key"
+[risk_num.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[risk_num.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[risk_num.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+[risk_num.columns.vega]
+type = "f64"
+role = "measure"
+grain = "instrument"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("risk_num").unwrap();
+        assert!(
+            !ds.column("strike").unwrap().categorical,
+            "a numeric dimension must not be interned"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store.apply_schema(ds).unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into risk_num_instrument_live
+                   (book, lhu, position_ref, counterparty, instrument_ref, strike, vega,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C','I1', 4200.0, 10, 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I2', 4200.0, 20, 'b', 1, 1, now()),
+                   ('BK0','L0','P3','C','I3', 4500.0, 5, 'b', 1, 1, now());",
+            )
+            .unwrap();
+
+        let view_text = "[t]\ndataset = \"risk_num\"\ngrouping = [\"strike\"]\n\
+                         [[t.columns]]\nname = \"vega\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", view_text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        let q = compile_view(
+            store.writer(),
+            &view,
+            &schema,
+            &Scope::default(),
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap_or_else(|e| panic!("a strike grouping must compile: {e}"));
+        // The load-bearing fact for the blotter: a non-interned grouping
+        // column is selected as VARCHAR, whatever its storage type, because
+        // the snapshot reads a grouping column as text (`Snapshot::text_in`
+        // downcasts to a string or dictionary array and nothing else) — a
+        // raw DOUBLE here would paint every strike level blank. `run`'s
+        // f64-first read would coerce "4200.0" back to a number and hide
+        // that, so the column is read as text, strictly.
+        assert!(
+            q.sql.contains("s.\"strike\"::varchar as \"strike\""),
+            "the strike level must be selected as text:\n{}",
+            q.sql
+        );
+        let conn = store.writer();
+        let mut stmt = conn.prepare(&q.sql).unwrap();
+        let mut rows: Vec<(i64, Option<String>, Option<f64>)> = stmt
+            .query_map(duckdb::params_from_iter(q.params.iter()), |r| {
+                Ok((r.get("row_depth")?, r.get("strike")?, r.get("vega")?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            rows,
+            vec![
+                (0, None, Some(35.0)),
+                (1, Some("4200.0".to_string()), Some(30.0)),
+                (1, Some("4500.0".to_string()), Some(5.0)),
+            ],
+            "one level per distinct strike, summed, under a grand total"
+        );
+    }
+
     #[test]
     fn a_real_null_in_a_grouping_column_does_not_fan_out_the_tree() {
         // A rolled-up level carries NULL in the columns below it, so
