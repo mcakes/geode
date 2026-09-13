@@ -8845,6 +8845,90 @@ run_mutation "coalesce: each key's readiness reads its own last_release" \
   geode-data keys_coalesce_independently
 
 
+# ---- Task 8: the runner's document queue (market-data spec §5.4 step 3) --
+
+# A document is taken AHEAD of any file, whatever the file's priority — a
+# publish of already-parsed, already-coalesced rows is milliseconds and
+# cannot starve a load. Gating the document pop on an empty file queue is
+# exactly the swap: with any file queued at all, every document waits for
+# the whole cold-start backlog to drain, which is the live-feed latency
+# this queue exists to avoid, and no event assertion about *whether* a
+# document published would ever notice.
+run_mutation "runner/document: a file is taken ahead of a queued document" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.documents.pop_front() {
+        return Some(Work::Document(job));
+    }' \
+  '    if q.items.is_empty() {
+        if let Some(job) = q.documents.pop_front() {
+            return Some(Work::Document(job));
+        }
+    }' \
+  geode-data take_work_prefers_a_document_over_a_queued_file
+
+# Every failure on the document path is filed under the document's own
+# key, joined — `HealthTracker`'s load lane is keyed by batch, so a
+# constant here files every broken feed under one batch: one key's parse
+# failure would clear another's, and the diagnostics row would name a
+# batch no document has. The Published arm reads `published.batch` back
+# from the publish, so only the Failed arm can see this.
+run_mutation "runner/document: a failure's batch is a constant, not the document's key" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let batch = join_key(&job.rows.key);' \
+  '    let batch = "doc".to_string();' \
+  geode-data an_invalid_document_fails_by_batch_and_the_runner_lives
+
+# A document has no book column, so the one partition it writes is the
+# bookless one, spelled `None`. An empty list is how a load that wrote
+# NOTHING reads — `works_a_plan_and_reports_every_publish` asserts exactly
+# that distinction for files — so a subscriber counting partitions would
+# see every document publish as having written no data at all.
+run_mutation "runner/document: the publish event reports no partition written" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            books: vec![None],' \
+  '            books: Vec::new(),' \
+  geode-data a_submitted_document_publishes_and_reports_its_batch
+
+# The publish runs inside the same `catch_unwind` + `contained` boundary a
+# file load does (spec §5.7). Calling it directly instead lets a panicking
+# publish unwind the ingest thread: the app keeps running but ingest is
+# over for the session — every later document AND every later file
+# silently never publishes. The mutation is the whole statement, replaced
+# by the same call with no boundary at all, so the removal is exact.
+run_mutation "runner/document: the publish runs outside the panic boundary" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            publish(
+                store,
+                &DocumentPublishRequest {
+                    dataset,
+                    source: &job.source,
+                    rows: &job.rows,
+                    source_time: job.source_time,
+                    received_at: job.received_at,
+                    bytes: job.bytes,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));' \
+  '    let outcome: Result<Result<DocumentPublished, String>, Box<dyn std::any::Any + Send>> =
+        Ok(publish(
+            store,
+            &DocumentPublishRequest {
+                dataset,
+                source: &job.source,
+                rows: &job.rows,
+                source_time: job.source_time,
+                received_at: job.received_at,
+                bytes: job.bytes,
+            },
+        )
+        .map_err(|e| e.to_string()));' \
+  geode-data a_panicking_publish_is_contained_and_reported
+
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
