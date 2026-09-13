@@ -9074,6 +9074,14 @@ run_mutation "cvi: a second singular container merges into the first instead of 
   '                        let _ = once;' \
   geode-documents a_repeated_singular_container_is_refused_naming_it
 
+run_mutation "subscribe: a topic-keyed parse failure is never cleared by a later clean message" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if self.failed_topics.remove(topic) {
+            (self.report_load)(topic, Health::Ok, format!("{topic}: parse ok"));
+        }' \
+  '        self.failed_topics.remove(topic);' \
+  geode-data a_parse_failure_sets_the_load_lane_and_a_later_clean_document_clears_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

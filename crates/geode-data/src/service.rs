@@ -9,7 +9,7 @@ use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink};
 use crate::documents::DocumentRegistry;
 use crate::health::{Health, severity_rank};
 use crate::ingest::scheduler::{Scheduler, SchedulerEvent, SchedulerSink};
-use crate::ingest::subscribe::{ParseFailureSink, SubscriptionWorker};
+use crate::ingest::subscribe::{LoadReportSink, SubscriptionWorker};
 use crate::ingest::{IngestEvent, IngestHandle, IngestRunner, IngestSink};
 use crate::query::as_of::AsOf;
 use crate::query::catalog::build_catalog;
@@ -991,32 +991,50 @@ impl DataService {
                 ));
                 continue;
             };
-            // The ingest sink's `Failed` arm, verbatim — `log_ingest_failure`
-            // included: a document that did not publish is the same
-            // event as a file that did not load, so it is logged the
-            // same way and filed on the same LOAD lane, keyed by the
-            // batch the receiver names (the document's key, or the topic
-            // when the bytes never yielded one).
-            let on_parse_failure: ParseFailureSink = {
+            // The ingest sink's own two arms, verbatim: a document that
+            // did not publish is the same event as a file that did not
+            // load, so a failure is logged by `log_ingest_failure` (the
+            // `Failed` arm) and filed on the LOAD lane keyed by the batch
+            // the receiver names — the document's key, or the raw topic
+            // when the bytes never yielded one.
+            //
+            // The receiver reports the HEALTH, not just a reason, because
+            // it also reports the `Ok` that clears a topic-keyed failure
+            // (`ingest::subscribe`'s module doc: this lane's only other
+            // `Ok` writer keys by the document's batch, which is a
+            // different string from the topic, so nothing else could).
+            // That recovery gets the ordinary transition line instead —
+            // the same `log_health_event` the `Published` arm uses, and
+            // never both, since a failure already had its own line above.
+            let report_load: LoadReportSink = {
                 let sink = Arc::clone(&sink);
                 let health_tracker = Arc::clone(&health_tracker);
                 let source = spec.name.clone();
                 let dataset_name = spec.dataset.clone();
-                Arc::new(move |batch: &str, reason: String| {
-                    log_ingest_failure(&dataset_name, batch, &reason);
+                Arc::new(move |batch: &str, health: Health, detail: String| {
+                    let failed = match &health {
+                        Health::Degraded { reason } | Health::Failed { reason } => {
+                            log_ingest_failure(&dataset_name, batch, reason);
+                            true
+                        }
+                        _ => false,
+                    };
                     health_tracker.report_load_and_emit(
                         &source,
                         batch,
-                        Health::Failed {
-                            reason: reason.clone(),
-                        },
-                        format!("{batch}: {reason}"),
+                        health,
+                        detail,
                         |reported| match reported {
-                            Some((worst, detail)) => sink(DataEvent::Health {
-                                source: source.clone(),
-                                worst,
-                                detail,
-                            }),
+                            Some((worst, detail)) => {
+                                if !failed {
+                                    log_health_event(&source, &worst, &detail);
+                                }
+                                sink(DataEvent::Health {
+                                    source: source.clone(),
+                                    worst,
+                                    detail,
+                                })
+                            }
                             None => true,
                         },
                     );
@@ -1067,7 +1085,7 @@ impl DataService {
                 kind,
                 subscription,
                 Arc::clone(&ingest),
-                on_parse_failure,
+                report_load,
                 on_connection,
             ) {
                 Ok(worker) => subscriptions.push(worker),
@@ -1670,6 +1688,23 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
+        subscribed_service_for(kind, adapter, "fake_cvi")
+    }
+
+    /// The same, with the source's `document` key spelled out — so a test
+    /// can name a kind the registry does not hold. The registry itself
+    /// always holds `kind` under ITS own name, which is what makes the
+    /// two strings able to disagree.
+    fn subscribed_service_for(
+        kind: Arc<dyn geode_core::document::DocumentKind>,
+        adapter: &str,
+        document: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::adapter::ChannelFeed,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let (bus, feed) = crate::adapter::ChannelAdapter::new("demo_bus");
         let mut adapters = AdapterRegistry::default();
@@ -1681,7 +1716,7 @@ mod tests {
         schema.datasets.push(ds);
         let spec = crate::source::SourceSpec {
             adapter: adapter.to_string(),
-            document: Some("fake_cvi".into()),
+            document: Some(document.to_string()),
             topics: vec!["cvi/>".into()],
             // Every message publishes: the coalescing window itself is
             // `ingest::subscribe`'s to test, and a window here would only
@@ -1794,6 +1829,40 @@ mod tests {
         svc.shutdown();
     }
 
+    /// Spec §11's other half of the missing-adapter case: the adapter is
+    /// there, the `document` key names a kind this build does not
+    /// register. Same lane, same shape — one unservable source, reported
+    /// with the kind named, and everything else still served.
+    #[test]
+    fn a_source_naming_a_document_kind_this_build_lacks_is_reported_and_skipped() {
+        let (_dir, feed, svc, rx) =
+            subscribed_service_for(Arc::new(FakeKind::new()), "demo_bus", "nonesuch_cvi");
+        let (source, worst, detail) = next_health(&rx);
+        assert_eq!(source, "cvi");
+        match &worst {
+            Health::Failed { reason } => {
+                assert!(reason.contains("nonesuch_cvi"), "{reason}");
+                assert!(reason.contains("not registered"), "{reason}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(detail.contains("nonesuch_cvi"), "{detail}");
+        // Nothing subscribed, so a message on the bus reaches nobody —
+        // the source was skipped, not half-started.
+        feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_millis(300)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a skipped source subscribes to nothing"
+        );
+        svc.shutdown();
+    }
+
     #[test]
     fn a_kind_that_disagrees_with_its_dataset_is_reported_and_skipped() {
         // Spec §6.4's check, at source-open time: the kind produces a
@@ -1874,6 +1943,49 @@ mod tests {
                 Err(_) => break,
             }
         }
+        svc.shutdown();
+    }
+
+    /// Spec §11's pair: a parse failure sets the load lane, and a later
+    /// clean document on the SAME topic clears it.
+    ///
+    /// The clearing half is the whole point. A parse failure has no batch
+    /// to key on, so it is filed under the raw topic; the load lane's only
+    /// other `Ok` writer is the ingest sink's `Published` arm, keyed by
+    /// the document's own batch (`SPX.Z`, a different string from
+    /// `cvi/SPX.Z`) — so without the receiver clearing its own topic
+    /// entry, this source would read `Failed` for the rest of the session
+    /// while publishing perfectly good documents.
+    #[test]
+    fn a_parse_failure_sets_the_load_lane_and_a_later_clean_document_clears_it() {
+        let (_dir, feed, svc, rx) = subscribed_service(Arc::new(FakeKind::new()), "demo_bus");
+        // Subscribing reported `Connected` — the discovery lane's `Ok`.
+        assert_eq!(next_health(&rx).1, Health::Ok);
+
+        feed.publish("cvi/SPX.Z", b"rubbish".to_vec());
+        let (source, worst, detail) = next_health(&rx);
+        assert_eq!(source, "cvi");
+        assert!(
+            matches!(&worst, Health::Failed { reason } if reason.starts_with("parse: ")),
+            "{worst:?}"
+        );
+        assert!(detail.starts_with("cvi/SPX.Z: parse: "), "{detail}");
+
+        // The same topic, parseable this time.
+        feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        let (source, worst, detail) = next_health(&rx);
+        assert_eq!((source.as_str(), &worst), ("cvi", &Health::Ok));
+        // `Lanes::combined` normalises a clean slot's detail away, so the
+        // recovery carries no reason — deliberately: with the lane keyed
+        // per batch, whichever clean slot happened to decide would
+        // otherwise re-fire an `Ok` the surface already shows.
+        assert_eq!(detail, "");
+        // And the document itself published, so the clear rides the
+        // ordinary path rather than replacing it.
+        assert_eq!(next_published(&rx).1, "SPX.Z");
         svc.shutdown();
     }
 

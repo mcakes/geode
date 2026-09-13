@@ -475,13 +475,31 @@ demo bus's transport (§10).
   validate and `source_time` failures map onto the load lane, keyed by
   batch or, when the bytes never parsed far enough to yield one, by the
   raw topic.** `Connected → Health::Ok`, `Reconnecting →
-  Health::Pending("reconnecting")` (nothing lost yet — a trader should
-  read "waiting", not "broken"), `Lost { reason } → Health::Failed {
-  reason }` (the adapter's own reason, verbatim) — all through
-  `report_discovery_and_emit`. A parse failure has no key (the bytes
-  never parsed), so it reports on the LOAD lane keyed by the message's
-  raw topic; a validate or `source_time_of` failure has a key (the rows
-  parsed fine) and reports keyed by that document's own batch. A
+  Health::Pending` with the detail `"reconnecting"` (`Health::Pending`
+  is a unit variant; the detail travels beside it, not inside it) —
+  nothing lost yet, and a trader should read "waiting", not "broken" —
+  `Lost { reason } → Health::Failed { reason }` (the adapter's own
+  reason, verbatim) — all through `report_discovery_and_emit`. A parse
+  failure has no key (the bytes never parsed), so it reports on the LOAD
+  lane keyed by the message's raw topic; a validate or `source_time_of`
+  failure has a key (the rows parsed fine) and reports keyed by that
+  document's own batch. **A topic-keyed failure is cleared by the
+  receiver itself, and by nothing else** (final fix wave): the load lane
+  is per-batch and worst-across-batches, and its only other `Ok` writer
+  is the ingest sink's `Published` arm, keyed by the document's own batch
+  — `SPX.Z`, a different string from `marketdata/cvi/SPX.Z` — so the
+  topic entry would otherwise stand `Failed` for the rest of the session
+  while the source published perfectly good documents.
+  `Receiving::failed_topics` (a `HashSet<String>`) remembers the topics
+  filed that way, and the first message from one that parses, validates
+  and stamps reports `Health::Ok` under that topic (detail `"{topic}:
+  parse ok"`, normalised away by `Lanes::combined` as every clean slot's
+  detail is) and forgets it. The tracker's own transition dedupe keeps
+  emits to real recoveries, and a clean message on a topic that never
+  failed costs one set lookup and no report. The closure the receiver is
+  given is therefore a LOAD REPORT sink (`LoadReportSink`, `(batch,
+  Health, detail)`), not a parse-failure one: this module reports both
+  directions of the lane it writes. A
   panicking `DocumentKind::parse` runs under the same `catch_unwind` +
   `geode_core::panic::contained` boundary every other background
   boundary in this crate uses, and is reported exactly as a parse

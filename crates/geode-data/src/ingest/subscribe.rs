@@ -21,14 +21,26 @@
 //! wakes four times a second to notice the stop flag.
 //!
 //! **Failures split by lane, and this module takes no position on either.**
-//! Two closures are passed in: `on_parse_failure` for a document this
-//! source sent that could not be published (the LOAD lane, keyed by batch —
-//! by the topic when the bytes never yielded a key), and the adapter's own
-//! `HealthSink` for connection state (the DISCOVERY lane). Both are built
-//! by `DataService::open`, because the health-lane rules are the service's
+//! Two closures are passed in: `report_load` for what this source's own
+//! documents did (the LOAD lane, keyed by batch — by the topic when the
+//! bytes never yielded a key), and the adapter's own `HealthSink` for
+//! connection state (the DISCOVERY lane). Both are built by
+//! `DataService::open`, because the health-lane rules are the service's
 //! (CLAUDE.md, Phase 4b: a clean discovery report must never clear a
 //! load-lane problem) and a receiver thread that reported health itself
 //! would be a second place those rules live.
+//!
+//! **A topic-keyed failure is cleared HERE, because nothing else can.**
+//! The load lane is per-batch and worst-across-batches, and its only
+//! other `Ok` writer is the ingest sink's `Published` arm, keyed by the
+//! document's own batch (`SPX.Z`) — a different string from the topic a
+//! failed parse was filed under (`marketdata/cvi/SPX.Z`). So a source
+//! that recovered from one malformed message would have read `Failed`
+//! for the rest of the session. [`Receiving::failed_topics`] remembers
+//! the topics filed that way and reports `Health::Ok` under the topic on
+//! the first message from it that parses, validates and stamps; the
+//! tracker's own transition dedupe means only a real recovery emits, and
+//! a clean message on a never-failed topic costs one set lookup.
 //!
 //! Nothing here allocates per row: the parse allocates the columns and
 //! those exact columns are moved into the [`DocumentJob`] the runner
@@ -38,6 +50,7 @@
 //! path.
 
 use crate::adapter::{AdapterError, HealthSink, MESSAGE_BOUND, Message, MessageSink, Subscription};
+use crate::health::Health;
 use crate::ingest::coalesce::Coalescer;
 use crate::ingest::runner::{DocumentJob, IngestHandle, panic_payload_message};
 use chrono::{DateTime, NaiveTime, Utc};
@@ -63,15 +76,20 @@ use std::time::{Duration, Instant};
 /// backstop short.
 const MAX_WAIT: Duration = Duration::from_millis(250);
 
-/// What a receiver thread does with a document it could not publish: the
-/// batch it is filed under (the document's joined key, or the topic when
-/// the bytes never yielded one) and the reason.
+/// What a receiver thread reports about its own documents: the batch it
+/// is filed under (the document's joined key, or the topic when the bytes
+/// never yielded one), the health, and the detail line that goes with it.
+///
+/// The health is a parameter rather than always `Failed` because this
+/// module reports BOTH directions: a failure, and the `Ok` that clears a
+/// topic-keyed one (see the module doc — no other writer of that lane
+/// knows the topic key exists).
 ///
 /// A closure rather than a channel because the service already owns the
 /// one door these have to go through — `HealthTracker`'s load lane — and
 /// the shape of a `DataEvent` is not this module's business. It must not
 /// block: it is called on the receiver thread, between two messages.
-pub type ParseFailureSink = Arc<dyn Fn(&str, String) + Send + Sync>;
+pub type LoadReportSink = Arc<dyn Fn(&str, Health, String) + Send + Sync>;
 
 /// One parsed document waiting for its release window, as the coalescer
 /// holds it.
@@ -133,7 +151,7 @@ impl SubscriptionWorker {
         kind: Arc<dyn DocumentKind>,
         mut subscription: Box<dyn Subscription>,
         ingest: Arc<IngestHandle>,
-        on_parse_failure: ParseFailureSink,
+        report_load: LoadReportSink,
         on_connection: HealthSink,
     ) -> Result<SubscriptionWorker, AdapterError> {
         let (sink, rx) = MessageSink::bounded(MESSAGE_BOUND);
@@ -145,9 +163,10 @@ impl SubscriptionWorker {
             kind,
             policy: spec.source_time.clone(),
             ingest,
-            on_parse_failure,
+            report_load,
             stop: Arc::clone(&stop),
             unknown: HashSet::new(),
+            failed_topics: HashSet::new(),
         };
         let window = spec.coalesce;
         let thread = std::thread::Builder::new()
@@ -225,13 +244,22 @@ struct Receiving {
     kind: Arc<dyn DocumentKind>,
     policy: SourceTime,
     ingest: Arc<IngestHandle>,
-    on_parse_failure: ParseFailureSink,
+    report_load: LoadReportSink,
     stop: Arc<AtomicBool>,
     /// Element paths this source's parser has already complained about.
     /// One set for the life of the thread, so a feed sending one stray
     /// element on every message logs one line, not one per message
     /// (spec §6.3).
     unknown: HashSet<String>,
+    /// Topics this source has filed a load-lane failure under — a parse
+    /// `Err` or a panicking parse, the two failures with no batch to key
+    /// on. Cleared by the first message from that topic that makes it all
+    /// the way through (see the module doc): no other writer of the load
+    /// lane keys by topic, so without this the entry would stand for the
+    /// life of the session. Bounded by the source's own topic set in
+    /// practice, and one entry is one `String` per topic that has ever
+    /// failed.
+    failed_topics: HashSet<String>,
 }
 
 impl Receiving {
@@ -306,7 +334,7 @@ impl Receiving {
             // is a mild imprecision rather than a wrong report — the
             // payload and its location name the real site.
             let panicked = panic_payload_message(payload.as_ref());
-            (self.on_parse_failure)(&message.topic, format!("parse panicked: {panicked}"));
+            self.report_topic_failure(&message.topic, format!("parse panicked: {panicked}"));
         }
     }
 
@@ -320,7 +348,7 @@ impl Receiving {
             // a failure filed under no batch at all could not be shown
             // against anything.
             Err(e) => {
-                (self.on_parse_failure)(&message.topic, format!("parse: {e}"));
+                self.report_topic_failure(&message.topic, format!("parse: {e}"));
                 return;
             }
         };
@@ -340,16 +368,21 @@ impl Receiving {
         // coalescer, and it is the `batch` the publish will record.
         let key = join_key(&rows.key);
         if let Err(e) = rows.validate(&self.dataset) {
-            (self.on_parse_failure)(&key, e);
+            self.report_failure(&key, e);
             return;
         }
         let source_time = match source_time_of(&self.policy, &rows, message.received) {
             Ok(t) => t,
             Err(e) => {
-                (self.on_parse_failure)(&key, e);
+                self.report_failure(&key, e);
                 return;
             }
         };
+        // Everything about this message is now good, so a topic-keyed
+        // failure standing against it is over. Before the offer rather
+        // than after: a coalesced message may not release for another
+        // window, and the recovery is news now.
+        self.clear_topic(&message.topic);
         let pending = Pending {
             rows,
             received: message.received,
@@ -358,6 +391,41 @@ impl Receiving {
         };
         if let Some((_key, released)) = coalescer.offer(Instant::now(), key, pending) {
             self.submit(released);
+        }
+    }
+
+    /// Files a load-lane failure under `batch` — a document's own joined
+    /// key, which the ingest sink's next clean publish of that batch
+    /// clears.
+    fn report_failure(&self, batch: &str, reason: String) {
+        (self.report_load)(
+            batch,
+            Health::Failed {
+                reason: reason.clone(),
+            },
+            format!("{batch}: {reason}"),
+        );
+    }
+
+    /// The same, for the two failures with no batch to key on (a parse
+    /// `Err`, a panicking parse) — filed under the raw TOPIC and
+    /// remembered, because [`Receiving::clear_topic`] is the only thing
+    /// that will ever clear it.
+    fn report_topic_failure(&mut self, topic: &str, reason: String) {
+        self.failed_topics.insert(topic.to_string());
+        self.report_failure(topic, reason);
+    }
+
+    /// Reports `Ok` under `topic` if a failure was ever filed there.
+    ///
+    /// `remove` answers that question and forgets it in one lookup, so
+    /// the ordinary case — a clean message on a topic that never failed —
+    /// costs a hash of the topic and no report at all. A repeated
+    /// recovery cannot flood the entity either way: the tracker emits on
+    /// a real transition only.
+    fn clear_topic(&mut self, topic: &str) {
+        if self.failed_topics.remove(topic) {
+            (self.report_load)(topic, Health::Ok, format!("{topic}: parse ok"));
         }
     }
 
@@ -550,7 +618,10 @@ mod tests {
         _ingest: Arc<IngestHandle>,
         feed: ChannelFeed,
         worker: SubscriptionWorker,
-        failures: Arc<Mutex<Vec<(String, String)>>>,
+        /// Every load-lane report the receiver made, as
+        /// `(batch, health, detail)` — both directions, since the
+        /// clearing `Ok` is one of this module's reports too.
+        reports: Arc<Mutex<Vec<(String, Health, String)>>>,
         states: Arc<Mutex<Vec<ConnectionState>>>,
     }
 
@@ -579,12 +650,15 @@ mod tests {
             source_time,
             ..SourceSpec::directory("cvi", "cvi_params", Vec::new())
         };
-        let failures: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let reports: Arc<Mutex<Vec<(String, Health, String)>>> = Arc::new(Mutex::new(Vec::new()));
         let states: Arc<Mutex<Vec<ConnectionState>>> = Arc::new(Mutex::new(Vec::new()));
-        let on_parse_failure: ParseFailureSink = {
-            let failures = Arc::clone(&failures);
-            Arc::new(move |batch: &str, reason: String| {
-                failures.lock().unwrap().push((batch.to_string(), reason));
+        let report_load: LoadReportSink = {
+            let reports = Arc::clone(&reports);
+            Arc::new(move |batch: &str, health: Health, detail: String| {
+                reports
+                    .lock()
+                    .unwrap()
+                    .push((batch.to_string(), health, detail));
             })
         };
         let on_connection: HealthSink = {
@@ -597,7 +671,7 @@ mod tests {
             kind,
             bus.subscription().expect("the channel adapter subscribes"),
             Arc::clone(&ingest),
-            on_parse_failure,
+            report_load,
             on_connection,
         )
         .expect("the bus is open");
@@ -608,7 +682,7 @@ mod tests {
             _ingest: ingest,
             feed,
             worker,
-            failures,
+            reports,
             states,
         }
     }
@@ -691,7 +765,7 @@ mod tests {
         );
         assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
         assert_eq!(live_params(&h.conn, "SPX.Z"), vec![7., 7., 7., 7., 7., 7.]);
-        assert!(h.failures.lock().unwrap().is_empty());
+        assert!(h.reports.lock().unwrap().is_empty());
         h.worker.shutdown();
     }
 
@@ -744,15 +818,24 @@ mod tests {
         let mut h = plain_harness();
         h.feed.publish("cvi/rubbish", b"not-a-document".to_vec());
         wait_until("the parse failure", || {
-            !h.failures.lock().unwrap().is_empty()
+            !h.reports.lock().unwrap().is_empty()
         });
         {
-            let failures = h.failures.lock().unwrap();
+            let reports = h.reports.lock().unwrap();
             assert_eq!(
-                failures[0].0, "cvi/rubbish",
+                reports[0].0, "cvi/rubbish",
                 "keyed by topic: the bytes never yielded a key"
             );
-            assert!(failures[0].1.starts_with("parse: "), "{:?}", failures[0].1);
+            assert!(
+                matches!(&reports[0].1, Health::Failed { reason } if reason.starts_with("parse: ")),
+                "{:?}",
+                reports[0].1
+            );
+            assert!(
+                reports[0].2.starts_with("cvi/rubbish: parse: "),
+                "{:?}",
+                reports[0].2
+            );
         }
         // Nothing was published, and the next good message still is.
         h.feed.publish(
@@ -760,6 +843,57 @@ mod tests {
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
         );
         assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        h.worker.shutdown();
+    }
+
+    /// The load lane is per-batch and worst-across-batches, and its only
+    /// other `Ok` writer is the ingest sink's `Published` arm — keyed by
+    /// the document's own batch (`SPX.Z`), never by the topic
+    /// (`cvi/SPX.Z`) a failed parse is filed under. So if the receiver did
+    /// not clear its own topic entry, a source that recovered from one
+    /// malformed message would read `Failed` for the rest of the session
+    /// while publishing perfectly good documents.
+    #[test]
+    fn a_clean_message_clears_the_topic_its_predecessor_failed_under() {
+        let mut h = plain_harness();
+        h.feed.publish("cvi/SPX.Z", b"not-a-document".to_vec());
+        wait_until("the parse failure", || {
+            !h.reports.lock().unwrap().is_empty()
+        });
+
+        // The same topic, this time parseable.
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
+        );
+        wait_until("the clearing report", || {
+            h.reports.lock().unwrap().len() == 2
+        });
+        {
+            let reports = h.reports.lock().unwrap();
+            assert!(
+                matches!(&reports[0].1, Health::Failed { .. }),
+                "{:?}",
+                reports[0]
+            );
+            assert_eq!(
+                (reports[1].0.as_str(), &reports[1].1),
+                ("cvi/SPX.Z", &Health::Ok),
+                "the clearing Ok is filed under the very topic the failure was"
+            );
+            assert_eq!(reports[1].2, "cvi/SPX.Z: parse ok");
+        }
+        // The document published too, so the clear is not instead of the
+        // ordinary path — and nothing more is reported for it: a topic
+        // that has been cleared is forgotten, so a third clean message
+        // costs one lookup and no report.
+        assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        h.feed.publish(
+            "cvi/SPX.Z",
+            FakeKind::message("SPX.Z", [7., 7., 7., 7., 7., 7.]),
+        );
+        assert_eq!(published(&h.events), ("SPX.Z".to_string(), 6));
+        assert_eq!(h.reports.lock().unwrap().len(), 2);
         h.worker.shutdown();
     }
 
@@ -775,12 +909,12 @@ mod tests {
             FakeKind::message(&key, [1., 2., 3., 4., 5., 6.]),
         );
         wait_until("the validation failure", || {
-            !h.failures.lock().unwrap().is_empty()
+            !h.reports.lock().unwrap().is_empty()
         });
-        let failures = h.failures.lock().unwrap();
-        assert_eq!(failures[0].0, key);
-        assert!(failures[0].1.contains("separator"), "{:?}", failures[0].1);
-        drop(failures);
+        let reports = h.reports.lock().unwrap();
+        assert_eq!(reports[0].0, key);
+        assert!(reports[0].2.contains("separator"), "{:?}", reports[0].2);
+        drop(reports);
         nothing_more(&h.events, Duration::from_millis(200));
         h.worker.shutdown();
     }
@@ -797,12 +931,12 @@ mod tests {
             FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]),
         );
         wait_until("the source-time failure", || {
-            !h.failures.lock().unwrap().is_empty()
+            !h.reports.lock().unwrap().is_empty()
         });
-        let failures = h.failures.lock().unwrap();
-        assert_eq!(failures[0].0, "SPX.Z");
-        assert!(failures[0].1.contains("nonesuch"), "{:?}", failures[0].1);
-        drop(failures);
+        let reports = h.reports.lock().unwrap();
+        assert_eq!(reports[0].0, "SPX.Z");
+        assert!(reports[0].2.contains("nonesuch"), "{:?}", reports[0].2);
+        drop(reports);
         nothing_more(&h.events, Duration::from_millis(200));
         h.worker.shutdown();
     }
@@ -853,18 +987,18 @@ mod tests {
         );
         h.feed.publish("cvi/SPX.Z", b"anything".to_vec());
         wait_until("the contained panic to be reported", || {
-            !h.failures.lock().unwrap().is_empty()
+            !h.reports.lock().unwrap().is_empty()
         });
         {
-            let failures = h.failures.lock().unwrap();
+            let reports = h.reports.lock().unwrap();
             assert_eq!(
-                failures[0].0, "cvi/SPX.Z",
+                reports[0].0, "cvi/SPX.Z",
                 "keyed by topic: a panicking parse yielded no key, exactly as an Err does"
             );
             assert!(
-                failures[0].1.contains("panicked") && failures[0].1.contains(PARSE_PANIC),
+                reports[0].2.contains("panicked") && reports[0].2.contains(PARSE_PANIC),
                 "the payload a trader needs to see is the panic's own message: {:?}",
-                failures[0].1
+                reports[0].2
             );
         }
         // The thread is still there. A second message handled is the only
@@ -873,9 +1007,9 @@ mod tests {
         // nothing ever arriving again.
         h.feed.publish("cvi/NDX.Z", b"anything".to_vec());
         wait_until("the second message to be handled too", || {
-            h.failures.lock().unwrap().len() == 2
+            h.reports.lock().unwrap().len() == 2
         });
-        assert_eq!(h.failures.lock().unwrap()[1].0, "cvi/NDX.Z");
+        assert_eq!(h.reports.lock().unwrap()[1].0, "cvi/NDX.Z");
         nothing_more(&h.events, Duration::from_millis(100));
         h.worker.shutdown();
     }
