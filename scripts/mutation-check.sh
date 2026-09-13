@@ -8606,6 +8606,80 @@ run_mutation "cvi: write refuses a hole in the grid" \
   '        if false {' \
   geode-documents write_refuses_rows_that_are_not_a_full_grid
 
+# ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
+
+# A subscribed source (`adapter != "csv_dir"`) with no `topics` is
+# skipped — the Error is what makes it skip-worthy rather than merely
+# noted. Downgrading it to Warning leaves the `continue` intact (the
+# source is still skipped either way), so the only thing this mutation
+# can change is the severity the diagnostic carries — exactly what the
+# test reads.
+run_mutation "sources/adapter: a subscribed source needs at least one topic" \
+  crates/geode-core/src/source_config.rs \
+  '                        Severity::Error,
+                        name,
+                        Some("topics"),' \
+  '                        Severity::Warning,
+                        name,
+                        Some("topics"),' \
+  geode-core a_subscribed_source_needs_topics_and_a_document
+
+# Same rule, the other required field: a subscribed source with no
+# `document` has no document kind to publish as.
+run_mutation "sources/adapter: a subscribed source needs a document" \
+  crates/geode-core/src/source_config.rs \
+  '                            Severity::Error,
+                            name,
+                            Some("document"),' \
+  '                            Severity::Warning,
+                            name,
+                            Some("document"),' \
+  geode-core a_subscribed_source_needs_topics_and_a_document
+
+# A subscribed source has no CSV row to infer a shape from, so its
+# dataset must be document family — removing the `!` inverts the check
+# to accept exactly the datasets it should refuse (and refuse the ones
+# it should accept), which a measure-family dataset on a subscribed
+# source would otherwise sail through silently.
+run_mutation "sources/adapter: a subscribed source needs a document family dataset" \
+  crates/geode-core/src/source_config.rs \
+  '            if subscribed && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  '            if subscribed && schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  geode-core a_subscribed_source_on_a_measure_dataset_is_an_error
+
+# `parse_duration`'s `ms` unit: a wrong-VALUE mutation (seconds instead
+# of milliseconds), not a marker — a test asserting only "it parsed"
+# would not notice `"500ms"` silently becoming 500 SECONDS.
+run_mutation "sources/adapter: parse_duration's ms unit is milliseconds, not seconds" \
+  crates/geode-core/src/source_config.rs \
+  '            digits.parse().ok().map(Duration::from_millis)' \
+  '            digits.parse().ok().map(Duration::from_secs)' \
+  geode-core parse_duration_accepts_milliseconds_and_a_bare_zero
+
+# A bare `"0"` needs no unit — `coalesce = "0"` opts a subscribed source
+# back into publishing every message. Flipping the return to `None`
+# checks the reader actually accepts it rather than falling through to
+# the unit-suffix grammar (which would also reject a bare "0", but for
+# the wrong reason — no unit char to strip).
+run_mutation "sources/adapter: a bare zero needs no unit" \
+  crates/geode-core/src/source_config.rs \
+  '    if s == "0" {
+        return Some(Duration::ZERO);
+    }' \
+  '    if s == "0" {
+        return None;
+    }' \
+  geode-core parse_duration_accepts_milliseconds_and_a_bare_zero
+
+# Directory-only keys (`paths` among them) on a subscribed source are
+# warned, never applied — `if false` silences the warning outright
+# rather than merely miscounting it.
+run_mutation "sources/adapter: paths on a subscribed source warns" \
+  crates/geode-core/src/source_config.rs \
+  '                if !paths.is_empty() {' \
+  '                if false {' \
+  geode-core directory_keys_on_a_subscribed_source_warn_and_a_directory_source_still_needs_paths
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
