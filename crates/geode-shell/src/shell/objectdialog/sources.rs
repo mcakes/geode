@@ -103,11 +103,20 @@ fn choice(options: &[&str], current: &str) -> FieldKind {
     FieldKind::Choice { options, selected }
 }
 
-/// The eight fields of one source, or of no source at all when `object`
-/// names nothing (`n`'s empty draft): `dataset` and `priority` are
+/// A directory source's nine fields, or a subscribed source's thirteen —
+/// `document`/`topics`/`coalesce`/`source_time` are appended only when
+/// `adapter != CSV_DIR_ADAPTER` (market-data-documents plan, Task 5),
+/// since they mean nothing for a directory source and would otherwise
+/// paint every existing directory source with four rows of noise. Or of
+/// no source at all when `object` names nothing (`n`'s empty draft,
+/// always the nine-field directory shape). `dataset` and `priority` are
 /// choices, `readiness`/`stable_polls` split the reader's one
 /// `readiness` key into a kind and its poll count, and the rest are
-/// editable text (§19.3's own list — `text_editable`).
+/// text — but only `paths`/`poll_interval`/`pending_timeout`/
+/// `batch_pattern` are editable (§19.3's own list — `text_editable`);
+/// `adapter` and the four subscribed-only fields are read-only, painted
+/// so a subscribed source is at least visibly one rather than looking
+/// like an idle directory source missing its `paths`.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -177,7 +186,13 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         layer: None,
     };
 
-    vec![
+    // Read-only (`to_table` never writes it back and it is not in
+    // `text_editable`'s list): always shown, since it is what tells a
+    // trader whether the four subscribed-only rows below apply at all.
+    let adapter = get_str("adapter").unwrap_or(CSV_DIR_ADAPTER);
+    let subscribed = adapter != CSV_DIR_ADAPTER;
+
+    let mut out = vec![
         field("dataset", "Dataset", choice(&datasets, &current_dataset)),
         text("paths", "Paths", paths.join(&format!("{PATH_SEPARATOR} "))),
         field("readiness", "Readiness", choice(&READINESS, readiness)),
@@ -210,24 +225,24 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             "Batch pattern",
             get_str("batch_pattern").unwrap_or("").to_string(),
         ),
-        // The five subscribed-source fields (market-data-documents plan,
-        // Task 5) are read-only here — `to_table` never writes them back
-        // and `text_editable` never offers `i` on them — so a subscribed
-        // source is at least visibly one, not silently painted as a
-        // directory source missing its `paths`. A real editing surface
-        // for these (a topic-pattern list, an adapter picker) is future
-        // work; this dialog's own vocabulary predates the adapter.
-        text(
-            "adapter",
-            "Adapter",
-            get_str("adapter").unwrap_or(CSV_DIR_ADAPTER).to_string(),
-        ),
-        text(
+        text("adapter", "Adapter", adapter.to_string()),
+    ];
+
+    // The four subscribed-only fields (market-data-documents plan, Task
+    // 5) are read-only here — same reason as `adapter` above — and
+    // appended only for a subscribed source: they mean nothing for a
+    // directory source, and painting them unconditionally would add
+    // four rows of noise to every existing directory source. A real
+    // editing surface for these (a topic-pattern list, an adapter
+    // picker) is future work; this dialog's own vocabulary predates the
+    // adapter.
+    if subscribed {
+        out.push(text(
             "document",
             "Document",
             get_str("document").unwrap_or("").to_string(),
-        ),
-        text(
+        ));
+        out.push(text(
             "topics",
             "Topics",
             table
@@ -240,18 +255,20 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
                         .join(&format!("{PATH_SEPARATOR} "))
                 })
                 .unwrap_or_default(),
-        ),
-        text(
+        ));
+        out.push(text(
             "coalesce",
             "Coalesce",
             duration("coalesce", DEFAULT_COALESCE),
-        ),
-        text(
+        ));
+        out.push(text(
             "source_time",
             "Source time",
             get_str("source_time").unwrap_or("receive").to_string(),
-        ),
-    ]
+        ));
+    }
+
+    out
 }
 
 /// `n` seeds the new source's dataset from the browse row under the
@@ -545,6 +562,32 @@ mod tests {
         for key in ["adapter", "document", "topics", "coalesce", "source_time"] {
             assert!(!text_editable(key), "{key}");
         }
+    }
+
+    /// The reviewer's own regression (2026-09-13): the four
+    /// subscribed-only rows above must never paint on a directory
+    /// source — a directory source's field list is exactly the
+    /// pre-Task-5 eight fields plus `adapter`, nothing more.
+    #[test]
+    fn a_directory_source_paints_no_subscribed_only_rows() {
+        let keys: Vec<String> = fields(&config(), Some("live"))
+            .into_iter()
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "dataset",
+                "paths",
+                "readiness",
+                "stable_polls",
+                "priority",
+                "poll_interval",
+                "pending_timeout",
+                "batch_pattern",
+                "adapter",
+            ]
+        );
     }
 
     #[test]

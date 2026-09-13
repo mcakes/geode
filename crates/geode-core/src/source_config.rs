@@ -14,7 +14,7 @@
 //! (`geode_data::source::SourceSpec`).
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
-use crate::schema::SchemaSpec;
+use crate::schema::{ColumnRole, ColumnType, SchemaSpec};
 use std::path::Path;
 use std::time::Duration;
 use toml::Table;
@@ -67,9 +67,11 @@ pub enum Priority {
 /// has no file for. `"receive"` is the default: the moment this process
 /// received the message. `"document:<field>"` names an attribute column
 /// on the document itself (an `anchor_date`, say) whose value is used
-/// instead — the field is validated against the dataset's own columns no
-/// earlier than the adapter that reads it, not here, since this reader
-/// has no document rows to check it against.
+/// instead — validated right here in `from_doc`, against the schema this
+/// reader already has in hand: the field must be a document-level
+/// attribute (`ColumnRole::Attribute { grain: None }`) of type `Date` or
+/// `Utf8`, or the source is skipped with an Error at `.source_time`
+/// naming the field and, when it exists but is the wrong shape, its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceTime {
     Receive,
@@ -211,6 +213,22 @@ fn spell_duration(d: Duration) -> String {
         format!("{}ms", d.as_millis())
     } else {
         format!("{}s", d.as_secs())
+    }
+}
+
+/// The config-grammar spelling of a `ColumnType` (`ColumnType::parse`'s
+/// own vocabulary, spelled back) — used only to name a `source_time`
+/// field's actual type in the "wrong shape" diagnostic below, so the
+/// message says something a trader can act on rather than a bare
+/// `{:?}` derive.
+fn type_name(t: ColumnType) -> &'static str {
+    match t {
+        ColumnType::Utf8 => "utf8",
+        ColumnType::F64 => "f64",
+        ColumnType::I64 => "i64",
+        ColumnType::Date => "date",
+        ColumnType::Timestamp => "timestamp",
+        ColumnType::Bool => "bool",
     }
 }
 
@@ -526,7 +544,65 @@ impl SourceSpec {
                 let source_time = match table.get("source_time").and_then(|v| v.as_str()) {
                     None | Some("receive") => SourceTime::Receive,
                     Some(s) => match s.strip_prefix("document:") {
-                        Some(field) => SourceTime::Document(field.to_string()),
+                        Some(field) => {
+                            // Validated right here, against the schema
+                            // this reader already has in hand — no need
+                            // to defer it to whatever later reads
+                            // `SourceTime::Document` (controller ruling,
+                            // market-data-documents plan Task 5 review).
+                            // `schema.dataset(&dataset)` is `Some` and
+                            // document-family: checked above, before
+                            // this source could reach `subscribed` code
+                            // at all.
+                            let column = schema.dataset(&dataset).and_then(|d| d.column(field));
+                            match column {
+                                Some(c)
+                                    if matches!(c.role, ColumnRole::Attribute { grain: None })
+                                        && matches!(c.ty, ColumnType::Date | ColumnType::Utf8) =>
+                                {
+                                    SourceTime::Document(field.to_string())
+                                }
+                                Some(c)
+                                    if matches!(c.role, ColumnRole::Attribute { grain: None }) =>
+                                {
+                                    diags.push(diag(
+                                        Severity::Error,
+                                        name,
+                                        Some("source_time"),
+                                        format!(
+                                            "'document:{field}' needs a date or utf8 \
+                                             attribute; '{field}' is {}",
+                                            type_name(c.ty)
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                                Some(_) => {
+                                    diags.push(diag(
+                                        Severity::Error,
+                                        name,
+                                        Some("source_time"),
+                                        format!(
+                                            "'document:{field}' needs a document-level \
+                                             attribute; '{field}' is not one"
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                                None => {
+                                    diags.push(diag(
+                                        Severity::Error,
+                                        name,
+                                        Some("source_time"),
+                                        format!(
+                                            "'document:{field}' names no column on \
+                                             dataset '{dataset}'"
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                            }
+                        }
                         None => {
                             diags.push(diag(
                                 Severity::Warning,
@@ -1013,6 +1089,46 @@ paths = ["/tmp/*.csv"]
                 .iter()
                 .any(|d| d.path.as_deref() == Some("sources.cvi.source_time")
                     && d.severity == Severity::Warning)
+        );
+    }
+
+    /// Task 5 review (2026-09-13): `document:<field>` is validated at
+    /// load, against the schema this reader already has — a typo names
+    /// no column at all, an f64 attribute is the wrong type, and a real
+    /// document-level date/utf8 attribute is accepted.
+    #[test]
+    fn source_time_document_field_is_validated_against_the_schema() {
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\nsource_time = \"document:anhor_date\"\n",
+        );
+        assert!(sources.is_empty(), "{sources:?}");
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.source_time"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\nsource_time = \"document:spot_ref\"\n",
+        );
+        assert!(sources.is_empty(), "{sources:?}");
+        let d = diags
+            .iter()
+            .find(|d| d.path.as_deref() == Some("sources.cvi.source_time"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Error);
+        assert!(d.message.contains("f64"), "{}", d.message);
+
+        let (sources, diags) = from(
+            "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+             topics = [\"a/>\"]\nsource_time = \"document:anchor_date\"\n",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            sources[0].source_time,
+            SourceTime::Document("anchor_date".into())
         );
     }
 
