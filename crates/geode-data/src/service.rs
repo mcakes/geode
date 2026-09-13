@@ -22,6 +22,7 @@ use crate::store::{Catalog, Store, StoreError};
 use chrono::{DateTime, Utc};
 use geode_core::config::Diagnostic;
 use geode_core::dimensions::DerivedDimensions;
+use geode_core::document::join_key;
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
     QueryOutcome,
@@ -1135,8 +1136,17 @@ impl DataService {
         let freshness = match &params.as_of {
             AsOf::Live => Freshness {
                 dataset: params.dataset.clone(),
+                // Per-document, not `dataset_as_of`/`book_freshness`: a
+                // document's `book` is always `None` (spec §4.1), so
+                // every document in the dataset collapses into the same
+                // one `book_freshness` group and the MIN across all of
+                // them would label a just-published document with some
+                // *other* document's staler time (Task 8 review, Major).
+                // `live_source_time` scoped to this document's own batch
+                // is the same honest per-partition reading the as-of arm
+                // below already takes.
                 as_of: catalog
-                    .dataset_as_of(&params.dataset, &[])?
+                    .live_source_time(&params.dataset, &join_key(&params.document_key), None)?
                     .map(|t| t.to_rfc3339()),
                 generation: catalog.latest_gen_id()?,
             },
@@ -1149,7 +1159,12 @@ impl DataService {
                     .resolved_as_of
                     .get(&params.dataset)
                     .map(|t| t.to_rfc3339()),
-                // Per-document, so no dataset-wide generation id applies.
+                // No per-document generation id is threaded out of
+                // `compile_document` (only its `source_time` is, above);
+                // `0` here matches the view path's own as-of arm, which
+                // reports the same placeholder for the identical reason
+                // (`query` above, a few lines up: "Per-partition, so no
+                // single number describes it").
                 generation: 0,
             },
         };
@@ -1433,6 +1448,24 @@ role = "attribute"
             },
         )
         .unwrap();
+        // A second key, published once at a time strictly between SPX.Z's
+        // two — so a live request for either document has a genuinely
+        // different own freshness to report, and a bug that collapsed
+        // every document's freshness into one dataset-wide MIN (Task 8
+        // review, Major) would answer both with NDX.Z's 14:03 rather than
+        // each document's own time.
+        crate::store::document::publish_document(
+            &store,
+            &crate::store::document::DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
+                rows: &doc("NDX.Z", [100., 200., 300., 400., 500., 600.]),
+                source_time: ts("2026-09-12T14:03:00Z"),
+                received_at: ts("2026-09-12T14:03:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
         crate::store::document::publish_document(
             &store,
             &crate::store::document::DocumentPublishRequest {
@@ -1597,6 +1630,51 @@ role = "attribute"
             ..p.clone()
         };
         assert!(svc.document(&bad).is_err());
+        svc.shutdown();
+    }
+
+    /// Task 8 review, Major: a live document request used to report
+    /// `dataset_as_of`/`book_freshness`, which groups by `book` — always
+    /// `None` for a document — so every document in the dataset collapsed
+    /// into one group and a request for a just-published document was
+    /// labelled with some *other* document's staler time. Two documents
+    /// of different freshness, each asked for live, must each get its
+    /// own back.
+    #[test]
+    fn a_live_document_request_reports_its_own_documents_freshness() {
+        let (_dir, svc, rx) = document_service();
+
+        svc.document(&DocumentParams {
+            key: QueryKey(4),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["SPX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let spx = next(&rx).snapshot.unwrap();
+        assert_eq!(
+            spx.provenance().datasets[0].as_of.as_deref(),
+            Some(ts("2026-09-12T14:05:00Z").to_rfc3339().as_str()),
+            "SPX.Z's own live generation, not NDX.Z's staler one"
+        );
+
+        svc.document(&DocumentParams {
+            key: QueryKey(5),
+            tag: 1,
+            submitted: Instant::now(),
+            dataset: "cvi_params".into(),
+            document_key: vec!["NDX.Z".into()],
+            as_of: AsOf::Live,
+        })
+        .unwrap();
+        let ndx = next(&rx).snapshot.unwrap();
+        assert_eq!(
+            ndx.provenance().datasets[0].as_of.as_deref(),
+            Some(ts("2026-09-12T14:03:00Z").to_rfc3339().as_str()),
+            "NDX.Z's own generation, not SPX.Z's newer one"
+        );
         svc.shutdown();
     }
 

@@ -38,9 +38,9 @@ fn invalid(msg: String) -> StoreError {
 /// this resolves every partition `resolve_generations` can see as of
 /// `t` (a summary-table read, cheap regardless of how many documents
 /// exist) and then picks out the one whose `batch` is this request's own
-/// key — `join_key` is `publish_document`'s exact inverse-of-nothing:
-/// the same join that became the batch on the way in is recomputed here
-/// on the way out, so the two can never name the partition differently.
+/// key — the exact same `join_key` call `publish_document` made to name
+/// the partition on the way in, recomputed here on the way out, so the
+/// two can never name it differently.
 /// The result is a plain `gen_id = N` equality, not an `IN`-list: with
 /// exactly one partition in scope there is exactly one generation to
 /// pin, and a bare equality is both the cheapest predicate DuckDB can
@@ -115,6 +115,14 @@ pub fn compile_document(
             match resolved {
                 Some(g) => {
                     resolved_as_of.insert(ds.name.clone(), g.source_time);
+                    // `generation_predicate`'s own doc comment warns that
+                    // `gen_id` alone can collide on a database loaded by
+                    // a build that predates the id sequence. That does
+                    // not apply here: the document family's tables are
+                    // new on this branch, so every `gen_id` a document
+                    // dataset ever holds was reserved from the sequence,
+                    // and one publish writes exactly one batch — so a
+                    // `gen_id` can never name two different partitions.
                     (relation, format!(" and gen_id = {}", g.gen_id))
                 }
                 // No generation of this document existed by `t`: a
@@ -241,7 +249,26 @@ role = "attribute"
         }
     }
 
-    fn fixture_with_two_generations() -> (tempfile::TempDir, Store, SchemaSpec, i64) {
+    struct Fixture {
+        _dir: tempfile::TempDir,
+        store: Store,
+        schema: SchemaSpec,
+        /// SPX.Z's first generation (2026-09-12T14:00:00Z).
+        spx_first_gen: i64,
+    }
+
+    /// SPX.Z published twice (14:00, then republished at 14:05) with a
+    /// second key, NDX.Z, published once in between (14:03).
+    ///
+    /// The second key exists so the as-of arm's per-document resolution
+    /// has more than one partition to choose from at once. With only one
+    /// document ever published, `resolve_generations`'s result always
+    /// has exactly one entry, so `.find(|g| g.batch == batch)` and a bug
+    /// that took whichever generation the resolve happened to list first
+    /// (`.next()`, `min_by_key`, …) read identically — the gap the Task
+    /// 8 review's Important #1 named. Two documents at different
+    /// source times makes the two implementations diverge.
+    fn fixture_with_two_generations() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
         let ds = cvi();
@@ -264,6 +291,18 @@ role = "attribute"
             &DocumentPublishRequest {
                 dataset: &ds,
                 source: "cvi",
+                rows: &doc("NDX.Z", [100., 200., 300., 400., 500., 600.]),
+                source_time: ts("2026-09-12T14:03:00Z"),
+                received_at: ts("2026-09-12T14:03:00Z"),
+                bytes: 0,
+            },
+        )
+        .unwrap();
+        publish_document(
+            &store,
+            &DocumentPublishRequest {
+                dataset: &ds,
+                source: "cvi",
                 rows: &doc("SPX.Z", [10., 20., 30., 40., 50., 60.]),
                 source_time: ts("2026-09-12T14:05:00Z"),
                 received_at: ts("2026-09-12T14:05:00Z"),
@@ -273,7 +312,12 @@ role = "attribute"
         .unwrap();
         let mut schema = SchemaSpec::default();
         schema.datasets.push(ds);
-        (dir, store, schema, first.gen_id)
+        Fixture {
+            _dir: dir,
+            store,
+            schema,
+            spx_first_gen: first.gen_id,
+        }
     }
 
     fn params(dataset: &str, key: &[&str], as_of: AsOf) -> DocumentParams {
@@ -300,10 +344,10 @@ role = "attribute"
 
     #[test]
     fn a_live_document_query_selects_one_key_in_axis_order() {
-        let (_d, store, schema, _) = fixture_with_two_generations();
+        let f = fixture_with_two_generations();
         let compiled = compile_document(
-            store.writer(),
-            &schema,
+            f.store.writer(),
+            &f.schema,
             &params("cvi_params", &["SPX.Z"], AsOf::Live),
         )
         .unwrap();
@@ -332,7 +376,7 @@ role = "attribute"
             "{}",
             compiled.sql
         );
-        let rows = run(&store, &compiled);
+        let rows = run(&f.store, &compiled);
         assert_eq!(
             rows.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
             vec![10., 20., 30., 40., 50., 60.]
@@ -349,10 +393,10 @@ role = "attribute"
 
     #[test]
     fn an_as_of_document_query_reads_the_resolved_generation_from_the_archive() {
-        let (_d, store, schema, first_gen) = fixture_with_two_generations();
+        let f = fixture_with_two_generations();
         let compiled = compile_document(
-            store.writer(),
-            &schema,
+            f.store.writer(),
+            &f.schema,
             &params(
                 "cvi_params",
                 &["SPX.Z"],
@@ -366,11 +410,13 @@ role = "attribute"
             compiled.sql
         );
         assert!(
-            compiled.sql.contains(&format!("gen_id = {first_gen}")),
+            compiled
+                .sql
+                .contains(&format!("gen_id = {}", f.spx_first_gen)),
             "{}",
             compiled.sql
         );
-        let rows = run(&store, &compiled);
+        let rows = run(&f.store, &compiled);
         assert_eq!(
             rows.iter().map(|(_, p)| *p).collect::<Vec<_>>(),
             vec![1., 2., 3., 4., 5., 6.]
@@ -381,25 +427,118 @@ role = "attribute"
         );
     }
 
+    /// Task 8 review, Important #1(a): two documents exist by 14:04, at
+    /// different source times, so a bug that resolved the wrong batch —
+    /// or simply took the first generation `resolve_generations` handed
+    /// back regardless of which document it belonged to — reads
+    /// differently from the correct per-document resolution. SPX.Z's
+    /// 14:05 republish has not happened yet at 14:04, so it must still
+    /// resolve to its *first* generation even though NDX.Z's only
+    /// generation (14:03) is newer and sorts later in `resolve_generations`'
+    /// result.
+    #[test]
+    fn an_as_of_document_query_resolves_each_key_to_its_own_generation() {
+        let f = fixture_with_two_generations();
+        let at = ts("2026-09-12T14:04:00Z");
+
+        let spx = compile_document(
+            f.store.writer(),
+            &f.schema,
+            &params("cvi_params", &["SPX.Z"], AsOf::At(at)),
+        )
+        .unwrap();
+        assert!(
+            spx.sql.contains(&format!("gen_id = {}", f.spx_first_gen)),
+            "{}",
+            spx.sql
+        );
+        assert_eq!(
+            run(&f.store, &spx)
+                .iter()
+                .map(|(_, p)| *p)
+                .collect::<Vec<_>>(),
+            vec![1., 2., 3., 4., 5., 6.],
+            "SPX.Z's 14:05 republish has not happened yet at 14:04"
+        );
+        assert_eq!(
+            spx.resolved_as_of.get("cvi_params").copied(),
+            Some(ts("2026-09-12T14:00:00Z"))
+        );
+
+        let ndx = compile_document(
+            f.store.writer(),
+            &f.schema,
+            &params("cvi_params", &["NDX.Z"], AsOf::At(at)),
+        )
+        .unwrap();
+        assert_eq!(
+            run(&f.store, &ndx)
+                .iter()
+                .map(|(_, p)| *p)
+                .collect::<Vec<_>>(),
+            vec![100., 200., 300., 400., 500., 600.],
+            "NDX.Z resolves to its own generation, not SPX.Z's"
+        );
+        assert_eq!(
+            ndx.resolved_as_of.get("cvi_params").copied(),
+            Some(ts("2026-09-12T14:03:00Z"))
+        );
+    }
+
+    /// Task 8 review, Important #1(b): before SPX.Z's first publish, the
+    /// request must compile and return nothing (the `and false` branch)
+    /// rather than error or somehow resolve NDX.Z's generation instead —
+    /// and the very same key at a later instant must resolve normally,
+    /// so the empty result is honestly "nothing existed yet", not a
+    /// compiler stuck on the first instant it was ever asked about.
+    #[test]
+    fn an_as_of_before_the_first_publish_compiles_and_returns_no_rows() {
+        let f = fixture_with_two_generations();
+        let before = compile_document(
+            f.store.writer(),
+            &f.schema,
+            &params(
+                "cvi_params",
+                &["SPX.Z"],
+                AsOf::At(ts("2026-09-12T13:59:00Z")),
+            ),
+        )
+        .unwrap();
+        assert!(run(&f.store, &before).is_empty());
+        assert!(!before.resolved_as_of.contains_key("cvi_params"));
+
+        let after = compile_document(
+            f.store.writer(),
+            &f.schema,
+            &params(
+                "cvi_params",
+                &["SPX.Z"],
+                AsOf::At(ts("2026-09-12T14:04:00Z")),
+            ),
+        )
+        .unwrap();
+        assert!(!run(&f.store, &after).is_empty());
+    }
+
     #[test]
     fn an_unknown_key_compiles_and_returns_no_rows() {
-        let (_d, store, schema, _) = fixture_with_two_generations();
+        let f = fixture_with_two_generations();
         let compiled = compile_document(
-            store.writer(),
-            &schema,
+            f.store.writer(),
+            &f.schema,
             &params("cvi_params", &["RUT.Z"], AsOf::Live),
         )
         .unwrap();
-        assert!(run(&store, &compiled).is_empty());
+        assert!(run(&f.store, &compiled).is_empty());
     }
 
     #[test]
     fn the_wrong_family_or_arity_or_dataset_is_a_compile_error() {
-        let (_d, store, mut schema, _) = fixture_with_two_generations();
+        let mut f = fixture_with_two_generations();
         assert!(
             compile_document(
-                store.writer(),
-                &schema,
+                f.store.writer(),
+                &f.schema,
                 &params("nonesuch", &["SPX.Z"], AsOf::Live)
             )
             .unwrap_err()
@@ -408,19 +547,19 @@ role = "attribute"
         );
         assert!(
             compile_document(
-                store.writer(),
-                &schema,
+                f.store.writer(),
+                &f.schema,
                 &params("cvi_params", &["SPX.Z", "NDX.Z"], AsOf::Live)
             )
             .unwrap_err()
             .to_string()
             .contains("key has 2 parts")
         );
-        schema.datasets[0].family = geode_core::schema::Family::Measures;
+        f.schema.datasets[0].family = geode_core::schema::Family::Measures;
         assert!(
             compile_document(
-                store.writer(),
-                &schema,
+                f.store.writer(),
+                &f.schema,
                 &params("cvi_params", &["SPX.Z"], AsOf::Live)
             )
             .unwrap_err()
