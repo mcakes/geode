@@ -28,6 +28,16 @@ impl Default for GeneratorConfig {
 const UNDERLYINGS: &[&str] = &[
     "SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2",
 ];
+
+/// The generator's own underlying vocabulary (Task 10, the demo bus):
+/// `demo_bus::spawn` needs one key per underlying it publishes a CVI
+/// document for, and this is the one place that vocabulary is declared
+/// — the risk generator's `UNDERLYINGS` above, not a second list the
+/// demo bus would have to keep in step with it by hand.
+pub fn demo_underlyings() -> Vec<String> {
+    UNDERLYINGS.iter().map(|s| s.to_string()).collect()
+}
+
 const CURRENCIES: &[&str] = &["USD", "EUR", "JPY", "GBP"];
 const MODEL_CODES: &[&str] = &[
     "EURP", "AMRP", "VSWP", "AUTO", "CLIQ", "BARR", "DIGI", "VANL",

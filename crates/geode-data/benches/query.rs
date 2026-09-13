@@ -226,6 +226,8 @@ fn service(
         dimensions: DerivedDimensions::default(),
         query_workers: 4,
         sources: Vec::new(),
+        adapters: Default::default(),
+        documents: Default::default(),
     })
     .unwrap();
     (db, src, service, rx, loaded)
@@ -251,6 +253,8 @@ fn reopen(
         dimensions: DerivedDimensions::default(),
         query_workers: 4,
         sources: Vec::new(),
+        adapters: Default::default(),
+        documents: Default::default(),
     })
     .unwrap()
 }
@@ -346,6 +350,8 @@ fn service_with_history(
         dimensions: DerivedDimensions::default(),
         query_workers: 4,
         sources: Vec::new(),
+        adapters: Default::default(),
+        documents: Default::default(),
     })
     .unwrap();
     (db, src, service, rx, loaded, between)

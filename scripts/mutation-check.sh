@@ -11,8 +11,9 @@
 # find what the fixture makes reachable. Reading the tests never revealed
 # that; twenty minutes of mutation did. Run it after touching the
 # compiler, the scope lowering, as-of routing, publish, the grain
-# vocabulary, or the document family, and treat a SURVIVED line as a missing test rather than a
-# curiosity.
+# vocabulary, the document family, the adapter tier, the coalescer, or
+# the receiver pipeline, and treat a SURVIVED line as a missing test
+# rather than a curiosity.
 #
 # The two source-time tie-break entries were described as "caught
 # probabilistically, because the tests loop twenty times". Measured, that
@@ -3068,10 +3069,14 @@ run_mutation "schema: a dimension carried by an uncarriable grain is dropped" \
 
 # ---- text filter / ENUM dictionary rewrite, distinct (Phase 4 §3.4-3.5)
 
+# Re-anchored (market-data Part 2 Task 1): the per-column term building
+# moved out of `compile_scope_cached`'s text block into
+# `scope_sql::text_column_term`, so `compile_distinct`'s document arm can
+# reuse it grain-free. Same site, same meaning, one nesting level shallower.
 run_mutation "text: a categorical column matches the dictionary, not the rows" \
   crates/geode-data/src/query/scope_sql.rs \
-  '            let test = if col.categorical && enum_types.contains(&ty) {' \
-  '            let test = if false {' \
+  '    let test = if col.categorical && enum_types.contains(&ty) {' \
+  '    let test = if false {' \
   geode-data a_text_filter_over_a_categorical_column_matches_the_dictionary_not_the_rows
 
 # Root cause of the as-of slowdown (2026-09-07 fix): the rewrite is now
@@ -3116,7 +3121,7 @@ run_mutation "text: a needle matching no dictionary value collapses to false" \
 run_mutation "text: the literal list binds the matching values, not the pattern" \
   crates/geode-data/src/query/scope_sql.rs \
   'bound = Value::Text(matches.join(SELECTION_DELIMITER));' \
-  'bound = pattern.clone();' \
+  'bound = Value::Text(pattern_text.to_string());' \
   geode-data a_dictionary_match_binds_the_matching_values_not_the_pattern
 
 # DictionaryCache (dictionary resolves once per statement, 2026-09-07):
@@ -5491,12 +5496,24 @@ run_mutation "crash file: write_crash_file never prunes old crash-*.log files" \
 
 run_mutation "service: an ingest failure is keyed by the source name, not the dataset" \
   crates/geode-data/src/service.rs \
-  '                            Some((worst, detail)) => sink(DataEvent::Health {
+  '                        &batch,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
                                 source: source.clone(),
                                 worst,
                                 detail,
                             }),' \
-  '                            Some((worst, detail)) => sink(DataEvent::Health {
+  '                        &batch,
+                        Health::Failed {
+                            reason: reason.clone(),
+                        },
+                        format!("{batch}: {reason}"),
+                        |reported| match reported {
+                            Some((worst, detail)) => sink(DataEvent::Health {
                                 source: dataset.clone(),
                                 worst,
                                 detail,
@@ -5723,20 +5740,23 @@ run_mutation "sections: the resolved-generation marker requires the snapshot's o
 
 run_mutation "sections: a source's path, priority and readiness are separate rows, not one long one" \
   crates/geode-diagnostics/src/sections.rs \
-  '    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-    out.push(row(
-        format!(
-            "priority: {} · readiness: {}",
-            spec.priority, spec.readiness
-        ),
-        1,
-        Tone::Muted,
-    ));' \
-  '    out.push(row(
-        format!("path: {paths} · priority: {} · readiness: {}", spec.priority, spec.readiness),
-        1,
-        Tone::Muted,
-    ));' \
+  '        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+        out.push(row(
+            format!(
+                "adapter: {} · priority: {} · readiness: {}",
+                spec.adapter, spec.priority, spec.readiness
+            ),
+            1,
+            Tone::Muted,
+        ));' \
+  '        out.push(row(
+            format!(
+                "path: {paths} · adapter: {} · priority: {} · readiness: {}",
+                spec.adapter, spec.priority, spec.readiness
+            ),
+            1,
+            Tone::Muted,
+        ));' \
   geode-diagnostics a_sources_spec_detail_is_split_into_short_rows
 
 run_mutation "commands: a diagnostics completion is the word under the cursor, not the whole line" \
@@ -8502,6 +8522,628 @@ run_mutation "objectdialog: the footer offers i only for an editable text or a n
   geode-shell \
   offers_text_entry_needs_a_number_or_an_editable_text_row
 
+# ---- market-data documents Part 2 Task 1: the document arm of
+# compile_distinct lowers the text and expression filters grain-free.
+# Part 1 shipped that arm with dimension selections only and disclosed the
+# gap; these four entries pin each half of closing it, and the direction
+# each half must fail in.
+
+# The narrowing itself. Without the OR term a text-filtered picker counts
+# every document whatever the needle -- Part 1's over-count.
+run_mutation "distinct/document: a text filter narrows the document contribution" \
+  crates/geode-data/src/query/distinct.rs \
+  '            clauses.push(format!("({})", terms.join(" or ")));
+            sql_params.extend(term_params);' \
+  '            let _ = (&terms, &term_params);' \
+  geode-data a_text_filter_narrows_a_document_datasets_contribution
+
+# The direction. A needle over a dataset with nothing searchable matches
+# NOTHING; `true` here widens hardest exactly when the trader has narrowed
+# hardest, which is the failure mode the measure path's own rule forbids.
+run_mutation "distinct/document: no textual column means nothing, not everything" \
+  crates/geode-data/src/query/distinct.rs \
+  '        if terms.is_empty() {
+            clauses.push("false".to_string());' \
+  '        if terms.is_empty() {
+            clauses.push("true".to_string());' \
+  geode-data a_text_filter_on_a_document_dataset_with_no_textual_column_contributes_nothing
+
+# The expression half: the conjunct is lowered AND kept. Dropping it is
+# exactly Part 1's behaviour, so this mutation restores the parked gap.
+run_mutation "distinct/document: an expression conjunct really binds" \
+  crates/geode-data/src/query/distinct.rs \
+  '            let sql = render_expr(term, &mut expr_params, dims)?;
+            clauses.push(sql);
+            sql_params.extend(expr_params);' \
+  '            let sql = render_expr(term, &mut expr_params, dims)?;
+            let _ = (sql, expr_params);' \
+  geode-data an_expression_filter_narrows_a_document_datasets_contribution
+
+# ... and a conjunct naming a column the document table has no storage for
+# is DROPPED, not compiled: compiling it is a binder error that fails the
+# whole picker query on the one dataset with no `book`, not just its branch.
+run_mutation "distinct/document: a conjunct on an absent column is dropped, not compiled" \
+  crates/geode-data/src/query/distinct.rs \
+  '            if term
+                .columns()
+                .iter()
+                .any(|c| !stored.contains(&dims.base_column(c)))
+            {
+                continue;' \
+  '            if false {
+                continue;' \
+  geode-data an_expression_the_document_dataset_lacks_a_column_for_is_dropped_not_an_error
+
+# document kind: a column the kind produces that the dataset does not
+# declare must be reported, not silently accepted.
+run_mutation "document kind: a column the kind produces is checked against the dataset" \
+  crates/geode-core/src/document.rs \
+  '        if !declared.iter().any(|c| &c.name == name) {' \
+  '        if false {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
+# ... and the mirror direction: a column the dataset declares that the
+# kind does not produce must be reported too.
+run_mutation "document kind: a column the dataset declares is checked against the kind" \
+  crates/geode-core/src/document.rs \
+  '        if !kind.columns().iter().any(|(name, _)| name == &spec.name) {' \
+  '        if false {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
+# ... and a same-named column whose type differs between kind and
+# dataset must be reported, not treated as a match.
+run_mutation "document kind: a same-named column's type is compared, not just its name" \
+  crates/geode-core/src/document.rs \
+  '        if let Some(spec) = declared.iter().find(|c| &c.name == name)
+            && *ty != spec.ty
+        {' \
+  '        if let Some(spec) = declared.iter().find(|c| &c.name == name)
+            && false
+        {' \
+  geode-core check_kind_against_accepts_a_matching_dataset_and_names_each_mismatch
+
+# cvi: a slice whose `param` count differs from the `node` count is
+# refused, not zipped down to the shorter of the two. Positional
+# alignment IS the document's meaning (spec §6.3), so a zipped ragged
+# slice is silently wrong data on a trader's surface — the shape no
+# marker and no row count would give away.
+run_mutation "cvi: a ragged slice is refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                    if slice.params.len() != nodes.len() {' \
+  '                    if false {' \
+  geode-documents a_ragged_slice_fails_with_both_counts
+
+# cvi: an element the model does not know is REPORTED by path, not
+# merely skipped. The skipped set is the per-source diagnostic that
+# makes an XSD drift visible (spec §6.3); swallowing it silently is the
+# failure mode where the desk adds a field and nobody hears about it.
+run_mutation "cvi: an unknown element is reported, not swallowed" \
+  crates/geode-documents/src/cvi.rs \
+  '                        unknown_paths.push(stack.joined());' \
+  '                        let _ = ();' \
+  geode-documents an_unknown_element_is_skipped_and_reported_by_path
+
+# cvi: `write` emits one `<param>` per node IN NODE ORDER. The document
+# carries no node label inside a slice, so a reversed (or otherwise
+# permuted) emission is a different surface that parses back cleanly —
+# the round trip is the only thing that can see it.
+run_mutation "cvi: write emits params in node order" \
+  crates/geode-documents/src/cvi.rs \
+  '        for n in 0..grid.nodes.len() {' \
+  '        for n in (0..grid.nodes.len()).rev() {' \
+  geode-documents write_then_parse_round_trips_the_expected_rows
+
+# cvi: a term appearing in two non-adjacent blocks is refused, because
+# the document form has one `<slice>` per term — writing such rows
+# splits or reorders them, and what comes back is not what went in.
+run_mutation "cvi: write refuses a term that is not one contiguous block" \
+  crates/geode-documents/src/cvi.rs \
+  '                if distinct.contains(t) {' \
+  '                if false {' \
+  geode-documents write_refuses_a_term_that_is_not_one_contiguous_block
+
+# cvi: a block whose nodes differ from the first block's is a hole in
+# the grid, and the document form cannot say "no value here" — the row
+# COUNT can still be right (a repeated node instead of a missing one),
+# so only comparing the node lists themselves catches it.
+run_mutation "cvi: write refuses a hole in the grid" \
+  crates/geode-documents/src/cvi.rs \
+  '        if &nodes[start..end] != first_nodes {' \
+  '        if false {' \
+  geode-documents write_refuses_rows_that_are_not_a_full_grid
+
+# ---- sources.toml grows an adapter (market-data-documents plan, Task 5) ----
+
+# A subscribed source (`adapter != "csv_dir"`) with no `topics` is
+# skipped — the Error is what makes it skip-worthy rather than merely
+# noted. Downgrading it to Warning leaves the `continue` intact (the
+# source is still skipped either way), so the only thing this mutation
+# can change is the severity the diagnostic carries — exactly what the
+# test reads.
+run_mutation "sources/adapter: a subscribed source needs at least one topic" \
+  crates/geode-core/src/source_config.rs \
+  '                        Severity::Error,
+                        name,
+                        Some("topics"),' \
+  '                        Severity::Warning,
+                        name,
+                        Some("topics"),' \
+  geode-core a_subscribed_source_needs_topics_and_a_document
+
+# Same rule, the other required field: a subscribed source with no
+# `document` has no document kind to publish as.
+run_mutation "sources/adapter: a subscribed source needs a document" \
+  crates/geode-core/src/source_config.rs \
+  '                            Severity::Error,
+                            name,
+                            Some("document"),' \
+  '                            Severity::Warning,
+                            name,
+                            Some("document"),' \
+  geode-core a_subscribed_source_needs_topics_and_a_document
+
+# A subscribed source has no CSV row to infer a shape from, so its
+# dataset must be document family — removing the `!` inverts the check
+# to accept exactly the datasets it should refuse (and refuse the ones
+# it should accept), which a measure-family dataset on a subscribed
+# source would otherwise sail through silently.
+run_mutation "sources/adapter: a subscribed source needs a document family dataset" \
+  crates/geode-core/src/source_config.rs \
+  '            if subscribed && !schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  '            if subscribed && schema.dataset(&dataset).is_some_and(|d| d.is_document()) {' \
+  geode-core a_subscribed_source_on_a_measure_dataset_is_an_error
+
+# `parse_duration`'s `ms` unit: a wrong-VALUE mutation (seconds instead
+# of milliseconds), not a marker — a test asserting only "it parsed"
+# would not notice `"500ms"` silently becoming 500 SECONDS.
+run_mutation "sources/adapter: parse_duration's ms unit is milliseconds, not seconds" \
+  crates/geode-core/src/source_config.rs \
+  '            digits.parse().ok().map(Duration::from_millis)' \
+  '            digits.parse().ok().map(Duration::from_secs)' \
+  geode-core parse_duration_accepts_milliseconds_and_a_bare_zero
+
+# A bare `"0"` needs no unit — `coalesce = "0"` opts a subscribed source
+# back into publishing every message. Flipping the return to `None`
+# checks the reader actually accepts it rather than falling through to
+# the unit-suffix grammar (which would also reject a bare "0", but for
+# the wrong reason — no unit char to strip).
+run_mutation "sources/adapter: a bare zero needs no unit" \
+  crates/geode-core/src/source_config.rs \
+  '    if s == "0" {
+        return Some(Duration::ZERO);
+    }' \
+  '    if s == "0" {
+        return None;
+    }' \
+  geode-core parse_duration_accepts_milliseconds_and_a_bare_zero
+
+# Directory-only keys (`paths` among them) on a subscribed source are
+# warned, never applied — `if false` silences the warning outright
+# rather than merely miscounting it.
+run_mutation "sources/adapter: paths on a subscribed source warns" \
+  crates/geode-core/src/source_config.rs \
+  '                if !paths.is_empty() {' \
+  '                if false {' \
+  geode-core directory_keys_on_a_subscribed_source_warn_and_a_directory_source_still_needs_paths
+
+# Task 5 review (2026-09-13): `source_time = "document:<field>"` is
+# validated against the schema — the field must be a document-level
+# attribute AND date/utf8, not merely a document-level attribute of any
+# type. Dropping the type half of the guard accepts an f64 attribute
+# (`spot_ref` in the fixture) exactly as readily as a date one — a
+# wrong-VALUE mutation (an f64 field silently becomes usable), not a
+# marker, and the one the reviewer's `document:spot_ref` case exists to
+# catch.
+run_mutation "sources/adapter: document:<field> must be date or utf8, not just an attribute" \
+  crates/geode-core/src/source_config.rs \
+  '                                        && matches!(c.ty, ColumnType::Date | ColumnType::Utf8) =>' \
+  '                                        && true =>' \
+  geode-core source_time_document_field_is_validated_against_the_schema
+
+# Task 6 (2026-09-13): Solace's `>` matches one or more trailing levels,
+# never zero — `marketdata/cvi/>` is not a subscription to the parent
+# topic `marketdata/cvi` itself. Satisfying a trailing `>` with an
+# exhausted topic is MQTT's `#`, a plausible thing to write and a silent
+# over-subscription: a source would start ingesting a topic the desk
+# never asked it for.
+run_mutation "adapter: > needs at least one level, never zero" \
+  crates/geode-data/src/adapter/topic.rs \
+  '            // no pattern left that could match here.
+            return false;' \
+  '            // no pattern left that could match here.
+            return pat == ">" && last;' \
+  geode-data topic_patterns_follow_solace_rules
+
+# `*` matches EXACTLY one level. Letting it return like `>` does makes it
+# swallow every remaining level, so `marketdata/*/SPX.Z` would also match
+# `marketdata/cvi/x/SPX.Z` — the wildcard would still "work" on every
+# positive case, which is why the negative assertion is the one that
+# defends it.
+run_mutation "adapter: * matches exactly one level" \
+  crates/geode-data/src/adapter/topic.rs \
+  '            "*" => true,' \
+  '            "*" => return true,' \
+  geode-data topic_patterns_follow_solace_rules
+
+# The dispatcher's topic check is the whole of a subscription's interest:
+# every registration is handed every message without it. Not merely
+# wasteful — each subscription parses what it receives against its own
+# dataset, so a repo source would be fed cvi bodies and report parse
+# failures for documents that were never addressed to it.
+run_mutation "adapter: a non-matching subscription is not fed the message" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                    .filter(|r| {
+                        r.topics
+                            .iter()
+                            .any(|pattern| topic_matches(pattern, &message.topic))
+                    })' \
+  '                    .filter(|_| true)' \
+  geode-data a_published_message_reaches_every_matching_subscription_and_no_other
+
+# `ChannelSubscription::remove` is the one remover behind `unsubscribe`,
+# `subscribe`'s replacement and `Drop`. Retaining everything leaves a
+# shut-down subscriber's sink registered, so the dispatcher keeps cloning
+# messages into a queue nobody drains for the life of the process.
+run_mutation "adapter: unsubscribe removes the registration" \
+  crates/geode-data/src/adapter/channel.rs \
+  '            .unwrap()
+            .retain(|r| r.id != self.id);' \
+  '            .unwrap()
+            .retain(|_| true);' \
+  geode-data a_published_message_reaches_every_matching_subscription_and_no_other
+
+# An upload echoes on the target it was written to (spec §5.5). A fixed
+# topic is the plausible slip and a wrong-VALUE one: the upload still
+# succeeds and the subscriber still receives it — `marketdata/upload/other`
+# matches the same `marketdata/upload/>` pattern the test subscribes to —
+# but the document arrives under a key it does not belong to, which is the
+# whole point of the topic assertion rather than a delivery assertion. A
+# topic matching NO pattern would be caught too, by the 5 s receive
+# timeout, and would say nothing about whether `target` was honoured.
+run_mutation "adapter: egress publishes on the target topic" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if self.feed.publish(target, bytes) {' \
+  '        if self.feed.publish("marketdata/upload/other", bytes) {' \
+  geode-data an_upload_echoes_on_the_target_topic
+
+
+# A subscription with no topic matches nothing, so accepting one would
+# register a sink the dispatcher can never feed and report `Connected` for
+# it — a source that reads healthy and delivers nothing, the worst of the
+# two failure shapes. `sources.toml` already refuses an empty list, so
+# this is the trait boundary's own guard and needs its own defence.
+run_mutation "adapter: an empty topic list is refused, not reported connected" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if topics.is_empty() {' \
+  '        if false {' \
+  geode-data subscribing_to_no_topic_at_all_is_refused_rather_than_reported_connected
+
+
+# Review finding 1 (2026-09-13): a closed bus must REFUSE a subscription.
+# `ensure_dispatcher` answers `Ok` whenever the dispatcher slot is filled,
+# and the slot outlives the thread, so without this check a subscribe
+# after the last feed was dropped would report `Connected` and deliver
+# nothing for the session — a source reading `Ok` in the discovery lane
+# with zero rows behind it, the false-clean shape. Re-anchored in round 2
+# to the same site with the same meaning: the check now UPGRADES and HOLDS
+# the sender for the whole call, so the mutation substitutes an open
+# sender of its own — the bus always looks alive, exactly the pre-fix
+# state — rather than flipping a condition that no longer exists.
+run_mutation "adapter: subscribing to a closed bus is refused" \
+  crates/geode-data/src/adapter/channel.rs \
+  '            .ok_or_else(|| AdapterError {' \
+  '            .or_else(|| Some(Arc::new(mpsc::sync_channel(1).0)))
+            .ok_or_else(|| AdapterError {' \
+  geode-data subscribing_after_every_feed_is_dropped_is_refused
+
+# A refused publish is counted, so a producer outrunning the dispatcher is
+# visible at all. Counting the SUCCESSES instead is the wrong-VALUE
+# mutation, not a marker: `refused()` still moves, still looks like a live
+# counter, and reads 256 where the truth is 2.
+run_mutation "adapter: a refused publish is counted, not a successful one" \
+  crates/geode-data/src/adapter/channel.rs \
+  '        if !queued {' \
+  '        if queued {' \
+  geode-data a_publish_onto_a_full_bus_is_refused_and_counted
+
+# Latest wins: a key already pending must take the NEWEST offer, not keep
+# whatever arrived first — otherwise a fast-repeating key's stale first
+# value is the one that eventually ships. Dropping the overwrite (`e.insert`
+# on the occupied entry) keeps the first value instead, a wrong-VALUE
+# mutation no marker-only assertion would see.
+run_mutation "coalesce: latest-wins replaces an already-pending item" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  '                e.insert(item);
+                None
+            }
+            Entry::Vacant(e) => {' \
+  '                let _ = item;
+                None
+            }
+            Entry::Vacant(e) => {' \
+  geode-data within_the_window_the_latest_wins_and_is_released_on_the_deadline
+
+# A release must restart the key's own window from the release instant
+# (spec §5.4 step 2), so the very next offer for that key waits a fresh
+# `window` rather than going out immediately. Dropping the `last_release`
+# stamp `due` sets on release leaves the key looking never-released, so
+# the next offer wrongly goes out at once instead of being held.
+run_mutation "coalesce: a release restarts the key's window" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  '                if let Some(item) = self.pending.remove(&key) {
+                    self.last_release.insert(key.clone(), now);
+                    out.push((key, item));
+                }' \
+  '                if let Some(item) = self.pending.remove(&key) {
+                    out.push((key, item));
+                }' \
+  geode-data within_the_window_the_latest_wins_and_is_released_on_the_deadline
+
+# Keys coalesce independently — each key's readiness is decided from its
+# OWN last release, never a shared/global one. Keying the lookup to a
+# fixed key literal couples every other key's timing to that one key's
+# history, exactly the failure mode of a window that is accidentally
+# global rather than per-key.
+run_mutation "coalesce: each key's readiness reads its own last_release" \
+  crates/geode-data/src/ingest/coalesce.rs \
+  'self.last_release.get(&key)' \
+  'self.last_release.get("SPX")' \
+  geode-data keys_coalesce_independently
+
+
+# ---- Task 8: the runner's document queue (market-data spec §5.4 step 3) --
+
+# A document is taken AHEAD of any file, whatever the file's priority — a
+# publish of already-parsed, already-coalesced rows is milliseconds and
+# cannot starve a load. Gating the document pop on an empty file queue is
+# exactly the swap: with any file queued at all, every document waits for
+# the whole cold-start backlog to drain, which is the live-feed latency
+# this queue exists to avoid, and no event assertion about *whether* a
+# document published would ever notice.
+run_mutation "runner/document: a file is taken ahead of a queued document" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.documents.pop_front() {
+        return Some(Work::Document(job));
+    }' \
+  '    if q.items.is_empty() {
+        if let Some(job) = q.documents.pop_front() {
+            return Some(Work::Document(job));
+        }
+    }' \
+  geode-data take_work_prefers_a_document_over_a_queued_file
+
+# Every failure on the document path is filed under the document's own
+# key, joined — `HealthTracker`'s load lane is keyed by batch, so a
+# constant here files every broken feed under one batch: one key's parse
+# failure would clear another's, and the diagnostics row would name a
+# batch no document has. The Published arm reads `published.batch` back
+# from the publish, so only the Failed arm can see this.
+run_mutation "runner/document: a failure's batch is a constant, not the document's key" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let batch = join_key(&job.rows.key);' \
+  '    let batch = "doc".to_string();' \
+  geode-data an_invalid_document_fails_by_batch_and_the_runner_lives
+
+# A document has no book column, so the one partition it writes is the
+# bookless one, spelled `None`. An empty list is how a load that wrote
+# NOTHING reads — `works_a_plan_and_reports_every_publish` asserts exactly
+# that distinction for files — so a subscriber counting partitions would
+# see every document publish as having written no data at all.
+run_mutation "runner/document: the publish event reports no partition written" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            books: vec![None],' \
+  '            books: Vec::new(),' \
+  geode-data a_submitted_document_publishes_and_reports_its_batch
+
+# The publish runs inside the same `catch_unwind` + `contained` boundary a
+# file load does (spec §5.7). Calling it directly instead lets a panicking
+# publish unwind the ingest thread: the app keeps running but ingest is
+# over for the session — every later document AND every later file
+# silently never publishes. The mutation is the whole statement, replaced
+# by the same call with no boundary at all, so the removal is exact.
+run_mutation "runner/document: the publish runs outside the panic boundary" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            publish(
+                store,
+                &DocumentPublishRequest {
+                    dataset,
+                    source: &job.source,
+                    rows: &job.rows,
+                    source_time: job.source_time,
+                    received_at: job.received_at,
+                    bytes: job.bytes,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));' \
+  '    let outcome: Result<Result<DocumentPublished, String>, Box<dyn std::any::Any + Send>> =
+        Ok(publish(
+            store,
+            &DocumentPublishRequest {
+                dataset,
+                source: &job.source,
+                rows: &job.rows,
+                source_time: job.source_time,
+                received_at: job.received_at,
+                bytes: job.bytes,
+            },
+        )
+        .map_err(|e| e.to_string()));' \
+  geode-data a_panicking_publish_is_contained_and_reported
+
+# ---- Task 9: subscribed sources (the receiver pipeline and the wiring) ----
+
+run_mutation "subscribe: a source naming an adapter this build lacks is skipped SILENTLY" \
+  crates/geode-data/src/service.rs \
+  "            let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                report_unservable(format!(\"adapter '{}' is not in this build\", spec.adapter));
+                continue;
+            };" \
+  '            let Some(adapter) = config.adapters.get(&spec.adapter) else {
+                continue;
+            };' \
+  geode-data a_source_naming_an_adapter_this_build_lacks_is_reported_and_skipped
+
+run_mutation "subscribe: the kind/dataset column check (spec 6.4) runs and its verdict is dropped" \
+  crates/geode-data/src/service.rs \
+  '            if let Err(e) = check_kind_against(kind.as_ref(), dataset) {
+                report_unservable(e);
+                continue;
+            }' \
+  '            let _ = check_kind_against(kind.as_ref(), dataset);' \
+  geode-data a_kind_that_disagrees_with_its_dataset_is_reported_and_skipped
+
+run_mutation "subscribe: a parse failure is reported on the DISCOVERY lane, not the load lane" \
+  crates/geode-data/src/service.rs \
+  '                    health_tracker.report_load_and_emit(
+                        &source,
+                        batch,' \
+  '                    health_tracker.report_discovery_and_emit(
+                        &source,' \
+  geode-data a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect
+
+run_mutation "subscribe: ConnectionState::Connected maps to Pending rather than Ok" \
+  crates/geode-data/src/service.rs \
+  '                        ConnectionState::Connected => (Health::Ok, String::new()),' \
+  '                        ConnectionState::Connected => (Health::Pending, String::new()),' \
+  geode-data a_lost_connection_is_discovery_health_and_a_parse_failure_outlives_a_reconnect
+
+run_mutation "subscribe: source_time_of's Receive policy stamps a fixed instant, not the arrival" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        SourceTime::Receive => return Ok(received),' \
+  '        SourceTime::Receive => {
+            return Ok(DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc));
+        }' \
+  geode-data the_receive_policy_stamps_the_moment_the_message_arrived
+
+run_mutation "subscribe: the coalescer is bypassed -- every message submits its own document" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if let Some((_key, released)) = coalescer.offer(Instant::now(), key, pending) {
+            self.submit(released);
+        }' \
+  '        self.submit(pending);
+        let _ = (coalescer, key);' \
+  geode-data two_messages_for_one_key_inside_the_window_publish_once_with_the_latest
+
+# ---- Task 9 fix round 1: the receiver's panic boundary and its refusal count ----
+
+run_mutation "subscribe: a panicking parse is NOT contained -- the receiver thread dies with it" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            geode_core::panic::contained(|| self.on_message(message, coalescer))
+        }));' \
+  '        let outcome: Result<(), Box<dyn std::any::Any + Send>> =
+            Ok(self.on_message(message, coalescer));' \
+  geode-data a_panicking_parse_is_contained_and_the_receiver_thread_carries_on
+
+run_mutation "subscribe: a subscription's refusal count reads zero rather than its sink's counter" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '    pub fn refused(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
+    }' \
+  '    pub fn refused(&self) -> u64 {
+        0
+    }' \
+  geode-data a_subscription_whose_queue_fills_counts_what_it_could_not_take
+
+run_mutation "demo bus: publishes every key once at start" \
+  crates/geode-app/src/demo_bus.rs \
+  '    // Every key once, immediately: the first thing a freshly opened
+    // panel sees.
+    for key in &underlyings {
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
+        publish_one(&feed, kind, generator, key, &mut warned_full);
+    }
+' \
+  '' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+
+run_mutation "demo bus: the topic format" \
+  crates/geode-app/src/demo_bus.rs \
+  'let topic = format!("marketdata/cvi/{key}");' \
+  'let topic = format!("marketdata/wrong/{key}");' \
+  geode-app the_bus_publishes_every_key_once_at_start_then_on_its_cadence
+
+run_mutation "demo bus: the generator's drift" \
+  crates/geode-demo-data/src/documents.rs \
+  '                    let magnitude = rng.random_range(MIN_WALK_STEP..MAX_WALK_STEP);' \
+  '                    let magnitude = 0.0;' \
+  geode-demo-data successive_documents_drift
+
+run_mutation "demo bus: the demo layer's [cvi] source" \
+  crates/geode-app/src/demo.rs \
+  '         [cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi_params\"\n\
+         topics = [\"marketdata/cvi/>\"]\ncoalesce = \"500ms\"\nsource_time = \"receive\"\n\
+         priority = \"latest_other\"\n",
+' \
+  '",
+' \
+  geode-app the_demo_layer_declares_the_cvi_source
+
+
+# ---- final fix wave: repeated known elements must not merge into duplicate rows ----
+
+run_mutation "document: a repeated axis tuple validates as a healthy document" \
+  crates/geode-core/src/document.rs \
+  '        if let Some((a, b)) = self.first_duplicate_rows() {' \
+  '        if let Some((a, b)) = None::<(usize, usize)> {' \
+  geode-core a_repeated_axis_tuple_is_refused_and_the_message_names_it
+
+run_mutation "cvi: a second singular container merges into the first instead of being refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                        if let Some((seen, element)) = once {
+                            if *seen {
+                                return Err(already_filled(element));
+                            }
+                            *seen = true;
+                        }' \
+  '                        let _ = once;' \
+  geode-documents a_repeated_singular_container_is_refused_naming_it
+
+run_mutation "subscribe: a topic-keyed parse failure is never cleared by a later clean message" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        if self.failed_topics.remove(topic) {
+            (self.report_load)(topic, Health::Ok, format!("{topic}: parse ok"));
+        }' \
+  '        self.failed_topics.remove(topic);' \
+  geode-data a_parse_failure_sets_the_load_lane_and_a_later_clean_document_clears_it
+
+run_mutation "subscribe: the worker keeps a sender alive, so unsubscribe never disconnects" \
+  crates/geode-data/src/ingest/subscribe.rs \
+  '        let refused = sink.refused_counter();
+        subscription.subscribe(&spec.topics, sink, on_connection)?;' \
+  '        let refused = sink.refused_counter();
+        let kept_sender = sink.clone();
+        subscription.subscribe(&spec.topics, sink, on_connection)?;
+        std::mem::forget(kept_sender);' \
+  geode-data shutting_down_an_idle_worker_does_not_wait_out_max_wait
+
+run_mutation "sources: a subscribed source stores the paths it just said it ignores" \
+  crates/geode-core/src/source_config.rs \
+  '                    paths.clear();' \
+  '' \
+  geode-core a_subscribed_sources_paths_are_warned_about_and_cleared
+
+run_mutation "sections: a subscribed source is described as a directory one (path and readiness)" \
+  crates/geode-diagnostics/src/sections.rs \
+  '    if spec.topics.is_empty() {' \
+  '    if true {' \
+  geode-diagnostics a_subscribed_source_shows_its_adapter_and_topics_not_paths
+
+run_mutation "cvi: a second <term> inside one slice wins silently instead of being refused" \
+  crates/geode-documents/src/cvi.rs \
+  '                        if slice.term.is_some() {
+                            return Err(already_filled("term"));
+                        }' \
+  '                        let _ = &slice.term;' \
+  geode-documents a_second_term_inside_one_slice_is_refused_naming_it
 # 2c §2.1: a colour with both hue and token is dropped, not merged.
 run_mutation "colour: both hue and token is refused" \
   crates/geode-core/src/colour/mod.rs \

@@ -180,6 +180,10 @@ disagree) and built in two parts, each with the slice that needs it.
 
 1. **CVI Params, end to end** —
    `docs/superpowers/specs/2026-09-12-geode-market-data-documents-design.md`.
+   Parts 1 (the document family, storage and publication) and 2 (the
+   adapter tier, the coalescer, the subscribed-source pipeline and the
+   demo bus) are done, 2026-09-13; Parts 3 (the panel) and 4 (egress)
+   remain.
 2. **Scenario panel** — axes on measures, link groups, launch context,
    the pivot grid with its cell-count measurement.
 3. **Vol viewers** — fetch, cache datasets, charts.

@@ -5,10 +5,12 @@
 mod bridge;
 mod crash;
 mod demo;
+mod demo_bus;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use geode_blotter::BlotterFactory;
 use geode_core::config::{ConfigSources, Diagnostic, LayerDoc, Severity};
@@ -110,8 +112,51 @@ fn main() {
             geode_blotter::init(cx);
             geode_diagnostics::init(cx);
 
+            // The demo bus's adapter (market-data-documents plan, Task
+            // 10): registered only under `--demo`, since it is the
+            // demo's own producer for the market-data path — a
+            // non-demo build never creates a `ChannelAdapter` and
+            // passes `AdapterRegistry::default()` into `data_setup`
+            // instead, exactly as it always has. Built here, before
+            // `build_shell_services`, because `bridge::data_setup`
+            // (called from inside it) is what actually registers the
+            // `[cvi]` source against this adapter.
+            let (demo_feed, adapters) = if demo_rows.is_some() {
+                let (adapter, feed) = geode_data::adapter::ChannelAdapter::new("demo_bus");
+                let mut adapters = geode_data::adapter::AdapterRegistry::default();
+                adapters.register(adapter);
+                (Some(feed), adapters)
+            } else {
+                (None, geode_data::adapter::AdapterRegistry::default())
+            };
+
             let (mut services, desk, user, bridge, diagnostics_factory) =
-                build_shell_services(demo_root.as_deref(), log_ring, log_control, cx);
+                build_shell_services(demo_root.as_deref(), log_ring, log_control, adapters, cx);
+
+            // The demo bus itself (Task 10): spawned once, right after
+            // the services it feeds exist. `geode_demo_data::
+            // demo_underlyings()` is the risk generator's own
+            // vocabulary, so the CVI documents this bus publishes never
+            // drift from the desk names `--demo`'s risk snapshot already
+            // uses. Kept alive as `demo_bus` until the app quits (below)
+            // — dropping it early would stop the thread and close its
+            // `ChannelFeed`, which would in turn close the bus's inbound
+            // channel out from under the data service's own subscription.
+            let mut demo_bus = demo_feed.map(|feed| {
+                let generator = geode_demo_data::documents::cvi::CviGenerator::new(
+                    42,
+                    geode_demo_data::demo_underlyings(),
+                    chrono::Local::now().date_naive(),
+                );
+                demo_bus::spawn(
+                    feed,
+                    Arc::new(geode_documents::CviKind),
+                    generator,
+                    Duration::from_secs(5),
+                    Duration::from_secs(2),
+                    42,
+                )
+            });
 
             // The panic hook (Phase 4b Task 6), installed after the
             // subscriber (`install_logging`, at the very top of `main`)
@@ -213,6 +258,31 @@ fn main() {
                     let handle = handle.clone();
                     cx.background_executor().spawn(async move {
                         handle.shutdown();
+                    })
+                })
+                .detach();
+            }
+
+            // The demo bus's own shutdown (Task 10): stopped before
+            // `_log_guard` drops at the end of `main` — off the UI
+            // thread, for the same reason the data service's shutdown
+            // above is, even though `DemoBus::stop` itself only ever
+            // waits out `STOP_POLL`-sized slices rather than a long
+            // cadence. `Arc<Mutex<Option<..>>>` (not a plain move) is
+            // what lets this run inside an `FnMut`: `on_app_quit`'s
+            // closure type must support being called more than once
+            // even though a real quit fires it only the once, and
+            // `DemoBus` cannot be cloned to give each hypothetical call
+            // its own copy the way the bridge's `DataHandle` clone
+            // above does — `take()` makes a second call a no-op instead.
+            if let Some(bus) = demo_bus.take() {
+                let bus = Arc::new(Mutex::new(Some(bus)));
+                cx.on_app_quit(move |cx| {
+                    let bus = Arc::clone(&bus);
+                    cx.background_executor().spawn(async move {
+                        if let Some(mut bus) = bus.lock().unwrap().take() {
+                            bus.stop();
+                        }
                     })
                 })
                 .detach();
@@ -499,10 +569,16 @@ impl ModuleFactory for DiagnosticsFactoryHandle {
 /// it's parsed, so it takes effect for everything logged after this
 /// call, and both go onto the returned `ShellServices` for the
 /// diagnostics tile and `:level` (later tasks) to reach.
+///
+/// `adapters` (market-data-documents plan, Task 10) is the caller's own
+/// adapter roster — the `ChannelAdapter` registered under `--demo`, or
+/// `AdapterRegistry::default()` otherwise — forwarded verbatim into
+/// `bridge::data_setup`.
 fn build_shell_services(
     demo_root: Option<&Path>,
     log_ring: Arc<Ring>,
     log_control: Arc<dyn LevelControl>,
+    adapters: geode_data::adapter::AdapterRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -599,7 +675,7 @@ fn build_shell_services(
         std::env::var("LOCALAPPDATA").ok(),
         std::env::var("HOME").ok(),
     );
-    let bridge = bridge::data_setup(&config, db).map(|setup| {
+    let bridge = bridge::data_setup(&config, db, adapters).map(|setup| {
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);

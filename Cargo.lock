@@ -2578,11 +2578,13 @@ dependencies = [
  "geode-data",
  "geode-demo-data",
  "geode-diagnostics",
+ "geode-documents",
  "geode-shell",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "rand 0.9.5",
  "tempfile",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
@@ -2643,7 +2645,9 @@ dependencies = [
 name = "geode-demo-data"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "criterion",
+ "geode-core",
  "rand 0.9.5",
  "serde_json",
  "tempfile",
@@ -2660,6 +2664,17 @@ dependencies = [
  "gpui-component",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "geode-documents"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "proptest 1.11.0",
+ "quick-xml",
 ]
 
 [[package]]

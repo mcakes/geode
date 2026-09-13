@@ -24,7 +24,7 @@ use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::attribution::ScopeSemantics;
 use geode_core::dimensions::DerivedDimensions;
-use geode_core::schema::{DatasetSpec, Grain};
+use geode_core::schema::{ColumnSpec, DatasetSpec, Grain};
 use geode_core::scope::{CompareOp, Expr, Literal, Scope};
 use std::collections::HashMap;
 
@@ -229,7 +229,10 @@ fn membership(ds: &DatasetSpec, grain: Grain, probe: Grain, era: Era<'_>, inner:
 /// `%text%` with LIKE's own wildcards escaped, so a trader typing `50_`
 /// or `100%` searches for those characters rather than for anything.
 /// Paired with `escape '\'` in the predicate.
-fn like_pattern(text: &str) -> String {
+///
+/// `pub(crate)` for `compile_distinct`'s document arm, which needs the same
+/// needle spelled the same way (market-data spec §4.5).
+pub(crate) fn like_pattern(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('%');
     for ch in text.chars() {
@@ -364,6 +367,58 @@ impl DictionaryCache {
     }
 }
 
+/// One textual column's text-filter term and the value it binds, or `None`
+/// when the column contributes no term at all.
+///
+/// Extracted from [`compile_scope_cached`]'s text block for
+/// `compile_distinct`'s document arm (market-data spec §4.5, Part 2 Task 1):
+/// this is the grain-free half of that block, and a document dataset is one
+/// table with no grain, so every routing decision the measure path makes
+/// *around* this term is a no-op there. The choice between a dictionary `IN`
+/// and a row-scanning `ILIKE`, and the value each binds, has to be spelled
+/// once or the two paths silently drift — which for a text filter means one
+/// of them scanning rows the other reads from a dictionary, or binding the
+/// pattern where the other binds the matches.
+///
+/// `enum_types` is the dataset's existing ENUM type names, resolved once by
+/// the caller through [`DictionaryCache::enum_types`] and passed as an owned
+/// slice: holding the cache's own borrow across a loop that also needs
+/// `&mut cache` for [`DictionaryCache::matches`] does not compile.
+///
+/// `pattern_text` is already `like_pattern`'d by the caller — once per
+/// filter, not once per column.
+///
+/// `None` means this column's dictionary holds no value meeting the needle,
+/// so it contributes nothing rather than an always-false subquery DuckDB
+/// would still have to plan. A caller left with no term at all must push a
+/// literal `false`: a needle nothing can match selects nothing, never
+/// everything. Both callers do; see the rule at the end of
+/// `compile_scope_cached`'s text block.
+pub(crate) fn text_column_term(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    col: &ColumnSpec,
+    enum_types: &[String],
+    pattern_text: &str,
+    cache: &mut DictionaryCache,
+) -> Result<Option<(String, Value)>, StoreError> {
+    let name = col.name.as_str();
+    let ty = crate::store::ddl::enum_type_name(&ds.name, name);
+    let bound;
+    let test = if col.categorical && enum_types.contains(&ty) {
+        let matches = cache.matches(conn, &ty, pattern_text)?;
+        if matches.is_empty() {
+            return Ok(None);
+        }
+        bound = Value::Text(matches.join(SELECTION_DELIMITER));
+        format!("\"{name}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))")
+    } else {
+        bound = Value::Text(pattern_text.to_string());
+        format!("\"{name}\" ilike ? escape '\\'")
+    };
+    Ok(Some((test, bound)))
+}
+
 /// One dimension selection as a predicate on the column it really reads,
 /// with its values bound as a single delimiter-joined varchar and split
 /// back by `string_split` in SQL — so the statement text, and therefore
@@ -407,7 +462,7 @@ pub(crate) fn selection_clause(
 
 /// Top-level `and` terms, each routed on its own so a scope mixing
 /// grains — `underlying_ref = 'SPX' and strike > 100` — compiles.
-fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+pub(crate) fn conjuncts(expr: &Expr) -> Vec<&Expr> {
     match expr {
         Expr::And(a, b) => {
             let mut out = conjuncts(a);
@@ -582,7 +637,6 @@ pub(crate) fn compile_scope_cached(
     // a literal `false` clause when no term survives.
     if let Some(text) = &scope.text {
         let pattern_text = like_pattern(text);
-        let pattern = Value::Text(pattern_text.clone());
         // Type existence is the only gate (spec §3.5, as amended): it
         // holds in every era, because `refresh_enum` builds the type
         // from live *and* archive (`crate::store::ddl`), so an archived
@@ -598,21 +652,13 @@ pub(crate) fn compile_scope_cached(
         let mut term_params: Vec<Value> = Vec::new();
         for col in ds.textual_columns() {
             let name = col.name.as_str();
-            let ty = crate::store::ddl::enum_type_name(&ds.name, name);
-            let bound;
-            let test = if col.categorical && enum_types.contains(&ty) {
-                let matches = cache.matches(conn, &ty, &pattern_text)?;
-                if matches.is_empty() {
-                    // No dictionary value meets the needle: this column
-                    // contributes nothing, rather than an always-false
-                    // subquery DuckDB would still have to plan.
-                    continue;
-                }
-                bound = Value::Text(matches.join(SELECTION_DELIMITER));
-                format!("\"{name}\" in (select unnest(string_split(?, '{SELECTION_DELIMITER}')))")
-            } else {
-                bound = pattern.clone();
-                format!("\"{name}\" ilike ? escape '\\'")
+            // No dictionary value meets the needle: this column
+            // contributes nothing, rather than an always-false subquery
+            // DuckDB would still have to plan.
+            let Some((test, bound)) =
+                text_column_term(conn, ds, col, &enum_types, &pattern_text, cache)?
+            else {
+                continue;
             };
             match route(ds, dims, grain, &[name])? {
                 None => terms.push(test),
@@ -749,7 +795,7 @@ fn derived_membership(
 ///
 /// `dims` is threaded through so a derived dimension is resolved to its
 /// source column here too, not only in dimension selections (spec §6.8).
-fn render_expr(
+pub(crate) fn render_expr(
     expr: &Expr,
     params: &mut Vec<Value>,
     dims: &DerivedDimensions,

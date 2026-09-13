@@ -301,11 +301,8 @@ fn threads(conn: &Connection) -> Result<u64, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::ddl::tests_support::{cvi_dataset, cvi_doc, ts};
     use geode_core::config::{LayerDoc, merge_docs};
-
-    fn ts(s: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
-    }
 
     /// `risk_snapshot` with a single declared grain (Position) — matches
     /// `store::retention::tests::position_only_dataset`'s shape, kept
@@ -650,68 +647,6 @@ grain = "position"
         assert_eq!(bookless.resolved_gen, Some(2));
     }
 
-    const CVI: &str = r#"
-[cvi_params]
-family = "document"
-key = ["underlying_ref"]
-axes = ["term", "node"]
-[cvi_params.columns.underlying_ref]
-type = "utf8"
-role = "dimension"
-[cvi_params.columns.term]
-type = "date"
-role = "axis"
-[cvi_params.columns.node]
-type = "f64"
-role = "axis"
-[cvi_params.columns.param]
-type = "f64"
-role = "value"
-[cvi_params.columns.anchor_date]
-type = "date"
-role = "attribute"
-[cvi_params.columns.spot_ref]
-type = "f64"
-role = "attribute"
-"#;
-
-    fn cvi() -> DatasetSpec {
-        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", CVI).unwrap()]);
-        let (schema, diags) = SchemaSpec::from_doc(&doc);
-        assert!(diags.is_empty(), "{diags:?}");
-        schema.dataset("cvi_params").unwrap().clone()
-    }
-
-    fn cvi_doc(key: &str, params: [f64; 6]) -> geode_core::document::DocumentRows {
-        use geode_core::document::{Column, DocumentRows, Value};
-        let d = |s: &str| chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap();
-        DocumentRows {
-            key: vec![key.into()],
-            attributes: vec![
-                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
-                ("spot_ref".into(), Value::F64(7650.0)),
-            ],
-            axes: vec![
-                (
-                    "term".into(),
-                    Column::Date(vec![
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-09-18"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                        d("2026-10-16"),
-                    ]),
-                ),
-                (
-                    "node".into(),
-                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
-                ),
-            ],
-            values: vec![("param".into(), Column::F64(params.to_vec()))],
-        }
-    }
-
     /// Step 6: `partitions_for` already lists one partition per document
     /// batch with `book: None` (it reads the `generations` summary the
     /// same way for both families) — this pins that against two real
@@ -722,7 +657,7 @@ role = "attribute"
     fn a_document_datasets_partitions_split_back_to_their_keys() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
-        let ds = cvi();
+        let ds = cvi_dataset();
         store.apply_schema(&ds).unwrap();
         crate::store::Catalog::new(store.writer())
             .ensure_tables()

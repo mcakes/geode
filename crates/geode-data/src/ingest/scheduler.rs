@@ -342,7 +342,6 @@ fn reason(h: &Health) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::ingest::{IngestEvent, IngestRunner};
-    use crate::source::{Priority, Readiness};
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 
@@ -369,14 +368,14 @@ mod tests {
         schema.datasets.push(ds.clone());
         let (handle, rx) = IngestRunner::spawn_channel(store, schema);
         let spec = SourceSpec {
-            name: "risk".into(),
-            dataset: "risk_snapshot".into(),
-            paths: vec![format!("{}/*.csv", empty.path().display())],
-            readiness: Readiness::Sentinel,
-            priority: Priority::LatestRisk,
             poll_interval: poll,
             pending_timeout,
             batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..SourceSpec::directory(
+                "risk",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", empty.path().display())],
+            )
         };
         drop(src);
         (db, empty, Arc::new(handle), rx, conn, spec, ds)

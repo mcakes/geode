@@ -453,8 +453,13 @@ pub(crate) fn assert_generations_match_tables(conn: &Connection, dataset: &str, 
 
 #[cfg(test)]
 pub(crate) mod tests_support {
+    use chrono::{DateTime, NaiveDate, Utc};
     use geode_core::config::{LayerDoc, merge_docs};
-    use geode_core::schema::{DatasetSpec, SchemaSpec};
+    use geode_core::document::{
+        Column, DocumentKind, DocumentRows, ParseError, ParsedDocument, Value, WriteError,
+        check_kind_against,
+    };
+    use geode_core::schema::{ColumnType, DatasetSpec, SchemaSpec};
 
     pub(crate) fn sample_dataset() -> DatasetSpec {
         let text = r#"
@@ -584,6 +589,276 @@ role = "attribute"
             .dataset("cvi_params")
             .unwrap()
             .clone()
+    }
+
+    pub(crate) fn ts(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    pub(crate) fn d(s: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    /// Two terms x three nodes, term-major — the same shape Task 4's tests
+    /// validate, with the six `param` values the caller chooses.
+    pub(crate) fn cvi_doc(key: &str, params: [f64; 6]) -> DocumentRows {
+        DocumentRows {
+            key: vec![key.into()],
+            attributes: vec![
+                ("anchor_date".into(), Value::Date(d("2026-09-12"))),
+                ("spot_ref".into(), Value::F64(7650.0)),
+            ],
+            axes: vec![
+                (
+                    "term".into(),
+                    Column::Date(vec![
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]),
+                ),
+                (
+                    "node".into(),
+                    Column::F64(vec![-20.0, -1.0, 3.5, -20.0, -1.0, 3.5]),
+                ),
+            ],
+            values: vec![("param".into(), Column::F64(params.to_vec()))],
+        }
+    }
+
+    /// A [`DocumentKind`] shaped exactly like the real CVI XML kind —
+    /// the same six columns `cvi_dataset` declares — over a byte format
+    /// small enough to write in a test literal:
+    ///
+    /// ```text
+    /// SPX.Z:1,2,3,4,5,6[:elem/path,other/path]
+    /// ```
+    ///
+    /// the key, then the six `param` values `cvi_doc` takes, then an
+    /// optional comma-separated list of element paths the "parser" did
+    /// not recognise (`ParsedDocument::unknown_paths`).
+    ///
+    /// It lives here rather than beside the receiver's own tests for a
+    /// layering reason (this plan's global constraints): the real CVI
+    /// kind is in `geode-documents`, which `geode-data` must never
+    /// depend on, so every test in this crate that needs a kind at all
+    /// needs a fake — the receiver's (`ingest::subscribe`) and the
+    /// service's (`service`) both, which is what makes this the one
+    /// place to spell it.
+    pub(crate) struct FakeKind {
+        columns: Vec<(&'static str, ColumnType)>,
+    }
+
+    impl FakeKind {
+        /// The six columns `cvi_dataset` declares, in
+        /// `document_columns()` order — so `check_kind_against` accepts
+        /// the pair.
+        pub(crate) fn new() -> FakeKind {
+            FakeKind {
+                columns: vec![
+                    ("underlying_ref", ColumnType::Utf8),
+                    ("term", ColumnType::Date),
+                    ("node", ColumnType::F64),
+                    ("param", ColumnType::F64),
+                    ("anchor_date", ColumnType::Date),
+                    ("spot_ref", ColumnType::F64),
+                ],
+            }
+        }
+
+        /// The same kind plus one column no dataset declares — the
+        /// kind/dataset mismatch `check_kind_against` refuses at
+        /// source-open time (spec §6.4).
+        pub(crate) fn with_extra_column() -> FakeKind {
+            let mut kind = FakeKind::new();
+            kind.columns.push(("surface_id", ColumnType::Utf8));
+            kind
+        }
+
+        /// One message body in the format `parse` reads. The inverse of
+        /// `write` for the no-unknown-paths case, and the one spelling
+        /// of the format a test should use — a hand-written literal
+        /// would fall out of step with `parse` the first time the format
+        /// changes.
+        pub(crate) fn message(key: &str, params: [f64; 6]) -> Vec<u8> {
+            let params = params
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{key}:{params}").into_bytes()
+        }
+    }
+
+    impl DocumentKind for FakeKind {
+        fn name(&self) -> &'static str {
+            "fake_cvi"
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            &self.columns
+        }
+
+        fn parse(&self, bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            let text = std::str::from_utf8(bytes).map_err(|e| ParseError {
+                message: format!("not utf-8: {e}"),
+            })?;
+            let mut fields = text.splitn(3, ':');
+            let key = fields.next().unwrap_or_default();
+            if key.is_empty() {
+                return Err(ParseError {
+                    message: format!("{text:?} has no key before the ':'"),
+                });
+            }
+            let Some(params) = fields.next() else {
+                return Err(ParseError {
+                    message: format!("{text:?} is not 'key:p1,...,p6'"),
+                });
+            };
+            let params: Vec<f64> = params
+                .split(',')
+                .map(|p| {
+                    p.trim().parse::<f64>().map_err(|e| ParseError {
+                        message: format!("{p:?} is not a number: {e}"),
+                    })
+                })
+                .collect::<Result<_, _>>()?;
+            let params: [f64; 6] = params.try_into().map_err(|p: Vec<f64>| ParseError {
+                message: format!("{} parameters, six expected", p.len()),
+            })?;
+            Ok(ParsedDocument {
+                rows: cvi_doc(key, params),
+                unknown_paths: fields
+                    .next()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.split(',').map(str::to_string).collect())
+                    .unwrap_or_default(),
+            })
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            let Some(key) = rows.key.first() else {
+                return Err(WriteError {
+                    message: "the document has no key".into(),
+                });
+            };
+            let Some((_, Column::F64(params))) = rows.values.iter().find(|(n, _)| n == "param")
+            else {
+                return Err(WriteError {
+                    message: "the document has no 'param' f64 column".into(),
+                });
+            };
+            let params: [f64; 6] = params
+                .clone()
+                .try_into()
+                .map_err(|p: Vec<f64>| WriteError {
+                    message: format!("{} parameters, six expected", p.len()),
+                })?;
+            Ok(FakeKind::message(key, params))
+        }
+    }
+
+    /// The message a [`PanickingKind`] parser panics with. A constant so
+    /// the test asserting the payload reached the health lane and the
+    /// panic that produced it cannot drift apart.
+    pub(crate) const PARSE_PANIC: &str = "the parser fell over";
+
+    /// A [`DocumentKind`] whose `parse` PANICS rather than answering
+    /// `Err` — the failure a real vendor parser has that a `Result` does
+    /// not describe (an index out of range on a truncated body, an
+    /// `unwrap` on an element a schema promised).
+    ///
+    /// It exists because the receiver thread's panic boundary is not
+    /// testable any other way: a boundary is only observable through the
+    /// panic it contains, so the fixture has to be the thing that panics.
+    /// Everything but `parse` delegates to [`FakeKind`], so a source
+    /// wired to this kind is identical to one wired to that one right up
+    /// to the panic.
+    pub(crate) struct PanickingKind {
+        inner: FakeKind,
+    }
+
+    impl PanickingKind {
+        pub(crate) fn new() -> PanickingKind {
+            PanickingKind {
+                inner: FakeKind::new(),
+            }
+        }
+    }
+
+    impl DocumentKind for PanickingKind {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+
+        fn columns(&self) -> &[(&'static str, ColumnType)] {
+            self.inner.columns()
+        }
+
+        /// Panics with a `String` payload (a formatted `panic!`), which is
+        /// the shape `panic_payload_message` reads second — the `&str`
+        /// arm is already covered by the runner's own panic tests.
+        fn parse(&self, _bytes: &[u8]) -> Result<ParsedDocument, ParseError> {
+            panic!("{PARSE_PANIC}");
+        }
+
+        fn write(&self, rows: &DocumentRows) -> Result<Vec<u8>, WriteError> {
+            self.inner.write(rows)
+        }
+    }
+
+    #[test]
+    fn the_fake_kind_round_trips_its_own_byte_format() {
+        let kind = FakeKind::new();
+        let bytes = FakeKind::message("SPX.Z", [1., 2., 3., 4., 5., 6.]);
+        let parsed = kind.parse(&bytes).expect("its own format parses");
+        assert_eq!(parsed.rows, cvi_doc("SPX.Z", [1., 2., 3., 4., 5., 6.]));
+        assert!(parsed.unknown_paths.is_empty());
+        assert_eq!(kind.write(&parsed.rows).unwrap(), bytes);
+        // Unknown paths ride in a third field, so the receiver's
+        // log-once path has something to report.
+        let with_unknown = kind
+            .parse(b"SPX.Z:1,2,3,4,5,6:a/b,c/d")
+            .expect("a third field parses");
+        assert_eq!(with_unknown.unknown_paths, vec!["a/b", "c/d"]);
+        // And garbage is an `Err`, not a panic and not an empty document.
+        assert!(kind.parse(b"not-a-document").is_err());
+        assert!(kind.parse(b"SPX.Z:1,2,3").is_err());
+        assert!(kind.parse(b"SPX.Z:1,2,3,4,5,six").is_err());
+        assert_eq!(check_kind_against(&kind, &cvi_dataset()), Ok(()));
+        assert!(
+            check_kind_against(&FakeKind::with_extra_column(), &cvi_dataset())
+                .unwrap_err()
+                .contains("surface_id")
+        );
+    }
+
+    #[test]
+    fn the_cvi_fixture_is_term_major() {
+        let rows = cvi_doc("X", [1., 2., 3., 4., 5., 6.]);
+        // Axes are [term, node]; term is the first axis.
+        let term_axis = &rows.axes[0];
+        assert_eq!(term_axis.0, "term");
+        // Six rows, term-major: three rows at 2026-09-18, then three at 2026-10-16.
+        match &term_axis.1 {
+            Column::Date(dates) => {
+                assert_eq!(
+                    dates,
+                    &[
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-09-18"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                        d("2026-10-16"),
+                    ]
+                );
+            }
+            _ => panic!("term axis should be a date column"),
+        }
     }
 }
 

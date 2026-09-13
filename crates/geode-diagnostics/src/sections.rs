@@ -146,16 +146,33 @@ fn push_spec_detail(out: &mut Vec<Row>, state: &geode_shell::diagnostics::Source
     // `uniform_list` slots that clip rather than wrap, and a demo source's
     // glob alone runs past a tile's width. Seen on a display 2026-09-08 —
     // the wrapped tail of this row painted over the poll row beneath it.
-    let paths = spec.paths.join(", ");
-    out.push(row(format!("path: {paths}"), 1, Tone::Muted));
-    out.push(row(
-        format!(
-            "priority: {} · readiness: {}",
-            spec.priority, spec.readiness
-        ),
-        1,
-        Tone::Muted,
-    ));
+    //
+    // Which two depends on what kind of source it is, and non-empty
+    // `topics` is that question (`SourceSummary::topics`: a subscribed
+    // source is refused at load without at least one, and a directory
+    // source never carries any). A subscribed source has no path to poll
+    // and no readiness rule, so printing either described a market-data
+    // feed as a directory source with an empty path and a sentinel
+    // convention it has never used.
+    if spec.topics.is_empty() {
+        let paths = spec.paths.join(", ");
+        out.push(row(format!("path: {paths}"), 1, Tone::Muted));
+        out.push(row(
+            format!(
+                "adapter: {} · priority: {} · readiness: {}",
+                spec.adapter, spec.priority, spec.readiness
+            ),
+            1,
+            Tone::Muted,
+        ));
+    } else {
+        out.push(row(format!("adapter: {}", spec.adapter), 1, Tone::Muted));
+        out.push(row(
+            format!("topics: {}", spec.topics.join(", ")),
+            1,
+            Tone::Muted,
+        ));
+    }
 }
 
 /// The "data" section (spec §4.6): dataset › partition (batch/book), each
@@ -519,6 +536,8 @@ mod tests {
                 paths: vec!["/data/*.csv".into()],
                 priority: "latest_risk".into(),
                 readiness: "sentinel".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         d.note_health(
@@ -545,6 +564,8 @@ mod tests {
                 paths: vec![],
                 priority: "p".into(),
                 readiness: "r".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
 
@@ -595,6 +616,8 @@ mod tests {
                 paths: vec!["/very/long/tmp/path/geode-demo/1000000-42/src/*.csv".into()],
                 priority: "LatestRisk".into(),
                 readiness: "Sentinel".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
@@ -608,8 +631,39 @@ mod tests {
             "the path row carries only the path: {path_row}"
         );
         assert!(
-            texts.contains(&"priority: LatestRisk · readiness: Sentinel"),
-            "priority and readiness share one short row: {texts:?}"
+            texts.contains(&"adapter: csv_dir · priority: LatestRisk · readiness: Sentinel"),
+            "the adapter, priority and readiness share one short row: {texts:?}"
+        );
+    }
+
+    /// A subscribed source has no path to poll and no readiness rule —
+    /// both were painted anyway, so a market-data feed read as a
+    /// directory source with an empty path and a sentinel convention it
+    /// has never used. It gets its adapter and its topics instead.
+    #[test]
+    fn a_subscribed_source_shows_its_adapter_and_topics_not_paths() {
+        let mut d = Diagnostics::new(LogLevels::default());
+        d.describe_source(
+            "cvi",
+            SourceSummary {
+                paths: Vec::new(),
+                priority: "LatestOther".into(),
+                readiness: "Sentinel".into(),
+                adapter: "demo_bus".into(),
+                topics: vec!["marketdata/cvi/>".into()],
+            },
+        );
+        let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert!(texts.contains(&"adapter: demo_bus"), "{texts:?}");
+        assert!(texts.contains(&"topics: marketdata/cvi/>"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.starts_with("path: ")),
+            "a subscribed source has no path to poll: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|t| t.contains("readiness")),
+            "nor a readiness rule: {texts:?}"
         );
     }
 
@@ -622,6 +676,8 @@ mod tests {
                 paths: vec![],
                 priority: "p".into(),
                 readiness: "r".into(),
+                adapter: "csv_dir".into(),
+                topics: Vec::new(),
             },
         );
         let rows = sources_rows(&d, SystemTime::UNIX_EPOCH);

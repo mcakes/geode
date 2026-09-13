@@ -22,7 +22,8 @@ use super::{Destination, Draft, Field, FieldKind};
 use geode_core::config::{Config, Diagnostic, Layer, LayerDoc, merge_docs};
 use geode_core::schema::SchemaSpec;
 use geode_core::source_config::{
-    DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL, SourceSpec, check_batch_pattern, parse_duration,
+    CSV_DIR_ADAPTER, DEFAULT_COALESCE, DEFAULT_PENDING_TIMEOUT, DEFAULT_POLL, SourceSpec,
+    check_batch_pattern, parse_duration,
 };
 use std::time::Duration;
 
@@ -74,10 +75,14 @@ pub fn prefix(value: &toml::Value) -> Option<String> {
 /// reader's own grammar (`parse_duration`) spelled back out. A field
 /// shows the value that will actually apply, so an omitted key is
 /// spelled from `DEFAULT_POLL`/`DEFAULT_PENDING_TIMEOUT` rather than
-/// left blank.
+/// left blank. A sub-second remainder (a subscribed source's `coalesce`,
+/// default 500ms) spells in `ms` — `as_secs()` alone would round it away
+/// to "0s", the one unit `parse_duration` would read back as zero.
 pub fn spell_duration(d: Duration) -> String {
     let s = d.as_secs();
-    if s > 0 && s.is_multiple_of(3600) {
+    if d.subsec_millis() > 0 {
+        format!("{}ms", d.as_millis())
+    } else if s > 0 && s.is_multiple_of(3600) {
         format!("{}h", s / 3600)
     } else if s > 0 && s.is_multiple_of(60) {
         format!("{}m", s / 60)
@@ -98,11 +103,20 @@ fn choice(options: &[&str], current: &str) -> FieldKind {
     FieldKind::Choice { options, selected }
 }
 
-/// The eight fields of one source, or of no source at all when `object`
-/// names nothing (`n`'s empty draft): `dataset` and `priority` are
+/// A directory source's nine fields, or a subscribed source's thirteen —
+/// `document`/`topics`/`coalesce`/`source_time` are appended only when
+/// `adapter != CSV_DIR_ADAPTER` (market-data-documents plan, Task 5),
+/// since they mean nothing for a directory source and would otherwise
+/// paint every existing directory source with four rows of noise. Or of
+/// no source at all when `object` names nothing (`n`'s empty draft,
+/// always the nine-field directory shape). `dataset` and `priority` are
 /// choices, `readiness`/`stable_polls` split the reader's one
 /// `readiness` key into a kind and its poll count, and the rest are
-/// editable text (§19.3's own list — `text_editable`).
+/// text — but only `paths`/`poll_interval`/`pending_timeout`/
+/// `batch_pattern` are editable (§19.3's own list — `text_editable`);
+/// `adapter` and the four subscribed-only fields are read-only, painted
+/// so a subscribed source is at least visibly one rather than looking
+/// like an idle directory source missing its `paths`.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
     let table = object
         .and_then(|name| config.doc(DOC).and_then(|doc| doc.value.get(name)))
@@ -172,7 +186,13 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
         layer: None,
     };
 
-    vec![
+    // Read-only (`to_table` never writes it back and it is not in
+    // `text_editable`'s list): always shown, since it is what tells a
+    // trader whether the four subscribed-only rows below apply at all.
+    let adapter = get_str("adapter").unwrap_or(CSV_DIR_ADAPTER);
+    let subscribed = adapter != CSV_DIR_ADAPTER;
+
+    let mut out = vec![
         field("dataset", "Dataset", choice(&datasets, &current_dataset)),
         text("paths", "Paths", paths.join(&format!("{PATH_SEPARATOR} "))),
         field("readiness", "Readiness", choice(&READINESS, readiness)),
@@ -207,7 +227,50 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             "Batch pattern",
             get_str("batch_pattern").unwrap_or("").to_string(),
         ),
-    ]
+        text("adapter", "Adapter", adapter.to_string()),
+    ];
+
+    // The four subscribed-only fields (market-data-documents plan, Task
+    // 5) are read-only here — same reason as `adapter` above — and
+    // appended only for a subscribed source: they mean nothing for a
+    // directory source, and painting them unconditionally would add
+    // four rows of noise to every existing directory source. A real
+    // editing surface for these (a topic-pattern list, an adapter
+    // picker) is future work; this dialog's own vocabulary predates the
+    // adapter.
+    if subscribed {
+        out.push(text(
+            "document",
+            "Document",
+            get_str("document").unwrap_or("").to_string(),
+        ));
+        out.push(text(
+            "topics",
+            "Topics",
+            table
+                .and_then(|t| t.get("topics"))
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(&format!("{PATH_SEPARATOR} "))
+                })
+                .unwrap_or_default(),
+        ));
+        out.push(text(
+            "coalesce",
+            "Coalesce",
+            duration("coalesce", DEFAULT_COALESCE),
+        ));
+        out.push(text(
+            "source_time",
+            "Source time",
+            get_str("source_time").unwrap_or("receive").to_string(),
+        ));
+    }
+
+    out
 }
 
 /// `n` seeds the new source's dataset from the browse row under the
@@ -451,6 +514,82 @@ mod tests {
             fields
                 .iter()
                 .all(|f| f.dest == Destination::Doc && f.layer.is_none())
+        );
+    }
+
+    /// A subscribed source's five adapter fields (market-data-documents
+    /// plan, Task 5) are painted, not silently dropped — so this dialog
+    /// never paints one as a directory source missing its `paths` — but
+    /// stay `!text_editable`: `to_table` never writes any of them back,
+    /// so an editable row here would look live and do nothing.
+    #[test]
+    fn subscribed_source_fields_are_painted_as_read_only_text() {
+        let config = Config::load(&ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[cvi_params]\nfamily = \"document\"\nkey = [\"underlying_ref\"]\n\
+                     axes = [\"term\"]\n[cvi_params.columns.underlying_ref]\n\
+                     type = \"utf8\"\nrole = \"dimension\"\n[cvi_params.columns.term]\n\
+                     type = \"date\"\nrole = \"axis\"\n[cvi_params.columns.param]\n\
+                     type = \"f64\"\nrole = \"value\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin(
+                    "sources",
+                    "[cvi]\nadapter = \"demo_bus\"\ndataset = \"cvi_params\"\n\
+                     document = \"cvi_params\"\ntopics = [\"a/>\", \"b/>\"]\n\
+                     coalesce = \"250ms\"\nsource_time = \"document:anchor_date\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let fields = fields(&config, Some("cvi"));
+        let by_key = |k: &str| fields.iter().find(|f| f.key == k).unwrap();
+        assert_eq!(by_key("adapter").kind, FieldKind::Text("demo_bus".into()));
+        assert_eq!(
+            by_key("document").kind,
+            FieldKind::Text("cvi_params".into())
+        );
+        assert_eq!(
+            by_key("topics").kind,
+            FieldKind::Text(format!("a/>{PATH_SEPARATOR} b/>"))
+        );
+        assert_eq!(by_key("coalesce").kind, FieldKind::Text("250ms".into()));
+        assert_eq!(
+            by_key("source_time").kind,
+            FieldKind::Text("document:anchor_date".into())
+        );
+        for key in ["adapter", "document", "topics", "coalesce", "source_time"] {
+            assert!(!text_editable(key), "{key}");
+        }
+    }
+
+    /// The reviewer's own regression (2026-09-13): the four
+    /// subscribed-only rows above must never paint on a directory
+    /// source — a directory source's field list is exactly the
+    /// pre-Task-5 eight fields plus `adapter`, nothing more.
+    #[test]
+    fn a_directory_source_paints_no_subscribed_only_rows() {
+        let keys: Vec<String> = fields(&config(), Some("live"))
+            .into_iter()
+            .map(|f| f.key)
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "dataset",
+                "paths",
+                "readiness",
+                "stable_polls",
+                "priority",
+                "poll_interval",
+                "pending_timeout",
+                "batch_pattern",
+                "adapter",
+            ]
         );
     }
 

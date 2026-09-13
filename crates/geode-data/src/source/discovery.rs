@@ -179,14 +179,13 @@ mod tests {
 
     fn spec(root: &std::path::Path) -> SourceSpec {
         SourceSpec {
-            name: "risk_files".into(),
-            dataset: "risk_snapshot".into(),
-            paths: vec![format!("{}/*.csv", root.display())],
-            readiness: Readiness::Sentinel,
-            priority: Priority::LatestRisk,
-            poll_interval: Duration::from_secs(30),
             pending_timeout: Duration::from_secs(3600),
             batch_pattern: Some(r"^risk_\d{4}-\d{2}-\d{2}_(?<batch>.+)$".into()),
+            ..SourceSpec::directory(
+                "risk_files",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", root.display())],
+            )
         }
     }
 

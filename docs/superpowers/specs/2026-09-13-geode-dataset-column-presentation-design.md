@@ -929,7 +929,7 @@ neither; `owner_of`'s own ordering is tested in `geode-core`.
 ### 9.8 Harness
 
 **772 entries** (747 at the branch point, 21 added over the six tasks
-and 4 more in the final review's fix wave, none removed);
+and 4 more in the final review's fix wave, none removed; 825 once main's market-data documents Part 2 was merged in);
 `--anchors-only` reports 0 stale, 0 ambiguous. The fix wave's four:
 `load: the dataset overlay is applied after the desk view's own colour
 cross-check` (the companion to the position entry below — it duplicates

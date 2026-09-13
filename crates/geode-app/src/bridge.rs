@@ -10,6 +10,8 @@ use geode_core::dimensions::DerivedDimensions;
 use geode_core::query::{CatalogParams, DistinctOutcome};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::ViewSpec;
+use geode_data::adapter::AdapterRegistry;
+use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{DataEvent, DataHandle, DataService, DataServiceConfig, EventSink};
 use geode_shell::diagnostics::SourceSummary;
@@ -54,7 +56,20 @@ pub struct DataSetup {
 }
 
 /// `None` when there is nothing to serve: no datasets or no views.
-pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
+///
+/// `adapters` is the caller's own roster (Task 10, the demo bus):
+/// `main.rs` passes an `AdapterRegistry` holding the `ChannelAdapter` it
+/// registered under `--demo` and `AdapterRegistry::default()` otherwise,
+/// so a non-demo build serves every `csv_dir` source and reports each
+/// subscribed one as unservable — the honest answer, never a silent
+/// no-op. `documents` is never a caller's choice: every build folds in
+/// `geode_documents::builtin_kinds()`, since a document kind carries no
+/// state and there is nothing a caller could sensibly leave out.
+pub fn data_setup(
+    config: &Config,
+    db_path: PathBuf,
+    adapters: AdapterRegistry,
+) -> Option<DataSetup> {
     let datasets = config.doc("datasets")?;
     // Presence only: the views themselves come from `load_views`, which
     // applies `view_presentation` over them. Nothing here may read the
@@ -89,6 +104,14 @@ pub fn data_setup(config: &Config, db_path: PathBuf) -> Option<DataSetup> {
             dimensions: dimensions.clone(),
             query_workers: 4,
             sources,
+            adapters,
+            documents: {
+                let mut documents = DocumentRegistry::default();
+                for kind in geode_documents::builtin_kinds() {
+                    documents.register(kind);
+                }
+                documents
+            },
         },
         views,
         dimensions,
@@ -245,6 +268,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     paths: source.paths.clone(),
                     priority: format!("{:?}", source.priority),
                     readiness: format!("{:?}", source.readiness),
+                    adapter: source.adapter.clone(),
+                    // Already empty for a directory source — `from_doc`
+                    // reads `topics` only when the source is subscribed —
+                    // and the tile reads that emptiness as "a directory
+                    // source", so it is cloned rather than gated here.
+                    topics: source.topics.clone(),
                 },
             );
         }
@@ -627,7 +656,7 @@ mod tests {
     use geode_core::config::{ConfigSources, LayerDoc};
     use geode_core::log::Ring;
     use geode_core::query::{AsOf, CatalogOutcome, CatalogSnapshot};
-    use geode_data::source::{Priority, Readiness, SourceSpec};
+    use geode_data::source::SourceSpec;
     use geode_diagnostics::DiagnosticsFactory;
     use geode_shell::actions::ActionRegistry;
     use geode_shell::defaults::{BUILTIN_KEYMAP, default_mod, register_builtin_actions};
@@ -1319,14 +1348,8 @@ role = "key"
             events: rx,
             dropped: Arc::new(AtomicU64::new(0)),
             sources: vec![SourceSpec {
-                name: "risk".into(),
-                dataset: "risk".into(),
-                paths: vec!["/data/risk/*.csv".into()],
-                readiness: Readiness::Sentinel,
-                priority: Priority::LatestRisk,
-                poll_interval: Duration::from_secs(30),
                 pending_timeout: Duration::from_secs(120),
-                batch_pattern: None,
+                ..SourceSpec::directory("risk", "risk", vec!["/data/risk/*.csv".into()])
             }],
         };
         cx.update(|cx| attach(&bridge, window, cx));
@@ -1400,7 +1423,7 @@ role = "key"
     #[test]
     fn data_setup_needs_datasets_and_views_and_carries_sources() {
         let none = Config::load(&ConfigSources::default());
-        assert!(data_setup(&none, "/tmp/x.duckdb".into()).is_none());
+        assert!(data_setup(&none, "/tmp/x.duckdb".into(), AdapterRegistry::default()).is_none());
         let config = Config::load(&ConfigSources {
             builtin: vec![
                 LayerDoc::builtin(
@@ -1413,7 +1436,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         assert_eq!(setup.config.sources.len(), 1);
         assert_eq!(setup.views.len(), 1);
         assert_eq!(setup.config.query_workers, 4);
@@ -1451,7 +1475,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         let view = &setup.views[0];
         let names: Vec<&str> = view.columns.iter().map(|c| c.name()).collect();
         assert_eq!(names, vec!["npv", "book"], "presentation order applied");
@@ -1524,7 +1549,8 @@ role = "key"
             ],
             ..ConfigSources::default()
         });
-        let setup = data_setup(&config, "/tmp/x.duckdb".into()).unwrap();
+        let setup =
+            data_setup(&config, "/tmp/x.duckdb".into(), AdapterRegistry::default()).unwrap();
         assert!(
             setup.colours.get("delta").is_some(),
             "the good definition must reach the factory"

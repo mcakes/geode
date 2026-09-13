@@ -2,12 +2,13 @@
 //! Seeded: same config always yields identical data. Struct-of-arrays per
 //! PHILOSOPHY §6 — no row objects.
 
+pub mod documents;
 mod emit;
 mod generate;
 mod model;
 
 pub use emit::{EmitOptions, EmittedDirectory, EmittedFile, emit_directory};
-pub use generate::{GeneratorConfig, generate};
+pub use generate::{GeneratorConfig, demo_underlyings, generate};
 pub use model::RiskBatch;
 
 #[cfg(test)]
