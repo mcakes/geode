@@ -790,11 +790,13 @@ pub struct ListItem {
 pub enum FieldKind {
     Text(String),
     /// `step` is the distance one `space` moves; `wrap` makes the range
-    /// circular — a hue — so a step past `max` lands at `min + overshoot`
-    /// rather than pinning at `max`. Every existing `Number` is
-    /// `step: 1, wrap: false` — the vocabulary Sources' `stable_polls`
-    /// and Groupings' display-only `slot` both use — until a colour
-    /// field (Part 2c) needs the wrap.
+    /// circular — a hue, say — so a step past `max` lands at
+    /// `min + overshoot` rather than pinning at `max` (spec §5.4). Every
+    /// `Number` this crate builds today is `step: 1, wrap: false` (the
+    /// only one live is Sources' `stable_polls`; Groupings' `slot` is
+    /// display-only and a [`FieldKind::Text`], not a `Number`, per
+    /// `groupings.rs`'s own doc) — a future field that steps by more than
+    /// one, or wraps, is what this pair exists for.
     Number {
         value: i64,
         min: i64,
